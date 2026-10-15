@@ -59,6 +59,24 @@ def test_conflict_detection_when_generic_and_bound_both_installed(tmp_path: path
     assert "orchestration-workflow" in conflicts[0]
     assert "kilo-mcp-orchestrator" in conflicts[0]
 
+    # Test auto-resolve conflicts
+    rc = run_env(["resolve-conflicts"], fake_home)
+    assert rc["ok"] is True
+    assert rc["resolved_count"] == 1
+    assert rc["resolved"][0]["assistant"] == "claude"
+    assert rc["resolved"][0]["removed"] == "orchestration-workflow"
+    assert rc["resolved"][0]["kept"] == "kilo-mcp-orchestrator"
+
+    # Verify conflict is now gone
+    st_after = run_env(["status"], fake_home)
+    assert st_after["environments"]["claude"]["global"]["conflicts"] == []
+
+    # Test individual skill removal
+    rm = run_env(["remove-skill", "kilo-mcp-orchestrator", "--assistant", "claude"], fake_home)
+    assert rm["ok"] is True
+    st_empty = run_env(["status"], fake_home)
+    assert "kilo-mcp-orchestrator" not in st_empty["environments"]["claude"]["global"]["skills"]
+
 
 def test_register_mcp_across_kilo_claude_codex(tmp_path: pathlib.Path) -> None:
     fake_home = tmp_path / "home"

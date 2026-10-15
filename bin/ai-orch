@@ -119,6 +119,14 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     ),
                     "description": "Provision and register an MCP server across assistants.",
                 },
+                "remove-skill": {
+                    "usage": "ai-orch env remove-skill <skill_name> --assistant <kilo|claude|codex> [--scope global|project] [--json]",
+                    "description": "Remove an installed skill from an assistant environment.",
+                },
+                "resolve-conflicts": {
+                    "usage": "ai-orch env resolve-conflicts [--workspace <dir>] [--json]",
+                    "description": "Auto-resolve trigger conflicts between generic and bound skills across assistants.",
+                },
             },
         },
         "render-agents-md": {

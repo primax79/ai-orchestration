@@ -386,6 +386,58 @@ def install_skills(
     }
 
 
+def remove_skill(
+    assistant: str,
+    scope: str,
+    skill_name: str,
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else pathlib.Path.cwd()
+    dest_dir = assistant_skills_dir(assistant, scope, ws, h) / skill_name
+    if not (dest_dir.exists() or dest_dir.is_symlink()):
+        return {"ok": False, "message": f"Skill '{skill_name}' not found in {dest_dir.parent}"}
+    if dest_dir.is_symlink() or dest_dir.is_file():
+        dest_dir.unlink()
+    elif dest_dir.is_dir():
+        shutil.rmtree(dest_dir)
+    return {"ok": True, "removed": str(dest_dir), "assistant": assistant, "scope": scope, "skill": skill_name}
+
+
+def resolve_conflicts(
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    """Auto-resolve trigger conflicts across assistant environments:
+      - Kilo: keeps native 'orchestration-workflow', removes bound 'kilo-mcp-orchestrator'.
+      - Claude & Codex: keeps bound 'kilo-mcp-orchestrator', removes generic 'orchestration-workflow'.
+    """
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+    scopes_to_check = ["global"] + (["project"] if ws else [])
+    resolved: list[dict[str, str]] = []
+
+    for assistant in ASSISTANTS:
+        for scope in scopes_to_check:
+            sdir = assistant_skills_dir(assistant, scope, ws, h)
+            has_generic = (sdir / "orchestration-workflow").exists()
+            has_bound = (sdir / "kilo-mcp-orchestrator").exists()
+            if has_generic and has_bound:
+                if assistant == "kilo":
+                    # Kilo orchestrates natively: drop bound copy
+                    res = remove_skill("kilo", scope, "kilo-mcp-orchestrator", ws, h)
+                    if res["ok"]:
+                        resolved.append({"assistant": "kilo", "scope": scope, "removed": "kilo-mcp-orchestrator", "kept": "orchestration-workflow"})
+                else:
+                    # Claude and Codex orchestrate Kilo over MCP: drop generic copy
+                    res = remove_skill(assistant, scope, "orchestration-workflow", ws, h)
+                    if res["ok"]:
+                        resolved.append({"assistant": assistant, "scope": scope, "removed": "orchestration-workflow", "kept": "kilo-mcp-orchestrator"})
+
+    return {"ok": True, "resolved_count": len(resolved), "resolved": resolved}
+
+
 def register_mcp_server(
     server_repo: str,
     assistants: list[str],
@@ -529,6 +581,33 @@ def cmd_register_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_remove_skill(args: argparse.Namespace) -> int:
+    ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
+    res = remove_skill(args.assistant, args.scope, args.skill, ws, args.home)
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        if res["ok"]:
+            print(f"[ok] Removed skill '{args.skill}' from {args.assistant} ({args.scope}).")
+        else:
+            print(f"[skip] {res['message']}")
+    return 0 if res["ok"] else 1
+
+
+def cmd_resolve_conflicts(args: argparse.Namespace) -> int:
+    ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
+    res = resolve_conflicts(ws, args.home)
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        if res["resolved_count"] > 0:
+            for r in res["resolved"]:
+                print(f"[ok] Resolved conflict in {r['assistant']} ({r['scope']}): removed '{r['removed']}', kept '{r['kept']}'.")
+        else:
+            print("[ok] No trigger conflicts found.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--home", type=pathlib.Path, default=None, help="Override home directory (for testing/sandboxing)")
@@ -564,6 +643,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_rm.add_argument("--workspace", default=None)
     p_rm.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
     p_rm.set_defaults(func=cmd_register_mcp)
+
+    p_rs = sub.add_parser("remove-skill", help="Remove an installed skill from an assistant environment")
+    p_rs.add_argument("skill", help="Name of the skill directory to remove")
+    p_rs.add_argument("--assistant", choices=ASSISTANTS, required=True)
+    p_rs.add_argument("--scope", choices=SCOPES, default="global")
+    p_rs.add_argument("--workspace", default=None)
+    p_rs.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
+    p_rs.set_defaults(func=cmd_remove_skill)
+
+    p_rc = sub.add_parser("resolve-conflicts", help="Auto-resolve trigger conflicts across Kilo, Claude, and Codex")
+    p_rc.add_argument("--workspace", default=None)
+    p_rc.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
+    p_rc.set_defaults(func=cmd_resolve_conflicts)
 
     return ap
 
