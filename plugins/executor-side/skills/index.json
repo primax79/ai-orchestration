@@ -1,7 +1,7 @@
 {
   "skills": [
     {
-      "name": "headless-executor-contract",
+      "name": "executor-contract",
       "files": [
         "SKILL.md",
         "SKILL.template.md"

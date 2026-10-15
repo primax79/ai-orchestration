@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""ai-orch — Unified CLI entrypoint for `ai-orchestration`.
+
+Dispatches:
+  - `ai-orch config <subcommand> [args...]` -> `orchestration_config.py`
+  - `ai-orch tasks <subcommand> [args...]`  -> `tasks_engine.py`
+  - `ai-orch env <subcommand> [args...]`    -> `orchestration_env.py`
+  - `ai-orch render-agents-md [args...]`    -> `orchestration_config.py render-agents-md`
+  - `ai-orch describe [--json]`             -> machine-readable command & schema catalog
+"""
+from __future__ import annotations
+
+import json
+import pathlib
+import subprocess
+import sys
+from typing import Any
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+ORCH_CONFIG_SCRIPT = (
+    REPO_ROOT
+    / "plugins"
+    / "shared"
+    / "skills"
+    / "orchestration-setup"
+    / "scripts"
+    / "orchestration_config.py"
+)
+TASKS_ENGINE_SCRIPT = (
+    REPO_ROOT
+    / "plugins"
+    / "architect-side"
+    / "skills"
+    / "task-pipeline"
+    / "scripts"
+    / "tasks_engine.py"
+)
+ORCH_ENV_SCRIPT = REPO_ROOT / "scripts" / "orchestration_env.py"
+
+CLI_DESCRIPTION: dict[str, Any] = {
+    "name": "ai-orch",
+    "version": "1.1.0",
+    "repository": "https://github.com/primax79/ai-orchestration",
+    "description": (
+        "Unified CLI for ai-orchestration: manages Global/Project orchestration.toml, "
+        "renders project AGENTS.md, and validates/transitions/syncs the tasks/ tree. "
+        "Supports both Single-Framework Native setups (Kilo-only / Claude-only) and "
+        "Multi-Framework MCP setups."
+    ),
+    "execution_modes": [
+        {
+            "id": "single-framework-native",
+            "description": "Orchestrator == Executor (e.g. Kilo-only or Claude-only using native worktrees and subagents, zero MCP required; default verification: independent-session).",
+        },
+        {
+            "id": "multi-framework-mcp",
+            "description": "Orchestrator != Executor (cross-framework delegation and verification over MCP servers like kilo-mcp / claude-mcp or CLI; default verification: cross-agent or panel).",
+        },
+    ],
+    "commands": {
+        "describe": {
+            "usage": "ai-orch describe [--json]",
+            "description": "Return machine-readable JSON catalog of all ai-orch commands, arguments, and scripts.",
+        },
+        "config": {
+            "script": str(ORCH_CONFIG_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch config <subcommand> [options] [--json]",
+            "subcommands": {
+                "show": {
+                    "usage": "ai-orch config show [--workspace <dir>] [--global-config <file>] [--json]",
+                    "description": "Load, merge, and display effective (Global + Project) orchestration.toml.",
+                },
+                "validate": {
+                    "usage": "ai-orch config validate [--workspace <dir>] [--plugin-dir <dir>...] [--json]",
+                    "description": "Validate kit skill-requirements.json and merged orchestration.toml.",
+                },
+                "init-global": {
+                    "usage": "ai-orch config init-global [--force] [--global-config <file>] [--json]",
+                    "description": "Create ~/.config/ai-orchestration/orchestration.toml with default schema.",
+                },
+                "init-project": {
+                    "usage": (
+                        "ai-orch config init-project [--workspace <dir>] [--name <name>] "
+                        "[--orchestrator <tool>] [--executor <tool>] "
+                        "[--verification-mode <self|independent-session|cross-agent|panel|owner>] [--force] [--json]"
+                    ),
+                    "description": "Create <workspace>/tasks/orchestration.toml.",
+                },
+                "set-profile": {
+                    "usage": (
+                        "ai-orch config set-profile <tool> <profile> --model <id> "
+                        "[--variant <v>] [--effort <e>] [--basis <b>] [--scope global|project] [--workspace <dir>] [--json]"
+                    ),
+                    "description": "Atomically set or update a (tool, profile) model assignment.",
+                },
+        "env": {
+            "script": str(ORCH_ENV_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch env <subcommand> [options] [--json]",
+            "subcommands": {
+                "status": {
+                    "usage": "ai-orch env status [--workspace <dir>] [--json]",
+                    "description": "Verify status & drift of CLIs (kilo, claude, codex), installed skills, and MCP servers.",
+                },
+                "fetch-repos": {
+                    "usage": "ai-orch env fetch-repos [--repos ai-orchestration kilo-mcp] [--json]",
+                    "description": "Clone or update orchestration repositories into ~/.ai-orchestration/repos/.",
+                },
+                "install-skills": {
+                    "usage": (
+                        "ai-orch env install-skills [--assistants kilo claude codex | all] "
+                        "[--scope global|project] [--repo ai-orchestration|kilo-mcp] [--link] [--workspace <dir>] [--json]"
+                    ),
+                    "description": "Install orchestration skills into Kilo, Claude, and/or Codex.",
+                },
+                "register-mcp": {
+                    "usage": (
+                        "ai-orch env register-mcp <kilo-mcp|claude-mcp|codex-mcp> "
+                        "[--assistants kilo claude codex | all] [--scope global|project] [--provision-venv] [--json]"
+                    ),
+                    "description": "Provision and register an MCP server across assistants.",
+                },
+            },
+        },
+        "render-agents-md": {
+                    "usage": "ai-orch config render-agents-md [--workspace <dir>] [--apply | --check] [--json]",
+                    "description": "Render or update the <!-- BEGIN ai-orchestration --> block in <workspace>/AGENTS.md.",
+                },
+            },
+        },
+        "tasks": {
+            "script": str(TASKS_ENGINE_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch tasks <subcommand> [options] [--json]",
+            "subcommands": {
+                "list": {
+                    "usage": "ai-orch tasks list [--tasks-dir <dir>] [--json]",
+                    "description": "Parse all emergent tasks (active + done/) and initiatives into structured JSON.",
+                },
+                "validate": {
+                    "usage": "ai-orch tasks validate [--tasks-dir <dir>] [--json]",
+                    "description": "Validate unique IDs, closed header field order, states/priorities/profiles, DAG acyclicity, and required sections.",
+                },
+                "transition": {
+                    "usage": (
+                        "ai-orch tasks transition <task_id> <new_state> [--actor <actor>] "
+                        "[--verifier <verifier>] [--reason <text>] [--tasks-dir <dir>] [--json]"
+                    ),
+                    "description": "Transition task state enforcing state-machine guards and moving closed tasks to tasks/done/.",
+                },
+                "sync-index": {
+                    "usage": "ai-orch tasks sync-index [--tasks-dir <dir>] [--apply | --check] [--json]",
+                    "description": "Deterministically regenerate or check tasks/00-INDEX.md tables from task headers.",
+                },
+            },
+        },
+        "render-agents-md": {
+            "script": str(ORCH_CONFIG_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch render-agents-md [--workspace <dir>] [--apply | --check] [--json]",
+            "description": "Shortcut alias for `ai-orch config render-agents-md`.",
+        },
+    },
+}
+
+
+def print_help() -> None:
+    print(__doc__.strip())
+    print("\nSubcommands:")
+    for cmd_name, meta in CLI_DESCRIPTION["commands"].items():
+        print(f"  {cmd_name:<18} {meta['description'] if 'description' in meta else meta['usage']}")
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print_help()
+        return 0
+
+    top_json = False
+    if argv[0] == "--json":
+        top_json = True
+        argv = argv[1:]
+
+    if not argv:
+        print_help()
+        return 0
+
+    group = argv[0]
+    rest = argv[1:]
+    if top_json and "--json" not in rest:
+        rest = rest + ["--json"]
+
+    if group == "describe":
+        print(json.dumps(CLI_DESCRIPTION, indent=2))
+        return 0
+
+    if group == "config":
+        proc = subprocess.run([sys.executable, str(ORCH_CONFIG_SCRIPT), *rest], check=False)
+        return proc.returncode
+
+    if group == "tasks":
+        proc = subprocess.run([sys.executable, str(TASKS_ENGINE_SCRIPT), *rest], check=False)
+        return proc.returncode
+
+    if group == "env":
+        proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), *rest], check=False)
+        return proc.returncode
+
+    if group == "render-agents-md":
+        proc = subprocess.run([sys.executable, str(ORCH_CONFIG_SCRIPT), "render-agents-md", *rest], check=False)
+        return proc.returncode
+
+    print(f"Unknown command group: {group!r}. Run 'ai-orch --help' or 'ai-orch describe --json'.", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

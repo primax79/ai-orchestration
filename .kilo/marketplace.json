@@ -1,17 +1,22 @@
 {
-  "name": "ai-architect-executor",
-  "description": "Protocol-agnostic Architect/Executor AI delegation pattern and skills",
-  "version": "1.0.0",
+  "name": "ai-orchestration",
+  "description": "Protocol-agnostic Architect/Executor orchestration and task-pipeline skills — works for both Single-Framework Native (Kilo-only / Claude-only with parallel native worktrees/subagents) and Multi-Framework MCP delegation",
+  "version": "1.1.0",
   "plugins": [
     {
-      "name": "orchestration-methodology",
-      "description": "Orchestrate Executor agents using discovery-first and non-blocking delegation",
-      "source": "./plugins/architect-side/skills/orchestration-methodology"
+      "name": "task-pipeline",
+      "description": "Author and maintain a durable, resumable development pipeline as a tasks/ tree (initiatives, specs, emergent tasks, and state registry)",
+      "source": "./plugins/architect-side/skills/task-pipeline"
     },
     {
-      "name": "delegation-roi-analysis",
+      "name": "orchestration-workflow",
+      "description": "Orchestrate Executor agents using discovery-first and non-blocking delegation",
+      "source": "./plugins/architect-side/skills/orchestration-workflow"
+    },
+    {
+      "name": "orchestration-metrics",
       "description": "Evaluate delegation efficiency and ROI analysis",
-      "source": "./plugins/architect-side/skills/delegation-roi-analysis"
+      "source": "./plugins/architect-side/skills/orchestration-metrics"
     },
     {
       "name": "conflict-resolver",
@@ -24,19 +29,19 @@
       "source": "./plugins/architect-side/skills/task-spec-authoring"
     },
     {
-      "name": "task-delegation",
+      "name": "task-worktree-ops",
       "description": "Manual git-worktree mechanics for handing tasks to an Executor and interacting with its live worktree",
-      "source": "./plugins/architect-side/skills/task-delegation"
+      "source": "./plugins/architect-side/skills/task-worktree-ops"
     },
     {
-      "name": "headless-executor-contract",
+      "name": "executor-contract",
       "description": "Behavioral contract for an Executor agent running background tasks",
-      "source": "./plugins/executor-side/skills/headless-executor-contract"
+      "source": "./plugins/executor-side/skills/executor-contract"
     },
     {
-      "name": "interactive-role-setup",
-      "description": "Maps the kit's abstract role profiles to whatever models/hosts you actually have",
-      "source": "./plugins/shared/skills/interactive-role-setup"
+      "name": "orchestration-setup",
+      "description": "Maps the kit's abstract role profiles to whatever models/hosts you actually have and configures orchestration.toml",
+      "source": "./plugins/shared/skills/orchestration-setup"
     }
   ]
 }

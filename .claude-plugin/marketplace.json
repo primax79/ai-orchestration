@@ -1,14 +1,14 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "ai-architect-executor",
-  "description": "The generic, protocol-agnostic Architect/Executor pattern for delegating work from an orchestrating AI to a worker AI - task discovery, isolation, delegation, monitoring, verification, and a headless-worker behavioral contract",
+  "name": "ai-orchestration",
+  "description": "The protocol-agnostic Architect/Executor orchestration and task-pipeline framework — works for both Single-Framework Native setups (Kilo-only or Claude-only with parallel native worktrees/subagents) and Multi-Framework MCP delegation, covering task discovery, specification, isolation, delegation, monitoring, cross-verification, and a headless-worker behavioral contract",
   "owner": {
     "name": "Alfredo Oliviero"
   },
   "plugins": [
     {
       "name": "architect-side",
-      "description": "Orchestration methodology (6 phases), delegation ROI analysis, conflict resolution, task-spec authoring, and manual task-delegation/git-worktree mechanics - all protocol-agnostic. Install if you're the orchestrating AI. Concrete tool bindings for a specific executor live in that binding's own repo, e.g. kilo-mcp.",
+      "description": "Orchestration workflow (6 phases), task-pipeline authoring (task-pipeline), orchestration metrics & ROI analysis, conflict resolution, task-spec authoring, and manual task-worktree-ops mechanics — works for both Single-Framework Native (parallel native worktrees/subagents) and Multi-Framework MCP delegation. Install if you're the orchestrating AI.",
       "author": {
         "name": "Alfredo Oliviero"
       },
@@ -17,7 +17,7 @@
     },
     {
       "name": "executor-side",
-      "description": "The headless-executor behavioral contract - zero interactivity, focus_files, mandatory Final Report, fail fast. Install if you're the agent executing background work delegated by an orchestrating Architect AI.",
+      "description": "The executor-contract behavioral contract - zero interactivity, focus_files, mandatory Final Report, fail fast. Install if you're the agent executing background work delegated by an orchestrating Architect AI.",
       "author": {
         "name": "Alfredo Oliviero"
       },
@@ -26,7 +26,7 @@
     },
     {
       "name": "shared",
-      "description": "interactive-role-setup - maps the kit's abstract role profiles to whatever models/hosts you actually have. Useful regardless of which side you install.",
+      "description": "orchestration-setup - maps the kit's abstract role profiles to whatever models/hosts you actually have, configures orchestration.toml, and renders project AGENTS.md. Useful regardless of which side you install.",
       "author": {
         "name": "Alfredo Oliviero"
       },

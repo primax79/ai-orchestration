@@ -1,53 +1,60 @@
 {
   "items": [
     {
+      "id": "task-pipeline",
+      "description": "Author and maintain a durable, resumable development pipeline as a `tasks/` tree - raw input (`_inbox/`) distilled into structured specs (`specs/`), initiatives (`NN-<slug>/plan.md`), emergent mid-session tasks (`<category>/T###-<slug>`), and a live `00-INDEX.md` registry. Works for both Single-Framework Native (Kilo-only / Claude-only) and Multi-Framework MCP delegation.",
+      "category": "architect-side",
+      "githubUrl": "https://github.com/primax79/ai-orchestration/tree/main/plugins/architect-side/skills/task-pipeline",
+      "content": "https://github.com/primax79/ai-orchestration/releases/download/skills-latest/task-pipeline.tar.gz"
+    },
+    {
       "id": "conflict-resolver",
       "description": "Resolve merge conflicts in files produced by parallel Executor tasks - find conflict markers, merge both versions preserving the semantics of each parallel feature, verify with linter/build.",
       "category": "architect-side",
-      "githubUrl": "https://github.com/primax79/ai-architect-executor/tree/main/plugins/architect-side/skills/conflict-resolver",
-      "content": "https://github.com/primax79/ai-architect-executor/releases/download/skills-latest/conflict-resolver.tar.gz"
+      "githubUrl": "https://github.com/primax79/ai-orchestration/tree/main/plugins/architect-side/skills/conflict-resolver",
+      "content": "https://github.com/primax79/ai-orchestration/releases/download/skills-latest/conflict-resolver.tar.gz"
     },
     {
-      "id": "delegation-roi-analysis",
-      "description": "Evaluate delegation efficiency - ROI analysis (delegation cost vs. hypothetical inline-generation cost), defect-pattern review from logged issues, and feedback-loop proposals for better task specifications. Use when asked whether delegating to an Executor is paying off. Methodology only - concrete telemetry-tool calls live in the specific binding's own repo (e.g. kilo-mcp's mcp-metrics-analyst).",
+      "id": "orchestration-metrics",
+      "description": "Evaluate delegation efficiency - ROI analysis (delegation cost vs. hypothetical inline-generation cost), defect-pattern review from logged issues, and feedback-loop proposals for better task specifications. Use when asked whether delegating to an Executor is paying off. Methodology only - concrete telemetry-tool calls live in the specific binding's own repo (e.g. kilo-mcp's kilo-mcp-metrics-analyst).",
       "category": "architect-side",
-      "githubUrl": "https://github.com/primax79/ai-architect-executor/tree/main/plugins/architect-side/skills/delegation-roi-analysis",
-      "content": "https://github.com/primax79/ai-architect-executor/releases/download/skills-latest/delegation-roi-analysis.tar.gz"
+      "githubUrl": "https://github.com/primax79/ai-orchestration/tree/main/plugins/architect-side/skills/orchestration-metrics",
+      "content": "https://github.com/primax79/ai-orchestration/releases/download/skills-latest/orchestration-metrics.tar.gz"
     },
     {
-      "id": "orchestration-methodology",
-      "description": "Orchestrate an Executor agent through the Architect/Executor pattern - discovery-first exploration, isolation before delegating, non-blocking parallel delegation, complexity-scaled monitoring/intervention, real verification (not just reading the report), and defect telemetry. Use when coordinating development work delegated to another agent.",
+      "id": "orchestration-workflow",
+      "description": "Orchestrate an Executor agent through the Architect/Executor pattern (Single-Framework Native with parallel worktrees/subagents or Multi-Framework MCP delegation) - discovery-first exploration, isolation before delegating, non-blocking parallel delegation, complexity-scaled monitoring/intervention, real verification (not just reading the report), and defect telemetry.",
       "category": "architect-side",
-      "githubUrl": "https://github.com/primax79/ai-architect-executor/tree/main/plugins/architect-side/skills/orchestration-methodology",
-      "content": "https://github.com/primax79/ai-architect-executor/releases/download/skills-latest/orchestration-methodology.tar.gz"
+      "githubUrl": "https://github.com/primax79/ai-orchestration/tree/main/plugins/architect-side/skills/orchestration-workflow",
+      "content": "https://github.com/primax79/ai-orchestration/releases/download/skills-latest/orchestration-workflow.tar.gz"
     },
     {
       "id": "task-spec-authoring",
-      "description": "Write task specifications for an Executor agent and calibrate how deeply to verify what it produces - task granularity, the negative-claim rule, reference-drift, caller-tracing, one-task-one-commit, and risk-calibrated verification depth. Protocol-agnostic: applies whether the spec is dispatched through an MCP connector, a CLI wrapper, or handed over by hand.",
+      "description": "Write task specifications for an Executor agent and calibrate how deeply to verify what it produces - task granularity, the negative-claim rule, reference-drift, caller-tracing, one-task-one-commit, and risk-calibrated verification depth. Protocol-agnostic: applies whether dispatched via Single-Framework Native worktrees/subagents, an MCP connector, a CLI wrapper, or handed over by hand.",
       "category": "architect-side",
-      "githubUrl": "https://github.com/primax79/ai-architect-executor/tree/main/plugins/architect-side/skills/task-spec-authoring",
-      "content": "https://github.com/primax79/ai-architect-executor/releases/download/skills-latest/task-spec-authoring.tar.gz"
+      "githubUrl": "https://github.com/primax79/ai-orchestration/tree/main/plugins/architect-side/skills/task-spec-authoring",
+      "content": "https://github.com/primax79/ai-orchestration/releases/download/skills-latest/task-spec-authoring.tar.gz"
     },
     {
-      "id": "task-delegation",
+      "id": "task-worktree-ops",
       "description": "Manual, git-based mechanics for handing a task off to an Executor agent working in its own dedicated git worktree, and for interacting with its live worktree afterward - applying a fix directly when file-edit tools are permission-blocked there, and deciding when it's safe to merge, rebase, or otherwise touch a branch it's actively working on.",
       "category": "architect-side",
-      "githubUrl": "https://github.com/primax79/ai-architect-executor/tree/main/plugins/architect-side/skills/task-delegation",
-      "content": "https://github.com/primax79/ai-architect-executor/releases/download/skills-latest/task-delegation.tar.gz"
+      "githubUrl": "https://github.com/primax79/ai-orchestration/tree/main/plugins/architect-side/skills/task-worktree-ops",
+      "content": "https://github.com/primax79/ai-orchestration/releases/download/skills-latest/task-worktree-ops.tar.gz"
     },
     {
-      "id": "headless-executor-contract",
-      "description": "Behavioral contract for an Executor agent running background tasks delegated by an orchestrating Architect AI - zero interactivity, focus_files contract, mandatory Final Report, fail fast, scope discipline. Protocol-agnostic (applies whether delegated over MCP, a CLI wrapper, or by hand).",
+      "id": "executor-contract",
+      "description": "Behavioral contract for an Executor agent running background tasks delegated by an orchestrating Architect AI - zero interactivity, focus_files contract, mandatory Final Report, fail fast, scope discipline. Protocol-agnostic (applies whether delegated via Single-Framework Native worktrees/subagents, over MCP, a CLI wrapper, or by hand).",
       "category": "executor-side",
-      "githubUrl": "https://github.com/primax79/ai-architect-executor/tree/main/plugins/executor-side/skills/headless-executor-contract",
-      "content": "https://github.com/primax79/ai-architect-executor/releases/download/skills-latest/headless-executor-contract.tar.gz"
+      "githubUrl": "https://github.com/primax79/ai-orchestration/tree/main/plugins/executor-side/skills/executor-contract",
+      "content": "https://github.com/primax79/ai-orchestration/releases/download/skills-latest/executor-contract.tar.gz"
     },
     {
-      "id": "interactive-role-setup",
-      "description": "Interactively maps the kit's four abstract role profiles (deep-reasoning, orchestration, bulk-execution, exploration) to whatever models/hosts the operator actually has available, persists the mapping to roles.toml, and verifies it against the live host config rather than trusting it blindly.",
+      "id": "orchestration-setup",
+      "description": "Interactively maps the kit's four abstract role profiles (deep-reasoning, orchestration, bulk-execution, exploration) to whatever models/hosts the operator actually has available, persists the mapping to orchestration.toml, and renders project AGENTS.md for both Single-Framework Native and Multi-Framework MCP setups.",
       "category": "shared",
-      "githubUrl": "https://github.com/primax79/ai-architect-executor/tree/main/plugins/shared/skills/interactive-role-setup",
-      "content": "https://github.com/primax79/ai-architect-executor/releases/download/skills-latest/interactive-role-setup.tar.gz"
+      "githubUrl": "https://github.com/primax79/ai-orchestration/tree/main/plugins/shared/skills/orchestration-setup",
+      "content": "https://github.com/primax79/ai-orchestration/releases/download/skills-latest/orchestration-setup.tar.gz"
     }
   ]
 }

@@ -1,0 +1,13 @@
+{
+  "skills": [
+    {
+      "name": "orchestration-setup",
+      "files": [
+        "SKILL.md",
+        "scripts/orchestration_config.py",
+        "scripts/test_orchestration_config.py",
+        "scripts/validate_roles.py"
+      ]
+    }
+  ]
+}

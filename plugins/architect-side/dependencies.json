@@ -1,11 +1,4 @@
 {
-  "_comment": "Not a Claude Code/Kilo-native manifest - neither tool's plugin installer reads or enforces this. Same convention as skill-requirements.json: a separate, self-consistent file our own scripts can check, kept out of plugin.json to avoid depending on whether that schema tolerates unknown keys.",
-  "dependencies": [
-    {
-      "plugin": "common-tools",
-      "repo": "https://github.com/primax79/agentic-coding-kit",
-      "skill": "macroplan-authoring",
-      "reason": "orchestration-methodology and task-spec-authoring reference the task/ tree convention (CONTEXT.md, 00-INDEX.md, specs/, NN-<slug>/plan.md) that skill owns - not vendored here."
-    }
-  ]
+  "_comment": "Not a Claude Code/Kilo-native manifest - neither tool's plugin installer reads or enforces this. Same convention as skill-requirements.json: a separate, self-consistent file our own scripts can check, kept out of plugin.json to avoid depending on whether that schema tolerates unknown keys. task-pipeline (formerly macroplan-authoring) is consolidated directly inside plugins/architect-side/skills/task-pipeline.",
+  "dependencies": []
 }

@@ -1,106 +1,124 @@
-# ai-architect-executor
+# ai-orchestration
 
-The generic, protocol-agnostic **Architect/Executor** pattern for
-delegating work from an orchestrating AI to a worker AI: task discovery,
-isolation, delegation, monitoring, verification, and a headless-worker
-behavioral contract. Not tied to Claude, not tied to Kilo, not tied to
-MCP - those are all one possible *binding* of this pattern, not the
-pattern itself.
+**Versioned Specification & Task Management, Worktree Execution Control, and Independent Verification for AI Coding Assistants (Kilo, Claude, Codex).**
 
-The vocabulary ("Architect" / "Executor") wasn't invented for this repo -
-it was already in use in `kilo-mcp`'s skill prose (its `pyproject.toml`
-describes it as "the architect/executor pattern") before anyone framed it
-as a reusable, protocol-agnostic abstraction. See `STATUS.md` for the full
-history and decision log of the split this repo came out of.
+`ai-orchestration` covers the complete engineering lifecycle in **two decoupled phases**:
 
-## Why this exists
+1. **Specification, Task Definition & State Management in Git (`tasks/`):**
+   Distills raw ideas (`_inbox/`) into **versioned specifications** (`tasks/specs/` with locked-in decisions and non-goals), decomposes initiatives into **atomic execution tasks** (`NN-<slug>/plan.md`, `1 task = 1 commit`), captures **emergent mid-session tasks** (`<category>/T###-<slug>.md`) with a machine-validated 13-field header and runnable acceptance criteria (`## Verification`), and keeps the live backlog (`tasks/00-INDEX.md`) deterministically synced via `./bin/ai-orch tasks`.
+2. **Worktree-Isolated Execution & Independent Verification (`orchestration.toml`):**
+   Keeps your main AI session lean (acting strictly as **Architect**) while delegating implementation and verification to isolated Git worktree workers. Because task management is completely decoupled from the execution channel, it works out of the box both in **Single-Framework Mode** (only Kilo, only Claude, or only Codex—zero MCP required) and in **Multi-Framework Mode** (orchestrating external agents via `kilo-mcp`, `claude-mcp`, `codex`).
 
-An orchestrating AI (the **Architect**) is good at reasoning, design, and
-review, but running a large implementation task through it directly is
-slow and token-heavy. A fast, semi-autonomous coding agent (the
-**Executor**) is good at implementation but needs a spec and doesn't
-review its own work critically. Splitting the two roles - and being
-disciplined about *how* the split works (isolate before delegating, verify
-by actually running the result rather than trusting a report, calibrate
-monitoring to task risk) - is the actual leverage. This repo is that
-discipline, written down once instead of re-derived per project or
-rediscovered the hard way per session.
+---
 
-## What's in this repo - three plugins, install the side(s) you need
+## Value Added at a Glance
 
-| Plugin | Skill | Covers |
-| --- | --- | --- |
-| `architect-side` | `orchestration-methodology` | The 6-phase methodology: discovery, isolation, delegation, monitoring & intervention, verification & review, closure & telemetry. |
-| `architect-side` | `delegation-roi-analysis` | Evaluating whether delegation is paying off - cost vs. inline-generation estimate, defect-pattern review, feedback-loop proposals. |
-| `architect-side` | `conflict-resolver` | Resolving merge conflicts between parallel Executor outputs. |
-| `architect-side` | `task-spec-authoring` | Writing Executor task specs and calibrating verification depth - applies regardless of dispatch path. |
-| `architect-side` | `task-delegation` | The **manual** (non-protocol) delegation path specifically: git-worktree mechanics for handing off a task and interacting with its live worktree. |
-| `executor-side` | `headless-executor-contract` | The Executor-side behavioral contract for running headless: zero interactivity, `focus_files`, mandatory Final Report, fail fast, scope discipline. |
-| `shared` | `interactive-role-setup` | Maps the kit's abstract role profiles (`deep-reasoning`/`orchestration`/`bulk-execution`/`exploration`) to whatever models/hosts you actually have. Useful to either side. |
+| Ad-Hoc Chat Session | With `ai-orchestration` |
+| :--- | :--- |
+| ❌ Specs & decisions vanish when context compacts | ✅ **Versioned Specs & Tasks** in Git (`tasks/00-INDEX.md`, `specs/`, `T###`) |
+| ❌ Main session bloats writing 10 files inline | ✅ **Main session only orchestrates**; workers run in parallel |
+| ❌ Parallel agents overwrite each other's files/ports | ✅ **Isolated Git Worktrees** + port/DB/registry guardrails |
+| ❌ Same agent writes the bug and claims "Done!" | ✅ **Independent Verification Gate** (`verifier != executor`) |
+| ❌ Frontier model wasted on mechanical edits | ✅ **4 Role Profiles** (`deep-reasoning`, `orchestration`, `bulk-execution`, `exploration`) |
 
-All seven skills are protocol-agnostic by design - no concrete tool names.
-The fully concrete version of four of them (`orchestration-methodology`,
-`headless-executor-contract`, `conflict-resolver`, `delegation-roi-analysis`),
-naming actual MCP tools, is *generated* from this repo's templates in
-[`kilo-mcp`](https://github.com/primax79/kilo-mcp) - see
-`scripts/generate_binding.py` here and `scripts/regenerate_bound_skills.py`
-there. `task-spec-authoring`, `task-delegation`, and `interactive-role-setup`
-have no binding-specific counterpart - they don't need one.
+---
 
-## Relationship with the other repos in this family
+## How It Works
 
-- **[`kilo-mcp`](https://github.com/primax79/kilo-mcp)** - depends on this
-  repo at build time: its skills are *generated* from this repo's
-  `SKILL.template.md` sources plus its own binding maps (`bindings/*.json`,
-  see `scripts/regenerate_bound_skills.py` there), not hand-duplicated.
-  Install `kilo-mcp`'s skills if you're driving Kilo Code via MCP - they
-  carry the real tool names. Install this repo's skills for a different
-  binding, or the protocol-agnostic form. **Never install both**: same
-  methodology, same activation triggers, guaranteed to compete for the
-  same description match.
-- **[`agentic-coding-kit`](https://github.com/primax79/agentic-coding-kit)** -
-  one real dependency in this direction: several skills here
-  (`task-spec-authoring`, `orchestration-methodology`) reference the
-  `tasks/` tree convention owned by that repo's `macroplan-authoring` skill
-  (`common-tools` plugin) for multi-session/delegated work. Install that
-  plugin alongside this one if you use macroplan-style task trees - this
-  repo does not vendor or duplicate that convention (see
-  `plugins/architect-side/dependencies.json` for the machine-readable
-  record; informational only, neither tool's installer enforces it today).
-  Everything else about the relationship is as before: its `agent-tooling-meta` plugin is about
-  *configuring* Kilo/Claude as installed tools, this repo is about
-  *delegating work* between them - see that repo's
-  [`docs/01-concepts.md`](https://github.com/primax79/agentic-coding-kit/blob/main/docs/01-concepts.md)
-  for general Claude Code/Kilo Code plugin & marketplace mechanics, not
-  repeated here.
-- **[`gcube-ai-toolkit`](https://github.com/primax79/gcube-ai-toolkit)** -
-  no dependency; disjoint content (gCube/D4Science-specific vs. generic).
+```mermaid
+flowchart TB
+    A["1. Define Task & Acceptance Criteria<br/>tasks/specs/ + tasks/&lt;cat&gt;/T###.md + 00-INDEX.md"]
+    B["2. Execute in Isolated Git Worktrees (1 Task = 1 Commit)<br/>• Single-Framework Native: Kilo agent_manager / Claude Agent / Codex exec<br/>• Multi-Framework MCP: kilo-mcp / claude-mcp / codex mcp-server"]
+    C["3. Independent Verification Gate (delivered -> verified)<br/>Fresh blind session or different framework runs ## Verification checks"]
+    D["4. Merge & Close (verified -> done)<br/>git merge --no-ff + post-merge build + move to tasks/done/"]
 
-## Install
+    A --> B --> C
+    C -->|"Pass"| D
+    C -->|"Fail (B1..Bn)"| B
+```
 
-Same mechanics as the rest of this family -
-[`agentic-coding-kit`'s docs](https://github.com/primax79/agentic-coding-kit/tree/main/docs)
-cover the concepts/authoring/distribution detail in full; short version:
+---
 
-**Claude Code:**
+## Two Execution Modes (Same Tasks, Pluggable Execution)
+
+1. **Single-Framework Native (Zero MCP required)**
+   Use only **Kilo Code**, only **Claude Code**, or only **Codex CLI**. The main session dispatches parallel native worktrees/subagents (`agent_manager` & `task` in Kilo; `Agent` in Claude; `codex exec` in Codex) and verifies `delivered` work using a **fresh, context-blind subagent** (`independent-session`) on the `deep-reasoning` model.
+2. **Multi-Framework via MCP (`kilo-mcp`, `claude-mcp`, `codex`)**
+   Combine multiple tools (e.g., Claude as Architect delegating implementation and RAG search to Kilo via `kilo-mcp`, and verifying with Codex or Claude via `cross-agent` / `panel`).
+
+---
+
+## Installation
+
+You can install `ai-orchestration` across **Kilo Code**, **Claude Code**, and **Codex CLI** with a single script (from a local clone or from scratch), or via each assistant's native plugin/marketplace mechanism:
 
 ```bash
-claude plugin marketplace add https://github.com/primax79/ai-architect-executor.git
-/plugin install architect-side   # or executor-side, or shared - pick what you need
+# Option A — One-command installer (installs skills + initializes ~/.config/ai-orchestration/orchestration.toml)
+./install.sh                  # add --with-mcp to also provision & register kilo-mcp / codex-mcp
+
+# Option B — One-liner from scratch (clones into ~/.ai-orchestration/repos/ and installs)
+curl -fsSL https://raw.githubusercontent.com/primax79/ai-orchestration/main/install.sh | bash
+
+# Option C — Native Claude Code marketplace
+claude plugin marketplace add https://github.com/primax79/ai-orchestration.git
+/plugin install architect-side executor-side shared
 ```
 
-**Kilo Code**: install with the AI Swissknife VS Code extension (or its CLI) (pick the
-plugin(s) you need - `architect-side`, `executor-side`, `shared`, or several),
+For targeted per-assistant installs (`--assistants kilo claude codex`), project-scope installs, Kilo Skill URLs, AI Swissknife integration, and MCP server registration, see the dedicated **[Installation Guide (`docs/INSTALLATION.md`)](docs/INSTALLATION.md)**.
 
-or Kilo's native Skill URLs (no extra tooling, one URL per plugin):
+---
 
-```text
-https://raw.githubusercontent.com/primax79/ai-architect-executor/main/plugins/architect-side/skills/
-https://raw.githubusercontent.com/primax79/ai-architect-executor/main/plugins/executor-side/skills/
-https://raw.githubusercontent.com/primax79/ai-architect-executor/main/plugins/shared/skills/
+## Project Quickstart
+
+### Option 1: Interactive Setup via Skill (Recommended)
+Open your AI assistant (Kilo, Claude, or Codex) in your project and invoke **`orchestration-setup`**:
+> *"Use `orchestration-setup` to configure orchestration for this project and generate `AGENTS.md`."*
+
+The skill interactively:
+1. Discovers your installed tools (`kilo`, `claude`, `codex`), MCP servers, and available models, and saves your global mapping to `~/.config/ai-orchestration/orchestration.toml` if not yet configured;
+2. Asks whether this project runs in **Single-Framework Mode** (e.g. Kilo-only or Claude-only) or **Multi-Framework MCP Mode**, and inspects the repo for shared ports, DBs, conflict-prone files, and test commands;
+3. Calls `orchestration_config.py` (`./bin/ai-orch`) to write the **unversioned** local project config (`~/.config/ai-orchestration/projects/<repo>/orchestration.toml`) and render the orchestration block in `AGENTS.md`.
+
+### Option 2: Non-Interactive CLI (`./bin/ai-orch`)
+The same deterministic scripts used by the skill can be run directly from the terminal (or by a UI/CI):
+
+```bash
+# 1. Configure a project (Single-Framework example: Kilo-only; or set --orchestrator claude --executor kilo)
+./bin/ai-orch config init-project --workspace /path/to/repo --orchestrator kilo --executor kilo
+
+# 2. Generate the always-on orchestration rules in /path/to/repo/AGENTS.md
+./bin/ai-orch render-agents-md --workspace /path/to/repo --apply
+
+# 3. Verify environment health, tasks, and config at any time
+./bin/ai-orch env status
+./bin/ai-orch tasks validate --tasks-dir tasks
 ```
 
-Regenerate `index.json` after any skill change: `python3 scripts/generate_skill_indices.py`.
+---
+
+## Included Skills (`plugins/`)
+
+| Plugin | Skill | Role Profile | Purpose |
+| :--- | :--- | :--- | :--- |
+| `architect-side` | **`orchestration-workflow`** | `orchestration` | 6-phase Architect/Executor loop (Discovery → Isolation → Dispatch → Monitor → Verify → Merge). |
+| `architect-side` | **`task-pipeline`** | `orchestration` | Manages `tasks/` (`00-INDEX.md`, `specs/`, initiatives `NN-<slug>`, emergent tasks `T###`) + `tasks_engine.py`. |
+| `architect-side` | **`task-spec-authoring`** | `deep-reasoning` | Writing grounded task specs, `## Verification` gates, parallel batch scopes & blind review panels. |
+| `architect-side` | **`task-worktree-ops`** | `deep-reasoning` | Git-worktree safety & `apply_fix_to_worktree.sh` for permission-blocked worktrees. |
+| `architect-side` | **`conflict-resolver`** | `deep-reasoning` | Resolving parallel branch conflicts (mechanical merge vs. incompatible-design fork). |
+| `architect-side` | **`orchestration-metrics`** | `deep-reasoning` | Analyzing delegation ROI, bounce/cancel rates, and spec guardrails. |
+| `executor-side` | **`executor-contract`** | `bulk-execution` | Worker contract: zero interactivity, `focus_files` first, `1 task = 1 commit`, `## Final Report`. |
+| `shared` | **`orchestration-setup`** | `deep-reasoning` | Configures `orchestration.toml` (tools, models per profile, verification) & renders `AGENTS.md`. |
+
+---
+
+## Documentation
+
+See **[`docs/README.md`](docs/README.md)** for the full structured documentation index:
+- **[Installation Guide (`docs/INSTALLATION.md`)](docs/INSTALLATION.md)** — From-scratch installer, per-assistant setup (Kilo, Claude, Codex, AI Swissknife), MCP registration, and drift checks.
+- **[Quickstart & Operator Playbooks (`docs/00-QUICKSTART-AND-PLAYBOOK.md`)](docs/00-QUICKSTART-AND-PLAYBOOK.md)** — Visual pipeline diagrams and step-by-step walkthroughs for Single-Framework and Multi-Framework setups.
+- **[Task & State Machine Spec (`tasks/specs/task-and-state-model.md`)](tasks/specs/task-and-state-model.md)** — Formal 13-field header, state transitions, and verification guards.
+- **[Config Schema (`docs/05-orchestration-config-schema.md`)](docs/05-orchestration-config-schema.md)** — Reference for Global & Project `orchestration.toml`.
+- **[Extension Spec (`tasks/specs/orchestration-extension-spec.md`)](tasks/specs/orchestration-extension-spec.md)** — Spec for the Backlog Manager & Environment Configurator UI.
 
 ## License
 

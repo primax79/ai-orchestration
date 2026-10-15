@@ -1,0 +1,11 @@
+{
+  "skills": [
+    {
+      "name": "executor-contract",
+      "files": [
+        "SKILL.md",
+        "SKILL.template.md"
+      ]
+    }
+  ]
+}

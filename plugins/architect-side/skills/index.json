@@ -8,32 +8,41 @@
       ]
     },
     {
-      "name": "delegation-roi-analysis",
+      "name": "orchestration-metrics",
       "files": [
         "SKILL.md",
         "SKILL.template.md"
       ]
     },
     {
-      "name": "orchestration-methodology",
+      "name": "orchestration-workflow",
       "files": [
         "SKILL.md",
         "SKILL.template.md"
       ]
     },
     {
-      "name": "task-delegation",
+      "name": "task-pipeline",
       "files": [
         "SKILL.md",
-        "references/worktree-git-plumbing.md",
-        "scripts/apply_fix_to_worktree.sh",
-        "scripts/test_apply_fix_to_worktree.sh"
+        "references/template.md",
+        "scripts/tasks_engine.py",
+        "scripts/test_tasks_engine.py"
       ]
     },
     {
       "name": "task-spec-authoring",
       "files": [
         "SKILL.md"
+      ]
+    },
+    {
+      "name": "task-worktree-ops",
+      "files": [
+        "SKILL.md",
+        "references/worktree-git-plumbing.md",
+        "scripts/apply_fix_to_worktree.sh",
+        "scripts/test_apply_fix_to_worktree.sh"
       ]
     }
   ]

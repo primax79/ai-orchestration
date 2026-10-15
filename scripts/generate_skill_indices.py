@@ -3,7 +3,7 @@
 generate_skill_indices.py - Generates Kilo-compatible index.json files at:
 1. Plugin Level (e.g. plugins/architect-side/index.json)
 2. Skills Directory Level (e.g. plugins/architect-side/skills/index.json)
-3. Individual Skill Level (e.g. plugins/architect-side/skills/orchestration-methodology/index.json)
+3. Individual Skill Level (e.g. plugins/architect-side/skills/orchestration-workflow/index.json)
 
 Ensures all forms of Kilo 'skills.urls' inputs work seamlessly regardless of
 trailing path level (point it at any of the three, Kilo resolves the same set).
@@ -28,7 +28,7 @@ PROFILES = {'deep-reasoning', 'orchestration', 'bulk-execution', 'exploration'}
 
 
 def validate_skill_requirements():
-    """Kit-internal half of role validation (see interactive-role-setup/SKILL.md):
+    """Kit-internal half of role validation (see plugins/shared/skills/orchestration-setup/scripts/validate_roles.py):
     every skill declares a valid profile, none declares a model. Self-contained
     per repo on purpose — this generator is already a per-repo ported copy, and
     a cross-repo import would break for anyone installing this plugin standalone.

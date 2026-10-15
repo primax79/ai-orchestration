@@ -18,6 +18,13 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PLUGINS_DIR = REPO_ROOT / 'plugins'
 GENERATOR = REPO_ROOT / 'scripts' / 'generate_binding.py'
 
+TEMPLATES = (
+    ('plugins/architect-side/skills/orchestration-workflow/SKILL.template.md', 'orchestration-workflow'),
+    ('plugins/architect-side/skills/orchestration-metrics/SKILL.template.md', 'orchestration-metrics'),
+    ('plugins/architect-side/skills/conflict-resolver/SKILL.template.md', 'conflict-resolver'),
+    ('plugins/executor-side/skills/executor-contract/SKILL.template.md', 'executor-contract'),
+)
+
 FRONTMATTER_RE = re.compile(r'^---\nname:\s*(.+?)\ndescription:\s*(.+?)\n---', re.DOTALL)
 
 
@@ -42,11 +49,13 @@ def main():
 
     failures = 0
     ran = 0
-    for template in sorted(PLUGINS_DIR.glob('*/skills/*/SKILL.template.md')):
+    for rel_template, default_name in TEMPLATES:
+        template = REPO_ROOT / rel_template
         skill_dir = template.parent
         out_path = skill_dir / 'SKILL.md'
-        name, description = read_current_frontmatter(out_path)
-        if not name:
+        _, description = read_current_frontmatter(out_path)
+        name = default_name
+        if not description:
             print(f"[FAIL] {out_path}: couldn't read current name/description to seed the generic pass")
             failures += 1
             continue

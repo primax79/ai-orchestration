@@ -1,5 +1,5 @@
 {
-  "headless-executor-contract": {
+  "executor-contract": {
     "profile": "bulk-execution",
     "reason": "Defines how the Executor itself behaves — the role it governs is the high-volume, spec-driven implementation side, not the Architect side reading it."
   }

@@ -1,0 +1,13 @@
+{
+  "skills": [
+    {
+      "name": "task-pipeline",
+      "files": [
+        "SKILL.md",
+        "references/template.md",
+        "scripts/tasks_engine.py",
+        "scripts/test_tasks_engine.py"
+      ]
+    }
+  ]
+}

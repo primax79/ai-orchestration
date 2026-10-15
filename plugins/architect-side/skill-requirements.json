@@ -3,20 +3,24 @@
     "profile": "deep-reasoning",
     "reason": "A design decision disguised as a merge: 'preserve both' compiles but ships two overlapping mechanisms, and nothing downstream catches a wrong call."
   },
-  "delegation-roi-analysis": {
+  "orchestration-metrics": {
     "profile": "deep-reasoning",
     "reason": "Beyond counting and grouping it proposes changes to delegation policy — a wrong recommendation has no test to catch it."
   },
-  "orchestration-methodology": {
+  "orchestration-workflow": {
     "profile": "orchestration",
     "reason": "Dispatch, polling, bookkeeping, close-out — mistakes here surface immediately as a stuck task or a failed verification step."
   },
-  "task-delegation": {
-    "profile": "deep-reasoning",
-    "reason": "Deciding whether it's safe to touch a live Executor worktree, or applying a fix to one without direct file-edit access — a wrong call here corrupts or races a session with nothing to catch it."
+  "task-pipeline": {
+    "profile": "orchestration",
+    "reason": "Structuring and maintaining the tasks/ pipeline, emergent task capture, state transitions, and 00-INDEX.md synchronization across sessions."
   },
   "task-spec-authoring": {
     "profile": "deep-reasoning",
     "reason": "Spec authoring and substantial verification of an Executor's output — a bad spec gets implemented faithfully, and a bad review approves it."
+  },
+  "task-worktree-ops": {
+    "profile": "deep-reasoning",
+    "reason": "Deciding whether it's safe to touch a live Executor worktree, or applying a fix to one without direct file-edit access — a wrong call here corrupts or races a session with nothing to catch it."
   }
 }

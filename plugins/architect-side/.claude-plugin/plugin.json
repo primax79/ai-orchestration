@@ -1,7 +1,7 @@
 {
   "name": "architect-side",
-  "version": "0.2.2",
-  "description": "Architect-side skills for the protocol-agnostic Architect/Executor pattern: orchestration methodology (6 phases), delegation ROI analysis, conflict resolution, task-spec authoring, and manual task-delegation/git-worktree mechanics. Install this if you're the orchestrating AI delegating work out.",
+  "version": "0.3.0",
+  "description": "Architect-side skills for the protocol-agnostic Architect/Executor pattern (Single-Framework Native and Multi-Framework MCP): orchestration workflow (6 phases), task-pipeline authoring (task-pipeline), orchestration metrics & ROI analysis, conflict resolution, task-spec authoring, and manual task-worktree-ops mechanics. Install this if you're the orchestrating AI.",
   "author": {
     "name": "Alfredo Oliviero"
   }

@@ -1,0 +1,11 @@
+{
+  "skills": [
+    {
+      "name": "orchestration-metrics",
+      "files": [
+        "SKILL.md",
+        "SKILL.template.md"
+      ]
+    }
+  ]
+}

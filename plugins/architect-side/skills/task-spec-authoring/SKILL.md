@@ -1,9 +1,19 @@
 ---
 name: task-spec-authoring
-description: "Write task specifications for an Executor agent and calibrate how deeply to verify what it produces - task granularity, the negative-claim rule, reference-drift, caller-tracing, one-task-one-commit, and risk-calibrated verification depth. Protocol-agnostic: applies whether the spec is dispatched through an MCP connector, a CLI wrapper, or handed over by hand - use it whenever a task spec is being written or an Executor's output is being reviewed, not only on any one dispatch path. For the manual/git-worktree mechanics of the CLI path specifically, see the sibling `task-delegation` skill."
+description: "Write task specifications for an Executor agent and calibrate how deeply to verify what it produces - task granularity, the negative-claim rule, reference-drift, caller-tracing, one-task-one-commit, and risk-calibrated verification depth. Protocol-agnostic: applies whether the spec is dispatched through an MCP connector, a CLI wrapper, or handed over by hand - use it whenever a task spec is being written or an Executor's output is being reviewed, not only on any one dispatch path. For the manual/git-worktree mechanics of the CLI path specifically, see the sibling `task-worktree-ops` skill."
 ---
 
 # Task spec authoring
+
+## Quick Reference
+
+| Field | Value |
+| --- | --- |
+| **Audience / Role** | Architect / Orchestrator (`deep-reasoning` profile) |
+| **When to Load** | Drafting task specifications, designing parallel task batches, or calibrating verification depth for an Executor's output |
+| **Execution Modes Supported** | **Single-Framework Native** (parallel native worktrees/subagents) and **Multi-Framework MCP / CLI** |
+| **Companion Scripts** | `bin/ai-orch`, `scripts/tasks_engine.py` (`task-pipeline`) |
+| **Related Skills** | `task-pipeline`, `orchestration-workflow`, `task-worktree-ops`, `executor-contract` |
 
 ## Purpose
 
@@ -20,12 +30,12 @@ Executor-implemented tasks - a cross-file conversion macroplan, roughly
 ## When to use
 
 - Writing a task file (standalone, or as one task inside a
-  `macroplan-authoring`-style plan) that will be handed to an Executor for
+  `task-pipeline`-style plan) that will be handed to an Executor for
   implementation, however that handoff happens.
 - Reviewing commits an Executor already produced, deciding what to verify
   and how deeply.
 
-Not for writing the plan's overall structure - use `macroplan-authoring`
+Not for writing the plan's overall structure - use `task-pipeline`
 for that (this skill is about the *content* of individual tasks and about
 verifying them, not about the `tasks/` tree scaffolding). Its
 `references/template.md` already has the file skeleton (Goal / Steps /
@@ -34,7 +44,7 @@ those fields, not a competing template.
 
 Not for the manual/git-worktree mechanics of applying a fix directly
 inside an Executor's dedicated worktree, or deciding when it's safe to
-touch a branch it's actively working on - see the sibling `task-delegation`
+touch a branch it's actively working on - see the sibling `task-worktree-ops`
 skill for that operational layer.
 
 ## Writing the spec: cross-check with other available engines before finalizing
@@ -144,7 +154,7 @@ Note explicitly in the task file that it should result in one commit
 scoped to just that task's changes - an agent working continuously
 across several tasks may otherwise sweep up unrelated pending work
 (another task's draft, an unrelated doc addition) into the same commit.
-The Executor's own behavioral contract (`headless-executor-contract`) is
+The Executor's own behavioral contract (`executor-contract`) is
 what must actually honor this at commit time; this is the spec-side half -
 say it explicitly so there's something to hold the Executor to.
 

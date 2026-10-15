@@ -1,5 +1,5 @@
 {
-  "interactive-role-setup": {
+  "orchestration-setup": {
     "profile": "deep-reasoning",
     "reason": "A wrong role-to-model mapping degrades every other skill silently, downstream, for as long as it goes unnoticed."
   }

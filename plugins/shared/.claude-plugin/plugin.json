@@ -1,7 +1,7 @@
 {
   "name": "shared",
   "version": "0.1.0",
-  "description": "Skills useful to both sides of the Architect/Executor pattern regardless of which role you install: interactive-role-setup maps the kit's abstract role profiles to whatever models/hosts you actually have. Install alongside either architect-side or executor-side (or both, if you're running as your own Architect and Executor on the same machine).",
+  "description": "Skills useful to both sides of the Architect/Executor pattern regardless of which role you install: orchestration-setup maps the kit's abstract role profiles to whatever models/hosts you actually have, configures orchestration.toml, and renders project AGENTS.md. Install alongside either architect-side or executor-side (or both, if you're running as your own Architect and Executor on the same machine).",
   "author": {
     "name": "Alfredo Oliviero"
   }
