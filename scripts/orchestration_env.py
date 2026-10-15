@@ -538,10 +538,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_st = sub.add_parser("status", help="Verify status & drift of CLIs, skills, and MCP servers across Kilo, Claude, and Codex")
     p_st.add_argument("--workspace", default=None, help="Optional project workspace to inspect project-scope installs")
+    p_st.add_argument("--json", action="store_true", help="Output structured JSON on stdout")
     p_st.set_defaults(func=cmd_status)
 
     p_fr = sub.add_parser("fetch-repos", help="Clone or update ai-orchestration / kilo-mcp in ~/.ai-orchestration/repos/")
     p_fr.add_argument("--repos", nargs="+", default=["ai-orchestration", "kilo-mcp"])
+    p_fr.add_argument("--json", action="store_true", help="Output structured JSON on stdout")
     p_fr.set_defaults(func=cmd_fetch_repos)
 
     p_is = sub.add_parser("install-skills", help="Install orchestration skills into Kilo, Claude, and/or Codex")
@@ -551,6 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_is.add_argument("--plugins", nargs="+", default=None, help="Plugins to install (default: architect-side executor-side shared)")
     p_is.add_argument("--link", action="store_true", help="Symlink skill folders instead of copying")
     p_is.add_argument("--workspace", default=None)
+    p_is.add_argument("--json", action="store_true", help="Output structured JSON on stdout")
     p_is.set_defaults(func=cmd_install_skills)
 
     p_rm = sub.add_parser("register-mcp", help="Provision and register kilo-mcp, claude-mcp, or codex-mcp across assistants")
@@ -559,6 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_rm.add_argument("--scope", choices=SCOPES, default="global")
     p_rm.add_argument("--provision-venv", action="store_true", help="Create .venv and pip install -e if missing")
     p_rm.add_argument("--workspace", default=None)
+    p_rm.add_argument("--json", action="store_true", help="Output structured JSON on stdout")
     p_rm.set_defaults(func=cmd_register_mcp)
 
     return ap

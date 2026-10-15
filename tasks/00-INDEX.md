@@ -12,7 +12,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 2 | 02 | [Formal Task Model, State Machine & `orchestration.toml` Specification](02-task-and-config-spec/plan.md) | done | 01 | M |
 | 3 | 03 | [Configuration & Task Management Skill + Python Scripts (`orchestration_config.py`, `tasks_engine.py`)](03-skill-and-script-engine/plan.md) | done | 02 | M |
 | 4 | 04 | [Orchestration Methodology & Skill Refinements (Review Tier 2)](04-methodology-refinements/plan.md) | partial (`T003`–`T005` done; `T006` open) | 01 | M |
-| 5 | 05 | [Standalone CLI (`ai-orch`), From-Scratch Installer & Extension Control Plane](05-cli-and-ui-handoff/plan.md) | partial (`05.1`–`05.2` done; `05.3`–`05.4` UI open) | 02, 03 | L |
+| 5 | 05 | [Standalone CLI (`ai-orch`), From-Scratch Installer & Extension Control Plane](05-cli-and-ui-handoff/plan.md) | done | 02, 03 | L |
 
 ## Specs
 
@@ -26,8 +26,6 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 
 | Id | Priority | Task | Executor | Handoff |
 | --- | --- | --- | --- | --- |
-| 05.3 | P1 | [Extension / Web UI Backend & Backlog Manager View (Macro-Task 1)](05-cli-and-ui-handoff/plan.md) | self / kilo | `Read tasks/05-cli-and-ui-handoff/plan.md (task 05.3) and tasks/specs/orchestration-extension-spec.md, build the Backlog Manager UI backed by bin/ai-orch tasks --json.` |
-| 05.4 | P1 | [Extension / Web UI Installer, Doctor & Orchestrator Configurator (Macro-Tasks 2, 3, 4)](05-cli-and-ui-handoff/plan.md) | self / kilo | `Read tasks/05-cli-and-ui-handoff/plan.md (task 05.4) and tasks/specs/orchestration-extension-spec.md, build the Environment Installer/Doctor & Configurator UI backed by bin/ai-orch env/config --json.` |
 | T008 | P1 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](server-and-bindings/T008-claude-mcp-phase1-spike.md) | claude | `Read tasks/server-and-bindings/T008-claude-mcp-phase1-spike.md and ../claude-mcp/SPEC.md, run the Phase 1 spike, record findings, and update the task and the registry.` |
 | T007 | P2 | [Structured verification gate tool in kilo-mcp](server-and-bindings/T007-verification-gate-tool.md) | kilo | `Read tasks/server-and-bindings/T007-verification-gate-tool.md, do the open steps, run the Verification, update the task and the registry.` |
 

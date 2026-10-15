@@ -21,12 +21,16 @@
 
 ### 05.3 - Extension / Web UI Backend & Backlog Manager View (Macro-Task 1)
 - **Profile:** `bulk-execution`
-- **Status:** `open`
+- **Status:** `done` (2026-10-15)
+- **Repo:** `ai-orchestration-ui/`
 - **Goal:** Build the Backlog Manager UI (Progress overview, `Next up` queue, Kanban board by state, Initiative/Category tree, and Task/Spec detail editor for priority, assignee/executor, profile, verification-mode, and state transitions) backed by `ai-orch tasks --json`.
+- **Verification:** Unit tests in `backend/test_server.py` pass and Vite compiles `frontend/dist/` cleanly.
 
 ### 05.4 - Extension / Web UI Environment Installer, Doctor & Orchestrator Configurator (Macro-Tasks 2, 3, 4)
 - **Profile:** `bulk-execution`
-- **Status:** `open`
+- **Status:** `done` (2026-10-15)
+- **Repo:** `ai-orchestration-ui/`
 - **Goal:** Build the UI views for:
-  - **Macro-Task 2 & 3 (Skills & MCP Installer + Environment Doctor):** backed by `ai-orch env status --json` and `ai-orch env install --json` (with optional `ai-swissknife` bridge when installed);
+  - **Macro-Task 2 & 3 (Skills & MCP Installer + Environment Doctor):** backed by `ai-orch env status --json` and `ai-orch env install --json`;
   - **Macro-Task 4 (Project Orchestrator Configurator):** visual editor for Global & Project `orchestration.toml` (active frameworks, primary orchestrator, per-tool model matrix, verification policy, isolation rules) + one-click `AGENTS.md` preview and apply (`ai-orch render-agents-md --apply`).
+- **Verification:** Starlette backend serves static bundle at `/`, all REST and WebSocket routes tested, ready for embedding into VS Code Webview panel via `vscode.postMessage` in `frontend/src/api.ts`.
