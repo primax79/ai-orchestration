@@ -371,3 +371,21 @@ actually-run test on a working `kilo` CLI says otherwise.
 - Does not replace any tool's own internal configuration UI.
 - Does not assume a specific model lineup - zero hardcoded vendor model names in the skill logic.
 - Does not run unattended - see "It never runs unattended" above.
+
+## Model Economics, Privacy, and Official Pricing References
+
+When guiding the operator to select models across the 4 cognitive profiles, follow these economic and security principles derived from empirical multi-turn audit accounting:
+
+1. **Cognitive Profile Cost Split:**
+   - Reserve high-tier models (`deep-reasoning`, `orchestration`) for architectural design, spec drafting, blind verification, and semantic conflict resolution.
+   - Map `bulk-execution` and `exploration` to fast agent-optimized models (e.g. `Gemini 3.8 Flash`, `Claude Sonnet`, `GPT-5-Codex-Mini`). In production runs, fast agent models cost **~1.7× less per component** while eliminating 60%–80% of secondary token expenditure.
+2. **Preventing the "Silent Subagent Leak":**
+   - In tools like Kilo Code, leaving `subagent_model` or `compaction` unset causes background workers and history compaction to inherit the expensive default chat model (`Gemini 4 Argon`, `Claude Opus`). Always explicitly map subagents and compaction to the `bulk-execution` / `exploration` model.
+3. **Free Tier vs. Paid Tier Privacy:**
+   - Free tiers (such as Google AI Studio's Free Tier) explicitly specify `Used to improve our products: Yes`, exposing proprietary codebase context, internal APIs, and prompts to model training and human review.
+   - The Paid Tier (Pay-As-You-Go / Tier 1+) guarantees `Used to improve our products: No`. For institutional, enterprise, or private codebases, always configure Paid Tier API keys and enable `"Hide Prompt-Training Models"`.
+4. **Official Online Pricing References:**
+   - **Google Gemini API:** [`https://ai.google.dev/gemini-api/docs/pricing`](https://ai.google.dev/gemini-api/docs/pricing)
+   - **Anthropic Claude API:** [`https://www.anthropic.com/pricing`](https://www.anthropic.com/pricing)
+   - **OpenAI API:** [`https://openai.com/api/pricing/`](https://openai.com/api/pricing/)
+   - Detailed production analysis: `ai-orchestration/docs/07-gemini-pricing-and-role-cost-analysis.md`.
