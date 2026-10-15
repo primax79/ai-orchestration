@@ -1,229 +1,232 @@
-# Report: Gemini API Pricing Analysis & Cognitive Role Cost Optimization
+# Report: Cross-Model Pricing Analysis & Multi-Framework Cost Optimization (Gemini vs. Claude vs. Codex)
 
 > **Author:** Kilo Code (AI Orchestrator)  
 > **Date:** 2026-10-15  
-> **Target Systems:** `ai-orchestration`, `kilo-mcp`, Kilo Code CLI / VS Code Extension (`~/.config/kilo/kilo.jsonc`), continuous auditing tools  
+> **Target Systems:** `ai-orchestration`, `kilo-mcp`, `claude-mcp`, Kilo Code (`~/.config/kilo/kilo.jsonc`), Claude Code (`valutazione modelli claude.md`), Codex CLI  
 > **Source Documents Analyzed & Cross-Referenced:**
 > - [Google AI Studio — Gemini API Official Pricing (`ai.google.dev/gemini-api/docs/pricing`)](https://ai.google.dev/gemini-api/docs/pricing)
-> - Google AI Studio Rate Cards: `Gemini 4 Argon` (`gemini-4-argon`) and `Gemini 3.8 Flash` (`gemini-3.8-flash`) (Standard Tier, Oct 2026)
-> - **Empirical Production Audit Accounting:** [`/Users/Alfredo/works/gcube_audit/docs/reports/COST-AND-ORCHESTRATION-ECONOMICS.md`](/Users/Alfredo/works/gcube_audit/docs/reports/COST-AND-ORCHESTRATION-ECONOMICS.md) (Real-world Kilo session store `~/.local/share/kilo/kilo.db` metrics across 573 runs, $532 shadow spend)
-> - Kilo Code UI Configuration (`Models` & `Model per Mode` screens)
+> - [Anthropic Claude Official API Pricing (`anthropic.com/pricing`)](https://www.anthropic.com/pricing)
+> - OpenAI API Pricing (`openai.com/api/pricing/`)
+> - **Empirical Production Accounting:** [`/Users/Alfredo/works/gcube_audit/docs/reports/COST-AND-ORCHESTRATION-ECONOMICS.md`](/Users/Alfredo/works/gcube_audit/docs/reports/COST-AND-ORCHESTRATION-ECONOMICS.md) (573 real production runs in `kilo.db`, $532 shadow spend)
+> - **Claude Model & Effort Operational Handbook:** [`/Users/Alfredo/works/ai-coding-tools/valutazione modelli claude.md`](/Users/Alfredo/works/ai-coding-tools/valutazione modelli claude.md) (Opus / Sonnet / Haiku effort calibration, quota mechanics, `opusplan`, context caching rules)
 > - Kilo Code Runtime Configuration (`~/.config/kilo/kilo.jsonc`)
 
 ---
 
-## 1. Executive Summary
+## 1. Executive Summary: The Cross-Ecosystem Landscape
 
-Software engineering agents operate in long-horizon, multi-turn loops. An agent reading a codebase, running tests, exploring dependencies, and self-correcting easily accumulates 30k–200k tokens per turn.
+In an agentic workflow, cost is not determined by the token price of a single question, but by **the compounding effect of multi-turn tool loops, cumulative context accumulation (30k–200k tokens per turn), prompt cache hit rates, and the cognitive tier chosen for each task**.
 
-By cross-referencing the **official Google Gemini API price list** with **real-world empirical accounting from 573 production runs in `gcube_audit` ($532 total shadow spend)**, this report establishes the factual foundation for our orchestration architecture:
-
-1. **Theoretical vs. Real-World Cost Ratio (2.7× list vs. 1.7× measured):**  
-   While `gemini-4-argon` is **2.67× more expensive than `gemini-3.8-flash` on list price**, real audit runs show an effective multiplier of **~1.7× per component** (`$3.86` for Argon vs. `$2.25` for Flash). This gap is explained by Gemini's aggressive **implicit context caching**, which already serves **89% of read tokens** in sustained sessions.
-2. **The "Silent Argon Leak" in Kilo Code:**  
-   In default Kilo Code setups where `Subagent Model` and `Compaction model` are left `Not set` / `Use chat model`, **every background subagent (e.g. `task(explore)`) and every periodic context compaction inherits the `Default Model` (`Gemini 4 Argon`)**. Routine discovery and mechanical summarization burn tokens at $10.00–$20.00/M instead of $3.75–$7.50/M.
-3. **The Daily Burn & Full-Scan Sustainability Trap:**  
-   The audit revealed an active daily burn rate of **~$195/day** ($271 on Oct 14, $119 on Oct 15). Running continuous full scans of a 640-repo corpus costs **~$1,440 (Flash) to ~$2,470 (Argon) per single pass**. Weekly full scans would drain **~$75k–$128k/year**; daily scans would require **~$0.5M–$0.9M/year**. Full re-scans on timers are completely unsustainable. The only viable production model is **incremental commit-triggered dispatch (~$2.3k/year)**.
-4. **Where the Money Actually Goes (The Uncached Input Bottleneck):**  
-   In the $372 Argon audit spend, **47% ($176)** went to fresh (uncached) input tokens. Because implicit caching already hits 89%, the primary financial lever is **reducing duplicate fresh input** via **byte-stable prompt prefixes** and **session reuse (`continue_session_id`)** between review and refutation (preventing code from being re-read from scratch in isolated sandboxes).
-5. **The Free Tier Risk (IP Exposure vs. Paid Privacy):**  
-   On Google's Free Tier, `Used to improve our products` is **`Yes`**, allowing code, prompts, and credentials to be inspected by human reviewers and used for model training. The **Paid Tier** guarantees **`No`**. For any institutional, enterprise, or private codebase, the Paid Tier is mandatory and `"Hide Prompt-Training Models"` must be **ON**.
-
----
-
-## 2. Official Pricing Matrix (Per 1 Million Tokens in USD)
-
-Extracted from the official Google AI Studio rate cards:
-
-| Pricing Dimension | `Gemini 4 Argon` (`gemini-4-argon`) | `Gemini 3.8 Flash` (`gemini-3.8-flash`) | Ratio / Savings (`Flash` vs `Argon`) |
-| :--- | :--- | :--- | :--- |
-| **Model Role** | Flagship Reasoning Model (deep math, architecture, long-decode) | Autonomous Agent & Long-Horizon Software Engineering Model | Specialized Cognitive Split |
-| **Free Tier Available?** | ❌ **No** (Not available on Free Tier or Google AI Pro) | ✅ **Yes** (Free of charge, but data used for training) | Flash only |
-| **Input Price (Current Promo)** | **$2.00** / 1M tokens *(thru Nov 30, 2026)* | **$0.75** / 1M tokens *(thru Dec 31, 2026)* | **Flash is 2.67× cheaper (-62.5%)** |
-| **Input Price (Standard Post-Promo)** | **$4.00** / 1M tokens *(starting Dec 1, 2026)* | **$1.50** / 1M tokens *(starting Jan 1, 2027)* | **Flash is 2.67× cheaper (-62.5%)** |
-| **Output + Thinking (Current Promo)** | **$10.00** / 1M tokens *(thru Nov 30, 2026)* | **$3.75** / 1M tokens *(thru Dec 31, 2026)* | **Flash is 2.67× cheaper (-62.5%)** |
-| **Output + Thinking (Standard)** | **$20.00** / 1M tokens *(starting Dec 1, 2026)* | **$7.50** / 1M tokens *(starting Jan 1, 2027)* | **Flash is 2.67× cheaper (-62.5%)** |
-| **Context Caching (Read / Hit)** | **$0.10** *(promo)* → **$0.20** *(standard)*<br>*(Implicit caching only; explicit storage unsupported)* | **$0.075** *(promo)* → **$0.15** *(standard)*<br>*(Supports explicit storage: $0.50→$1.00/1M/hr)* | **Flash is 25% cheaper on cached hits** |
-| **December 2026 Promo Divergence** | Full standard price: **$4.00 in / $20.00 out** | Still discounted: **$0.75 in / $3.75 out** | **Flash is 5.33× cheaper (-81.25%)!** |
-| **Grounding with Google Search** | 5,000 free/month, then $14 / 1,000 requests | 5,000 free/month, then $14 / 1,000 requests | Identical |
-| **Data Privacy (Paid Tier)** | `Used to improve our products: No` | `Used to improve our products: No` | Contractually private |
-| **Data Privacy (Free Tier)** | *(N/A — No Free Tier)* | `Used to improve our products: Yes` | ⚠️ **Public training risk** |
-
----
-
-## 3. Empirical Production Evidence: The `gcube_audit` Real-World Spend
-
-Source: Kilo session database (`~/.local/share/kilo/kilo.db`), column `cost`, filtered by audit sandbox runs as documented in `gcube_audit/docs/reports/COST-AND-ORCHESTRATION-ECONOMICS.md`:
-
-### 3.1 Cumulative Measured Shadow Spend
-- **Total Realized Cost:** **~$532** (€0 billed to lab today due to Google credits; daily burn is the real ceiling).
-- **Runs analyzed:** **573 runs**:
-  - `gemini-4-argon`: **$372 across 370 runs**
-  - `gemini-3.8-flash`: **$150 across 196 runs**
-  - Other models: **$8 across 7 runs**
-
-### 3.2 Real Cost per Component (The Planning Unit)
-- **Round 1 (55 components on `Gemini 3.8 Flash`):** **~$2.25 / component** (review + refutation).
-- **Blind Re-run `gcube_audit_g4` (99 components on `Gemini 4 Argon`):** **~$3.86 / component** (review + refutation).
-- **The Empirical Multiplier:** In real multi-turn agent sessions, Argon costs **~1.7× Flash** (significantly lower than the 2.67× theoretical price list ratio).
-- **Why?** Argon's long context retention and Kilo's session flow benefit heavily from implicit caching at `$0.10/M`, dampening the headline $2.00–$4.00 input fee.
-
-### 3.3 Token Class Breakdown of the $372 Argon Spend
-Where did the $372 actually go?
+By cross-referencing **Google Gemini API rate cards**, **Anthropic Claude API pricing**, and **real-world production metrics from 573 audit runs ($532 total shadow spend)**, this report establishes the comprehensive economic comparison across the three major coding agent frameworks:
 
 ```text
-ARGON TOKEN CLASS EXPENDITURE BREAKDOWN ($372 Total)
-────────────────────────────────────────────────────────────────────────────
-Fresh (Uncached) Input:   $176  ████████████████████████ (47.3%)
-Output Tokens:             $87  ████████████             (23.4%)
-Cache-Read (Hits):         $71  ██████████               (19.1%)
-Reasoning (Thinking):      $38  █████                    (10.2%)
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                       CROSS-ECOSYSTEM PRICING RATIOS (Per 1M Tokens)                        │
+│                                                                                             │
+│  FLAGSHIP DEEP-REASONING:                                                                   │
+│  • Claude 3 / 3.5 / 4 Opus:  $15.00 in / $75.00 out (Cache Read: $1.50)                     │
+│  • Gemini 4 Argon:           $2.00 in  / $10.00 out (Promo) -> $4.00 in / $20.00 out (Cache: $0.10-$0.20)
+│  ──► Opus is 3.75× to 7.5× more expensive than Argon! Cache read is 7.5× to 15× more expensive. │
+│                                                                                             │
+│  BALANCED WORKHORSE / IMPLEMENTATION:                                                       │
+│  • Claude 3.5 Sonnet:        $3.00 in / $15.00 out (Cache Read: $0.30)                     │
+│  • Gemini 3.8 Flash:         $0.75 in /  $3.75 out (Promo) -> $1.50 in /  $7.50 out (Cache: $0.075-$0.15)
+│  ──► Sonnet is 2.0× to 4.0× more expensive than Flash! Cache read is 2× to 4× more expensive.│
+│                                                                                             │
+│  FAST EXPLORATION & READ-ONLY:                                                              │
+│  • Claude 3.5 Haiku:         $0.80 in /  $4.00 out (Cache Read: $0.08)                     │
+│  • Gemini 3.8 Flash:         $0.75 in /  $3.75 out (Cache Read: $0.075)                    │
+│  ──► Haiku and Flash are near price parity (~$0.75-$0.80 in / $3.75-$4.00 out).             │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key Discovery:** Implicit caching already serves **89% of all read tokens** at 20× less than fresh input. Therefore:
-- Trying to push cache hit rate higher yields marginal returns.
-- **The true financial lever is reducing fresh uncached input**.
-- Today, review and refutation running in separate sandboxes re-read the entire codebase from scratch, paying the fresh input fee twice. On the 99-component Argon run alone, **re-reading code in separate sandboxes wasted ~$67**.
+### Core Takeaways:
+1. **The Architecture/Orchestrator Arbitrage:**  
+   Running the main Architect session on `Gemini 4 Argon` delivers frontier-tier reasoning (long-decode, deep math, complex architectural decomposition) at **one-quarter to one-seventh of the token cost of `Claude Opus`**.
+2. **The Implementation Workhorse Arbitrage:**  
+   Delegating bulk implementation to `Gemini 3.8 Flash` via worktrees reduces execution spend by **50% to 75% compared to `Claude Sonnet`**, while providing a 1M token context window.
+3. **The Silent Context Re-Read Penalty in Claude Code:**  
+   As documented in `valutazione modelli claude.md`, switching models mid-session in Claude Code **invalidates the prompt cache**, forcing the subsequent turn to re-read the entire accumulated conversation without cache discounts. In multi-turn sessions, keeping session prefixes byte-stable and avoiding mid-flight model switches saves 30%–50% of turn cost.
+4. **Claude Pro/Team Quota vs. API Credits:**  
+   On Claude Pro plans, Sonnet usage is drawn from the 5-hour rolling quota window, but **Opus usage exceeding 200k context requires API usage credits**. Using `ai-orchestration` to delegate execution to Kilo or local worktrees prevents exhausting Claude Pro rolling quotas.
 
 ---
 
-## 4. Daily Burn and the Sustainability Ceiling
+## 2. Complete Cross-Provider Pricing Matrix (Per 1 Million Tokens in USD)
 
-The empirical burn rate observed during active audit days was **~$195/day** ($271 on 2026-10-14, $119 on 2026-10-15).
+| Model & Provider | Input Price (Uncached) | Output Price (incl. Thinking) | Context Cache Read (Hit) | Context Cache Write | Free Tier Available? |
+| :--- | :--- | :--- | :--- | :--- | :---: |
+| **`Gemini 4 Argon`** (Google) | **$2.00** *(promo)* → **$4.00** *(Dec 2026)* | **$10.00** *(promo)* → **$20.00** *(Dec 2026)* | **$0.10** → **$0.20** | *(Implicit, free)* | ❌ No |
+| **`Gemini 3.8 Flash`** (Google) | **$0.75** *(promo)* → **$1.50** *(Jan 2027)* | **$3.75** *(promo)* → **$7.50** *(Jan 2027)* | **$0.075** → **$0.15** | $0.50–$1.00/M/hr (storage) | ✅ Yes *(data trained)* |
+| **`Claude 3 / 3.5 Opus`** (Anthropic) | **$15.00** | **$75.00** | **$1.50** | **$18.75** | ❌ No |
+| **`Claude 3.5 Sonnet`** (Anthropic) | **$3.00** | **$15.00** | **$0.30** | **$3.75** | ❌ No |
+| **`Claude 3.5 Haiku`** (Anthropic) | **$0.80** *(≤128k)* / $1.00 *(>128k)* | **$4.00** *(≤128k)* / $5.00 *(>128k)* | **$0.08** | **$1.00** | ❌ No |
+| **`GPT-5-Codex` / `o3`** (OpenAI) | **$5.00**–**$10.00** *(est.)* | **$20.00**–**$40.00** *(est.)* | **$1.25**–**$2.50** | *(Implicit)* | ❌ No |
+| **`GPT-5-Codex-Mini` / `o3-mini`** | **$1.10** | **$4.40** | **$0.55** | *(Implicit)* | ❌ No |
 
-Extrapolating this to the complete gCube corpus (~640 repositories):
+---
 
-```mermaid
-flowchart TB
-    C1["Full Corpus Scan (640 Repositories)<br/>Flash: ~$1,440 | Argon: ~$2,470 per single pass"]
-    
-    C1 -->|"Weekly Full Passes (Scheduled Timer)"| U1["UNSUSTAINABLE<br/>Flash: ~$75k/year | Argon: ~$128k/year<br/>Daily scans: ~$0.5M - $0.9M/year<br/>Drains grant credits rapidly!"]
-    
-    C1 -->|"Incremental Commit-Triggered Only"| S1["SUSTAINABLE (~20 components/week)<br/>Flash: ~$2.3k/year | Argon on-demand: ~$4k/year<br/>Two orders of magnitude reduction (98% savings)!"]
+## 3. Deep-Dive on Claude Models, Quotas & Effort Levels
+
+Derived from `valutazione modelli claude.md` and Anthropic specifications:
+
+### 3.1 The "Silent Failure vs. Immediate Failure" Rule
+The governing criterion for model and effort selection is **whether an error is caught by an automated downstream gate**:
+- **Silent Failure (Pay for the Frontier Model — Opus 5, effort: `high` / `xhigh`):**  
+  Design conversations, architecture reviews, spec authoring (`task-spec-authoring`), diff review, root-cause debugging of elusive bugs, and semantic merge conflicts. A flawed spec generates no compiler error: it gets faithfully implemented into hundreds of lines of wrong code.
+- **Immediate / Noisy Failure (Use the Workhorse Model — Sonnet 5, effort: `medium` / `high`):**  
+  Feature implementation with clear acceptance criteria, mechanical refactoring (renames, API migrations), orchestration loops (dispatching workers, polling, status tracking). Tests, typecheckers, and linters immediately catch errors at zero human cost.
+- **Deterministic / Read-Only (Use the Fast Model — Haiku 4.5, effort: `low`):**  
+  Codebase exploration, symbol discovery, caller tracing, post-gate triage ("tests failed → bounce"), commit messages, and changelogs.
+
+### 3.2 Reasoning Effort Levers in Claude Code
+- **Effort before Model:** Decreasing effort on an expensive model (e.g. Opus with `low` effort) wastes money: you pay the high token base fee while losing the analytical depth for which the model was chosen. Prefer **Sonnet at full effort (`high`)** over **Opus at crippled effort**.
+- **The `ultrathink` Keyword:** Placing `ultrathink` in a prompt requests maximum reasoning depth for that single turn without permanently altering session settings.
+- **The `opusplan` Mini-Pattern:** Claude Code's built-in `opusplan` alias uses Opus during planning mode, then automatically downgrades execution turns to Sonnet. `ai-orchestration` generalizes this pattern across multi-agent worktrees and tools.
+- **Effort Compatibility:** `xhigh` is supported on Opus 5, but is silently downgraded to `high` on older Opus 4.6 / Sonnet 4.6 versions.
+
+### 3.3 Context Caching in Claude Code
+- Claude's prompt caching provides a **90% discount on input reads** ($0.30/M on Sonnet, $1.50/M on Opus) for prompts >1,024 tokens with a 5-minute TTL.
+- **The Mid-Session Switch Trap:** Changing models mid-session (`/model`) forces Claude to rebuild the full conversation history uncached, incurring the full fresh input fee across all prior turns.
+
+---
+
+## 4. Empirical Cross-Check: `gcube_audit` Real Production Data
+
+Cross-referencing theoretical pricing against the **$532 measured spend across 573 production runs** in `~/.local/share/kilo/kilo.db`:
+
+### 4.1 Cost per Planning Unit (Review + Refutation per Component)
+- **`Gemini 3.8 Flash` Round 1 (55 components):** **~$2.25 / component**
+- **`Gemini 4 Argon` Blind Re-run (99 components):** **~$3.86 / component**
+- **Hypothetical `Claude 3.5 Sonnet` Projection:** **~$6.50–$9.00 / component**
+- **Hypothetical `Claude 3 / 3.5 Opus` Projection:** **~$28.00–$42.00 / component**
+
+In production, **Argon costs ~1.7× Flash** (not the 2.67× list price), because implicit caching already serves **89% of read tokens** at $0.10/M.
+
+### 4.2 Token Class Breakdown (Where the Budget Actually Burns)
+Analyzing the $372 Argon spend:
+- **Fresh (Uncached) Input:** **47.3% ($176)** — *The dominant cost bottleneck.*
+- **Output Tokens:** **23.4% ($87)**
+- **Cache-Read Hits:** **19.1% ($71)**
+- **Reasoning Tokens:** **10.2% ($38)**
+
+**The Financial Lever:** Trying to push the 89% cache hit rate higher yields diminishing returns. The true financial lever is **reducing duplicate fresh input**:
+1. **Byte-stable prompt prefixes:** Placing invariable instructions (grounding rules, methodology) at the very start of prompts ensures Gemini and Claude prompt caches never bust.
+2. **Session reuse (`continue_session_id`):** Conducting code review and subsequent refutation/fixes within the same session rather than separate sandboxes prevents re-reading the entire codebase, saving ~$67 per 100 components.
+
+---
+
+## 5. Multi-Framework Role Mapping (`orchestration.toml`)
+
+Translating these economic findings into the canonical mapping across all three frameworks:
+
+```toml
+# ~/.config/ai-orchestration/orchestration.toml
+
+[routing]
+default_orchestrator = "kilo"    # or "claude"
+default_executor = "kilo"
+default_profile = "bulk-execution"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. KILO CODE (Google Gemini Backed)
+# ─────────────────────────────────────────────────────────────────────────────
+[tools.kilo.profiles.deep-reasoning]
+model = "google/gemini-4-argon"
+variant = "high"
+basis = "operator-stated"
+
+[tools.kilo.profiles.orchestration]
+model = "google/gemini-4-argon"
+variant = "medium"
+basis = "operator-stated"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+variant = "medium"
+basis = "operator-stated"
+
+[tools.kilo.profiles.exploration]
+model = "google/gemini-3.8-flash"
+variant = "low"
+basis = "operator-stated"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. CLAUDE CODE (Anthropic Backed)
+# ─────────────────────────────────────────────────────────────────────────────
+[tools.claude.profiles.deep-reasoning]
+model = "opus"
+effort = "high"
+basis = "operator-stated"
+
+[tools.claude.profiles.orchestration]
+model = "sonnet"
+effort = "medium"
+basis = "operator-stated"
+
+[tools.claude.profiles.bulk-execution]
+model = "sonnet"
+effort = "high"
+basis = "operator-stated"
+
+[tools.claude.profiles.exploration]
+model = "haiku"
+effort = "low"
+basis = "operator-stated"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. CODEX CLI (OpenAI Backed)
+# ─────────────────────────────────────────────────────────────────────────────
+[tools.codex.profiles.deep-reasoning]
+model = "gpt-5-codex"
+effort = "high"
+basis = "operator-stated"
+
+[tools.codex.profiles.orchestration]
+model = "gpt-5-codex"
+effort = "medium"
+basis = "operator-stated"
+
+[tools.codex.profiles.bulk-execution]
+model = "gpt-5-codex-mini"
+effort = "medium"
+basis = "operator-stated"
+
+[tools.codex.profiles.exploration]
+model = "gpt-5-codex-mini"
+effort = "low"
+basis = "operator-stated"
 ```
 
-**Architectural Law:** Scheduled full re-scans of an entire repository corpus on a timer are an economic anti-pattern. Work must be triggered **incrementally on git commit changes only**.
+---
+
+## 6. How Kilo Code Tracks and Calculates Costs
+
+Kilo computes and logs cost deterministically at each turn through a 3-tier pipeline:
+
+1. **Provider Response Telemetry:**  
+   On every API response, the model provider returns exact token counts: `input_tokens`, `output_tokens`, `reasoning_tokens`, `tokens_cache_read`, and `tokens_cache_write`.
+2. **Deterministic Formula:**  
+   Kilo looks up the model's rate card in its internal catalog:
+   $$\text{cost} = \frac{(\text{input} \times \text{in\_rate}) + (\text{output} \times \text{out\_rate}) + (\text{cache\_read} \times \text{cache\_rate}) + (\text{reasoning} \times \text{out\_rate})}{1,000,000}$$
+3. **Storage in SQLite (`~/.local/share/kilo/kilo.db`):**  
+   - Every individual turn is logged in the `part` table with `type: "step-finish"`:
+     ```json
+     {"type":"step-finish", "tokens":{"total":12993,"input":12825,"output":88,"reasoning":80,"cache":{"write":0,"read":0}}, "cost":0.01771125}
+     ```
+   - Total session usage is aggregated into the `session` table (`cost`, `tokens_input`, `tokens_output`, `tokens_reasoning`, `tokens_cache_read`, `tokens_cache_write`).
 
 ---
 
-## 5. Seven Binding Economic Rules for Orchestration
+## 7. Strategic Recommendations
 
-Based on the empirical evidence, the following 7 economic rules are formally bound into `ai-orchestration` (`orchestration-workflow`, `orchestration-metrics`, `orchestration-setup`):
-
-1. **Incremental Dispatch, Not Scheduled Full Passes:**
-   Only dispatch an agent task on a component or repository when its pinned commit hash has changed in Git. Never re-scan unchanged trees on a timer.
-2. **Flash by Default, Argon on Demand:**
-   Use `Gemini 3.8 Flash` for all bulk execution, exploration, and baseline scanning (~$2.25/component). Promote to `Gemini 4 Argon` (~$3.86/component) only where the stronger reasoning model changes the verdict: independent verification of high/critical findings, complex architectural specs, and subtle semantic conflict resolution.
-3. **Maximize Implicit Cache via Byte-Stable Prompt Prefixes:**
-   Keep invariant prompt text (grounding clause, methodology instructions, templates) strictly at the beginning of prompts, byte-identical across runs. Put variable context (file paths, diffs, findings) at the very end. This ensures Gemini's prefix caching hits on every turn.
-4. **Session Reuse for Review → Refutation (`continue_session_id`):**
-   When an agent reviews code and then refutes or fixes findings, reuse the same session (`continue_session_id` / `--resume`) rather than spawning a fresh sandbox. This eliminates the duplicate fresh input fee ($67 saved per 100 components).
-5. **Driver-Level Budget Guardrails:**
-   The orchestration driver (`kilo-mcp`, `bin/ai-orch`, or continuous audit tools) must read Kilo's `cost` column from `kilo.db`, log the daily shadow spend, and automatically pause dispatch if a configured daily or per-run cost ceiling is exceeded.
-6. **Asynchronous Batch Path for Bulk Scans:**
-   For latency-tolerant background sweeps, investigate Gemini's Batch API (-50% cost reduction). Split "bulk background scan" (batchable, asynchronous) from "interactive developer orchestration" (synchronous).
-7. **Budget Planning for Scheduled Price Step-Ups:**
-   Argon prices double on **2026-12-01** ($2→$4 in, $10→$20 out). Flash prices double on **2027-01-01** ($0.75→$1.50 in, $3.75→$7.50 out). During December 2026, Flash offers a **5.33× price advantage** over Argon.
-
----
-
-## 6. Audit of Kilo Code Settings (`kilo.jsonc`) & Production Remediation
-
-### 6.1 The "Silent Argon Leak" Identified in Kilo Settings
-
-In the user's current settings:
-- **`Default Model`:** `Gemini 4 Argon` (Correct for the Architect session).
-- **`Subagent Model`:** `Not set` → According to Kilo's tooltip, *“Leave unset to inherit the calling agent's model”*. When Kilo spawns subagents (`task(explore)`, background workers), **they silently run on Argon**, burning $10.00–$20.00/M.
-- **`Compaction Model`:** `Use chat model` → Compacting 150k context windows uses Argon instead of Flash.
-- **`Hide Prompt-Training Models`:** `OFF` → Consumer endpoints capable of training on code remain active.
-- **`Model per Mode`:** Most specialized modes are unset, inheriting Argon across the board.
-
-### 6.2 Recommended Agent-to-Model Mapping in `kilo.jsonc`
-
-```jsonc
-{
-  "$schema": "https://app.kilo.ai/config.json",
-  "model": "google/gemini-4-argon",
-  "small_model": "google/gemini-flash-latest",
-  "subagent_model": "google/gemini-flash-latest",
-  "compaction": {
-    "model": "google/gemini-flash-latest"
-  },
-  "agent": {
-    // ── DEEP-REASONING & ORCHESTRATION (Argon: $2-$4 in / $10-$20 out) ──
-    "architect": {
-      "model": "google/gemini-4-argon",
-      "mode": "primary"
-    },
-    "code-reviewer": {
-      "model": "google/gemini-4-argon",
-      "mode": "primary"
-    },
-    "code-skeptic": {
-      "model": "google/gemini-4-argon",
-      "mode": "primary"
-    },
-    "debug": {
-      "model": "google/gemini-4-argon",
-      "mode": "primary"
-    },
-    "merge-resolver": {
-      "model": "google/gemini-4-argon"
-    },
-    "orchestrator": {
-      "model": "google/gemini-4-argon"
-    },
-    "kilo-mcp-orchestrator-agent": {
-      "model": "google/gemini-4-argon"
-    },
-    "plan": {
-      "model": "google/gemini-4-argon"
-    },
-
-    // ── BULK-EXECUTION & EXPLORATION (Flash: $0.75-$1.50 in / $3.75-$7.50 out) ──
-    "code-simplifier": {
-      "model": "google/gemini-flash-latest",
-      "mode": "primary"
-    },
-    "frontend-specialist": {
-      "model": "google/gemini-flash-latest",
-      "mode": "primary"
-    },
-    "test-engineer": {
-      "model": "google/gemini-flash-latest",
-      "mode": "primary"
-    },
-    "docs-specialist": {
-      "model": "google/gemini-flash-latest",
-      "mode": "primary"
-    },
-    "ask": {
-      "model": "google/gemini-flash-latest"
-    },
-    "kilo-customizer": {
-      "model": "google/gemini-flash-latest"
-    }
-  },
-  "skills": {
-    "paths": [],
-    "urls": [
-      "https://raw.githubusercontent.com/primax79/ai-orchestration/main/plugins/architect-side/skills/",
-      "https://raw.githubusercontent.com/primax79/ai-orchestration/main/plugins/executor-side/skills/",
-      "https://raw.githubusercontent.com/primax79/ai-orchestration/main/plugins/shared/skills/"
-    ]
-  }
-}
-```
-
----
-
-## 7. Strategic Cross-Analysis Summary
-
-| Metric / Dimension | Theoretical Price List (`ai.google.dev`) | Empirical Audit (`gcube_audit`) | Orchestration Policy Action |
-| :--- | :--- | :--- | :--- |
-| **Cost Multiplier (Argon vs Flash)** | 2.67× list ($2.00 vs $0.75 in; $10 vs $3.75 out) | **1.72× measured** ($3.86 vs $2.25 per component) | Use Flash as primary bulk engine; reserve Argon for verification and architecture. |
-| **December 2026 Promo Window** | Argon doubles 2026-12-01; Flash discount holds until 2026-12-31. | Multiplier jumps to **5.33×** for 31 days. | Shift maximum execution volume to Flash during December 2026. |
-| **Primary Cost Driver** | Output & thinking tokens look highest per token ($10/$20). | **Fresh (uncached) input was 47% ($176)** of all spend! | Use byte-stable prompt prefixes; reuse sessions (`continue_session_id`) to avoid double-reading code. |
-| **Context Caching Effectiveness** | Documented as implicit caching at $0.10/M. | **89% of read tokens hit cache** in real sessions. | Caching is already optimal; focus on reducing the 11% fresh input. |
-| **Corpus Scan Sustainability** | N/A | Full scan of 640 repos = **$1,440–$2,470/pass**. | Ban timer-based full sweeps; enforce **commit-triggered incremental scanning ($2.3k/yr)**. |
-| **Data Privacy & Governance** | Free Tier uses data for training; Paid Tier does not. | Audit ran under Google grant credits on Paid Tier. | Set `"Hide Prompt-Training Models": true` to protect proprietary code. |
+1. **Use `Gemini 4 Argon` or `Claude Opus` strictly for the Architect & Verification roles:**  
+   The $2.00–$15.00/M input fee is fully justified for design decisions, spec drafting, and independent verification where mistakes compound silently.
+2. **Prevent the "Silent Subagent Leak" in Kilo Settings:**  
+   In `~/.config/kilo/kilo.jsonc`, explicitly set `"subagent_model": "google/gemini-flash-latest"` and `"compaction": { "model": "google/gemini-flash-latest" }`. Leaving them unset silently defaults background workers to `Gemini 4 Argon`, tripling execution costs.
+3. **Turn ON "Hide Prompt-Training Models":**  
+   Ensures zero code leakage to public training datasets.
+4. **Leverage Cross-Framework Arbitrage in Multi-Framework Mode:**  
+   Architect in Claude Code (`opus` / `sonnet`) → Delegate bulk implementation to Kilo CLI (`Gemini 3.8 Flash`) via `kilo-mcp` → Cross-verify with Codex or Claude. This captures the best reasoning intelligence of both ecosystems while paying bulk rates ($0.75/M) for file edits.
+5. **Enforce Commit-Triggered Incremental Scans:**  
+   Never schedule full repository sweeps on timers. Commit-triggered incremental runs reduce annual token burn by **98%** ($2.3k vs. $128k/yr).
