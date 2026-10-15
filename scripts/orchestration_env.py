@@ -30,6 +30,22 @@ REMOTE_REPOS = {
     "kilo-mcp": "https://github.com/primax79/kilo-mcp.git",
 }
 
+OBSOLETE_SKILL_RENAMES = {
+    "interactive-role-setup": "orchestration-setup",
+    "orchestration-methodology": "orchestration-workflow",
+    "delegation-roi-analysis": "orchestration-metrics",
+    "macroplan-authoring": "task-pipeline",
+    "task-delegation": "task-worktree-ops",
+    "headless-executor-contract": "executor-contract",
+    "mcp-metrics-analyst": "kilo-mcp-metrics-analyst",
+    "kilo-mcp-headless-executor": "kilo-mcp-executor-contract",
+    "mcp-orchestrator": "kilo-mcp-orchestrator",
+}
+
+OBSOLETE_AGENT_RENAMES = {
+    "mcp-orchestrator-agent.md": "kilo-mcp-orchestrator-agent.md",
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers: Hashing, Paths & Repo Discovery
@@ -202,7 +218,9 @@ def inspect_environment(
                     sname = child.name
                     inst_hash = hash_directory(child)
                     src = catalog.get(sname)
-                    if src is None:
+                    if sname in OBSOLETE_SKILL_RENAMES:
+                        state = f"obsolete-renamed->{OBSOLETE_SKILL_RENAMES[sname]}"
+                    elif src is None:
                         state = "unmanaged"
                     elif inst_hash == src["hash"]:
                         state = "up-to-date"
@@ -291,12 +309,44 @@ def install_skills(
 
     selected_plugins = plugins or ["architect-side", "executor-side", "shared"]
     installed: list[dict[str, str]] = []
+    removed_obsolete: list[str] = []
 
     for assistant in assistants:
         dest_skills_dir = assistant_skills_dir(assistant, scope, ws, h)
         dest_skills_dir.mkdir(parents=True, exist_ok=True)
 
+        # Clean up obsolete pre-rename skill directories in this target
+        for old_name in OBSOLETE_SKILL_RENAMES:
+            old_dir = dest_skills_dir / old_name
+            if old_dir.is_symlink() or old_dir.is_file():
+                old_dir.unlink()
+                removed_obsolete.append(str(old_dir))
+            elif old_dir.is_dir():
+                shutil.rmtree(old_dir)
+                removed_obsolete.append(str(old_dir))
+
+        # Clean up obsolete pre-rename agent files and install any plugin agents
+        dest_agents_dir = dest_skills_dir.parent / "agents"
+        if dest_agents_dir.is_dir():
+            for old_agent in OBSOLETE_AGENT_RENAMES:
+                old_a_path = dest_agents_dir / old_agent
+                if old_a_path.exists() or old_a_path.is_symlink():
+                    old_a_path.unlink()
+                    removed_obsolete.append(str(old_a_path))
+
         for p_name in selected_plugins:
+            src_agents_root = rpath / "plugins" / p_name / "agents"
+            if src_agents_root.is_dir() and assistant in ("claude", "kilo"):
+                dest_agents_dir.mkdir(parents=True, exist_ok=True)
+                for agent_md in sorted(src_agents_root.glob("*.md")):
+                    target_agent = dest_agents_dir / agent_md.name
+                    if target_agent.is_symlink() or target_agent.exists():
+                        target_agent.unlink()
+                    if link:
+                        target_agent.symlink_to(agent_md)
+                    else:
+                        shutil.copy2(agent_md, target_agent)
+
             src_skills_root = rpath / "plugins" / p_name / "skills"
             if not src_skills_root.is_dir():
                 continue
@@ -328,7 +378,12 @@ def install_skills(
                         "mode": "symlink" if link else "copy",
                     }
                 )
-    return {"ok": True, "installed_count": len(installed), "installed": installed}
+    return {
+        "ok": True,
+        "installed_count": len(installed),
+        "installed": installed,
+        "removed_obsolete": removed_obsolete,
+    }
 
 
 def register_mcp_server(
