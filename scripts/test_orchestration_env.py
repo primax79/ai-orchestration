@@ -678,3 +678,19 @@ def test_env_lock_held_during_execution(tmp_path: pathlib.Path) -> None:
     with open(lock_path, "a") as f3:
         fcntl.flock(f3.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(f3.fileno(), fcntl.LOCK_UN)
+
+
+def test_reinstall_of_identical_skills_is_a_noop(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    run_env(["install-skills", "--assistants", "claude", "--scope", "global"], fake_home)
+    trash_root = fake_home / ".config" / "ai-orchestration" / "trash"
+    before = sorted(p for p in trash_root.rglob("*")) if trash_root.exists() else []
+
+    plan = run_env(["install-skills", "--dry-run", "--assistants", "claude", "--scope", "global"], fake_home)
+    skill_actions = {e["action"] for e in plan["plan"] if "/skills/" in e["path"]}
+    assert skill_actions == {"noop"}, skill_actions
+
+    run_env(["install-skills", "--assistants", "claude", "--scope", "global"], fake_home)
+    after = sorted(p for p in trash_root.rglob("*")) if trash_root.exists() else []
+    assert after == before

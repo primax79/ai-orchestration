@@ -934,6 +934,11 @@ def install_skills(
                                     action = "skip"
                                     reason = f"Skip {cur_state} agent '{aname}': not in --overwrite list"
                                     after_sha256 = None
+                            elif before_sha256 == compute_target_hash(agent_md):
+                                # Identical content: nothing to do (avoids trashing/copying on every install)
+                                action = "noop"
+                                reason = f"Agent '{aname}' already up to date"
+                                after_sha256 = None
                             else:
                                 action = "replace"
                                 reason = f"Update agent '{aname}' from {repo_name}/{p_name}"
@@ -992,6 +997,11 @@ def install_skills(
                                 action = "skip"
                                 reason = f"Skip {cur_state} skill '{sname}': not in --overwrite list"
                                 after_sha256 = None
+                        elif before_sha256 == src_hash and not target_dir.is_symlink() and not link:
+                            # Identical copy: nothing to do (avoids trashing/copying on every install)
+                            action = "noop"
+                            reason = f"Skill '{sname}' already up to date"
+                            after_sha256 = None
                         else:
                             action = "replace"
                             reason = f"Update skill '{sname}' from {repo_name}/{p_name}"
@@ -1059,7 +1069,7 @@ def install_skills(
 
         for op in planned_ops:
             action = op.get("action", "trash")
-            if action == "skip":
+            if action in ("skip", "noop"):
                 continue
             if op["type"] in ("obsolete_skill", "obsolete_agent"):
                 kind = "skills" if op["type"] == "obsolete_skill" else "agents"
