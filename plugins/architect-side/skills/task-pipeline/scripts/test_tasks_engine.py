@@ -2,8 +2,11 @@
 """Unit tests for tasks_engine.py."""
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
+import re
+import shutil
 import subprocess
 import sys
 
@@ -370,8 +373,26 @@ OLD
     chk1 = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--check", "--json")
     assert chk1.returncode == 1
 
-    app = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--json")
-    assert app.returncode == 0
+    # An index without markers must refuse --apply
+    app_refused = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--json")
+    assert app_refused.returncode == 1
+    assert json.loads(app_refused.stdout)["ok"] is False
+
+    # --adopt alone is preview only and writes nothing
+    adopt = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--json")
+    assert adopt.returncode == 0
+    adopt_payload = json.loads(adopt.stdout)
+    assert adopt_payload["applied"] is False
+    current_h = adopt_payload["hash"]
+
+    # --adopt --apply without --expect-hash is refused
+    adopt_no_hash = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--apply", "--json")
+    assert adopt_no_hash.returncode == 1
+    assert json.loads(adopt_no_hash.stdout)["ok"] is False
+
+    # --adopt --apply with --expect-hash writes markers and syncs
+    adopt_apply = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--apply", "--expect-hash", current_h, "--json")
+    assert adopt_apply.returncode == 0
 
     chk2 = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--check", "--json")
     assert chk2.returncode == 0
@@ -382,3 +403,325 @@ OLD
     assert "| T001 | P0 | [First feature](features/T001-first.md) |" in synced
     assert "| T001 | Which DB engine? | owner | T002 |" in synced
     assert "| T000 | [Initial setup](done/features/T000-init.md) | done |" in synced
+
+
+def test_index_regression_fixture_lossless(tmp_path: pathlib.Path) -> None:
+    fixture_dir = SCRIPT_DIR / "fixtures" / "index-regression"
+    tasks_dir = tmp_path / "tasks"
+    shutil.copytree(fixture_dir, tasks_dir)
+
+    orig_index_path = fixture_dir / "00-INDEX.md"
+    orig_text = orig_index_path.read_text(encoding="utf-8")
+    orig_bytes = (tasks_dir / "00-INDEX.md").read_bytes()
+
+    # Parse original Done rows from ## Done section
+    def _extract_done_rows(text: str) -> dict[str, tuple[str, str]]:
+        m = re.search(r"^##\s+Done\b.*?(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+        if not m:
+            return {}
+        res: dict[str, tuple[str, str]] = {}
+        for line in m.group(0).splitlines():
+            line_s = line.strip()
+            if not line_s.startswith("|"):
+                continue
+            cells = [c.strip() for c in line_s.strip("|").split("|")]
+            if len(cells) == 4 and re.match(r"^T\d+$", cells[0]):
+                res[cells[0]] = (cells[2], cells[3])
+        return res
+
+    orig_done_rows = _extract_done_rows(orig_text)
+    orig_ids = set(re.findall(r"\b(T\d{3})\b", orig_text))
+
+    # 1. Preview-only adopt writes nothing
+    res_adopt_preview = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--json")
+    assert res_adopt_preview.returncode == 0
+    payload_preview = json.loads(res_adopt_preview.stdout)
+    assert payload_preview["ok"] is True
+    assert payload_preview["applied"] is False
+    assert (tasks_dir / "00-INDEX.md").read_bytes() == orig_bytes
+    current_hash = payload_preview["hash"]
+
+    # 2. Adopt + apply without --expect-hash is refused
+    res_adopt_no_hash = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--apply", "--json")
+    assert res_adopt_no_hash.returncode == 1
+    assert json.loads(res_adopt_no_hash.stdout)["ok"] is False
+    assert (tasks_dir / "00-INDEX.md").read_bytes() == orig_bytes
+
+    # 3. Adopt + apply with mismatched hash is refused
+    res_adopt_bad_hash = run_cli(
+        "sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--apply", "--expect-hash", "0" * 64, "--json"
+    )
+    assert res_adopt_bad_hash.returncode == 1
+    assert json.loads(res_adopt_bad_hash.stdout)["ok"] is False
+    assert (tasks_dir / "00-INDEX.md").read_bytes() == orig_bytes
+
+    # 4. Adopt + apply with the right hash succeeds
+    res_adopt_apply = run_cli(
+        "sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--apply", "--expect-hash", current_hash, "--json"
+    )
+    assert res_adopt_apply.returncode == 0
+    payload_applied = json.loads(res_adopt_apply.stdout)
+    assert payload_applied["ok"] is True
+    assert payload_applied["applied"] is True
+
+    # 5. Subsequent normal apply succeeds
+    res_apply = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--json")
+    assert res_apply.returncode == 0
+    assert json.loads(res_apply.stdout)["ok"] is True
+
+    result_index_path = tasks_dir / "00-INDEX.md"
+    result_text = result_index_path.read_text(encoding="utf-8")
+
+    # Verification: No row lost
+    result_ids = set(re.findall(r"\b(T\d{3})\b", result_text))
+    assert orig_ids.issubset(result_ids)
+
+    # Verification: No Done cell lost (compare by id + Closed + Result)
+    result_done_rows = _extract_done_rows(result_text)
+
+    for tid, (expected_res, expected_closed) in orig_done_rows.items():
+        assert tid in result_done_rows
+        assert result_done_rows[tid] == (expected_res, expected_closed)
+
+    # Verification: No prose line lost outside regions
+    non_region_text = re.sub(
+        r"<!--\s*ai-orch:generated\s+[^\n>]+-->.*?<!--\s*/ai-orch:generated\s+[^\n>]+-->\n?",
+        "",
+        result_text,
+        flags=re.DOTALL,
+    )
+    for expected_prose in [
+        "# Task Index",
+        "Live registry of work for this workspace.",
+        "## Next up",
+        "## Tasks by category",
+        "## Decisions waiting",
+        "Priorities validated 2026-10-08 against the P0-P3 criteria",
+        "## Done",
+    ]:
+        assert expected_prose in non_region_text
+
+    # Verification: Second --apply is a no-op (file bytes unchanged)
+    bytes_before = result_index_path.read_bytes()
+    res_apply2 = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_apply2.returncode == 0
+    bytes_after = result_index_path.read_bytes()
+    assert bytes_before == bytes_after
+
+    # Verification: --check exits 0
+    res_check = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--check", "--json")
+    assert res_check.returncode == 0
+    payload_check = json.loads(res_check.stdout)
+    assert payload_check["in_sync"] is True
+    assert payload_check["diff"] == ""
+
+
+def test_sync_index_expect_hash(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "cat").mkdir(parents=True)
+    _write_sample_task(tasks_dir / "cat" / "T001.md", task_id="T001", title="Task 1", category="cat")
+
+    # Initial creation with markers
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        """# Task Index
+
+## Next up
+
+<!-- ai-orch:generated next-up -->
+<!-- /ai-orch:generated next-up -->
+
+## Tasks by category
+
+<!-- ai-orch:generated tasks-by-category -->
+<!-- /ai-orch:generated tasks-by-category -->
+
+## Decisions waiting
+
+<!-- ai-orch:generated decisions -->
+<!-- /ai-orch:generated decisions -->
+
+## Done
+
+<!-- ai-orch:generated done -->
+<!-- /ai-orch:generated done -->
+""",
+        encoding="utf-8",
+    )
+    run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    current_hash = hashlib.sha256(index_path.read_bytes()).hexdigest()
+
+    # Mismatch hash -> refused, file unchanged
+    bad_hash = "0" * 64
+    res_mismatch = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--expect-hash", bad_hash, "--json")
+    assert res_mismatch.returncode == 1
+    payload = json.loads(res_mismatch.stdout)
+    assert payload["ok"] is False
+    assert "hash mismatch" in payload["error"].lower()
+    assert hashlib.sha256(index_path.read_bytes()).hexdigest() == current_hash
+
+    # Matching hash -> succeeds
+    res_match = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--expect-hash", current_hash, "--json")
+    assert res_match.returncode == 0
+    assert json.loads(res_match.stdout)["ok"] is True
+
+
+def test_sync_index_refused_without_markers(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    index_path = tasks_dir / "00-INDEX.md"
+    content = "# Task Index\n\n## Next up\n\n| Id | Task |\n\n## Done\n\n| Id | Task |\n"
+    index_path.write_text(content, encoding="utf-8")
+
+    res = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--json")
+    assert res.returncode == 1
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is False
+    assert "has no generated-region markers" in payload["error"]
+    assert index_path.read_text(encoding="utf-8") == content
+
+
+def test_sync_index_missing_id_kept_with_suffix(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    _write_sample_task(tasks_dir / "features" / "T001.md", task_id="T001", title="Real task", category="features")
+
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        """# Task Index
+
+## Next up
+
+<!-- ai-orch:generated next-up -->
+| Id | Priority | Task | Executor | Handoff |
+| --- | --- | --- | --- | --- |
+| T997 | P1 | [Missing next](features/T997.md) | kilo | `do it` |
+<!-- /ai-orch:generated next-up -->
+
+## Tasks by category
+
+<!-- ai-orch:generated tasks-by-category -->
+### features
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T001 | P1 | [Real task](features/T001.md) | open | kilo | - |
+| T998 | P2 | [Deleted task](features/T998.md) | open | kilo | - |
+<!-- /ai-orch:generated tasks-by-category -->
+
+## Decisions waiting
+
+<!-- ai-orch:generated decisions -->
+| - | None. | - | - |
+<!-- /ai-orch:generated decisions -->
+
+## Done
+
+<!-- ai-orch:generated done -->
+| Id | Task | Result | Closed |
+| --- | --- | --- | --- |
+| T999 | [Old deleted task](done/old/T999.md) | done | 2026-07-01 |
+<!-- /ai-orch:generated done -->
+""",
+        encoding="utf-8",
+    )
+
+    res = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res.returncode == 0
+
+    content = index_path.read_text(encoding="utf-8")
+    assert "| T999 | [Old deleted task](done/old/T999.md) (missing) | done | 2026-07-01 |" in content
+    assert "| T998 | P2 | [Deleted task](features/T998.md) (missing) | open | kilo | - |" in content
+    assert "| T997 | P1 | [Missing next](features/T997.md) (missing) | kilo | `do it` |" in content
+
+    # Second apply should not duplicate "(missing) (missing)"
+    res2 = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res2.returncode == 0
+    content2 = index_path.read_text(encoding="utf-8")
+    assert "(missing) (missing)" not in content2
+
+
+def test_sync_index_empty_decisions_renders_generic_row(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    _write_sample_task(tasks_dir / "features" / "T001.md", task_id="T001", title="Task", decider="-")
+
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        """# Task Index
+
+## Next up
+
+<!-- ai-orch:generated next-up -->
+| Id | Priority | Task | Executor | Handoff |
+| --- | --- | --- | --- | --- |
+<!-- /ai-orch:generated next-up -->
+
+## Tasks by category
+
+<!-- ai-orch:generated tasks-by-category -->
+<!-- /ai-orch:generated tasks-by-category -->
+
+## Decisions waiting
+
+<!-- ai-orch:generated decisions -->
+| Task / Initiative | Question (exact) | Decider | Blocks |
+| --- | --- | --- | --- |
+| - | None currently blocking — architectural direction locked with owner on 2026-10-15 (see `docs/03`–`05`). | - | - |
+<!-- /ai-orch:generated decisions -->
+
+## Done
+
+<!-- ai-orch:generated done -->
+| Id | Task | Result | Closed |
+| --- | --- | --- | --- |
+<!-- /ai-orch:generated done -->
+""",
+        encoding="utf-8",
+    )
+
+    res = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res.returncode == 0
+
+    content = index_path.read_text(encoding="utf-8")
+    assert "| - | None. | - | - |" in content
+    assert "architectural direction locked with owner" not in content
+
+
+def test_sync_index_preserves_blank_lines_outside_regions(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    _write_sample_task(tasks_dir / "features" / "T001.md", task_id="T001", title="Task")
+
+    index_path = tasks_dir / "00-INDEX.md"
+    five_blanks = "\n\n\n\n\n"
+    index_path.write_text(
+        f"""# Task Index{five_blanks}## Next up
+
+<!-- ai-orch:generated next-up -->
+<!-- /ai-orch:generated next-up -->
+
+## Tasks by category
+
+<!-- ai-orch:generated tasks-by-category -->
+<!-- /ai-orch:generated tasks-by-category -->
+
+## Decisions waiting
+
+<!-- ai-orch:generated decisions -->
+<!-- /ai-orch:generated decisions -->
+
+## Done
+
+<!-- ai-orch:generated done -->
+<!-- /ai-orch:generated done -->{five_blanks}## Footer
+""",
+        encoding="utf-8",
+    )
+
+    res = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res.returncode == 0
+
+    content = index_path.read_text(encoding="utf-8")
+    assert f"# Task Index{five_blanks}## Next up" in content
+    assert f"{five_blanks}## Footer" in content

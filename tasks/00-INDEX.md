@@ -30,13 +30,16 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 
 ## Next up
 
+<!-- ai-orch:generated next-up -->
 | Id | Priority | Task | Executor | Handoff |
 | --- | --- | --- | --- | --- |
 | T008 | P1 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](server-and-bindings/T008-claude-mcp-phase1-spike.md) | claude | `Read tasks/server-and-bindings/T008-claude-mcp-phase1-spike.md and ../claude-mcp/SPEC.md, run the Phase 1 spike, record findings, and update the task and the registry.` |
 | T007 | P2 | [Structured verification gate tool in kilo-mcp](server-and-bindings/T007-verification-gate-tool.md) | kilo | `Read tasks/server-and-bindings/T007-verification-gate-tool.md, do the open steps, run the Verification, update the task and the registry.` |
+<!-- /ai-orch:generated next-up -->
 
 ## Tasks by category
 
+<!-- ai-orch:generated tasks-by-category -->
 ### methodology
 
 Evolutions and refinements to the orchestration skills (`orchestration-methodology`, `conflict-resolver`, `headless-executor-contract`). Owner session: unassigned ([README](methodology/README.md)).
@@ -53,15 +56,19 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | --- | --- | --- | --- | --- | --- |
 | T008 | P1 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](server-and-bindings/T008-claude-mcp-phase1-spike.md) | open | claude | - |
 | T007 | P2 | [Structured verification gate tool in kilo-mcp](server-and-bindings/T007-verification-gate-tool.md) | open | kilo | - |
+<!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
 
+<!-- ai-orch:generated decisions -->
 | Task / Initiative | Question (exact) | Decider | Blocks |
 | --- | --- | --- | --- |
-| - | None currently blocking — architectural direction locked with owner on 2026-10-15 (see `docs/03`–`05`). | - | - |
+| - | None. | - | - |
+<!-- /ai-orch:generated decisions -->
 
 ## Done
 
+<!-- ai-orch:generated done -->
 | Id | Task | Result | Closed |
 | --- | --- | --- | --- |
 | T010 | [Core skill renames decision (docs/06 taxonomy vs. current skill names)](done/methodology/T010-core-skill-naming-decision.md) | done | 2026-10-15 |
@@ -71,6 +78,7 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T003 | [Phase 5 explicit decision point and worktree lifecycle closure](done/methodology/T003-phase5-decision-and-worktree-cleanup.md) | done | 2026-10-15 |
 | T002 | [Decision telemetry (kilo_log_decision) and ROI analysis rework](done/server-and-bindings/T002-decision-telemetry-and-roi-rework.md) | done | 2026-10-15 |
 | T001 | [Task completion wait (kilo_task_wait) and watcher guidance](done/server-and-bindings/T001-task-completion-wait-and-watcher.md) | done | 2026-10-15 |
+<!-- /ai-orch:generated done -->
 
 ## Dependency graph
 
