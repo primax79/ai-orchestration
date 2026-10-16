@@ -2,6 +2,7 @@
 """Unit tests for orchestration_config.py."""
 from __future__ import annotations
 
+import difflib
 import json
 import pathlib
 import subprocess
@@ -311,3 +312,299 @@ def test_render_agents_md_use_case_1_single_framework_and_use_case_2_multi_frame
     assert 'kilo_implement(isolation="worktree")' in content2
     assert "**claude**:" in content2
     assert "**kilo**:" in content2
+
+
+def test_surgical_update_difflib_preserves_comments_and_formatting(tmp_path: pathlib.Path) -> None:
+    cfg_file = tmp_path / "global" / "orchestration.toml"
+    cfg_file.parent.mkdir(parents=True)
+
+    initial_toml = """# Top-level comment
+schema_version = 1
+last_verified = "2026-10-15"
+
+# Routing configuration
+[routing]
+default_orchestrator = "kilo" # inline comment on orchestrator
+default_executor = "kilo"
+default_profile = "bulk-execution"
+
+# Verification policy
+[verification]
+default_mode = "cross-agent" # inline comment on verification
+
+# Unrelated section with comments
+[unrelated]
+# comment in unrelated
+key1 = "value1" # inline comment on key1
+key2 = 42
+
+[tools.kilo]
+enabled = true
+
+[tools.kilo.profiles.deep-reasoning]
+model = "google/gemini-4-argon" # inline comment on model
+variant = "high"
+basis = "operator-stated"
+
+[tools.claude]
+enabled = true
+"""
+    cfg_file.write_text(initial_toml, encoding="utf-8")
+
+    # 1. Test set-routing surgical edit
+    res_sr = run_cli(
+        "--global-config",
+        str(cfg_file),
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--scope",
+        "global",
+    )
+    assert res_sr.returncode == 0, res_sr.stdout + res_sr.stderr
+
+    after_routing = cfg_file.read_text(encoding="utf-8")
+    diff_routing = [
+        l
+        for l in difflib.unified_diff(
+            initial_toml.splitlines(),
+            after_routing.splitlines(),
+            lineterm="",
+        )
+        if l.startswith(("+", "-")) and not l.startswith(("+++", "---"))
+    ]
+    # Assert difflib: changed lines count is 2 (1 removed, 1 added) and content is ONLY the target key line
+    assert len(diff_routing) == 2
+    assert diff_routing[0] == '-default_orchestrator = "kilo" # inline comment on orchestrator'
+    assert diff_routing[1] == '+default_orchestrator = "claude" # inline comment on orchestrator'
+
+    # 2. Test set-profile surgical edit
+    res_sp = run_cli(
+        "--global-config",
+        str(cfg_file),
+        "set-profile",
+        "kilo",
+        "deep-reasoning",
+        "--model",
+        "custom/reasoner-v9",
+        "--scope",
+        "global",
+    )
+    assert res_sp.returncode == 0, res_sp.stdout + res_sp.stderr
+
+    after_profile = cfg_file.read_text(encoding="utf-8")
+    diff_profile = [
+        l
+        for l in difflib.unified_diff(
+            after_routing.splitlines(),
+            after_profile.splitlines(),
+            lineterm="",
+        )
+        if l.startswith(("+", "-")) and not l.startswith(("+++", "---"))
+    ]
+    assert len(diff_profile) == 2
+    assert diff_profile[0] == '-model = "google/gemini-4-argon" # inline comment on model'
+    assert diff_profile[1] == '+model = "custom/reasoner-v9" # inline comment on model'
+
+
+def test_insert_missing_key_and_missing_table(tmp_path: pathlib.Path) -> None:
+    sample_toml = """# Initial config
+[routing]
+default_orchestrator = "kilo"
+
+[unrelated]
+foo = "bar"
+"""
+    # 1. Insert key into existing table
+    updated1 = oc.set_toml_value(sample_toml, ["routing"], "default_executor", "claude")
+    parsed1 = oc.tomllib.loads(updated1)
+    assert parsed1["routing"]["default_orchestrator"] == "kilo"
+    assert parsed1["routing"]["default_executor"] == "claude"
+    assert parsed1["unrelated"]["foo"] == "bar"
+    lines1 = updated1.splitlines()
+    assert 'default_executor = "claude"' in lines1
+    assert lines1.index('default_executor = "claude"') < lines1.index("[unrelated]")
+
+    # 2. Insert new table at end of file
+    updated2 = oc.set_toml_value(updated1, ["verification"], "default_mode", "independent-session")
+    parsed2 = oc.tomllib.loads(updated2)
+    assert parsed2["verification"]["default_mode"] == "independent-session"
+    assert "[verification]" in updated2
+    assert 'default_mode = "independent-session"' in updated2
+
+
+def test_headless_schema_validation(tmp_path: pathlib.Path) -> None:
+    valid_cfg = {
+        "tools": {
+            "kilo": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+                "headless": {
+                    "argv": ["kilo", "run", "--dir", "{cwd}", "-m", "{model}", "-f", "{prompt_file}"],
+                    "resume_argv": ["kilo", "run", "-s", "{session_id}", "-f", "{prompt_file}"],
+                    "prompt_via": "file",
+                    "permission_mode": "acceptEdits",
+                    "sandbox": "workspace-write",
+                    "allowed_tools": ["edit", "bash"],
+                },
+            }
+        }
+    }
+    errors, warnings = oc.validate_config(valid_cfg)
+    assert errors == [], f"Expected no errors but got: {errors}"
+
+    # Invalid placeholder in argv
+    invalid_argv_cfg = {
+        "tools": {
+            "kilo": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+                "headless": {
+                    "argv": ["kilo", "run", "--bad", "{bad_placeholder}"],
+                },
+            }
+        }
+    }
+    errors, _ = oc.validate_config(invalid_argv_cfg)
+    assert any("{bad_placeholder}" in e for e in errors)
+
+    # Invalid placeholder in resume_argv
+    invalid_resume_cfg = {
+        "tools": {
+            "kilo": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+                "headless": {
+                    "resume_argv": ["kilo", "resume", "{invalid_resume}"],
+                },
+            }
+        }
+    }
+    errors, _ = oc.validate_config(invalid_resume_cfg)
+    assert any("{invalid_resume}" in e for e in errors)
+
+    # Invalid prompt_via
+    invalid_pv_cfg = {
+        "tools": {
+            "kilo": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+                "headless": {
+                    "prompt_via": "pipe",
+                },
+            }
+        }
+    }
+    errors, _ = oc.validate_config(invalid_pv_cfg)
+    assert any("prompt_via" in e for e in errors)
+
+
+def test_rendered_agents_md_block_names_real_project_config_path(tmp_path: pathlib.Path) -> None:
+    workspace = tmp_path / "my_project"
+    workspace.mkdir()
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    cfg, _ = oc.resolve_config(global_cfg_path, workspace)
+
+    expected_proj_path = oc.find_project_config_path(workspace, global_cfg_path)
+    block = oc.render_agents_md_block(cfg, workspace, global_cfg_path)
+
+    assert str(expected_proj_path) in block
+    assert "tasks/orchestration.toml" not in block
+
+
+def test_set_routing_validation_and_refusals(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    run_cli("--global-config", str(global_cfg_path), "init-global")
+
+    # 1. At least one flag required
+    res_none = run_cli("--global-config", str(global_cfg_path), "set-routing", "--scope", "global")
+    assert res_none.returncode != 0
+
+    # 2. Unknown tool refused
+    res_unknown = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "set-routing",
+        "--orchestrator",
+        "unknown-tool-xyz",
+        "--scope",
+        "global",
+    )
+    assert res_unknown.returncode != 0
+    assert "unknown or disabled" in (res_unknown.stderr + res_unknown.stdout)
+
+    # 3. Disabled tool refused
+    global_toml = global_cfg_path.read_text(encoding="utf-8")
+    global_toml = oc.set_toml_value(global_toml, ["tools", "codex"], "enabled", False)
+    global_cfg_path.write_text(global_toml, encoding="utf-8")
+
+    res_disabled = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "set-routing",
+        "--executor",
+        "codex",
+        "--scope",
+        "global",
+    )
+    assert res_disabled.returncode != 0
+    assert "unknown or disabled" in (res_disabled.stderr + res_disabled.stdout)
+
+    # 4. Invalid profile refused
+    res_profile = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "set-routing",
+        "--default-profile",
+        "super-thinking",
+        "--scope",
+        "global",
+    )
+    assert res_profile.returncode != 0
+
+    # 5. Invalid verification mode refused
+    res_mode = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "set-routing",
+        "--verification-mode",
+        "no-verification",
+        "--scope",
+        "global",
+    )
+    assert res_mode.returncode != 0
+
+    # 6. Valid set-routing in project scope
+    workspace = tmp_path / "ws_routing"
+    workspace.mkdir()
+    res_valid = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--executor",
+        "kilo",
+        "--default-profile",
+        "orchestration",
+        "--verification-mode",
+        "panel",
+        "--scope",
+        "project",
+        "--workspace",
+        str(workspace),
+    )
+    assert res_valid.returncode == 0
+    payload = json.loads(res_valid.stdout)
+    assert payload["ok"] is True
+    assert payload["routing"]["default_orchestrator"] == "claude"
+    assert payload["routing"]["default_executor"] == "kilo"
+    assert payload["routing"]["default_profile"] == "orchestration"
+    assert payload["verification"]["default_mode"] == "panel"
+
+    merged, meta = oc.resolve_config(global_cfg_path, workspace)
+    assert merged["routing"]["default_orchestrator"] == "claude"
+    assert merged["routing"]["default_executor"] == "kilo"
+    assert merged["routing"]["default_profile"] == "orchestration"
+    assert merged["verification"]["default_mode"] == "panel"

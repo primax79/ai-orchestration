@@ -1,6 +1,6 @@
 # Orchestration Configuration Schema (`orchestration.toml`)
 
-> **Goal:** A unified, hierarchical, **unversioned (local-environment only)** configuration file (Global `~/.config/ai-orchestration/orchestration.toml` + optional per-project local override `~/.config/ai-orchestration/projects/<repo>/orchestration.toml` or gitignored `.ai-orchestration.local.toml`) that strictly separates **versioned task/spec definitions in Git (`tasks/`)** from **local agent & model execution settings**, supporting both:
+> **Goal:** A unified, hierarchical, **unversioned (local-environment only)** configuration file (Global `~/.config/ai-orchestration/orchestration.toml` + optional per-project local override `<workspace>/.ai-orchestration.local.toml` if present, gitignored, or `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml`) that strictly separates **versioned task/spec definitions in Git (`tasks/`)** from **local agent & model execution settings**, supporting both:
 > - **Single-Framework Native setups** (e.g. Kilo-only or Claude-only, dispatching parallel native worktrees/sub-sessions and running independent blind-session verification with zero MCP servers); and
 > - **Multi-Framework MCP setups** (delegating execution or cross-agent verification to external frameworks via `kilo-mcp`, `claude-mcp`, or CLI).
 >
@@ -18,7 +18,7 @@
    - Defines your available **Tools / Executors** (`kilo`, `claude`, `codex`), their **MCP bindings** (`kilo-mcp`, `claude-mcp`), and the **per-tool model matrix** (which model + variant/effort each tool uses for `deep-reasoning`, `orchestration`, `bulk-execution`, `exploration`).
    - Defines your default **Workflow Routing & Verification Policy** (e.g., default executor for `bulk-execution`, default cross-agent verifier when `verification-mode = "cross-agent"` or `"panel"`).
 
-2. **Project Config (`<repo>/.ai-orchestration.toml` or `<repo>/tasks/orchestration.toml`)**:
+2. **Project Config (`<workspace>/.ai-orchestration.local.toml` if present, gitignored, or `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml`)**:
    - Optional; inherits everything from Global and overrides only what differs for this project:
      - Which tools/MCPs are active in this project;
      - Optional model overrides per activity;
@@ -71,6 +71,38 @@ cli_command = "claude"
 enabled = true
 mcp_server = ""          # CLI-driven
 cli_command = "codex"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1.1 HEADLESS ADAPTER OVERRIDES (Optional per-tool execution parameters)
+# ─────────────────────────────────────────────────────────────────────────────
+# Overrides built-in CLI adapter templates used by `ai-orch run`.
+# Keys:
+#   argv: list[str]             - Command line template to start a new headless run
+#   resume_argv: list[str]      - Command line template to continue an existing session
+#   prompt_via: "stdin" | "file"- How the prompt payload is fed into the process
+#   permission_mode: str        - Tool-specific permission level (e.g. "acceptEdits")
+#   sandbox: str                - Sandbox isolation mode (e.g. "workspace-write")
+#   allowed_tools: list[str]    - Tool allowlist for the process
+#
+# Allowed placeholders inside argv / resume_argv:
+#   {cwd}, {model}, {variant}, {session_id}, {permission_mode}, {sandbox}, {prompt_file}
+
+[tools.kilo.headless]
+argv = ["kilo", "run", "--format", "json", "--dir", "{cwd}", "-m", "{model}", "-f", "{prompt_file}", "Follow the attached task prompt."]
+resume_argv = ["kilo", "run", "--format", "json", "--dir", "{cwd}", "-s", "{session_id}", "-f", "{prompt_file}", "Continue."]
+prompt_via = "file"
+
+[tools.claude.headless]
+argv = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--session-id", "{session_id}", "--model", "{model}", "--permission-mode", "{permission_mode}", "--permission-prompts", "none"]
+resume_argv = ["claude", "-p", "--resume", "{session_id}", "--output-format", "stream-json", "--verbose", "--permission-mode", "{permission_mode}", "--permission-prompts", "none"]
+prompt_via = "stdin"
+permission_mode = "acceptEdits"
+
+[tools.codex.headless]
+argv = ["codex", "exec", "--json", "-C", "{cwd}", "-m", "{model}", "-s", "{sandbox}", "-"]
+resume_argv = ["codex", "exec", "resume", "{session_id}", "--json", "-c", "sandbox_mode={sandbox}", "-"]
+prompt_via = "stdin"
+sandbox = "workspace-write"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. PER-TOOL MODEL MATRIX (Model + Effort/Variant per Activity Profile)
@@ -145,7 +177,7 @@ panel_require_blind_reviewer = true
 
 ---
 
-### 2.2 Project-Level Override (`<project>/tasks/orchestration.toml` or `.ai-orchestration.toml`)
+### 2.2 Project-Level Override (`<workspace>/.ai-orchestration.local.toml` or `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml`)
 
 Example showing how `~/works/ricerca_auto` is expressed in ~35 lines of config (and generates the 105-line `ricerca_auto/AGENTS.md` deterministically):
 
@@ -202,3 +234,37 @@ Following the same proven pattern used across the toolkit (`interactive-role-set
    - Thin CLI entry point wrapping those exact Python scripts for direct terminal and agent invocation.
 3. **Step 3 — Web Server / UI & VS Code Extension (separate UI repo)**:
    - Calls the same Python core/CLI to inspect/edit `orchestration.toml`, view/edit tasks, launch runs via MCP, and trigger cross-agent verification.
+
+---
+
+## 4. Surgical TOML Updates (`set-routing` and `set-profile`)
+
+Modifying `orchestration.toml` (either Global or Project-local) must never rewrite or reformat untouched sections of the configuration file.
+
+Both `ai-orch config set-routing` and `ai-orch config set-profile` employ a **surgical updater** (`set_toml_value`, stdlib only):
+- Edits only the line of the targeted key inside `[table]` (or inserts the key at the end of the table, or appends a new `[table]` at end-of-file if missing).
+- Preserves every other byte: comments, blank lines, table ordering, and quoting styles.
+- Validates the resulting document by re-parsing with Python's stdlib `tomllib` and confirming the updated value before writing.
+- Performs atomic writes using process-isolated temporary files and rename.
+
+### 4.1 `ai-orch config set-routing`
+
+Atomically sets default routing and verification defaults in either global or project scope:
+
+```sh
+ai-orch config set-routing \
+  [--orchestrator <tool>] \
+  [--executor <tool>] \
+  [--default-profile <deep-reasoning|orchestration|bulk-execution|exploration>] \
+  [--verification-mode <self|independent-session|cross-agent|panel|owner>] \
+  --scope global|project \
+  [--workspace <dir>] \
+  [--global-config <path>] \
+  [--json]
+```
+
+- **Validation rules:**
+  - At least one of `--orchestrator`, `--executor`, `--default-profile`, or `--verification-mode` is required.
+  - `--orchestrator` and `--executor` validate that the given tool id is defined and `enabled = true` in the effective merged configuration.
+  - `--default-profile` and `--verification-mode` validate against known standard enums.
+  - Updates `[routing].default_orchestrator`, `default_executor`, `default_profile`, and `[verification].default_mode`.

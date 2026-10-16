@@ -38,6 +38,24 @@ BASIS_VALUES = {
 VERIFICATION_MODES = {"self", "independent-session", "cross-agent", "panel", "owner"}
 KNOWN_NO_XHIGH_SUBSTRINGS = ("opus-4.6", "sonnet-4.6", "opus 4.6", "sonnet 4.6")
 
+HEADLESS_ALLOWED_KEYS = {
+    "argv",
+    "resume_argv",
+    "prompt_via",
+    "permission_mode",
+    "sandbox",
+    "allowed_tools",
+}
+ALLOWED_PLACEHOLDERS = {
+    "cwd",
+    "model",
+    "variant",
+    "session_id",
+    "permission_mode",
+    "sandbox",
+    "prompt_file",
+}
+
 BEGIN_MARKER = "<!-- BEGIN ai-orchestration -->"
 END_MARKER = "<!-- END ai-orchestration -->"
 
@@ -291,6 +309,237 @@ def dump_toml(data: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def parse_table_header(line: str) -> list[str] | None:
+    stripped = line.strip()
+    if not stripped.startswith("[") or stripped.startswith("[["):
+        return None
+    m = re.match(r"^\[\s*([^\[\]]+?)\s*\]\s*(?:#.*)?$", stripped)
+    if not m:
+        return None
+    header_content = m.group(1).strip()
+    parts: list[str] = []
+    token_re = re.compile(
+        r"""(?:\s*\.\s*|^\s*)(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*"""
+    )
+    idx = 0
+    while idx < len(header_content):
+        m_part = token_re.match(header_content, idx)
+        if not m_part:
+            return None
+        if m_part.group(1) is not None:
+            val = bytes(m_part.group(1), "utf-8").decode("unicode_escape")
+            parts.append(val)
+        elif m_part.group(2) is not None:
+            parts.append(m_part.group(2))
+        else:
+            parts.append(m_part.group(3))
+        idx = m_part.end()
+    return parts
+
+
+def match_key_line(line: str) -> tuple[str, str, str] | None:
+    s = line.lstrip()
+    if not s or s.startswith("#") or s.startswith("["):
+        return None
+    indent = line[: len(line) - len(s)]
+    m = re.match(
+        r"""^(?P<key>[A-Za-z0-9_-]+|"[^"\\]*(?:\\.[^"\\]*)*"|'[^']*')\s*=\s*(?P<rest>.*)$""",
+        s,
+        re.DOTALL,
+    )
+    if not m:
+        return None
+    raw_key = m.group("key")
+    rest = m.group("rest")
+    if (raw_key.startswith('"') and raw_key.endswith('"')) or (
+        raw_key.startswith("'") and raw_key.endswith("'")
+    ):
+        k_name = raw_key[1:-1]
+    else:
+        k_name = raw_key
+    return indent, k_name, rest
+
+
+def extract_inline_comment(line: str) -> str:
+    in_double = False
+    in_single = False
+    escape = False
+    for idx, ch in enumerate(line):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_double:
+            escape = True
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if ch == "#" and not in_double and not in_single:
+            start_ws = idx
+            while start_ws > 0 and line[start_ws - 1] in " \t":
+                start_ws -= 1
+            return line[start_ws:].rstrip("\r\n")
+    return ""
+
+
+def set_toml_value(text: str, table_path: list[str], key: str, value: Any) -> str:
+    """Surgically update or insert a key inside a TOML table, preserving formatting.
+
+    Preserves comments, blank lines, ordering, and untouched values.
+    Validates by re-parsing with tomllib; raises ValueError if parsing fails or
+    the resulting value differs from the expected value.
+    """
+    expanded_table_path: list[str] = []
+    for p in table_path:
+        expanded_table_path.extend(p.split("."))
+    table_path = expanded_table_path
+
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+
+    table_found = False
+    body_start = 0
+    body_end = len(lines)
+
+    if not table_path:
+        table_found = True
+        body_start = 0
+        for idx, line in enumerate(lines):
+            if parse_table_header(line) is not None or line.lstrip().startswith("[["):
+                body_end = idx
+                break
+    else:
+        for idx, line in enumerate(lines):
+            hdr = parse_table_header(line)
+            if hdr == table_path:
+                table_found = True
+                body_start = idx + 1
+                body_end = len(lines)
+                for next_idx in range(body_start, len(lines)):
+                    next_line = lines[next_idx]
+                    if (
+                        parse_table_header(next_line) is not None
+                        or next_line.lstrip().startswith("[[")
+                    ):
+                        body_end = next_idx
+                        break
+                break
+
+    formatted_val = _format_toml_value(value) if value is not None else ""
+    key_str = key if re.match(r"^[A-Za-z0-9_-]+$", key) else f'"{key}"'
+
+    if table_found:
+        key_found = False
+        key_start = -1
+        key_end = -1
+        indent = ""
+
+        idx = body_start
+        while idx < body_end:
+            matched = match_key_line(lines[idx])
+            if matched and matched[1] == key:
+                key_found = True
+                key_start = idx
+                indent = matched[0]
+                j = idx + 1
+                while j <= body_end:
+                    candidate = "".join(lines[idx:j])
+                    try:
+                        if tomllib is not None:
+                            tomllib.loads(candidate)
+                        break
+                    except Exception:
+                        j += 1
+                else:
+                    j = idx + 1
+                key_end = j
+                break
+            idx += 1
+
+        if key_found:
+            if value is None:
+                del lines[key_start:key_end]
+            else:
+                comment = extract_inline_comment(lines[key_start])
+                new_line = f"{indent}{key_str} = {formatted_val}{comment}{newline}"
+                lines[key_start:key_end] = [new_line]
+        else:
+            if value is not None:
+                for l in lines[body_start:body_end]:
+                    m = match_key_line(l)
+                    if m:
+                        indent = m[0]
+                        break
+
+                insert_idx = body_end
+                while insert_idx > body_start and lines[insert_idx - 1].strip() == "":
+                    insert_idx -= 1
+
+                new_line = f"{indent}{key_str} = {formatted_val}{newline}"
+                lines.insert(insert_idx, new_line)
+    else:
+        if value is not None:
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                lines[-1] = lines[-1] + newline
+            if lines and lines[-1].strip() != "":
+                lines.append(newline)
+
+            header_str = ".".join(
+                p if re.match(r"^[A-Za-z0-9_-]+$", p) else f'"{p}"' for p in table_path
+            )
+            lines.append(f"[{header_str}]{newline}")
+            lines.append(f"{key_str} = {formatted_val}{newline}")
+
+    new_text = "".join(lines)
+
+    if tomllib is None:
+        raise RuntimeError("Python 3.11+ (tomllib) required")
+    try:
+        parsed = tomllib.loads(new_text)
+    except Exception as e:
+        raise ValueError(f"Surgical TOML update produced invalid TOML: {e}") from e
+
+    cur: Any = parsed
+    for p in table_path:
+        if not isinstance(cur, dict) or p not in cur:
+            raise ValueError(
+                f"Surgical TOML update: table path {table_path} not found in parsed result"
+            )
+        cur = cur[p]
+
+    if value is None:
+        if key in cur:
+            raise ValueError(f"Surgical TOML update: key {key!r} was not removed")
+    else:
+        if key not in cur:
+            raise ValueError(
+                f"Surgical TOML update: key {key!r} not found in parsed table {table_path}"
+            )
+        if cur[key] != value:
+            raise ValueError(
+                f"Surgical TOML update: parsed value {cur[key]!r} does not match expected {value!r}"
+            )
+
+    return new_text
+
+
+def write_file_atomic(path: pathlib.Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        temp_path.write_text(content, encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(base)
     for k, v in override.items():
@@ -346,7 +595,64 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
         errors.append("At least one tool in [tools.<name>] must have enabled = true.")
 
     for tname, tcfg in tools.items():
-        if not isinstance(tcfg, dict) or not tcfg.get("enabled", True):
+        if not isinstance(tcfg, dict):
+            continue
+
+        headless = tcfg.get("headless")
+        if headless is not None:
+            if not isinstance(headless, dict):
+                errors.append(f"Tool '{tname}' [tools.{tname}.headless] must be a table.")
+            else:
+                for hk in headless:
+                    if hk not in HEADLESS_ALLOWED_KEYS:
+                        errors.append(
+                            f"Tool '{tname}' headless has unknown key {hk!r} "
+                            f"(allowed: {sorted(HEADLESS_ALLOWED_KEYS)})."
+                        )
+
+                for argv_key in ("argv", "resume_argv"):
+                    if argv_key in headless:
+                        val = headless[argv_key]
+                        if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
+                            errors.append(
+                                f"Tool '{tname}' headless '{argv_key}' must be a list of strings."
+                            )
+                        else:
+                            for arg_str in val:
+                                for placeholder in re.findall(r"\{([^{}]+)\}", arg_str):
+                                    if placeholder not in ALLOWED_PLACEHOLDERS:
+                                        errors.append(
+                                            f"Tool '{tname}' headless {argv_key} contains invalid placeholder "
+                                            f"'{{{placeholder}}}' (allowed: {sorted('{' + p + '}' for p in ALLOWED_PLACEHOLDERS)})."
+                                        )
+
+                if "prompt_via" in headless:
+                    pv = headless["prompt_via"]
+                    if pv not in ("stdin", "file"):
+                        errors.append(
+                            f"Tool '{tname}' headless 'prompt_via' must be 'stdin' or 'file' (got {pv!r})."
+                        )
+
+                if "permission_mode" in headless:
+                    pm = headless["permission_mode"]
+                    if not isinstance(pm, str):
+                        errors.append(
+                            f"Tool '{tname}' headless 'permission_mode' must be a string."
+                        )
+
+                if "sandbox" in headless:
+                    sb = headless["sandbox"]
+                    if not isinstance(sb, str):
+                        errors.append(f"Tool '{tname}' headless 'sandbox' must be a string.")
+
+                if "allowed_tools" in headless:
+                    at = headless["allowed_tools"]
+                    if not isinstance(at, list) or not all(isinstance(x, str) for x in at):
+                        errors.append(
+                            f"Tool '{tname}' headless 'allowed_tools' must be a list of strings."
+                        )
+
+        if not tcfg.get("enabled", True):
             continue
         profiles = tcfg.get("profiles", {})
         for prof in PROFILES:
@@ -401,11 +707,19 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
 # AGENTS.md Renderer (modeled on ~/works/ricerca_auto/AGENTS.md)
 # ---------------------------------------------------------------------------
 
-def render_agents_md_block(cfg: dict[str, Any]) -> str:
+def render_agents_md_block(
+    cfg: dict[str, Any],
+    workspace: pathlib.Path | None = None,
+    global_path: pathlib.Path | None = None,
+) -> str:
     proj = cfg.get("project", {})
     routing = cfg.get("routing", {})
     ver = cfg.get("verification", {})
     tools = cfg.get("tools", {})
+
+    ws = workspace or pathlib.Path(".")
+    proj_cfg_path = find_project_config_path(ws, global_path)
+    gpath = global_path or default_global_config_path()
 
     orchestrator_id = proj.get("primary_orchestrator") or routing.get("default_orchestrator", "kilo")
     executor_id = routing.get("default_executor", orchestrator_id)
@@ -535,7 +849,7 @@ def render_agents_md_block(cfg: dict[str, Any]) -> str:
 # Agent Orchestration & Development Guidelines (`AGENTS.md`)
 
 > **Managed by `ai-orchestration` (`orchestration_config.py render-agents-md`).**
-> Edit `tasks/orchestration.toml` (project) or `~/.config/ai-orchestration/orchestration.toml` (global) and re-run `render-agents-md --apply` to update.
+> Edit `{proj_cfg_path}` (project) or `{gpath}` (global) and re-run `render-agents-md --apply` to update.
 
 This repository uses an **Architect / Executor** development workflow (`primary_orchestrator = "{orchestrator_id}"`, `default_executor = "{executor_id}"`, `verification_mode = "{v_mode}"`). The **main session** acts strictly as the **Architect & Orchestrator** (discovery, task specification, parallel dispatch, verification, and integration), delegating implementation and heavy exploration to isolated **Worktree sessions** and **Subagents**.
 
@@ -733,35 +1047,149 @@ def cmd_set_profile(args: argparse.Namespace) -> int:
         print(f"[FAIL] invalid basis {args.basis!r}; must be one of {sorted(BASIS_VALUES)}", file=sys.stderr)
         return 2
 
+    gpath = getattr(args, "global_config", None)
     if args.scope == "project":
         ws = pathlib.Path(args.workspace or ".").resolve()
-        target_path = find_project_config_path(ws, args.global_config)
-        data = load_toml_file(target_path) if target_path.exists() else {}
+        target_path = find_project_config_path(ws, gpath)
+        text = target_path.read_text(encoding="utf-8") if target_path.exists() else ""
     else:
-        target_path = args.global_config or default_global_config_path()
-        data = load_toml_file(target_path) if target_path.exists() else copy.deepcopy(DEFAULT_GLOBAL_CONFIG)
+        target_path = gpath or default_global_config_path()
+        if target_path.exists():
+            text = target_path.read_text(encoding="utf-8")
+        else:
+            text = dump_toml(DEFAULT_GLOBAL_CONFIG)
 
-    tools = data.setdefault("tools", {})
-    tcfg = tools.setdefault(args.tool, {"enabled": True})
-    profiles = tcfg.setdefault("profiles", {})
-    entry = profiles.setdefault(args.profile, {})
-    entry["model"] = args.model
+    table_path = ["tools", args.tool, "profiles", args.profile]
+    text = set_toml_value(text, table_path, "model", args.model)
     if args.variant is not None:
-        entry["variant"] = args.variant
-        entry.pop("effort", None)
+        text = set_toml_value(text, table_path, "variant", args.variant)
+        text = set_toml_value(text, table_path, "effort", None)
     if args.effort is not None:
-        entry["effort"] = args.effort
-        entry.pop("variant", None)
+        text = set_toml_value(text, table_path, "effort", args.effort)
+        text = set_toml_value(text, table_path, "variant", None)
     if args.basis is not None:
-        entry["basis"] = args.basis
-    data["last_verified"] = datetime.date.today().isoformat()
+        text = set_toml_value(text, table_path, "basis", args.basis)
 
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(dump_toml(data), encoding="utf-8")
-    if args.json:
-        print(json.dumps({"ok": True, "path": str(target_path), "tool": args.tool, "profile": args.profile, "entry": entry}))
+    write_file_atomic(target_path, text)
+
+    parsed = tomllib.loads(text) if tomllib is not None else {}
+    entry = parsed.get("tools", {}).get(args.tool, {}).get("profiles", {}).get(args.profile, {})
+
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "path": str(target_path),
+                    "tool": args.tool,
+                    "profile": args.profile,
+                    "entry": entry,
+                }
+            )
+        )
     else:
         print(f"[ok] updated [{args.tool}.profiles.{args.profile}] in {target_path}")
+    return 0
+
+
+def cmd_set_routing(args: argparse.Namespace) -> int:
+    if not any([args.orchestrator, args.executor, args.default_profile, args.verification_mode]):
+        msg = "at least one of --orchestrator, --executor, --default-profile, --verification-mode is required"
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": msg}))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
+        return 2
+
+    ws = pathlib.Path(args.workspace).resolve() if getattr(args, "workspace", None) else None
+    gpath = getattr(args, "global_config", None)
+    merged, _ = resolve_config(gpath, ws)
+    tools = merged.get("tools", {})
+    enabled_tools = {
+        name for name, t in tools.items() if isinstance(t, dict) and t.get("enabled", True)
+    }
+
+    if args.orchestrator is not None:
+        if args.orchestrator not in enabled_tools:
+            msg = f"tool {args.orchestrator!r} is unknown or disabled (enabled tools: {sorted(enabled_tools)})"
+            if getattr(args, "json", False):
+                print(json.dumps({"ok": False, "error": msg}))
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
+
+    if args.executor is not None:
+        if args.executor not in enabled_tools:
+            msg = f"tool {args.executor!r} is unknown or disabled (enabled tools: {sorted(enabled_tools)})"
+            if getattr(args, "json", False):
+                print(json.dumps({"ok": False, "error": msg}))
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
+
+    if args.default_profile is not None:
+        if args.default_profile not in PROFILE_SET:
+            msg = f"invalid profile {args.default_profile!r}; must be one of {sorted(PROFILES)}"
+            if getattr(args, "json", False):
+                print(json.dumps({"ok": False, "error": msg}))
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
+
+    if args.verification_mode is not None:
+        if args.verification_mode not in VERIFICATION_MODES:
+            msg = f"invalid verification mode {args.verification_mode!r}; must be one of {sorted(VERIFICATION_MODES)}"
+            if getattr(args, "json", False):
+                print(json.dumps({"ok": False, "error": msg}))
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
+
+    if args.scope == "project":
+        project_ws = ws or pathlib.Path(".").resolve()
+        target_path = find_project_config_path(project_ws, gpath)
+    else:
+        target_path = gpath or default_global_config_path()
+
+    text = target_path.read_text(encoding="utf-8") if target_path.exists() else ""
+
+    if args.orchestrator is not None:
+        text = set_toml_value(text, ["routing"], "default_orchestrator", args.orchestrator)
+    if args.executor is not None:
+        text = set_toml_value(text, ["routing"], "default_executor", args.executor)
+    if args.default_profile is not None:
+        text = set_toml_value(text, ["routing"], "default_profile", args.default_profile)
+    if args.verification_mode is not None:
+        text = set_toml_value(text, ["verification"], "default_mode", args.verification_mode)
+
+    write_file_atomic(target_path, text)
+
+    updated_routing: dict[str, str] = {}
+    if args.orchestrator is not None:
+        updated_routing["default_orchestrator"] = args.orchestrator
+    if args.executor is not None:
+        updated_routing["default_executor"] = args.executor
+    if args.default_profile is not None:
+        updated_routing["default_profile"] = args.default_profile
+
+    updated_verification: dict[str, str] = {}
+    if args.verification_mode is not None:
+        updated_verification["default_mode"] = args.verification_mode
+
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "path": str(target_path),
+                    "scope": args.scope,
+                    "routing": updated_routing,
+                    "verification": updated_verification,
+                }
+            )
+        )
+    else:
+        print(f"[ok] updated routing in {target_path}")
     return 0
 
 
@@ -808,8 +1236,9 @@ def cmd_init_project(args: argparse.Namespace) -> int:
 
 def cmd_render_agents_md(args: argparse.Namespace) -> int:
     ws = pathlib.Path(args.workspace or ".").resolve()
-    cfg, _ = resolve_config(args.global_config, ws)
-    block = render_agents_md_block(cfg)
+    gpath = getattr(args, "global_config", None)
+    cfg, _ = resolve_config(gpath, ws)
+    block = render_agents_md_block(cfg, ws, gpath)
     agents_md_path = ws / "AGENTS.md"
 
     existing = agents_md_path.read_text(encoding="utf-8") if agents_md_path.exists() else ""
@@ -879,7 +1308,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_sp.set_defaults(func=cmd_set_profile)
 
-    p_ip = sub.add_parser("init-project", help="Initialize <workspace>/tasks/orchestration.toml")
+    p_sr = sub.add_parser(
+        "set-routing",
+        help="Set default orchestrator, executor, profile, and/or verification mode",
+    )
+    p_sr.add_argument("--orchestrator", default=None, help="Default orchestrator tool id")
+    p_sr.add_argument("--executor", default=None, help="Default executor tool id")
+    p_sr.add_argument("--default-profile", default=None, help=f"Default profile ({', '.join(PROFILES)})")
+    p_sr.add_argument(
+        "--verification-mode",
+        default=None,
+        help=f"Default verification mode ({', '.join(sorted(VERIFICATION_MODES))})",
+    )
+    p_sr.add_argument("--scope", choices=("global", "project"), required=True, help="Config scope (global or project)")
+    p_sr.add_argument("--workspace", default=None, help="Workspace root for project scope")
+    p_sr.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+    p_sr.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_sr.set_defaults(func=cmd_set_routing)
+
+    p_ip = sub.add_parser(
+        "init-project",
+        help=(
+            "Initialize project orchestration.toml (<workspace>/.ai-orchestration.local.toml "
+            "if present, gitignored, or ~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml)"
+        ),
+    )
     p_ip.add_argument("--workspace", default=".")
     p_ip.add_argument("--name", default=None)
     p_ip.add_argument("--orchestrator", default="kilo")

@@ -84,7 +84,10 @@ CLI_DESCRIPTION: dict[str, Any] = {
                         "[--orchestrator <tool>] [--executor <tool>] "
                         "[--verification-mode <self|independent-session|cross-agent|panel|owner>] [--force] [--json]"
                     ),
-                    "description": "Create <workspace>/tasks/orchestration.toml.",
+                    "description": (
+                        "Create project orchestration.toml (<workspace>/.ai-orchestration.local.toml "
+                        "if present, gitignored, or ~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml)."
+                    ),
                 },
                 "set-profile": {
                     "usage": (
@@ -93,6 +96,20 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     ),
                     "description": "Atomically set or update a (tool, profile) model assignment.",
                 },
+                "set-routing": {
+                    "usage": (
+                        "ai-orch config set-routing [--orchestrator <tool>] [--executor <tool>] "
+                        "[--default-profile <profile>] [--verification-mode <mode>] "
+                        "--scope global|project [--workspace <dir>] [--global-config <file>] [--json]"
+                    ),
+                    "description": "Atomically set default orchestrator, executor, profile, and/or verification mode.",
+                },
+                "render-agents-md": {
+                    "usage": "ai-orch config render-agents-md [--workspace <dir>] [--apply | --check] [--json]",
+                    "description": "Render or update the <!-- BEGIN ai-orchestration --> block in <workspace>/AGENTS.md.",
+                },
+            },
+        },
         "env": {
             "script": str(ORCH_ENV_SCRIPT.relative_to(REPO_ROOT)),
             "usage": "ai-orch env <subcommand> [options] [--json]",
@@ -126,12 +143,6 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "resolve-conflicts": {
                     "usage": "ai-orch env resolve-conflicts [--workspace <dir>] [--json]",
                     "description": "Auto-resolve trigger conflicts between generic and bound skills across assistants.",
-                },
-            },
-        },
-        "render-agents-md": {
-                    "usage": "ai-orch config render-agents-md [--workspace <dir>] [--apply | --check] [--json]",
-                    "description": "Render or update the <!-- BEGIN ai-orchestration --> block in <workspace>/AGENTS.md.",
                 },
             },
         },
