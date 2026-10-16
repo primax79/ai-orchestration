@@ -1376,12 +1376,49 @@ def cmd_render_agents_md(args: argparse.Namespace) -> int:
     block = render_agents_md_block(cfg, ws, gpath)
     agents_md_path = ws / "AGENTS.md"
 
-    existing = agents_md_path.read_text(encoding="utf-8") if agents_md_path.exists() else ""
+    if agents_md_path.exists():
+        current_bytes = agents_md_path.read_bytes()
+        current_hash = hashlib.sha256(current_bytes).hexdigest()
+        existing = current_bytes.decode("utf-8")
+    else:
+        current_bytes = b""
+        current_hash = hashlib.sha256(b"").hexdigest()
+        existing = ""
+
     updated = inject_or_replace_agents_block(existing, block)
 
-    if args.check:
+    if getattr(args, "diff", False):
+        diff_str = "".join(
+            difflib.unified_diff(
+                existing.splitlines(keepends=True),
+                updated.splitlines(keepends=True),
+                fromfile=f"a/{agents_md_path.name}",
+                tofile=f"b/{agents_md_path.name}",
+            )
+        )
+        changed = existing != updated
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "path": str(agents_md_path),
+                        "diff": diff_str,
+                        "hash": current_hash,
+                        "changed": changed,
+                    }
+                )
+            )
+        else:
+            if diff_str:
+                sys.stdout.write(diff_str)
+            else:
+                print(f"[ok] no changes in {agents_md_path}")
+        return 0
+
+    if getattr(args, "check", False):
         in_sync = existing == updated
-        if args.json:
+        if getattr(args, "json", False):
             print(json.dumps({"ok": in_sync, "path": str(agents_md_path)}))
         elif not in_sync:
             print(f"[FAIL] {agents_md_path} orchestration block is out of sync")
@@ -1389,15 +1426,44 @@ def cmd_render_agents_md(args: argparse.Namespace) -> int:
             print(f"[ok] {agents_md_path} orchestration block is in sync")
         return 0 if in_sync else 1
 
-    if args.apply:
-        agents_md_path.write_text(updated, encoding="utf-8")
-        if args.json:
+    if getattr(args, "expect_hash", None) is not None:
+        disk_bytes = agents_md_path.read_bytes() if agents_md_path.exists() else b""
+        actual_hash = hashlib.sha256(disk_bytes).hexdigest()
+        if actual_hash.lower() != args.expect_hash.strip().lower():
+            msg = f"hash mismatch for {agents_md_path}: expected {args.expect_hash}, found {actual_hash}"
+            if getattr(args, "json", False):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": msg,
+                            "expected_hash": args.expect_hash,
+                            "actual_hash": actual_hash,
+                            "path": str(agents_md_path),
+                        }
+                    )
+                )
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
+
+        if not getattr(args, "apply", False):
+            msg = "--expect-hash requires --apply"
+            if getattr(args, "json", False):
+                print(json.dumps({"ok": False, "error": msg}))
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
+
+    if getattr(args, "apply", False):
+        write_file_atomic(agents_md_path, updated)
+        if getattr(args, "json", False):
             print(json.dumps({"ok": True, "applied": True, "path": str(agents_md_path)}))
         else:
             print(f"[ok] updated {agents_md_path}")
         return 0
 
-    if args.json:
+    if getattr(args, "json", False):
         print(json.dumps({"ok": True, "applied": False, "path": str(agents_md_path), "rendered_block": block}))
     else:
         sys.stdout.write(block)
@@ -1486,6 +1552,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ra.add_argument("--workspace", default=".")
     p_ra.add_argument("--apply", action="store_true", help="Write/update <workspace>/AGENTS.md in-place")
     p_ra.add_argument("--check", action="store_true", help="Exit non-zero if <workspace>/AGENTS.md is out of sync")
+    p_ra.add_argument("--diff", action="store_true", default=False, help="Preview changes as unified diff without writing")
+    p_ra.add_argument("--expect-hash", default=None, help="Expected sha256 hash of target file before writing; refuse on mismatch")
     p_ra.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_ra.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_ra.set_defaults(func=cmd_render_agents_md)

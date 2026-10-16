@@ -854,3 +854,322 @@ def test_ai_orch_describe_catalog_entries() -> None:
     assert "--expect-hash" in config_subs["set-routing"]["usage"]
     assert "--diff" in config_subs["set-profile"]["usage"]
     assert "--expect-hash" in config_subs["set-profile"]["usage"]
+    assert "--diff" in config_subs["render-agents-md"]["usage"]
+    assert "--expect-hash" in config_subs["render-agents-md"]["usage"]
+    assert "--diff" in catalog["commands"]["render-agents-md"]["usage"]
+    assert "--expect-hash" in catalog["commands"]["render-agents-md"]["usage"]
+
+
+def test_render_agents_md_diff_scenarios(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    run_cli("--global-config", str(global_cfg_path), "init-global")
+
+    # 1. Missing AGENTS.md: returns hash of b"", changed=True, diff has additions, file untouched
+    ws_missing = tmp_path / "ws_missing"
+    ws_missing.mkdir()
+    agents_missing = ws_missing / "AGENTS.md"
+    assert not agents_missing.exists()
+
+    empty_hash = hashlib.sha256(b"").hexdigest()
+    res_missing = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_missing),
+        "--diff",
+    )
+    assert res_missing.returncode == 0, res_missing.stdout + res_missing.stderr
+    payload_missing = json.loads(res_missing.stdout)
+    assert payload_missing["ok"] is True
+    assert payload_missing["path"] == str(agents_missing)
+    assert payload_missing["hash"] == empty_hash
+    assert payload_missing["changed"] is True
+    assert "+<!-- BEGIN ai-orchestration -->" in payload_missing["diff"]
+    assert not agents_missing.exists()  # file was not created or modified
+
+    # 2. AGENTS.md without the block: returns current file hash, changed=True, diff shows insertion, file bytes unchanged
+    ws_noblock = tmp_path / "ws_noblock"
+    ws_noblock.mkdir()
+    agents_noblock = ws_noblock / "AGENTS.md"
+    initial_noblock = "# My Project\n\nExisting notes without block.\n"
+    agents_noblock.write_text(initial_noblock, encoding="utf-8")
+    before_bytes_noblock = agents_noblock.read_bytes()
+    before_hash_noblock = hashlib.sha256(before_bytes_noblock).hexdigest()
+
+    res_noblock = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_noblock),
+        "--diff",
+    )
+    assert res_noblock.returncode == 0, res_noblock.stdout + res_noblock.stderr
+    payload_noblock = json.loads(res_noblock.stdout)
+    assert payload_noblock["ok"] is True
+    assert payload_noblock["path"] == str(agents_noblock)
+    assert payload_noblock["hash"] == before_hash_noblock
+    assert payload_noblock["changed"] is True
+    assert "+<!-- BEGIN ai-orchestration -->" in payload_noblock["diff"]
+    assert agents_noblock.read_bytes() == before_bytes_noblock  # file untouched!
+
+    # 3. AGENTS.md with an outdated block: returns current file hash, changed=True, diff shows replacement, file bytes unchanged
+    ws_outdated = tmp_path / "ws_outdated"
+    ws_outdated.mkdir()
+    agents_outdated = ws_outdated / "AGENTS.md"
+    initial_outdated = (
+        "# Header\n\nIntro notes.\n\n"
+        "<!-- BEGIN ai-orchestration -->\n"
+        "OLD STALE ORCHESTRATION CONTENT\n"
+        "<!-- END ai-orchestration -->\n\n"
+        "## Footer\nKeep this footer.\n"
+    )
+    agents_outdated.write_text(initial_outdated, encoding="utf-8")
+    before_bytes_outdated = agents_outdated.read_bytes()
+    before_hash_outdated = hashlib.sha256(before_bytes_outdated).hexdigest()
+
+    res_outdated = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_outdated),
+        "--diff",
+    )
+    assert res_outdated.returncode == 0, res_outdated.stdout + res_outdated.stderr
+    payload_outdated = json.loads(res_outdated.stdout)
+    assert payload_outdated["ok"] is True
+    assert payload_outdated["path"] == str(agents_outdated)
+    assert payload_outdated["hash"] == before_hash_outdated
+    assert payload_outdated["changed"] is True
+    assert "-OLD STALE ORCHESTRATION CONTENT" in payload_outdated["diff"]
+    assert "+> **Managed by `ai-orchestration`" in payload_outdated["diff"]
+    assert agents_outdated.read_bytes() == before_bytes_outdated  # file untouched!
+
+    # 4. AGENTS.md already up to date: returns current file hash, changed=False, diff="", file bytes unchanged
+    res_apply = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_outdated),
+        "--apply",
+    )
+    assert res_apply.returncode == 0
+    up_to_date_bytes = agents_outdated.read_bytes()
+    up_to_date_hash = hashlib.sha256(up_to_date_bytes).hexdigest()
+
+    res_uptodate = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_outdated),
+        "--diff",
+    )
+    assert res_uptodate.returncode == 0, res_uptodate.stdout + res_uptodate.stderr
+    payload_uptodate = json.loads(res_uptodate.stdout)
+    assert payload_uptodate["ok"] is True
+    assert payload_uptodate["path"] == str(agents_outdated)
+    assert payload_uptodate["hash"] == up_to_date_hash
+    assert payload_uptodate["changed"] is False
+    assert payload_uptodate["diff"] == ""
+    assert agents_outdated.read_bytes() == up_to_date_bytes  # file untouched!
+
+    # Also test non-JSON text output
+    res_text = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "render-agents-md",
+        "--workspace",
+        str(ws_outdated),
+        "--diff",
+    )
+    assert res_text.returncode == 0
+    assert f"[ok] no changes in {agents_outdated}" in res_text.stdout
+
+
+def test_render_agents_md_expect_hash_match_and_mismatch(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    run_cli("--global-config", str(global_cfg_path), "init-global")
+
+    ws = tmp_path / "ws_expect_hash"
+    ws.mkdir()
+    agents_md = ws / "AGENTS.md"
+    initial_content = (
+        "# Header\n\n"
+        "<!-- BEGIN ai-orchestration -->\n"
+        "STALE BLOCK\n"
+        "<!-- END ai-orchestration -->\n\n"
+        "# Footer\n"
+    )
+    agents_md.write_text(initial_content, encoding="utf-8")
+    initial_bytes = agents_md.read_bytes()
+    initial_hash = hashlib.sha256(initial_bytes).hexdigest()
+
+    # 1. Mismatch on existing file -> refused (non-zero exit) and file untouched
+    res_mismatch = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws),
+        "--apply",
+        "--expect-hash",
+        "badbeef0" * 8,
+    )
+    assert res_mismatch.returncode != 0
+    payload_mismatch = json.loads(res_mismatch.stdout)
+    assert payload_mismatch["ok"] is False
+    assert "hash mismatch" in payload_mismatch["error"]
+    assert payload_mismatch["actual_hash"] == initial_hash
+    assert agents_md.read_bytes() == initial_bytes  # file untouched!
+
+    # 2. Match on existing file -> written atomically
+    res_match = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws),
+        "--apply",
+        "--expect-hash",
+        initial_hash,
+    )
+    assert res_match.returncode == 0, res_match.stdout + res_match.stderr
+    payload_match = json.loads(res_match.stdout)
+    assert payload_match["ok"] is True
+    assert payload_match["applied"] is True
+    assert agents_md.read_bytes() != initial_bytes
+    assert "STALE BLOCK" not in agents_md.read_text(encoding="utf-8")
+
+    # 3. Missing file mismatch -> refused and file not created
+    ws_missing = tmp_path / "ws_missing_apply"
+    ws_missing.mkdir()
+    agents_missing = ws_missing / "AGENTS.md"
+    assert not agents_missing.exists()
+
+    res_missing_mismatch = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_missing),
+        "--apply",
+        "--expect-hash",
+        "deadbeef" * 8,
+    )
+    assert res_missing_mismatch.returncode != 0
+    payload_mm = json.loads(res_missing_mismatch.stdout)
+    assert payload_mm["ok"] is False
+    assert payload_mm["actual_hash"] == hashlib.sha256(b"").hexdigest()
+    assert not agents_missing.exists()
+
+    # 4. Missing file match with hash of empty bytes -> written
+    empty_hash = hashlib.sha256(b"").hexdigest()
+    res_missing_match = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_missing),
+        "--apply",
+        "--expect-hash",
+        empty_hash,
+    )
+    assert res_missing_match.returncode == 0, res_missing_match.stdout + res_missing_match.stderr
+    payload_m_match = json.loads(res_missing_match.stdout)
+    assert payload_m_match["ok"] is True
+    assert payload_m_match["applied"] is True
+    assert agents_missing.exists()
+
+    # 5. --apply without --expect-hash keeps working (CLI convenience)
+    res_no_hash = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws),
+        "--apply",
+    )
+    assert res_no_hash.returncode == 0
+
+    # 6. --expect-hash without --apply refuses
+    res_no_apply = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws),
+        "--expect-hash",
+        hashlib.sha256(agents_md.read_bytes()).hexdigest(),
+    )
+    assert res_no_apply.returncode != 0
+
+
+def test_render_agents_md_handwritten_content_byte_identical_after_apply(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    run_cli("--global-config", str(global_cfg_path), "init-global")
+
+    header_text = (
+        "# Custom Project Title\n\n"
+        "Intro with special characters: 🌟, emojis 🤖, tabs \t, and unicode quotes '“”'.\n\n"
+        "## Pre-existing Architecture\n\n"
+        "Details about custom subsystems.\n\n"
+    )
+    footer_text = (
+        "\n\n## Custom Footer Section\n\n"
+        "Preserve every single byte here verbatim.\n"
+        "Line 2 of footer.\n"
+    )
+    stale_block = (
+        "<!-- BEGIN ai-orchestration -->\n"
+        "OUTDATED MANAGED BLOCK THAT MUST BE REPLACED\n"
+        "<!-- END ai-orchestration -->"
+    )
+    full_content = header_text + stale_block + footer_text
+
+    ws = tmp_path / "ws_byte_identical"
+    ws.mkdir()
+    agents_md = ws / "AGENTS.md"
+    agents_md.write_text(full_content, encoding="utf-8")
+
+    before_bytes = agents_md.read_bytes()
+    before_hash = hashlib.sha256(before_bytes).hexdigest()
+
+    res = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws),
+        "--apply",
+        "--expect-hash",
+        before_hash,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+
+    after_text = agents_md.read_text(encoding="utf-8")
+    assert oc.BEGIN_MARKER in after_text
+    assert oc.END_MARKER in after_text
+
+    # Verify text before BEGIN_MARKER is byte-identical
+    begin_idx = after_text.index(oc.BEGIN_MARKER)
+    assert after_text[:begin_idx] == header_text
+
+    # Verify text after END_MARKER is byte-identical
+    end_idx = after_text.index(oc.END_MARKER) + len(oc.END_MARKER)
+    assert after_text[end_idx:] == footer_text

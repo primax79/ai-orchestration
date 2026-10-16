@@ -107,8 +107,14 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "Atomically set default orchestrator, executor, profile, and/or verification mode (supports --diff preview and --expect-hash).",
                 },
                 "render-agents-md": {
-                    "usage": "ai-orch config render-agents-md [--workspace <dir>] [--apply | --check] [--json]",
-                    "description": "Render or update the <!-- BEGIN ai-orchestration --> block in <workspace>/AGENTS.md.",
+                    "usage": (
+                        "ai-orch config render-agents-md [--workspace <dir>] "
+                        "[--apply] [--expect-hash <hash>] [--check] [--diff] [--json]"
+                    ),
+                    "description": (
+                        "Render or update the <!-- BEGIN ai-orchestration --> block in <workspace>/AGENTS.md "
+                        "(supports --diff preview and --expect-hash)."
+                    ),
                 },
             },
         },
@@ -179,7 +185,10 @@ CLI_DESCRIPTION: dict[str, Any] = {
         },
         "render-agents-md": {
             "script": str(ORCH_CONFIG_SCRIPT.relative_to(REPO_ROOT)),
-            "usage": "ai-orch render-agents-md [--workspace <dir>] [--apply | --check] [--json]",
+            "usage": (
+                "ai-orch render-agents-md [--workspace <dir>] "
+                "[--apply] [--expect-hash <hash>] [--check] [--diff] [--json]"
+            ),
             "description": "Shortcut alias for `ai-orch config render-agents-md`.",
         },
     },
