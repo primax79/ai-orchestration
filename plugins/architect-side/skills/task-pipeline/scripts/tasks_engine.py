@@ -12,6 +12,7 @@ supports `--json` (before or after the subcommand name).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import difflib
 import hashlib
@@ -23,7 +24,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any
+import threading
+import time
+from typing import Any, Iterator
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
 
 CORE_HEADER_FIELDS: tuple[str, ...] = (
     "id",
@@ -124,6 +132,190 @@ def is_valid_state(raw_state: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Platform, Locking & File Serialization
+# ---------------------------------------------------------------------------
+
+class LockTimeoutError(Exception):
+    pass
+
+
+class UnsupportedPlatformError(Exception):
+    pass
+
+
+def is_platform_supported() -> bool:
+    if os.name == "nt" or fcntl is None:
+        return False
+    return True
+
+
+_LOCK_STATE = threading.local()
+
+
+@contextlib.contextmanager
+def task_write_lock(tasks_dir: pathlib.Path, timeout: float | None = None) -> Iterator[pathlib.Path]:
+    """Acquire an exclusive flock on <tasks_dir>/.ai-orch.lock.
+    Re-entrant for the current thread. Waits up to timeout seconds (default 10s
+    or AI_ORCH_LOCK_TIMEOUT env var), raising LockTimeoutError on timeout."""
+    if not is_platform_supported():
+        raise UnsupportedPlatformError("Mutating commands are unsupported on Windows (requires fcntl for flock).")
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    lock_path = tasks_dir / ".ai-orch.lock"
+
+    held = getattr(_LOCK_STATE, "held_locks", None)
+    if held is None:
+        held = {}
+        _LOCK_STATE.held_locks = held
+
+    lock_key = str(lock_path)
+    if lock_key in held and held[lock_key] > 0:
+        held[lock_key] += 1
+        try:
+            yield lock_path
+        finally:
+            held[lock_key] -= 1
+            if held[lock_key] == 0:
+                del held[lock_key]
+        return
+
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("AI_ORCH_LOCK_TIMEOUT", "10.0"))
+        except ValueError:
+            timeout = 10.0
+
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o666)
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    acquired = False
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    break
+                sleep_interval = min(0.05, max(0.005, deadline - time.monotonic()))
+                if sleep_interval > 0:
+                    time.sleep(sleep_interval)
+
+        if not acquired:
+            raise LockTimeoutError(f"Failed to acquire task-write lock on {lock_path} within {timeout}s.")
+
+        held[lock_key] = 1
+        yield lock_path
+    finally:
+        if acquired:
+            if lock_key in held:
+                held[lock_key] -= 1
+                if held[lock_key] == 0:
+                    del held[lock_key]
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _file_sha256(path: pathlib.Path) -> str:
+    if not path.is_file():
+        return hashlib.sha256(b"").hexdigest()
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _folder_bundle_sha256(folder_path: pathlib.Path) -> str:
+    hasher = hashlib.sha256()
+    if not folder_path.is_dir():
+        return hasher.hexdigest()
+
+    files: list[tuple[str, pathlib.Path]] = []
+    for root, dirs, filenames in os.walk(folder_path):
+        dirs[:] = sorted([d for d in dirs if not d.startswith(".")])
+        root_path = pathlib.Path(root)
+        for fn in sorted(filenames):
+            if fn.startswith("."):
+                continue
+            file_path = root_path / fn
+            if file_path.is_file():
+                rel_path = file_path.relative_to(folder_path).as_posix()
+                files.append((rel_path, file_path))
+
+    files.sort(key=lambda item: item[0])
+    for rel_path, file_path in files:
+        hasher.update(rel_path.encode("utf-8") + b"\x00" + file_path.read_bytes())
+
+    return hasher.hexdigest()
+
+
+def task_bundle_sha256(task: dict[str, Any] | pathlib.Path | str) -> str:
+    """Compute sha256 over a canonical serialization of the task's files:
+    for a folder task every regular file in the folder (sorted relative path + NUL + bytes),
+    for a single-file task just that file."""
+    if isinstance(task, dict):
+        is_folder = bool(task.get("is_folder", False))
+        if is_folder:
+            folder_path = pathlib.Path(task.get("task_root") or task.get("file_path", ""))
+            if folder_path.is_file():
+                folder_path = folder_path.parent
+            return _folder_bundle_sha256(folder_path)
+        else:
+            file_path = pathlib.Path(task.get("file_path") or task.get("task_root", ""))
+            return _file_sha256(file_path)
+
+    p = pathlib.Path(task)
+    if p.is_dir():
+        return _folder_bundle_sha256(p)
+    if p.is_file() and p.name == "README.md" and re.match(r"^T\d{3,}-", p.parent.name):
+        return _folder_bundle_sha256(p.parent)
+    return _file_sha256(p)
+
+
+def _atomic_write_text(path: pathlib.Path, content: str, encoding: str = "utf-8") -> None:
+    """Write content to path atomically via temporary file and os.replace,
+    preserving existing file mode."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path_str = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    tmp_path = pathlib.Path(tmp_path_str)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(content)
+
+        if path.exists():
+            try:
+                mode = path.stat().st_mode & 0o777
+                os.chmod(tmp_path, mode)
+            except OSError:
+                pass
+        else:
+            try:
+                umask = os.umask(0)
+                os.umask(umask)
+                os.chmod(tmp_path, 0o666 & ~umask)
+            except OSError:
+                pass
+
+        os.replace(tmp_path, path)
+    except BaseException:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
 
@@ -196,7 +388,7 @@ def parse_emergent_task_file(
     )
 
     raw_state = headers.get("state", "")
-    return {
+    task_dict = {
         "kind": "emergent",
         "id": headers.get("id", ""),
         "title": headers.get("title", ""),
@@ -228,6 +420,8 @@ def parse_emergent_task_file(
         "task_root": str(task_root),
         "rel_path": rel_path,
     }
+    task_dict["bundle_sha256"] = task_bundle_sha256(task_dict)
+    return task_dict
 
 
 def discover_emergent_tasks(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
@@ -394,6 +588,7 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
                     "rel_path": plan_path.relative_to(tasks_dir).as_posix(),
                     "has_summary": (entry / "summary.md").is_file(),
                     "tasks": chosen_tasks,
+                    "bundle_sha256": _file_sha256(plan_path),
                 }
             )
     return initiatives
@@ -548,6 +743,23 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
         if color.get(node, 0) == 0:
             _dfs(node, [node])
 
+    # Warn if .ai-orch.lock is not ignored by git when inside a git repository
+    lock_file = tasks_dir / ".ai-orch.lock"
+    try:
+        res = subprocess.run(
+            ["git", "check-ignore", "-q", str(lock_file)],
+            cwd=str(tasks_dir),
+            capture_output=True,
+            check=False,
+        )
+        if res.returncode == 1:
+            warnings.append(
+                f"{lock_file.name} is not ignored by git in {tasks_dir}. "
+                "Add '.ai-orch.lock' to .gitignore to avoid committing the lock file."
+            )
+    except (FileNotFoundError, OSError):
+        pass
+
     return errors, warnings, emergent, initiatives
 
 
@@ -638,7 +850,7 @@ def _update_task_file_headers_and_state(
         if scan_idx < len(lines) and not lines[scan_idx].strip() and scan_idx > 0 and not lines[scan_idx - 1].strip():
             del lines[scan_idx]
 
-    file_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    _atomic_write_text(file_path, "\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def _append_progress_log(
@@ -670,11 +882,12 @@ def _append_progress_log(
             new_content = f"{parts[0]}## Log{heading_suffix}\n\n{entry_line}\n"
             if rest:
                 new_content += f"{rest.rstrip()}\n"
-            progress_path.write_text(new_content, encoding="utf-8")
+            _atomic_write_text(progress_path, new_content, encoding="utf-8")
         else:
-            progress_path.write_text(content.rstrip() + f"\n\n## Log (newest first)\n\n{entry_line}\n", encoding="utf-8")
+            _atomic_write_text(progress_path, content.rstrip() + f"\n\n## Log (newest first)\n\n{entry_line}\n", encoding="utf-8")
     elif progress_path:
-        progress_path.write_text(
+        _atomic_write_text(
+            progress_path,
             f"# {task_info['id']} - progress\n\n## Open\n\n## Log (newest first)\n\n{entry_line}\n",
             encoding="utf-8",
         )
@@ -712,162 +925,175 @@ def transition_task(
     actor: str | None = None,
     verifier: str | None = None,
     reason: str | None = None,
+    expect_task_hash: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    if not is_valid_state(new_state):
+    if not is_platform_supported():
         return False, {
             "ok": False,
             "task_id": task_id,
-            "error": f"Invalid target state {new_state!r}. Allowed states: {sorted(CANONICAL_STATES)}.",
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
         }
 
-    emergent = discover_emergent_tasks(tasks_dir)
-    target = next((t for t in emergent if t["id"] == task_id), None)
-    if target is None:
-        return False, {
-            "ok": False,
-            "task_id": task_id,
-            "error": f"Task {task_id!r} not found in {tasks_dir}.",
-        }
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    try:
+        with task_write_lock(tasks_dir):
+            if not is_valid_state(new_state):
+                return False, {
+                    "ok": False,
+                    "task_id": task_id,
+                    "error": f"Invalid target state {new_state!r}. Allowed states: {sorted(CANONICAL_STATES)}.",
+                }
 
-    old_state = target["state"]
-    old_canon = target["canonical_state"]
-    new_canon = normalize_state(new_state)
+            emergent = discover_emergent_tasks(tasks_dir)
+            target = next((t for t in emergent if t["id"] == task_id), None)
+            if target is None:
+                return False, {
+                    "ok": False,
+                    "task_id": task_id,
+                    "error": f"Task {task_id!r} not found in {tasks_dir}.",
+                }
 
-    if old_canon in ("open", "in progress") and new_canon in ("done", "done with a caveat", "verified"):
-        return False, {
-            "ok": False,
-            "task_id": task_id,
-            "old_state": old_state,
-            "new_state": new_state,
-            "error": (
-                f"Illegal transition '{old_state}' -> '{new_state}': "
-                "no direct path from open/in progress to verified or done; task must pass through 'delivered' first."
-            ),
-        }
+            current_hash = task_bundle_sha256(target)
+            if expect_task_hash is not None:
+                if current_hash.lower() != expect_task_hash.strip().lower():
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "error": "stale-task",
+                        "expected": expect_task_hash,
+                        "actual": current_hash,
+                    }
 
-    allowed = ALLOWED_TRANSITIONS.get(old_canon, set())
-    if new_canon not in allowed:
-        return False, {
-            "ok": False,
-            "task_id": task_id,
-            "old_state": old_state,
-            "new_state": new_state,
-            "error": (
-                f"Illegal transition '{old_state}' -> '{new_state}'. "
-                f"Allowed from '{old_canon}': {sorted(allowed)}."
-            ),
-        }
+            old_state = target["state"]
+            old_canon = target["canonical_state"]
+            new_canon = normalize_state(new_state)
 
-    # Guard on delivered -> verified
-    vmode = (target.get("verification_mode") or "cross-agent").strip()
-    if vmode == "-":
-        vmode = "cross-agent"
-    executor = target.get("executor", "self")
+            if old_canon in ("open", "in progress") and new_canon in ("done", "done with a caveat", "verified"):
+                return False, {
+                    "ok": False,
+                    "task_id": task_id,
+                    "old_state": old_state,
+                    "new_state": new_state,
+                    "error": (
+                        f"Illegal transition '{old_state}' -> '{new_state}': "
+                        "no direct path from open/in progress to verified or done; task must pass through 'delivered' first."
+                    ),
+                }
 
-    if old_canon == "delivered" and new_canon == "verified":
-        if vmode == "self" and not _is_independent_verifier(executor, actor, verifier):
-            return False, {
-                "ok": False,
+            allowed = ALLOWED_TRANSITIONS.get(old_canon, set())
+            if new_canon not in allowed:
+                return False, {
+                    "ok": False,
+                    "task_id": task_id,
+                    "old_state": old_state,
+                    "new_state": new_state,
+                    "error": (
+                        f"Illegal transition '{old_state}' -> '{new_state}'. "
+                        f"Allowed from '{old_canon}': {sorted(allowed)}."
+                    ),
+                }
+
+            # Guard on delivered -> verified
+            vmode = (target.get("verification_mode") or "cross-agent").strip()
+            if vmode == "-":
+                vmode = "cross-agent"
+            executor = target.get("executor", "self")
+
+            if old_canon == "delivered" and new_canon == "verified":
+                if vmode == "self" and not _is_independent_verifier(executor, actor, verifier):
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": old_state,
+                        "new_state": new_state,
+                        "error": (
+                            "Task has verification-mode='self' and no independent verifier or owner approval was supplied; "
+                            "transition to 'done with a caveat: self-verified only' instead of 'verified'."
+                        ),
+                    }
+                if vmode == "owner" and (actor or "").lower() != "owner" and (verifier or "").lower() != "owner":
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": old_state,
+                        "new_state": new_state,
+                        "error": "Task requires owner verification (--actor owner or --verifier owner).",
+                    }
+                if not _is_independent_verifier(executor, actor, verifier):
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": old_state,
+                        "new_state": new_state,
+                        "error": (
+                            f"Independent verification guard failed: task executor is {executor!r}, "
+                            f"so transitioning 'delivered' -> 'verified' requires an independent verifier "
+                            f"(--actor != {executor!r}, --verifier <tool>:<profile>, blind-subagent:<profile>, or owner)."
+                        ),
+                    }
+
+            if new_canon == "bounced" and not (reason and reason.strip()):
+                return False, {
+                    "ok": False,
+                    "task_id": task_id,
+                    "old_state": old_state,
+                    "new_state": new_state,
+                    "error": "Transitioning to 'bounced' requires --reason with the failing criterion / B1..Bn findings.",
+                }
+
+            # Format state string when self-verified caveat is used
+            effective_state = new_state
+            if new_canon == "done with a caveat" and ":" not in new_state and reason:
+                effective_state = f"done with a caveat: {reason.strip()}"
+            elif new_canon == "done with a caveat" and ":" not in new_state and vmode == "self":
+                effective_state = "done with a caveat: self-verified only"
+
+            is_terminal = new_canon in TERMINAL_STATES
+            file_path = pathlib.Path(target["file_path"])
+            _update_task_file_headers_and_state(
+                file_path,
+                effective_state,
+                verifier=verifier,
+                clear_next_up=is_terminal,
+            )
+            _append_progress_log(target, old_state, effective_state, actor, verifier, reason)
+
+            final_path = file_path
+            if is_terminal and not target["in_done"]:
+                final_path = _move_task_to_done(target, tasks_dir)
+
+            new_bundle_hash = task_bundle_sha256(final_path)
+            return True, {
+                "ok": True,
                 "task_id": task_id,
                 "old_state": old_state,
-                "new_state": new_state,
-                "error": (
-                    "Task has verification-mode='self' and no independent verifier or owner approval was supplied; "
-                    "transition to 'done with a caveat: self-verified only' instead of 'verified'."
-                ),
+                "new_state": effective_state,
+                "verifier": verifier or target.get("verifier"),
+                "reason": reason,
+                "file_path": str(final_path),
+                "rel_path": final_path.relative_to(tasks_dir).as_posix(),
+                "bundle_sha256": new_bundle_hash,
             }
-        if vmode == "owner" and (actor or "").lower() != "owner" and (verifier or "").lower() != "owner":
-            return False, {
-                "ok": False,
-                "task_id": task_id,
-                "old_state": old_state,
-                "new_state": new_state,
-                "error": "Task requires owner verification (--actor owner or --verifier owner).",
-            }
-        if not _is_independent_verifier(executor, actor, verifier):
-            return False, {
-                "ok": False,
-                "task_id": task_id,
-                "old_state": old_state,
-                "new_state": new_state,
-                "error": (
-                    f"Independent verification guard failed: task executor is {executor!r}, "
-                    f"so transitioning 'delivered' -> 'verified' requires an independent verifier "
-                    f"(--actor != {executor!r}, --verifier <tool>:<profile>, blind-subagent:<profile>, or owner)."
-                ),
-            }
-
-    if new_canon == "bounced" and not (reason and reason.strip()):
+    except LockTimeoutError as e:
         return False, {
             "ok": False,
             "task_id": task_id,
-            "old_state": old_state,
-            "new_state": new_state,
-            "error": "Transitioning to 'bounced' requires --reason with the failing criterion / B1..Bn findings.",
+            "error": "lock-timeout",
+            "message": str(e),
         }
-
-    # Format state string when self-verified caveat is used
-    effective_state = new_state
-    if new_canon == "done with a caveat" and ":" not in new_state and reason:
-        effective_state = f"done with a caveat: {reason.strip()}"
-    elif new_canon == "done with a caveat" and ":" not in new_state and vmode == "self":
-        effective_state = "done with a caveat: self-verified only"
-
-    is_terminal = new_canon in TERMINAL_STATES
-    file_path = pathlib.Path(target["file_path"])
-    _update_task_file_headers_and_state(
-        file_path,
-        effective_state,
-        verifier=verifier,
-        clear_next_up=is_terminal,
-    )
-    _append_progress_log(target, old_state, effective_state, actor, verifier, reason)
-
-    final_path = file_path
-    if is_terminal and not target["in_done"]:
-        final_path = _move_task_to_done(target, tasks_dir)
-
-    return True, {
-        "ok": True,
-        "task_id": task_id,
-        "old_state": old_state,
-        "new_state": effective_state,
-        "verifier": verifier or target.get("verifier"),
-        "reason": reason,
-        "file_path": str(final_path),
-        "rel_path": final_path.relative_to(tasks_dir).as_posix(),
-    }
+    except UnsupportedPlatformError as e:
+        return False, {
+            "ok": False,
+            "task_id": task_id,
+            "error": "unsupported-platform",
+            "message": str(e),
+        }
 
 
 # ---------------------------------------------------------------------------
 # 00-INDEX.md Synchronizer
 # ---------------------------------------------------------------------------
-
-def _file_sha256(path: pathlib.Path) -> str:
-    if not path.is_file():
-        return hashlib.sha256(b"").hexdigest()
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _atomic_write_text(path: pathlib.Path, content: str, encoding: str = "utf-8") -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path_str = tempfile.mkstemp(
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    tmp_path = pathlib.Path(tmp_path_str)
-    try:
-        with os.fdopen(fd, "w", encoding=encoding) as f:
-            f.write(content)
-        os.replace(tmp_path, path)
-    except BaseException:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise
 
 
 def _git_closed_date(tasks_dir: pathlib.Path, rel_path: str) -> str:
@@ -1456,6 +1682,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                     "handoff": sub_t.get("handoff", f"Work on task {sub_id} in {init.get('rel_path')}"),
                     "file_path": str(tasks_dir / init["rel_path"]),
                     "in_done": sub_t.get("state", init_st) == "done",
+                    "bundle_sha256": init.get("bundle_sha256") or _file_sha256(tasks_dir / init["rel_path"]),
                 }
             )
         if not init.get("tasks"):
@@ -1473,6 +1700,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                     "handoff": f"Review plan for Initiative #{init['id']} in {init.get('rel_path')}",
                     "file_path": str(tasks_dir / init["rel_path"]),
                     "in_done": init_st == "done",
+                    "bundle_sha256": init.get("bundle_sha256") or _file_sha256(tasks_dir / init["rel_path"]),
                 }
             )
 
@@ -1524,6 +1752,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_transition(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    expect_task_hash = getattr(args, "expect_task_hash", None)
     ok, payload = transition_task(
         tasks_dir=tasks_dir,
         task_id=args.task_id,
@@ -1531,6 +1760,7 @@ def cmd_transition(args: argparse.Namespace) -> int:
         actor=args.actor,
         verifier=args.verifier,
         reason=args.reason,
+        expect_task_hash=expect_task_hash,
     )
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
@@ -1538,20 +1768,146 @@ def cmd_transition(args: argparse.Namespace) -> int:
         if ok:
             print(f"[ok] {args.task_id}: {payload['old_state']!r} -> {payload['new_state']!r} ({payload['rel_path']})")
         else:
-            print(f"[FAIL] {payload['error']}", file=sys.stderr)
+            err = payload.get("error", "transition failed")
+            if "expected" in payload and "actual" in payload:
+                print(f"[FAIL] {err}: expected {payload['expected']}, got {payload['actual']}", file=sys.stderr)
+            elif "message" in payload:
+                print(f"[FAIL] {err}: {payload['message']}", file=sys.stderr)
+            else:
+                print(f"[FAIL] {err}", file=sys.stderr)
     return 0 if ok else 1
 
 
 def cmd_sync_index(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     index_path = tasks_dir / "00-INDEX.md"
-    existing = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
-    current_hash = _file_sha256(index_path)
 
     adopt = getattr(args, "adopt", False)
     apply_flag = getattr(args, "apply", False)
     check_flag = getattr(args, "check", False)
     expect_hash = getattr(args, "expect_hash", None)
+
+    # If --apply, run under exclusive task-write lock
+    if apply_flag:
+        if not is_platform_supported():
+            err_msg = "Mutating commands are unsupported on Windows (requires fcntl for flock)."
+            if getattr(args, "json", False):
+                print(
+                    json.dumps(
+                        {"ok": False, "applied": False, "error": "unsupported-platform", "message": err_msg, "path": str(index_path)},
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"[FAIL] unsupported-platform: {err_msg}", file=sys.stderr)
+            return 1
+
+        try:
+            with task_write_lock(tasks_dir):
+                existing = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
+                current_hash = _file_sha256(index_path)
+
+                # 1. Hash verification if expect_hash is given
+                if expect_hash is not None:
+                    if current_hash.lower() != expect_hash.lower():
+                        err_msg = f"Index hash mismatch: expected {expect_hash}, got {current_hash}"
+                        if getattr(args, "json", False):
+                            print(
+                                json.dumps(
+                                    {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
+                                    indent=2,
+                                )
+                            )
+                        else:
+                            print(f"[FAIL] {err_msg}", file=sys.stderr)
+                        return 1
+
+                has_markers = has_generated_markers(existing) if existing.strip() else True
+
+                # 2. Check adopt + apply requires --expect-hash
+                if adopt and apply_flag:
+                    if expect_hash is None:
+                        err_msg = "Adopting markers with --apply requires --expect-hash <sha256>."
+                        if getattr(args, "json", False):
+                            print(
+                                json.dumps(
+                                    {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
+                                    indent=2,
+                                )
+                            )
+                        else:
+                            print(f"[FAIL] {err_msg}", file=sys.stderr)
+                        return 1
+
+                # 3. Check plain --apply on an index without markers
+                if existing.strip() and not has_markers and not adopt and apply_flag:
+                    err_msg = (
+                        f"Index {index_path} has no generated-region markers "
+                        "(<!-- ai-orch:generated <section> -->). Run with --adopt to preview, then --adopt --apply --expect-hash <hash>."
+                    )
+                    if getattr(args, "json", False):
+                        print(
+                            json.dumps(
+                                {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
+                                indent=2,
+                            )
+                        )
+                    else:
+                        print(f"[FAIL] {err_msg}", file=sys.stderr)
+                    return 1
+
+                # 4. Render
+                try:
+                    rendered = render_synced_index(tasks_dir, existing, adopt=adopt)
+                except ValueError as e:
+                    err_msg = str(e)
+                    if getattr(args, "json", False):
+                        print(
+                            json.dumps(
+                                {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
+                                indent=2,
+                            )
+                        )
+                    else:
+                        print(f"[FAIL] {err_msg}", file=sys.stderr)
+                    return 1
+
+                # 5. Apply
+                _atomic_write_text(index_path, rendered, encoding="utf-8")
+                new_hash = _file_sha256(index_path)
+                if getattr(args, "json", False):
+                    print(
+                        json.dumps(
+                            {
+                                "ok": True,
+                                "applied": True,
+                                "adopted": adopt,
+                                "path": str(index_path),
+                                "hash": new_hash,
+                            },
+                            indent=2,
+                        )
+                    )
+                else:
+                    action = "adopted and updated" if adopt else "updated"
+                    print(f"[ok] {action} {index_path}")
+                return 0
+        except LockTimeoutError as e:
+            err_msg = str(e)
+            if getattr(args, "json", False):
+                print(
+                    json.dumps(
+                        {"ok": False, "applied": False, "error": "lock-timeout", "message": err_msg, "path": str(index_path)},
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"[FAIL] lock-timeout: {err_msg}", file=sys.stderr)
+            return 1
+
+    # Read-only modes (check, preview, adopt preview)
+    existing = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
+    current_hash = _file_sha256(index_path)
 
     # 1. Hash verification if expect_hash is given
     if expect_hash is not None:
@@ -1727,38 +2083,64 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path) -> dict[str, Any]:
       3. Regenerates/updates 00-INDEX.md with standard tables (Initiatives, Specs, Next up, Tasks by category, Decisions waiting, Done).
       4. Validates the upgraded tree.
     """
-    upgraded_files: list[str] = []
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if not is_platform_supported():
+        return {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+            "upgraded_files": [],
+            "emergent_count": 0,
+            "initiative_count": 0,
+            "errors": ["unsupported-platform: Mutating commands are unsupported on Windows"],
+            "warnings": [],
+        }
 
-    # 1. Update tasks/AGENTS.md
-    agents_md = tasks_dir / "AGENTS.md"
-    existing_agents = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
-    if existing_agents.strip() != CANONICAL_TASKS_AGENTS_MD.strip():
-        agents_md.write_text(CANONICAL_TASKS_AGENTS_MD, encoding="utf-8")
-        upgraded_files.append(str(agents_md))
+    try:
+        with task_write_lock(tasks_dir):
+            upgraded_files: list[str] = []
 
-    # 2. Ensure standard directories
-    (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
-    (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
+            # 1. Update tasks/AGENTS.md
+            agents_md = tasks_dir / "AGENTS.md"
+            existing_agents = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
+            if existing_agents.strip() != CANONICAL_TASKS_AGENTS_MD.strip():
+                _atomic_write_text(agents_md, CANONICAL_TASKS_AGENTS_MD, encoding="utf-8")
+                upgraded_files.append(str(agents_md))
 
-    # 3. Re-sync 00-INDEX.md
-    idx_path = tasks_dir / "00-INDEX.md"
-    existing_idx = idx_path.read_text(encoding="utf-8") if idx_path.is_file() else ""
-    rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
-    if existing_idx.strip() != rendered_idx.strip():
-        _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
-        upgraded_files.append(str(idx_path))
+            # 2. Ensure standard directories
+            (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
+            (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
 
-    # 4. Validate
-    errors, warnings, emergent, initiatives = validate_tasks_tree(tasks_dir)
+            # 3. Re-sync 00-INDEX.md
+            idx_path = tasks_dir / "00-INDEX.md"
+            existing_idx = idx_path.read_text(encoding="utf-8") if idx_path.is_file() else ""
+            rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
+            if existing_idx.strip() != rendered_idx.strip():
+                _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
+                upgraded_files.append(str(idx_path))
 
-    return {
-        "ok": len(errors) == 0,
-        "upgraded_files": upgraded_files,
-        "emergent_count": len(emergent),
-        "initiative_count": len(initiatives),
-        "errors": errors,
-        "warnings": warnings,
-    }
+            # 4. Validate
+            errors, warnings, emergent, initiatives = validate_tasks_tree(tasks_dir)
+
+            return {
+                "ok": len(errors) == 0,
+                "upgraded_files": upgraded_files,
+                "emergent_count": len(emergent),
+                "initiative_count": len(initiatives),
+                "errors": errors,
+                "warnings": warnings,
+            }
+    except LockTimeoutError as e:
+        return {
+            "ok": False,
+            "error": "lock-timeout",
+            "message": str(e),
+            "upgraded_files": [],
+            "emergent_count": 0,
+            "initiative_count": 0,
+            "errors": [f"lock-timeout: {e}"],
+            "warnings": [],
+        }
 
 
 def cmd_upgrade(args: argparse.Namespace) -> int:
@@ -1804,6 +2186,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("--actor", default=None, help="Actor performing the transition (e.g. kilo, claude, owner)")
     p_tr.add_argument("--verifier", default=None, help="Independent verifier identifier (e.g. claude:deep-reasoning, blind-subagent:deep-reasoning, owner)")
     p_tr.add_argument("--reason", default=None, help="Bounce findings (B1..Bn), caveat reason, or transition note")
+    p_tr.add_argument("--expect-task-hash", default=None, help="Refuse to transition if task bundle SHA256 does not match this hash")
     p_tr.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_tr.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_tr.set_defaults(func=cmd_transition)

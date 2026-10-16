@@ -802,3 +802,346 @@ def test_sync_index_preserves_blank_lines_outside_regions(tmp_path: pathlib.Path
     content = index_path.read_text(encoding="utf-8")
     assert f"# Task Index{five_blanks}## Next up" in content
     assert f"{five_blanks}## Footer" in content
+
+
+def test_concurrent_transitions_with_expect_task_hash(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    t001_dir = tasks_dir / "features" / "T001-concurrent"
+    _write_sample_task(t001_dir / "README.md", task_id="T001", title="Concurrent task", category="features")
+    (t001_dir / "CONTEXT.md").write_text("# Context\nInitial context\n", encoding="utf-8")
+    (t001_dir / "PROGRESS.md").write_text("# Progress\nInitial progress\n", encoding="utf-8")
+
+    bundle_hash = te.task_bundle_sha256(t001_dir)
+
+    # Use a lock-holding helper process to synchronize p1 and p2 at the lock boundary
+    lock_file = tasks_dir / ".ai-orch.lock"
+    helper = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"""
+import fcntl, os, sys
+fd = os.open({str(lock_file)!r}, os.O_RDWR | os.O_CREAT, 0o666)
+fcntl.flock(fd, fcntl.LOCK_EX)
+sys.stdout.write("LOCKED\\n")
+sys.stdout.flush()
+sys.stdin.readline()
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+""",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert helper.stdout is not None and helper.stdin is not None
+    assert helper.stdout.readline() == "LOCKED\n"
+
+    # Spawn two concurrent transition processes with the same expect-task-hash
+    p1 = subprocess.Popen(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "transition",
+            "T001",
+            "in progress",
+            "--actor",
+            "kilo",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--expect-task-hash",
+            bundle_hash,
+            "--json",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    p2 = subprocess.Popen(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "transition",
+            "T001",
+            "in progress",
+            "--actor",
+            "kilo",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--expect-task-hash",
+            bundle_hash,
+            "--json",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    import time
+    time.sleep(0.2)  # Allow both processes to start and queue on flock
+
+    # Release the lock so p1 and p2 race
+    helper.stdin.write("RELEASE\n")
+    helper.stdin.flush()
+    helper.wait(timeout=5)
+
+    out1, err1 = p1.communicate(timeout=10)
+    out2, err2 = p2.communicate(timeout=10)
+
+    res1 = (p1.returncode, json.loads(out1))
+    res2 = (p2.returncode, json.loads(out2))
+
+    successes = [r for r in (res1, res2) if r[0] == 0]
+    failures = [r for r in (res1, res2) if r[0] != 0]
+
+    assert len(successes) == 1, f"Expected exactly 1 success, got {len(successes)}: {res1}, {res2}"
+    assert len(failures) == 1, f"Expected exactly 1 failure, got {len(failures)}: {res1}, {res2}"
+
+    succ_payload = successes[0][1]
+    fail_payload = failures[0][1]
+
+    assert succ_payload["ok"] is True
+    assert succ_payload["new_state"] == "in progress"
+
+    assert fail_payload["ok"] is False
+    assert fail_payload["error"] == "stale-task"
+    assert fail_payload["expected"] == bundle_hash
+    assert fail_payload["actual"] != bundle_hash
+
+
+def test_stale_expect_task_hash_refused_bundle_unchanged(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    t001_dir = tasks_dir / "features" / "T001-stale"
+    _write_sample_task(t001_dir / "README.md", task_id="T001", title="Stale test task", category="features")
+    (t001_dir / "CONTEXT.md").write_text("# Context\nImportant context\n", encoding="utf-8")
+    (t001_dir / "PROGRESS.md").write_text("# Progress\nInitial progress log\n", encoding="utf-8")
+
+    bundle_hash = te.task_bundle_sha256(t001_dir)
+    original_bytes = {
+        p.relative_to(t001_dir).as_posix(): p.read_bytes()
+        for p in t001_dir.rglob("*")
+        if p.is_file() and not p.name.startswith(".")
+    }
+
+    stale_hash = "0" * 64
+    res = run_cli(
+        "transition",
+        "T001",
+        "in progress",
+        "--actor",
+        "kilo",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--expect-task-hash",
+        stale_hash,
+        "--json",
+    )
+    assert res.returncode == 1
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is False
+    assert payload["error"] == "stale-task"
+    assert payload["expected"] == stale_hash
+    assert payload["actual"] == bundle_hash
+
+    # Compare bytes of every file in the task bundle
+    current_bytes = {
+        p.relative_to(t001_dir).as_posix(): p.read_bytes()
+        for p in t001_dir.rglob("*")
+        if p.is_file() and not p.name.startswith(".")
+    }
+    assert current_bytes == original_bytes
+
+
+def test_lock_timeout_path(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(tasks_dir / "features" / "T001-lock.md", task_id="T001", category="features")
+
+    lock_file = tasks_dir / ".ai-orch.lock"
+    helper = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"""
+import fcntl, os, sys
+fd = os.open({str(lock_file)!r}, os.O_RDWR | os.O_CREAT, 0o666)
+fcntl.flock(fd, fcntl.LOCK_EX)
+sys.stdout.write("LOCKED\\n")
+sys.stdout.flush()
+sys.stdin.readline()
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+""",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert helper.stdout is not None and helper.stdin is not None
+    assert helper.stdout.readline() == "LOCKED\n"
+
+    try:
+        import os
+        env = dict(os.environ, AI_ORCH_LOCK_TIMEOUT="1")
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "transition",
+                "T001",
+                "in progress",
+                "--actor",
+                "kilo",
+                "--tasks-dir",
+                str(tasks_dir),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        assert proc.returncode != 0
+        payload = json.loads(proc.stdout)
+        assert payload["ok"] is False
+        assert payload["error"] == "lock-timeout"
+    finally:
+        helper.stdin.write("QUIT\n")
+        helper.stdin.flush()
+        helper.wait(timeout=5)
+
+
+def test_atomic_write_failure_cleanup(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target_file = tmp_path / "sample.md"
+    target_file.write_text("original content\n", encoding="utf-8")
+    original_bytes = target_file.read_bytes()
+
+    def failing_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        assert pathlib.Path(src).is_file()
+        raise OSError("Simulated filesystem error during atomic replace")
+
+    import os
+    monkeypatch.setattr(os, "replace", failing_replace)
+
+    with pytest.raises(OSError, match="Simulated filesystem error"):
+        te._atomic_write_text(target_file, "mutated content that should abort\n")
+
+    # Original file is intact
+    assert target_file.read_bytes() == original_bytes
+    # No temp files left behind
+    temp_files = list(tmp_path.glob(".*.tmp"))
+    assert temp_files == []
+
+
+def test_tasks_list_bundle_sha256_stability_and_context_change(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    folder_dir = tasks_dir / "features" / "T001-folder"
+    _write_sample_task(folder_dir / "README.md", task_id="T001", title="Folder task", category="features")
+    context_file = folder_dir / "CONTEXT.md"
+    context_file.write_text("# Initial Context\nSome context text\n", encoding="utf-8")
+
+    single_file = tasks_dir / "features" / "T002-single.md"
+    _write_sample_task(single_file, task_id="T002", title="Single task", category="features")
+
+    # 1. Run list --json
+    res1 = run_cli("list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res1.returncode == 0
+    data1 = json.loads(res1.stdout)
+    assert data1["ok"] is True
+
+    t1_hash_run1 = next(t["bundle_sha256"] for t in data1["emergent_tasks"] if t["id"] == "T001")
+    t2_hash_run1 = next(t["bundle_sha256"] for t in data1["emergent_tasks"] if t["id"] == "T002")
+    assert re.match(r"^[0-9a-f]{64}$", t1_hash_run1)
+    assert re.match(r"^[0-9a-f]{64}$", t2_hash_run1)
+
+    # Also verify all_tasks exposes bundle_sha256
+    all_t1 = next(t["bundle_sha256"] for t in data1["all_tasks"] if t["id"] == "T001")
+    assert all_t1 == t1_hash_run1
+
+    # 2. Stability across calls
+    res2 = run_cli("list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res2.returncode == 0
+    data2 = json.loads(res2.stdout)
+    t1_hash_run2 = next(t["bundle_sha256"] for t in data2["emergent_tasks"] if t["id"] == "T001")
+    t2_hash_run2 = next(t["bundle_sha256"] for t in data2["emergent_tasks"] if t["id"] == "T002")
+    assert t1_hash_run2 == t1_hash_run1
+    assert t2_hash_run2 == t2_hash_run1
+
+    # 3. Modify CONTEXT.md of folder task
+    context_file.write_text("# Updated Context\nDifferent context text\n", encoding="utf-8")
+
+    res3 = run_cli("list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res3.returncode == 0
+    data3 = json.loads(res3.stdout)
+    t1_hash_run3 = next(t["bundle_sha256"] for t in data3["emergent_tasks"] if t["id"] == "T001")
+    t2_hash_run3 = next(t["bundle_sha256"] for t in data3["emergent_tasks"] if t["id"] == "T002")
+
+    assert t1_hash_run3 != t1_hash_run1, "Bundle hash must change when CONTEXT.md changes"
+    assert t2_hash_run3 == t2_hash_run1, "Single-file task hash must remain unchanged"
+
+
+def test_unsupported_platform_refusal_on_mutating_commands(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(tasks_dir / "features" / "T001.md", task_id="T001", category="features")
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n"
+        "## Next up\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+    # Sync index initially so check passes
+    run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+
+    # Read-only commands work
+    res_list = run_cli("list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_list.returncode == 0
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+    res_check = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--check", "--json")
+    assert res_check.returncode == 0
+
+    # Simulate unsupported platform
+    monkeypatch.setattr(te, "is_platform_supported", lambda: False)
+
+    # transition fails
+    ok_tr, payload_tr = te.transition_task(tasks_dir, "T001", "in progress", actor="kilo")
+    assert ok_tr is False
+    assert payload_tr["error"] == "unsupported-platform"
+
+    # sync-index --apply fails
+    class Args:
+        pass
+    args_sync = Args()
+    args_sync.tasks_dir = str(tasks_dir)
+    args_sync.apply = True
+    args_sync.check = False
+    args_sync.adopt = False
+    args_sync.expect_hash = None
+    args_sync.json = True
+    assert te.cmd_sync_index(args_sync) == 1
+
+    # upgrade fails
+    upg_res = te.upgrade_tasks_tree(tasks_dir)
+    assert upg_res["ok"] is False
+    assert upg_res["error"] == "unsupported-platform"
+
+
+def test_validate_lock_file_git_ignore_warning(tmp_path: pathlib.Path) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+
+    tasks_dir = repo_dir / "tasks"
+    _write_sample_task(tasks_dir / "features" / "T001.md", task_id="T001", category="features")
+
+    # 1. Lock file not ignored -> warning
+    errors, warnings, emergent, initiatives = te.validate_tasks_tree(tasks_dir)
+    assert len(errors) == 0
+    assert any(".ai-orch.lock" in w and "not ignored by git" in w for w in warnings)
+
+    # 2. Add .ai-orch.lock to .gitignore -> warning disappears
+    (repo_dir / ".gitignore").write_text(".ai-orch.lock\n", encoding="utf-8")
+    errors2, warnings2, emergent2, initiatives2 = te.validate_tasks_tree(tasks_dir)
+    assert len(errors2) == 0
+    assert not any(".ai-orch.lock" in w for w in warnings2)

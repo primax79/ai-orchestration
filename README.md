@@ -120,6 +120,11 @@ See **[`docs/README.md`](docs/README.md)** for the full structured documentation
 - **[Config Schema (`docs/05-orchestration-config-schema.md`)](docs/05-orchestration-config-schema.md)** — Reference for Global & Project `orchestration.toml`.
 - **[Extension Spec (`tasks/specs/orchestration-extension-spec.md`)](tasks/specs/orchestration-extension-spec.md)** — Spec for the Backlog Manager & Environment Configurator UI.
 
+## Platform & File Locking
+
+- **Platform:** `ai-orchestration` core targets macOS and Linux. On Windows (`os.name == "nt"` or where `fcntl` is unavailable), read-only commands (`list`, `validate`, `sync-index --check`) work, but mutating commands (`transition`, `sync-index --apply`, `upgrade`) refuse with `error: "unsupported-platform"`.
+- **File Locking:** Concurrent task writes are serialized via an exclusive `flock` on `<tasks_dir>/.ai-orch.lock`. The lock file should be ignored in version control (ensure `.ai-orch.lock` is included in `.gitignore`).
+
 ## License
 
 [MIT](LICENSE)
