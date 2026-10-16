@@ -308,6 +308,7 @@ def test_sync_index_preserves_initiatives_and_updates_tables(tmp_path: pathlib.P
         category="features",
         priority="P0",
         next_up="yes",
+        state="waiting",
         decider="owner: Which DB engine?",
     )
     _write_sample_task(
@@ -482,6 +483,82 @@ def test_index_regression_fixture_lossless(tmp_path: pathlib.Path) -> None:
     for tid, (expected_res, expected_closed) in orig_done_rows.items():
         assert tid in result_done_rows
         assert result_done_rows[tid] == (expected_res, expected_closed)
+
+    # Regression assertion (a): Decisions table equals original Decisions table
+    # (only T007, T009 rows, original texts, original header row)
+    def _extract_table_lines(text: str, section_heading: str) -> list[str]:
+        m = re.search(rf"^##\s+{re.escape(section_heading)}\b.*?(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+        if not m:
+            return []
+        lines: list[str] = []
+        for line in m.group(0).splitlines():
+            line_s = line.strip()
+            if line_s.startswith("|"):
+                lines.append(line_s)
+        return lines
+
+    orig_dec_table = _extract_table_lines(orig_text, "Decisions waiting")
+    result_dec_table = _extract_table_lines(result_text, "Decisions waiting")
+    assert result_dec_table == orig_dec_table
+    dec_row_ids = [
+        c.strip() for line in result_dec_table[2:]
+        for c in [line.strip("|").split("|")[0].strip()]
+        if c and c != "-"
+    ]
+    assert dec_row_ids == ["T007", "T009"]
+
+    # Regression assertion (b): sequence of ### headings and row ids in every table equal original
+    def _extract_category_headings(text: str) -> list[str]:
+        m = re.search(r"^##\s+Tasks by category\b.*?(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+        if not m:
+            return []
+        return [cm.group(1) for cm in re.finditer(r"^###\s+([A-Za-z0-9_-]+)\s*$", m.group(0), re.MULTILINE)]
+
+    orig_cat_headings = _extract_category_headings(orig_text)
+    result_cat_headings = _extract_category_headings(result_text)
+    assert result_cat_headings == orig_cat_headings
+
+    def _extract_table_row_ids(text: str, heading_pattern: str) -> list[str]:
+        m = re.search(rf"^{heading_pattern}\b.*?(?=^#+ |\Z)", text, re.MULTILINE | re.DOTALL)
+        if not m:
+            return []
+        ids: list[str] = []
+        for line in m.group(0).splitlines():
+            line_s = line.strip()
+            if not line_s.startswith("|"):
+                continue
+            cells = [c.strip() for c in line_s.strip("|").split("|")]
+            if not cells or cells[0] in ("Id", "Task", "Task / Initiative", "---", "-") or cells[0].startswith("---"):
+                continue
+            ids.append(cells[0])
+        return ids
+
+    # Check row ids in Next up
+    assert _extract_table_row_ids(result_text, r"##\s+Next up") == _extract_table_row_ids(orig_text, r"##\s+Next up")
+    # Check row ids in each category
+    for cat in orig_cat_headings:
+        assert _extract_table_row_ids(result_text, rf"###\s+{cat}") == _extract_table_row_ids(orig_text, rf"###\s+{cat}")
+    # Check row ids in Decisions waiting
+    assert _extract_table_row_ids(result_text, r"##\s+Decisions waiting") == _extract_table_row_ids(orig_text, r"##\s+Decisions waiting")
+    # Check row ids in Done
+    assert _extract_table_row_ids(result_text, r"##\s+Done") == _extract_table_row_ids(orig_text, r"##\s+Done")
+
+    # Regression assertion (c): Done rows keep order and dates
+    def _extract_done_ordered(text: str) -> list[tuple[str, str, str]]:
+        m = re.search(r"^##\s+Done\b.*?(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+        if not m:
+            return []
+        rows: list[tuple[str, str, str]] = []
+        for line in m.group(0).splitlines():
+            line_s = line.strip()
+            if not line_s.startswith("|"):
+                continue
+            cells = [c.strip() for c in line_s.strip("|").split("|")]
+            if len(cells) == 4 and re.match(r"^T\d+$", cells[0]):
+                rows.append((cells[0], cells[2], cells[3]))
+        return rows
+
+    assert _extract_done_ordered(result_text) == _extract_done_ordered(orig_text)
 
     # Verification: No prose line lost outside regions
     non_region_text = re.sub(
