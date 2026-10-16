@@ -12,16 +12,18 @@ Supports 3 first-class assistant environments (`kilo`, `claude`, `codex`) and 2 
 from __future__ import annotations
 
 import argparse
+import contextlib
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
 import pathlib
 import re
 import shutil
-import tempfile
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -58,20 +60,45 @@ SKILL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 # ---------------------------------------------------------------------------
 
 def hash_directory(dir_path: pathlib.Path) -> str:
-    """Deterministic SHA-256 over all files in a skill directory (ignoring index.json and hidden files)."""
+    """Deterministic SHA-256 over all files in a skill directory (ignoring index.json, .ai-orch-source.json, and hidden files)."""
     h = hashlib.sha256()
     if not dir_path.is_dir():
         return ""
     for root, dirs, files in os.walk(dir_path):
         dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "__pycache__")
         for fname in sorted(files):
-            if fname.startswith(".") or fname.endswith(".pyc") or fname == "index.json":
+            if fname.startswith(".") or fname.endswith(".pyc") or fname in ("index.json", ".ai-orch-source.json"):
                 continue
             fpath = pathlib.Path(root) / fname
             rel = fpath.relative_to(dir_path).as_posix()
             h.update(rel.encode("utf-8") + b"\0")
             h.update(fpath.read_bytes() + b"\0")
     return h.hexdigest()[:16]
+
+
+def compute_target_hash(target_path: pathlib.Path) -> str | None:
+    """Return content hash for a file (sha256) or directory (hash_directory).
+    For symlinks: hash of target if resolvable, or hash of symlink dest if broken.
+    Return None if target does not exist.
+    """
+    if not (target_path.exists() or target_path.is_symlink()):
+        return None
+    try:
+        if target_path.is_symlink():
+            resolved = target_path.resolve()
+            if resolved.is_dir():
+                return hash_directory(resolved)
+            elif resolved.is_file():
+                return hashlib.sha256(resolved.read_bytes()).hexdigest()
+            else:
+                return hashlib.sha256(os.readlink(target_path).encode("utf-8")).hexdigest()
+        elif target_path.is_dir():
+            return hash_directory(target_path)
+        elif target_path.is_file():
+            return hashlib.sha256(target_path.read_bytes()).hexdigest()
+    except Exception:
+        return None
+    return None
 
 
 def get_home_dir() -> pathlib.Path:
@@ -81,6 +108,27 @@ def get_home_dir() -> pathlib.Path:
     return pathlib.Path.home()
 
 
+def get_env_lock_path(home: pathlib.Path | None = None) -> pathlib.Path:
+    h = home or get_home_dir()
+    return h / ".config" / "ai-orchestration" / "env.lock"
+
+
+@contextlib.contextmanager
+def env_lock(home: pathlib.Path | None = None):
+    """Exclusive flock on <home>/.config/ai-orchestration/env.lock."""
+    lock_file = get_env_lock_path(home)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_file, "a") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+
+
 def get_repos_cache_dir(home: pathlib.Path | None = None) -> pathlib.Path:
     h = home or get_home_dir()
     return h / ".ai-orchestration" / "repos"
@@ -88,34 +136,112 @@ def get_repos_cache_dir(home: pathlib.Path | None = None) -> pathlib.Path:
 
 def resolve_source_repo(repo_name: str, home: pathlib.Path | None = None) -> pathlib.Path | None:
     """Find `ai-orchestration`, `kilo-mcp`, or `claude-mcp` locally (sibling checkout) or in ~/.ai-orchestration/repos/."""
+    if home is not None:
+        cached = get_repos_cache_dir(home) / repo_name
+        if cached.is_dir():
+            return cached
+
     if repo_name == "ai-orchestration" and (REPO_ROOT / "plugins").is_dir():
         return REPO_ROOT
-    sibling = REPO_ROOT.parent / repo_name
-    if sibling.is_dir():
-        return sibling
-    for parent in REPO_ROOT.parents:
-        cand = parent / repo_name
-        if cand.is_dir():
-            return cand
+    roots_to_check = [REPO_ROOT]
+    # If in a git worktree, also check relative to the main repository
+    git_file = REPO_ROOT / ".git"
+    if git_file.is_file():
+        try:
+            content = git_file.read_text(encoding="utf-8").strip()
+            if content.startswith("gitdir:"):
+                gdir = pathlib.Path(content.split(":", 1)[1].strip())
+                if ".git" in gdir.parts:
+                    idx = gdir.parts.index(".git")
+                    roots_to_check.append(pathlib.Path(*gdir.parts[:idx]))
+        except Exception:
+            pass
+
+    for root in roots_to_check:
+        sibling = root.parent / repo_name
+        if sibling.is_dir() and ((sibling / "plugins").is_dir() or (sibling / "server.py").is_file()):
+            return sibling
+        for parent in list(root.parents)[:4]:
+            cand = parent / repo_name
+            if cand.is_dir() and ((cand / "plugins").is_dir() or (cand / "server.py").is_file()):
+                return cand
     cached = get_repos_cache_dir(home) / repo_name
     if cached.is_dir():
         return cached
     return None
 
 
-def trash_path(path: pathlib.Path, timestamp: str | None = None) -> pathlib.Path:
-    """Move a file, directory, or symlink into .ai-orch-trash/<timestamp>/<name> instead of deleting."""
+def trash_path(
+    path: pathlib.Path,
+    assistant: str | None = None,
+    scope: str = "global",
+    kind: str | None = None,
+    reason: str = "",
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    timestamp: str | None = None,
+) -> pathlib.Path:
+    """Move a file, directory, or symlink into
+    <home>/.config/ai-orchestration/trash/<assistant>/<scope-segment>/<UTC ts>/<kind>/<name>
+    and write manifest.json in the <ts> dir.
+    """
     if not (path.exists() or path.is_symlink()):
         return path
+    h = home or get_home_dir()
     ts = timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    trash_dir = path.parent / ".ai-orch-trash" / ts
-    trash_dir.mkdir(parents=True, exist_ok=True)
-    dest = trash_dir / path.name
+
+    if not assistant:
+        if ".kilo" in path.parts:
+            assistant = "kilo"
+        elif ".claude" in path.parts:
+            assistant = "claude"
+        elif ".codex" in path.parts:
+            assistant = "codex"
+        else:
+            assistant = "general"
+
+    if not kind:
+        if "agents" in path.parts or path.suffix == ".md":
+            kind = "agents"
+        else:
+            kind = "skills"
+
+    if scope == "global" or not workspace:
+        scope_segment = "global"
+    else:
+        ws_abs = str(workspace.resolve())
+        ws_hash = hashlib.sha256(ws_abs.encode("utf-8")).hexdigest()[:8]
+        scope_segment = f"project-{workspace.resolve().name}-{ws_hash}"
+
+    ts_dir = h / ".config" / "ai-orchestration" / "trash" / assistant / scope_segment / ts
+    kind_dir = ts_dir / kind
+    kind_dir.mkdir(parents=True, exist_ok=True)
+
+    dest = kind_dir / path.name
     counter = 1
     while dest.exists() or dest.is_symlink():
-        dest = trash_dir / f"{path.name}_{counter}"
+        dest = kind_dir / f"{path.name}_{counter}"
         counter += 1
+
+    orig_str = str(path)
     shutil.move(str(path), str(dest))
+
+    manifest_file = ts_dir / "manifest.json"
+    manifest: list[dict[str, str]] = []
+    if manifest_file.is_file():
+        try:
+            loaded = json.loads(manifest_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                manifest = loaded
+        except Exception:
+            manifest = []
+
+    manifest.append({
+        "original_path": orig_str,
+        "trashed_path": str(dest),
+        "reason": reason,
+    })
+    manifest_file.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return dest
 
 
@@ -160,6 +286,44 @@ def assistant_mcp_config_path(
     raise ValueError(f"Unknown assistant: {assistant}")
 
 
+def assistant_agents_dir(
+    assistant: str,
+    scope: str,
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+) -> pathlib.Path:
+    h = home or get_home_dir()
+    ws = workspace or pathlib.Path.cwd()
+    if assistant == "kilo":
+        return (h / ".config" / "kilo" / "agents") if scope == "global" else (ws / ".kilo" / "agents")
+    elif assistant == "claude":
+        return (h / ".claude" / "agents") if scope == "global" else (ws / ".claude" / "agents")
+    elif assistant == "codex":
+        return (h / ".codex" / "agents") if scope == "global" else (ws / ".codex" / "agents")
+    raise ValueError(f"Unknown assistant: {assistant}")
+
+
+def read_agent_receipts(agents_dir: pathlib.Path) -> dict[str, dict[str, Any]]:
+    rfile = agents_dir / ".ai-orch-receipts.json"
+    if not rfile.is_file():
+        return {}
+    try:
+        data = json.loads(rfile.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def write_agent_receipt(agents_dir: pathlib.Path, filename: str, receipt: dict[str, Any]) -> None:
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    rfile = agents_dir / ".ai-orch-receipts.json"
+    data = read_agent_receipts(agents_dir)
+    data[filename] = receipt
+    rfile.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Catalog Discovery from Local / Cloned Source Repos
 # ---------------------------------------------------------------------------
@@ -181,6 +345,30 @@ def discover_available_skills(home: pathlib.Path | None = None) -> dict[tuple[st
                 "plugin": pdir.name,
                 "path": str(sdir),
                 "hash": hash_directory(sdir),
+            }
+    return catalog
+
+
+def discover_available_agents(home: pathlib.Path | None = None) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Return map of (repo, plugin, agent_filename) -> {name, repo, plugin, path, hash} across repos."""
+    catalog: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for repo_name in ("ai-orchestration", "kilo-mcp", "claude-mcp"):
+        rpath = resolve_source_repo(repo_name, home)
+        if not rpath or not (rpath / "plugins").is_dir():
+            continue
+        for agent_md in sorted((rpath / "plugins").glob("*/agents/*.md")):
+            pdir = agent_md.parent.parent
+            aname = agent_md.name
+            try:
+                ahash = hashlib.sha256(agent_md.read_bytes()).hexdigest()
+            except Exception:
+                ahash = ""
+            catalog[(repo_name, pdir.name, aname)] = {
+                "name": aname,
+                "repo": repo_name,
+                "plugin": pdir.name,
+                "path": str(agent_md),
+                "hash": ahash,
             }
     return catalog
 
@@ -210,11 +398,6 @@ def detect_skill_state(
 
     inst_hash = hash_directory(child) if (child.is_dir() and not child.is_symlink()) or (child.is_symlink() and child.resolve().is_dir()) else ""
 
-    # Check up-to-date by content hash
-    for entry in matching_entries:
-        if inst_hash and inst_hash == entry["hash"]:
-            return ("up-to-date", entry["repo"], entry["hash"])
-
     # Check up-to-date by direct symlink to catalog source
     if child.is_symlink():
         try:
@@ -225,23 +408,32 @@ def detect_skill_state(
         except Exception:
             pass
 
-    # Content matches no catalog entry and not a symlink to catalog entry.
-    # Check if installed by this tool:
-    # 1. Copy mode: marker file .ai-orch-source.json
+    # Check receipt file .ai-orch-source.json
     marker = child / ".ai-orch-source.json"
     if marker.is_file():
         try:
             mdata = json.loads(marker.read_text(encoding="utf-8"))
             mrepo = mdata.get("repo")
-            mhash = mdata.get("hash")
+            mhash = mdata.get("source_hash") or mdata.get("hash")
             mplugin = mdata.get("plugin")
-            if (mrepo, mplugin, sname) in catalog:
-                mhash = catalog[(mrepo, mplugin, sname)]["hash"]
-            return ("modified-or-outdated", mrepo, mhash)
+            cat_entry = catalog.get((mrepo, mplugin, sname)) if mrepo and mplugin else None
+            if not cat_entry and matching_entries:
+                cat_entry = matching_entries[0]
+            cat_hash = cat_entry["hash"] if cat_entry else None
+
+            if inst_hash and inst_hash == mhash and (not cat_hash or inst_hash == cat_hash):
+                return ("up-to-date", mrepo, cat_hash or mhash)
+            else:
+                return ("modified-or-outdated", mrepo, cat_hash or mhash)
         except Exception:
             return ("modified-or-outdated", None, None)
 
-    # 2. Link mode: symlink target into known source repo
+    # No receipt: check if hash matches any catalog entry (legacy copies)
+    for entry in matching_entries:
+        if inst_hash and inst_hash == entry["hash"]:
+            return ("up-to-date", entry["repo"], entry["hash"])
+
+    # Link mode into known source repo
     if child.is_symlink():
         try:
             resolved = child.resolve()
@@ -253,7 +445,75 @@ def detect_skill_state(
         except Exception:
             pass
 
-    # Neither marker nor symlink to known repo
+    # Neither marker nor symlink to known repo and no catalog hash match
+    return ("foreign", None, None)
+
+
+def detect_agent_state(
+    child: pathlib.Path,
+    catalog_agents: dict[tuple[str, str, str], dict[str, Any]],
+    receipts: dict[str, dict[str, Any]],
+    home: pathlib.Path | None = None,
+) -> tuple[str, str | None, str | None]:
+    """Determine state, source_repo, and source_hash for an installed agent file/symlink."""
+    aname = child.name
+    if aname in OBSOLETE_AGENT_RENAMES:
+        return (f"obsolete-renamed->{OBSOLETE_AGENT_RENAMES[aname]}", None, None)
+
+    matching_entries = [entry for entry in catalog_agents.values() if entry["name"] == aname]
+    if not matching_entries:
+        return ("unmanaged", None, None)
+
+    inst_hash = ""
+    if child.is_file() or child.is_symlink():
+        try:
+            resolved = child.resolve()
+            if resolved.is_file():
+                inst_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        except Exception:
+            pass
+
+    # Check up-to-date by direct symlink to catalog source
+    if child.is_symlink():
+        try:
+            resolved = child.resolve()
+            for entry in matching_entries:
+                if resolved == pathlib.Path(entry["path"]).resolve():
+                    return ("up-to-date", entry["repo"], entry["hash"])
+        except Exception:
+            pass
+
+    receipt = receipts.get(aname)
+    if receipt:
+        r_repo = receipt.get("repo")
+        r_hash = receipt.get("source_hash") or receipt.get("hash")
+        r_plugin = receipt.get("plugin")
+        cat_entry = catalog_agents.get((r_repo, r_plugin, aname)) if r_repo and r_plugin else None
+        if not cat_entry and matching_entries:
+            cat_entry = matching_entries[0]
+        cat_hash = cat_entry["hash"] if cat_entry else None
+
+        if inst_hash and inst_hash == r_hash and (not cat_hash or inst_hash == cat_hash):
+            return ("up-to-date", r_repo, cat_hash or r_hash)
+        else:
+            return ("modified-or-outdated", r_repo, cat_hash or r_hash)
+
+    # No receipt: check if hash matches any catalog entry (legacy copies)
+    for entry in matching_entries:
+        if inst_hash and inst_hash == entry["hash"]:
+            return ("up-to-date", entry["repo"], entry["hash"])
+
+    if child.is_symlink():
+        try:
+            resolved = child.resolve()
+            for rname in ("ai-orchestration", "kilo-mcp", "claude-mcp"):
+                rpath = resolve_source_repo(rname, home)
+                if rpath and (resolved == rpath or rpath in resolved.parents):
+                    cat_entry = next((e for e in matching_entries if e["repo"] == rname), None)
+                    return ("modified-or-outdated", rname, cat_entry["hash"] if cat_entry else None)
+        except Exception:
+            pass
+
     return ("foreign", None, None)
 
 
@@ -341,6 +601,7 @@ def inspect_environment(
     h = home or get_home_dir()
     ws = workspace.resolve() if workspace else None
     catalog = discover_available_skills(h)
+    catalog_agents = discover_available_agents(h)
 
     clis = {tool: check_cli_binary(tool) for tool in ASSISTANTS}
     repos_status = {}
@@ -363,7 +624,7 @@ def inspect_environment(
             installed_skills: dict[str, Any] = {}
             if sdir.is_dir():
                 for child in sorted(sdir.iterdir()):
-                    if child.name == ".ai-orch-trash" or child.name.startswith("."):
+                    if child.name.startswith("."):
                         continue
                     if not (child.is_dir() or child.is_symlink()):
                         continue
@@ -374,6 +635,33 @@ def inspect_environment(
                     inst_hash = hash_directory(child)
                     state, src_repo, src_hash = detect_skill_state(child, catalog, h)
                     installed_skills[sname] = {
+                        "state": state,
+                        "is_symlink": child.is_symlink(),
+                        "installed_hash": inst_hash,
+                        "source_repo": src_repo,
+                        "source_hash": src_hash,
+                    }
+
+            # Inspect agents
+            adir = assistant_agents_dir(assistant, scope, ws, h)
+            installed_agents: dict[str, Any] = {}
+            if adir.is_dir():
+                agent_receipts = read_agent_receipts(adir)
+                for child in sorted(adir.iterdir()):
+                    if child.name.startswith(".") or not child.name.endswith(".md"):
+                        continue
+                    if not (child.is_file() or child.is_symlink()):
+                        continue
+                    aname = child.name
+                    state, src_repo, src_hash = detect_agent_state(child, catalog_agents, agent_receipts, h)
+                    inst_hash = ""
+                    try:
+                        resolved = child.resolve()
+                        if resolved.is_file():
+                            inst_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+                    except Exception:
+                        pass
+                    installed_agents[aname] = {
                         "state": state,
                         "is_symlink": child.is_symlink(),
                         "installed_hash": inst_hash,
@@ -395,6 +683,8 @@ def inspect_environment(
                 "skills_dir": str(sdir),
                 "installed_count": len(installed_skills),
                 "skills": installed_skills,
+                "agents_dir": str(adir),
+                "agents": installed_agents,
                 "conflicts": conflicts,
                 "mcp_config_path": str(mcp_cfg_path),
                 "registered_mcps": sorted(mcps.keys()),
@@ -415,28 +705,140 @@ def inspect_environment(
 def clone_or_update_repos(
     repos: list[str],
     home: pathlib.Path | None = None,
+    dry_run: bool = False,
+    expect_plan_hash: str | None = None,
 ) -> dict[str, Any]:
-    cache_dir = get_repos_cache_dir(home)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    results: dict[str, Any] = {}
+    h = home or get_home_dir()
+    cache_dir = get_repos_cache_dir(h)
 
-    for rname in repos:
-        existing = resolve_source_repo(rname, home)
-        if existing and existing.parent != cache_dir:
-            results[rname] = {"action": "using-local-checkout", "path": str(existing), "ok": True}
-            continue
-        target = cache_dir / rname
-        url = REMOTE_REPOS.get(rname)
-        if not url:
-            results[rname] = {"action": "skipped-no-remote", "path": None, "ok": False}
-            continue
-        if (target / ".git").is_dir():
-            res = subprocess.run(["git", "-C", str(target), "pull", "--ff-only"], capture_output=True, text=True, check=False)
-            results[rname] = {"action": "updated", "path": str(target), "ok": res.returncode == 0}
-        else:
-            res = subprocess.run(["git", "clone", url, str(target)], capture_output=True, text=True, check=False)
-            results[rname] = {"action": "cloned", "path": str(target), "ok": res.returncode == 0}
-    return results
+    def _build_plan() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        p: list[dict[str, Any]] = []
+        ops: list[dict[str, Any]] = []
+        for rname in repos:
+            existing = resolve_source_repo(rname, h)
+            if existing and existing.parent != cache_dir:
+                head_sha = None
+                try:
+                    res = subprocess.run(
+                        ["git", "-C", str(existing), "rev-parse", "HEAD"],
+                        capture_output=True, text=True, check=False,
+                    )
+                    if res.returncode == 0:
+                        head_sha = res.stdout.strip()
+                except Exception:
+                    pass
+                p_item = {
+                    "action": "skip",
+                    "path": str(existing),
+                    "reason": f"Using existing local checkout of {rname}",
+                    "current_state": "local-checkout",
+                    "before_sha256": head_sha,
+                    "after_sha256": None,
+                }
+                p.append(p_item)
+                ops.append({"type": "local", "repo": rname, "path": existing, "plan_item": p_item})
+                continue
+
+            target = cache_dir / rname
+            url = REMOTE_REPOS.get(rname)
+            if not url:
+                p_item = {
+                    "action": "skip",
+                    "path": str(target),
+                    "reason": f"No remote URL configured for {rname}",
+                    "current_state": "missing",
+                    "before_sha256": None,
+                    "after_sha256": None,
+                }
+                p.append(p_item)
+                ops.append({"type": "no_remote", "repo": rname, "path": target, "plan_item": p_item})
+                continue
+
+            if (target / ".git").is_dir():
+                head_sha = None
+                try:
+                    res = subprocess.run(
+                        ["git", "-C", str(target), "rev-parse", "HEAD"],
+                        capture_output=True, text=True, check=False,
+                    )
+                    if res.returncode == 0:
+                        head_sha = res.stdout.strip()
+                except Exception:
+                    pass
+                p_item = {
+                    "action": "git-pull",
+                    "path": str(target),
+                    "reason": f"Update {rname} via git pull --ff-only",
+                    "current_state": "cloned",
+                    "before_sha256": head_sha,
+                    "after_sha256": None,
+                }
+                p.append(p_item)
+                ops.append({"type": "pull", "repo": rname, "path": target, "plan_item": p_item})
+            else:
+                p_item = {
+                    "action": "git-clone",
+                    "path": str(target),
+                    "reason": f"Clone {rname} from {url}",
+                    "current_state": "missing",
+                    "before_sha256": None,
+                    "after_sha256": None,
+                }
+                p.append(p_item)
+                ops.append({"type": "clone", "repo": rname, "path": target, "url": url, "plan_item": p_item})
+        return p, ops
+
+    plan, planned_ops = _build_plan()
+    plan_hash = compute_plan_hash(plan)
+
+    if expect_plan_hash is not None and expect_plan_hash != plan_hash:
+        return {
+            "ok": False,
+            "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed plan hash is {plan_hash}",
+            "plan": plan,
+            "plan_hash": plan_hash,
+        }
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "plan": plan,
+            "plan_hash": plan_hash,
+        }
+
+    with env_lock(h):
+        plan, planned_ops = _build_plan()
+        plan_hash = compute_plan_hash(plan)
+        if expect_plan_hash is not None and expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed plan hash is {plan_hash}",
+                "plan": plan,
+                "plan_hash": plan_hash,
+            }
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        results: dict[str, Any] = {}
+        for op in planned_ops:
+            rname = op["repo"]
+            if op["type"] == "local":
+                results[rname] = {"action": "using-local-checkout", "path": str(op["path"]), "ok": True}
+            elif op["type"] == "no_remote":
+                results[rname] = {"action": "skipped-no-remote", "path": None, "ok": False}
+            elif op["type"] == "pull":
+                res = subprocess.run(["git", "-C", str(op["path"]), "pull", "--ff-only"], capture_output=True, text=True, check=False)
+                results[rname] = {"action": "updated", "path": str(op["path"]), "ok": res.returncode == 0}
+            elif op["type"] == "clone":
+                res = subprocess.run(["git", "clone", op["url"], str(op["path"])], capture_output=True, text=True, check=False)
+                results[rname] = {"action": "cloned", "path": str(op["path"]), "ok": res.returncode == 0}
+
+        return {
+            "ok": all(v.get("ok", False) for v in results.values()),
+            "results": results,
+            "plan": plan,
+            "plan_hash": plan_hash,
+        }
 
 
 def install_skills(
@@ -458,126 +860,172 @@ def install_skills(
         raise FileNotFoundError(f"Source repository {repo_name!r} not found locally. Run `fetch-repos` first.")
 
     selected_plugins = plugins or ["architect-side", "executor-side", "shared"]
-    catalog = discover_available_skills(h)
     overwrite_set = set(overwrite or [])
     overwrite_all = "all" in overwrite_set
 
-    plan: list[dict[str, Any]] = []
-    planned_ops: list[dict[str, Any]] = []
+    def _build_plan() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        catalog = discover_available_skills(h)
+        catalog_agents = discover_available_agents(h)
+        p: list[dict[str, Any]] = []
+        ops: list[dict[str, Any]] = []
 
-    for assistant in assistants:
-        dest_skills_dir = assistant_skills_dir(assistant, scope, ws, h)
-        dest_agents_dir = (
-            (h / ".config" / "kilo" / "agents")
-            if (assistant == "kilo" and scope == "global")
-            else (dest_skills_dir.parent / "agents")
-        )
+        for assistant in assistants:
+            dest_skills_dir = assistant_skills_dir(assistant, scope, ws, h)
+            dest_agents_dir = assistant_agents_dir(assistant, scope, ws, h)
 
-        # 1. Obsolete skills
-        for old_name in sorted(OBSOLETE_SKILL_RENAMES):
-            old_dir = dest_skills_dir / old_name
-            if old_dir.exists() or old_dir.is_symlink():
-                new_target = OBSOLETE_SKILL_RENAMES[old_name]
-                p_item = {
-                    "action": "trash",
-                    "path": str(old_dir),
-                    "reason": f"obsolete pre-rename name of {new_target}",
-                    "current_state": f"obsolete-renamed->{new_target}",
-                }
-                plan.append(p_item)
-                planned_ops.append({"type": "obsolete_skill", "path": old_dir, "plan_item": p_item})
-
-        # 2. Obsolete agents
-        if dest_agents_dir.is_dir():
-            for old_agent in sorted(OBSOLETE_AGENT_RENAMES):
-                old_a_path = dest_agents_dir / old_agent
-                if old_a_path.exists() or old_a_path.is_symlink():
-                    new_agent = OBSOLETE_AGENT_RENAMES[old_agent]
+            # 1. Obsolete skills
+            for old_name in sorted(OBSOLETE_SKILL_RENAMES):
+                old_dir = dest_skills_dir / old_name
+                if old_dir.exists() or old_dir.is_symlink():
+                    new_target = OBSOLETE_SKILL_RENAMES[old_name]
                     p_item = {
                         "action": "trash",
-                        "path": str(old_a_path),
-                        "reason": f"obsolete pre-rename name of {new_agent}",
-                        "current_state": f"obsolete-renamed->{new_agent}",
+                        "path": str(old_dir),
+                        "reason": f"obsolete pre-rename name of {new_target}",
+                        "current_state": f"obsolete-renamed->{new_target}",
+                        "before_sha256": compute_target_hash(old_dir),
+                        "after_sha256": None,
                     }
-                    plan.append(p_item)
-                    planned_ops.append({"type": "obsolete_agent", "path": old_a_path, "plan_item": p_item})
+                    p.append(p_item)
+                    ops.append({"type": "obsolete_skill", "assistant": assistant, "scope": scope, "path": old_dir, "plan_item": p_item})
 
-        # 3. Agent files to install
-        for p_name in selected_plugins:
-            src_agents_root = rpath / "plugins" / p_name / "agents"
-            if src_agents_root.is_dir() and assistant in ("claude", "kilo"):
-                for agent_md in sorted(src_agents_root.glob("*.md")):
-                    target_agent = dest_agents_dir / agent_md.name
-                    is_existing = target_agent.exists() or target_agent.is_symlink()
-                    action = "replace" if is_existing else "create"
-                    cur_state = "installed" if is_existing else "missing"
+            # 2. Obsolete agents
+            if dest_agents_dir.is_dir():
+                for old_agent in sorted(OBSOLETE_AGENT_RENAMES):
+                    old_a_path = dest_agents_dir / old_agent
+                    if old_a_path.exists() or old_a_path.is_symlink():
+                        new_agent = OBSOLETE_AGENT_RENAMES[old_agent]
+                        p_item = {
+                            "action": "trash",
+                            "path": str(old_a_path),
+                            "reason": f"obsolete pre-rename name of {new_agent}",
+                            "current_state": f"obsolete-renamed->{new_agent}",
+                            "before_sha256": compute_target_hash(old_a_path),
+                            "after_sha256": None,
+                        }
+                        p.append(p_item)
+                        ops.append({"type": "obsolete_agent", "assistant": assistant, "scope": scope, "path": old_a_path, "plan_item": p_item})
+
+            # 3. Agent files to install
+            for p_name in selected_plugins:
+                src_agents_root = rpath / "plugins" / p_name / "agents"
+                if src_agents_root.is_dir() and assistant in ("claude", "kilo"):
+                    agent_receipts = read_agent_receipts(dest_agents_dir)
+                    for agent_md in sorted(src_agents_root.glob("*.md")):
+                        aname = agent_md.name
+                        target_agent = dest_agents_dir / aname
+                        src_hash = hashlib.sha256(agent_md.read_bytes()).hexdigest()
+                        is_existing = target_agent.exists() or target_agent.is_symlink()
+                        if not is_existing:
+                            action = "create"
+                            cur_state = "missing"
+                            reason = f"Install agent '{aname}' from {repo_name}/{p_name}"
+                            before_sha256 = None
+                            after_sha256 = src_hash
+                        else:
+                            cur_state, s_repo, s_hash = detect_agent_state(target_agent, catalog_agents, agent_receipts, h)
+                            before_sha256 = compute_target_hash(target_agent)
+                            if cur_state in ("unmanaged", "modified-or-outdated", "foreign"):
+                                if overwrite_all or aname in overwrite_set:
+                                    action = "replace"
+                                    reason = f"Replace {cur_state} agent '{aname}' with {repo_name}/{p_name} (--overwrite)"
+                                    after_sha256 = src_hash
+                                else:
+                                    action = "skip"
+                                    reason = f"Skip {cur_state} agent '{aname}': not in --overwrite list"
+                                    after_sha256 = None
+                            else:
+                                action = "replace"
+                                reason = f"Update agent '{aname}' from {repo_name}/{p_name}"
+                                after_sha256 = src_hash
+
+                        p_item = {
+                            "action": action,
+                            "path": str(target_agent),
+                            "reason": reason,
+                            "current_state": cur_state,
+                            "before_sha256": before_sha256,
+                            "after_sha256": after_sha256,
+                        }
+                        p.append(p_item)
+                        ops.append({
+                            "type": "agent",
+                            "action": action,
+                            "assistant": assistant,
+                            "scope": scope,
+                            "agent": aname,
+                            "plugin": p_name,
+                            "repo": repo_name,
+                            "src": agent_md,
+                            "target": target_agent,
+                            "dest_dir": dest_agents_dir,
+                            "link": link,
+                            "plan_item": p_item,
+                        })
+
+            # 4. Skills to install
+            for p_name in selected_plugins:
+                src_skills_root = rpath / "plugins" / p_name / "skills"
+                if not src_skills_root.is_dir():
+                    continue
+                for skill_md in sorted(src_skills_root.glob("*/SKILL.md")):
+                    src_dir = skill_md.parent
+                    sname = src_dir.name
+                    target_dir = dest_skills_dir / sname
+                    src_hash = hash_directory(src_dir)
+                    is_existing = target_dir.exists() or target_dir.is_symlink()
+                    if not is_existing:
+                        action = "create"
+                        cur_state = "missing"
+                        reason = f"Install skill '{sname}' from {repo_name}/{p_name}"
+                        before_sha256 = None
+                        after_sha256 = src_hash
+                    else:
+                        cur_state, s_repo, s_hash = detect_skill_state(target_dir, catalog, h)
+                        before_sha256 = compute_target_hash(target_dir)
+                        if cur_state in ("unmanaged", "modified-or-outdated", "foreign"):
+                            if overwrite_all or sname in overwrite_set:
+                                action = "replace"
+                                reason = f"Replace {cur_state} skill '{sname}' with {repo_name}/{p_name} (--overwrite)"
+                                after_sha256 = src_hash
+                            else:
+                                action = "skip"
+                                reason = f"Skip {cur_state} skill '{sname}': not in --overwrite list"
+                                after_sha256 = None
+                        else:
+                            action = "replace"
+                            reason = f"Update skill '{sname}' from {repo_name}/{p_name}"
+                            after_sha256 = src_hash
+
                     p_item = {
                         "action": action,
-                        "path": str(target_agent),
-                        "reason": f"Install agent '{agent_md.name}' from {repo_name}/{p_name}",
+                        "path": str(target_dir),
+                        "reason": reason,
                         "current_state": cur_state,
+                        "before_sha256": before_sha256,
+                        "after_sha256": after_sha256,
                     }
-                    plan.append(p_item)
-                    planned_ops.append({
-                        "type": "agent",
+                    p.append(p_item)
+                    ops.append({
+                        "type": "skill",
                         "action": action,
-                        "src": agent_md,
-                        "target": target_agent,
-                        "dest_dir": dest_agents_dir,
+                        "assistant": assistant,
+                        "scope": scope,
+                        "skill": sname,
+                        "plugin": p_name,
+                        "repo": repo_name,
+                        "src": src_dir,
+                        "target": target_dir,
+                        "dest_dir": dest_skills_dir,
                         "link": link,
                         "plan_item": p_item,
                     })
 
-        # 4. Skills to install
-        for p_name in selected_plugins:
-            src_skills_root = rpath / "plugins" / p_name / "skills"
-            if not src_skills_root.is_dir():
-                continue
-            for skill_md in sorted(src_skills_root.glob("*/SKILL.md")):
-                src_dir = skill_md.parent
-                sname = src_dir.name
-                target_dir = dest_skills_dir / sname
-                is_existing = target_dir.exists() or target_dir.is_symlink()
-                if not is_existing:
-                    action = "create"
-                    cur_state = "missing"
-                    reason = f"Install skill '{sname}' from {repo_name}/{p_name}"
-                else:
-                    cur_state, s_repo, s_hash = detect_skill_state(target_dir, catalog, h)
-                    if cur_state in ("unmanaged", "modified-or-outdated", "foreign"):
-                        if overwrite_all or sname in overwrite_set:
-                            action = "replace"
-                            reason = f"Replace {cur_state} skill '{sname}' with {repo_name}/{p_name} (--overwrite)"
-                        else:
-                            action = "skip"
-                            reason = f"Skip {cur_state} skill '{sname}': not in --overwrite list"
-                    else:
-                        action = "replace"
-                        reason = f"Update skill '{sname}' from {repo_name}/{p_name}"
+        return p, ops
 
-                p_item = {
-                    "action": action,
-                    "path": str(target_dir),
-                    "reason": reason,
-                    "current_state": cur_state,
-                }
-                plan.append(p_item)
-                planned_ops.append({
-                    "type": "skill",
-                    "action": action,
-                    "assistant": assistant,
-                    "scope": scope,
-                    "skill": sname,
-                    "plugin": p_name,
-                    "repo": repo_name,
-                    "src": src_dir,
-                    "target": target_dir,
-                    "dest_dir": dest_skills_dir,
-                    "link": link,
-                    "plan_item": p_item,
-                })
-
+    plan, planned_ops = _build_plan()
     plan_hash = compute_plan_hash(plan)
+
     if expect_plan_hash is not None and expect_plan_hash != plan_hash:
         return {
             "ok": False,
@@ -594,65 +1042,115 @@ def install_skills(
             "plan_hash": plan_hash,
         }
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    installed: list[dict[str, str]] = []
-    removed_obsolete: list[str] = []
+    with env_lock(h):
+        plan, planned_ops = _build_plan()
+        plan_hash = compute_plan_hash(plan)
+        if expect_plan_hash is not None and expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed plan hash is {plan_hash}",
+                "plan": plan,
+                "plan_hash": plan_hash,
+            }
 
-    for op in planned_ops:
-        action = op.get("action", "trash")
-        if action == "skip":
-            continue
-        if op["type"] in ("obsolete_skill", "obsolete_agent"):
-            trash_path(op["path"], timestamp=ts)
-            removed_obsolete.append(str(op["path"]))
-        elif op["type"] == "agent":
-            op["dest_dir"].mkdir(parents=True, exist_ok=True)
-            if action == "replace":
-                trash_path(op["target"], timestamp=ts)
-            if op["link"]:
-                op["target"].symlink_to(op["src"])
-            else:
-                shutil.copy2(op["src"], op["target"])
-        elif op["type"] == "skill":
-            op["dest_dir"].mkdir(parents=True, exist_ok=True)
-            if action == "replace":
-                trash_path(op["target"], timestamp=ts)
-            if op["link"]:
-                op["target"].symlink_to(op["src"])
-            else:
-                shutil.copytree(
-                    op["src"],
-                    op["target"],
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        installed: list[dict[str, str]] = []
+        removed_obsolete: list[str] = []
+
+        for op in planned_ops:
+            action = op.get("action", "trash")
+            if action == "skip":
+                continue
+            if op["type"] in ("obsolete_skill", "obsolete_agent"):
+                kind = "skills" if op["type"] == "obsolete_skill" else "agents"
+                trash_path(
+                    op["path"],
+                    assistant=op["assistant"],
+                    scope=op["scope"],
+                    kind=kind,
+                    reason=op["plan_item"]["reason"],
+                    workspace=ws,
+                    home=h,
+                    timestamp=ts,
                 )
-                marker_data = {
+                removed_obsolete.append(str(op["path"]))
+            elif op["type"] == "agent":
+                op["dest_dir"].mkdir(parents=True, exist_ok=True)
+                if action == "replace":
+                    trash_path(
+                        op["target"],
+                        assistant=op["assistant"],
+                        scope=op["scope"],
+                        kind="agents",
+                        reason=op["plan_item"]["reason"],
+                        workspace=ws,
+                        home=h,
+                        timestamp=ts,
+                    )
+                if op["link"]:
+                    op["target"].symlink_to(op["src"])
+                else:
+                    shutil.copy2(op["src"], op["target"])
+                receipt_data = {
                     "repo": op["repo"],
                     "plugin": op["plugin"],
-                    "name": op["skill"],
-                    "hash": hash_directory(op["src"]),
+                    "name": op["agent"],
+                    "source_hash": hashlib.sha256(op["src"].read_bytes()).hexdigest(),
+                    "installed_at": datetime.now(timezone.utc).isoformat(),
+                    "mode": "symlink" if op["link"] else "copy",
                 }
-                (op["target"] / ".ai-orch-source.json").write_text(
-                    json.dumps(marker_data, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-            installed.append({
-                "assistant": op["assistant"],
-                "scope": op["scope"],
-                "skill": op["skill"],
-                "plugin": op["plugin"],
-                "repo": op["repo"],
-                "target": str(op["target"]),
-                "mode": "symlink" if op["link"] else "copy",
-            })
+                write_agent_receipt(op["dest_dir"], op["agent"], receipt_data)
+            elif op["type"] == "skill":
+                op["dest_dir"].mkdir(parents=True, exist_ok=True)
+                if action == "replace":
+                    trash_path(
+                        op["target"],
+                        assistant=op["assistant"],
+                        scope=op["scope"],
+                        kind="skills",
+                        reason=op["plan_item"]["reason"],
+                        workspace=ws,
+                        home=h,
+                        timestamp=ts,
+                    )
+                if op["link"]:
+                    op["target"].symlink_to(op["src"])
+                else:
+                    shutil.copytree(
+                        op["src"],
+                        op["target"],
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
+                    )
+                    marker_data = {
+                        "repo": op["repo"],
+                        "plugin": op["plugin"],
+                        "name": op["skill"],
+                        "source_hash": hash_directory(op["src"]),
+                        "installed_at": datetime.now(timezone.utc).isoformat(),
+                        "mode": "copy",
+                    }
+                    (op["target"] / ".ai-orch-source.json").write_text(
+                        json.dumps(marker_data, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                installed.append({
+                    "assistant": op["assistant"],
+                    "scope": op["scope"],
+                    "skill": op["skill"],
+                    "plugin": op["plugin"],
+                    "repo": op["repo"],
+                    "target": str(op["target"]),
+                    "mode": "symlink" if op["link"] else "copy",
+                })
 
-    return {
-        "ok": True,
-        "installed_count": len(installed),
-        "installed": installed,
-        "removed_obsolete": removed_obsolete,
-        "plan": plan,
-        "plan_hash": plan_hash,
-    }
+        return {
+            "ok": True,
+            "installed_count": len(installed),
+            "installed": installed,
+            "removed_obsolete": removed_obsolete,
+            "plan": plan,
+            "plan_hash": plan_hash,
+        }
 
 
 def remove_skill(
@@ -668,8 +1166,6 @@ def remove_skill(
     ws = workspace.resolve() if workspace else pathlib.Path.cwd()
     if not SKILL_NAME_RE.fullmatch(skill_name or ""):
         return {"ok": False, "message": f"Invalid skill name {skill_name!r}: expected a single directory name ([A-Za-z0-9][A-Za-z0-9._-]*)", "plan": [], "plan_hash": compute_plan_hash([])}
-    if skill_name == ".ai-orch-trash":
-        return {"ok": False, "message": "Cannot remove .ai-orch-trash", "plan": [], "plan_hash": compute_plan_hash([])}
     skills_dir = assistant_skills_dir(assistant, scope, ws, h)
     dest_dir = skills_dir / skill_name
     # Defence in depth: the target must be a direct child of the skills dir (no traversal, no symlinked parent tricks)
@@ -678,14 +1174,19 @@ def remove_skill(
     if not (dest_dir.exists() or dest_dir.is_symlink()):
         return {"ok": False, "message": f"Skill '{skill_name}' not found in {dest_dir.parent}", "plan": [], "plan_hash": compute_plan_hash([])}
 
-    catalog = discover_available_skills(h)
-    cur_state, _, _ = detect_skill_state(dest_dir, catalog, h)
-    plan = [{
-        "action": "trash",
-        "path": str(dest_dir),
-        "reason": f"Remove skill '{skill_name}' from {assistant} ({scope})",
-        "current_state": cur_state,
-    }]
+    def _build_plan() -> list[dict[str, Any]]:
+        catalog = discover_available_skills(h)
+        cur_state, _, _ = detect_skill_state(dest_dir, catalog, h)
+        return [{
+            "action": "trash",
+            "path": str(dest_dir),
+            "reason": f"Remove skill '{skill_name}' from {assistant} ({scope})",
+            "current_state": cur_state,
+            "before_sha256": compute_target_hash(dest_dir),
+            "after_sha256": None,
+        }]
+
+    plan = _build_plan()
     plan_hash = compute_plan_hash(plan)
 
     if expect_plan_hash is not None and expect_plan_hash != plan_hash:
@@ -704,16 +1205,35 @@ def remove_skill(
             "plan_hash": plan_hash,
         }
 
-    trash_path(dest_dir)
-    return {
-        "ok": True,
-        "removed": str(dest_dir),
-        "assistant": assistant,
-        "scope": scope,
-        "skill": skill_name,
-        "plan": plan,
-        "plan_hash": plan_hash,
-    }
+    with env_lock(h):
+        plan = _build_plan()
+        plan_hash = compute_plan_hash(plan)
+        if expect_plan_hash is not None and expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed plan hash is {plan_hash}",
+                "plan": plan,
+                "plan_hash": plan_hash,
+            }
+
+        trash_path(
+            dest_dir,
+            assistant=assistant,
+            scope=scope,
+            kind="skills",
+            reason=plan[0]["reason"],
+            workspace=ws,
+            home=h,
+        )
+        return {
+            "ok": True,
+            "removed": str(dest_dir),
+            "assistant": assistant,
+            "scope": scope,
+            "skill": skill_name,
+            "plan": plan,
+            "plan_hash": plan_hash,
+        }
 
 
 def resolve_conflicts(
@@ -731,39 +1251,45 @@ def resolve_conflicts(
     scopes_to_check = ["global"] + (["project"] if ws else [])
     policy = load_conflict_policy(h, ws)
 
-    plan: list[dict[str, Any]] = []
-    conflict_items: list[dict[str, Any]] = []
+    def _build_plan() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        p: list[dict[str, Any]] = []
+        c_items: list[dict[str, Any]] = []
+        for assistant in ASSISTANTS:
+            for scope in scopes_to_check:
+                sdir = assistant_skills_dir(assistant, scope, ws, h)
+                has_generic = (sdir / "orchestration-workflow").exists()
+                has_bound = (sdir / "kilo-mcp-orchestrator").exists()
+                if has_generic and has_bound:
+                    keep_target = policy.get(assistant, "generic" if assistant == "kilo" else "bound")
+                    if keep_target == "generic":
+                        to_remove = "kilo-mcp-orchestrator"
+                        to_keep = "orchestration-workflow"
+                    else:
+                        to_remove = "orchestration-workflow"
+                        to_keep = "kilo-mcp-orchestrator"
+                    target_path = sdir / to_remove
+                    p_item = {
+                        "action": "trash",
+                        "path": str(target_path),
+                        "reason": f"Resolve conflict in {assistant} ({scope}): keep '{to_keep}', trash '{to_remove}' per policy",
+                        "current_state": "conflict",
+                        "before_sha256": compute_target_hash(target_path),
+                        "after_sha256": None,
+                    }
+                    p.append(p_item)
+                    c_items.append({
+                        "assistant": assistant,
+                        "scope": scope,
+                        "removed": to_remove,
+                        "kept": to_keep,
+                        "path": target_path,
+                        "reason": p_item["reason"],
+                    })
+        return p, c_items
 
-    for assistant in ASSISTANTS:
-        for scope in scopes_to_check:
-            sdir = assistant_skills_dir(assistant, scope, ws, h)
-            has_generic = (sdir / "orchestration-workflow").exists()
-            has_bound = (sdir / "kilo-mcp-orchestrator").exists()
-            if has_generic and has_bound:
-                keep_target = policy.get(assistant, "generic" if assistant == "kilo" else "bound")
-                if keep_target == "generic":
-                    to_remove = "kilo-mcp-orchestrator"
-                    to_keep = "orchestration-workflow"
-                else:
-                    to_remove = "orchestration-workflow"
-                    to_keep = "kilo-mcp-orchestrator"
-                target_path = sdir / to_remove
-                p_item = {
-                    "action": "trash",
-                    "path": str(target_path),
-                    "reason": f"Resolve conflict in {assistant} ({scope}): keep '{to_keep}', trash '{to_remove}' per policy",
-                    "current_state": "conflict",
-                }
-                plan.append(p_item)
-                conflict_items.append({
-                    "assistant": assistant,
-                    "scope": scope,
-                    "removed": to_remove,
-                    "kept": to_keep,
-                    "path": target_path,
-                })
-
+    plan, conflict_items = _build_plan()
     plan_hash = compute_plan_hash(plan)
+
     if expect_plan_hash is not None and expect_plan_hash != plan_hash:
         return {
             "ok": False,
@@ -782,24 +1308,44 @@ def resolve_conflicts(
             "plan_hash": plan_hash,
         }
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    resolved: list[dict[str, str]] = []
-    for item in conflict_items:
-        trash_path(item["path"], timestamp=ts)
-        resolved.append({
-            "assistant": item["assistant"],
-            "scope": item["scope"],
-            "removed": item["removed"],
-            "kept": item["kept"],
-        })
+    with env_lock(h):
+        plan, conflict_items = _build_plan()
+        plan_hash = compute_plan_hash(plan)
+        if expect_plan_hash is not None and expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed plan hash is {plan_hash}",
+                "plan": plan,
+                "plan_hash": plan_hash,
+            }
 
-    return {
-        "ok": True,
-        "resolved_count": len(resolved),
-        "resolved": resolved,
-        "plan": plan,
-        "plan_hash": plan_hash,
-    }
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        resolved: list[dict[str, str]] = []
+        for item in conflict_items:
+            trash_path(
+                item["path"],
+                assistant=item["assistant"],
+                scope=item["scope"],
+                kind="skills",
+                reason=item["reason"],
+                workspace=ws,
+                home=h,
+                timestamp=ts,
+            )
+            resolved.append({
+                "assistant": item["assistant"],
+                "scope": item["scope"],
+                "removed": item["removed"],
+                "kept": item["kept"],
+            })
+
+        return {
+            "ok": True,
+            "resolved_count": len(resolved),
+            "resolved": resolved,
+            "plan": plan,
+            "plan_hash": plan_hash,
+        }
 
 
 def _atomic_write_with_backup(path: pathlib.Path, content: str) -> None:
@@ -843,35 +1389,90 @@ def register_mcp_server(
         cmd = str(venv_py) if venv_py.is_file() else sys.executable
         cmd_args = [str(rpath / "server.py")]
 
-    plan: list[dict[str, Any]] = []
-    configs_to_update: list[tuple[str, pathlib.Path, dict[str, Any]]] = []
+    def _build_plan() -> tuple[list[dict[str, Any]], list[tuple[str, pathlib.Path, dict[str, Any], str]], bool]:
+        p: list[dict[str, Any]] = []
+        c_updates: list[tuple[str, pathlib.Path, dict[str, Any], str]] = []
+        needs_venv = False
 
-    for assistant in assistants:
-        cfg_path = assistant_mcp_config_path(assistant, scope, ws, h)
-        data: dict[str, Any] = {}
-        if cfg_path.exists():
-            # Never fall back to {} on a parse error: that would overwrite the whole file
-            # (e.g. ~/.claude.json holds all of Claude Code's state) with a single key.
-            try:
-                data = json.loads(cfg_path.read_text(encoding="utf-8"))
-            except Exception as exc:
-                raise ValueError(f"Refusing to modify {cfg_path}: it is not valid JSON ({exc}). Fix or register the server manually.") from exc
-            if not isinstance(data, dict):
-                raise ValueError(f"Refusing to modify {cfg_path}: top-level JSON value is not an object.")
-            mcps = read_registered_mcps(cfg_path, assistant)
-            cur_state = "registered" if server_repo in mcps else "unregistered"
-        else:
-            cur_state = "missing"
+        if server_repo != "codex-mcp" and provision_venv:
+            rpath_v = resolve_source_repo(server_repo, h)
+            if rpath_v:
+                v_dir = rpath_v / ".venv"
+                v_py = v_dir / "bin" / "python"
+                if not v_py.is_file():
+                    needs_venv = True
+                    p.append({
+                        "action": "venv-create",
+                        "path": str(v_dir),
+                        "command": f"{sys.executable} -m venv {v_dir}",
+                        "reason": f"Create virtualenv for {server_repo}",
+                        "current_state": "missing",
+                        "before_sha256": None,
+                        "after_sha256": None,
+                    })
+                    p.append({
+                        "action": "pip-install",
+                        "path": str(v_dir),
+                        "command": f"{v_py} -m pip install -q -e {rpath_v}",
+                        "reason": f"Install {server_repo} in editable mode",
+                        "current_state": "uninstalled",
+                        "before_sha256": None,
+                        "after_sha256": None,
+                    })
 
-        plan.append({
-            "action": "edit",
-            "path": str(cfg_path),
-            "reason": f"Register MCP server '{server_repo}' in {assistant} ({scope})",
-            "current_state": cur_state,
-        })
-        configs_to_update.append((assistant, cfg_path, data))
+        for assistant in assistants:
+            cfg_path = assistant_mcp_config_path(assistant, scope, ws, h)
+            data: dict[str, Any] = {}
+            if cfg_path.exists():
+                # Never fall back to {} on a parse error: that would overwrite the whole file
+                # (e.g. ~/.claude.json holds all of Claude Code's state) with a single key.
+                try:
+                    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    raise ValueError(f"Refusing to modify {cfg_path}: it is not valid JSON ({exc}). Fix or register the server manually.") from exc
+                if not isinstance(data, dict):
+                    raise ValueError(f"Refusing to modify {cfg_path}: top-level JSON value is not an object.")
+                mcps = read_registered_mcps(cfg_path, assistant)
+                cur_state = "registered" if server_repo in mcps else "unregistered"
+            else:
+                cur_state = "missing"
 
+            new_data = json.loads(json.dumps(data))
+            effective_cmd = str(rpath / ".venv" / "bin" / "python") if (provision_venv and server_repo != "codex-mcp") else cmd
+            if assistant == "kilo":
+                mcp_block = new_data.setdefault("mcp", {})
+                mcp_block[server_repo] = {
+                    "type": "local",
+                    "command": [effective_cmd, *cmd_args],
+                    "enabled": True,
+                }
+            else:
+                mcp_block = new_data.setdefault("mcpServers", {})
+                mcp_block[server_repo] = {
+                    "type": "stdio",
+                    "command": effective_cmd,
+                    "args": cmd_args,
+                }
+
+            new_json_str = json.dumps(new_data, indent=2) + "\n"
+            after_sha = hashlib.sha256(new_json_str.encode("utf-8")).hexdigest()
+            before_sha = compute_target_hash(cfg_path)
+
+            p.append({
+                "action": "edit",
+                "path": str(cfg_path),
+                "reason": f"Register MCP server '{server_repo}' in {assistant} ({scope})",
+                "current_state": cur_state,
+                "before_sha256": before_sha,
+                "after_sha256": after_sha,
+            })
+            c_updates.append((assistant, cfg_path, new_data, new_json_str))
+
+        return p, c_updates, needs_venv
+
+    plan, configs_to_update, needs_venv = _build_plan()
     plan_hash = compute_plan_hash(plan)
+
     if expect_plan_hash is not None and expect_plan_hash != plan_hash:
         return {
             "ok": False,
@@ -891,45 +1492,40 @@ def register_mcp_server(
             "plan_hash": plan_hash,
         }
 
-    if server_repo != "codex-mcp" and provision_venv:
-        rpath = resolve_source_repo(server_repo, h)
-        assert rpath is not None
-        venv_py = rpath / ".venv" / "bin" / "python"
-        if not venv_py.is_file():
+    with env_lock(h):
+        plan, configs_to_update, needs_venv = _build_plan()
+        plan_hash = compute_plan_hash(plan)
+        if expect_plan_hash is not None and expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed plan hash is {plan_hash}",
+                "plan": plan,
+                "plan_hash": plan_hash,
+            }
+
+        if needs_venv and server_repo != "codex-mcp":
+            rpath = resolve_source_repo(server_repo, h)
+            assert rpath is not None
+            venv_py = rpath / ".venv" / "bin" / "python"
             subprocess.run([sys.executable, "-m", "venv", str(rpath / ".venv")], check=True)
             subprocess.run([str(venv_py), "-m", "pip", "install", "-q", "-e", str(rpath)], check=True)
             cmd = str(venv_py)
 
-    updated_configs: list[str] = []
-    for assistant, cfg_path, data in configs_to_update:
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        if assistant == "kilo":
-            mcp_block = data.setdefault("mcp", {})
-            mcp_block[server_repo] = {
-                "type": "local",
-                "command": [cmd, *cmd_args],
-                "enabled": True,
-            }
-        else:
-            mcp_block = data.setdefault("mcpServers", {})
-            mcp_block[server_repo] = {
-                "type": "stdio",
-                "command": cmd,
-                "args": cmd_args,
-            }
+        updated_configs: list[str] = []
+        for assistant, cfg_path, data, content_str in configs_to_update:
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_with_backup(cfg_path, content_str)
+            updated_configs.append(str(cfg_path))
 
-        _atomic_write_with_backup(cfg_path, json.dumps(data, indent=2) + "\n")
-        updated_configs.append(str(cfg_path))
-
-    return {
-        "ok": True,
-        "server": server_repo,
-        "command": cmd,
-        "args": cmd_args,
-        "updated_configs": updated_configs,
-        "plan": plan,
-        "plan_hash": plan_hash,
-    }
+        return {
+            "ok": True,
+            "server": server_repo,
+            "command": cmd,
+            "args": cmd_args,
+            "updated_configs": updated_configs,
+            "plan": plan,
+            "plan_hash": plan_hash,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -965,13 +1561,25 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_fetch_repos(args: argparse.Namespace) -> int:
-    res = clone_or_update_repos(args.repos, args.home)
+    res = clone_or_update_repos(
+        repos=args.repos,
+        home=args.home,
+        dry_run=args.dry_run,
+        expect_plan_hash=args.expect_plan_hash,
+    )
     if args.json:
         print(json.dumps(res, indent=2))
     else:
-        for r, info in res.items():
-            print(f"[{ 'ok' if info['ok'] else 'FAIL' }] {r}: {info['action']} ({info['path']})")
-    return 0 if all(v["ok"] for v in res.values()) else 1
+        if not res.get("ok"):
+            print(f"[error] {res.get('error', 'Execution refused')}", file=sys.stderr)
+        elif res.get("dry_run"):
+            print(f"[dry-run] Plan ({len(res['plan'])} action(s), hash: {res['plan_hash']}):")
+            for item in res["plan"]:
+                print(f"  {item['action'].upper():<10} {item['path']} ({item['reason']})")
+        else:
+            for r, info in res.get("results", {}).items():
+                print(f"[{ 'ok' if info.get('ok') else 'FAIL' }] {r}: {info.get('action')} ({info.get('path')})")
+    return 0 if res.get("ok") else 1
 
 
 def cmd_install_skills(args: argparse.Namespace) -> int:
@@ -1113,6 +1721,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_fr = sub.add_parser("fetch-repos", help="Clone or update ai-orchestration / kilo-mcp in ~/.ai-orchestration/repos/")
     p_fr.add_argument("--repos", nargs="+", default=["ai-orchestration", "kilo-mcp"])
+    p_fr.add_argument("--dry-run", action="store_true", default=False, help="Compute and output execution plan without modifying disk")
+    p_fr.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
     p_fr.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
     p_fr.set_defaults(func=cmd_fetch_repos)
 

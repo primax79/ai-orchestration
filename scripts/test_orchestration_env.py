@@ -1,6 +1,7 @@
 """Unit tests for scripts/orchestration_env.py (skill installation, MCP registration, status & drift detection across kilo, claude, and codex)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -234,12 +235,18 @@ def test_no_clobber_install_and_overwrite_and_trash(tmp_path: pathlib.Path) -> N
     assert plan2_by_path[str(foreign_dir)]["action"] == "replace"
     assert plan2_by_path[str(modified_dir)]["action"] == "skip"
 
-    # Verify old copy was moved to .ai-orch-trash/
-    trash_dir = claude_skills / ".ai-orch-trash"
-    assert trash_dir.is_dir()
-    trashed_foreign = list(trash_dir.glob("*/orchestration-workflow/SKILL.md"))
+    # Verify old copy was moved to centralized trash outside assistant directory
+    assert not (claude_skills / ".ai-orch-trash").exists()
+    trash_base = fake_home / ".config" / "ai-orchestration" / "trash" / "claude" / "global"
+    trashed_foreign = list(trash_base.glob("*/skills/orchestration-workflow/SKILL.md"))
     assert len(trashed_foreign) == 1
     assert trashed_foreign[0].read_text() == "# Foreign Orchestration\n"
+
+    # Verify manifest exists and records the trashed item
+    manifests = list(trash_base.glob("*/manifest.json"))
+    assert len(manifests) >= 1
+    m_entries = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert any(m["original_path"] == str(foreign_dir) for m in m_entries)
 
     # Verify new copy was installed with .ai-orch-source.json
     assert (foreign_dir / "SKILL.md").read_text() != "# Foreign Orchestration\n"
@@ -251,13 +258,15 @@ def test_no_clobber_install_and_overwrite_and_trash(tmp_path: pathlib.Path) -> N
         fake_home,
     )
     assert inst3["ok"] is True
-    trashed_modified = list(trash_dir.glob("*/executor-contract/SKILL.md"))
+    trashed_modified = list(trash_base.glob("*/skills/executor-contract/SKILL.md"))
     assert len(trashed_modified) == 1
     assert trashed_modified[0].read_text() == "# Local Edit of Executor\n"
 
-    # Verify .ai-orch-trash is ignored by inspect_environment
-    st2 = run_env(["status"], fake_home)
-    assert ".ai-orch-trash" not in st2["environments"]["claude"]["global"]["skills"]
+    # Verify nothing under skills_dir except installed skills (no trash dir)
+    for child in claude_skills.iterdir():
+        assert child.is_dir()
+        assert not child.name.startswith(".")
+        assert (child / "SKILL.md").is_file()
 
 
 def test_dry_run_leaves_disk_completely_unchanged(tmp_path: pathlib.Path) -> None:
@@ -384,14 +393,23 @@ def test_obsolete_renames_in_plan_and_trashed_only_on_apply(tmp_path: pathlib.Pa
     assert not obs_skill.exists()
     assert not obs_agent.exists()
 
-    # Preserved in .ai-orch-trash/
-    trashed_skill = list((fake_home / ".claude" / "skills" / ".ai-orch-trash").glob("*/interactive-role-setup/SKILL.md"))
+    # Preserved in centralized trash outside assistant dirs
+    assert not (fake_home / ".claude" / "skills" / ".ai-orch-trash").exists()
+    assert not (kilo_agents / ".ai-orch-trash").exists()
+
+    claude_trash = fake_home / ".config" / "ai-orchestration" / "trash" / "claude" / "global"
+    trashed_skill = list(claude_trash.glob("*/skills/interactive-role-setup/SKILL.md"))
     assert len(trashed_skill) == 1
     assert trashed_skill[0].read_text() == "# Obsolete Skill\n"
 
-    trashed_agent = list((kilo_agents / ".ai-orch-trash").glob("*/mcp-orchestrator-agent.md"))
+    kilo_trash = fake_home / ".config" / "ai-orchestration" / "trash" / "kilo" / "global"
+    trashed_agent = list(kilo_trash.glob("*/agents/mcp-orchestrator-agent.md"))
     assert len(trashed_agent) == 1
     assert trashed_agent[0].read_text() == "# Obsolete Agent\n"
+
+    # Manifest exists and records the trashed items
+    skill_manifest = json.loads(list(claude_trash.glob("*/manifest.json"))[0].read_text(encoding="utf-8"))
+    assert any(m["original_path"] == str(obs_skill) for m in skill_manifest)
 
 
 def test_remove_skill_and_resolve_conflicts_trash_instead_of_delete(tmp_path: pathlib.Path) -> None:
@@ -406,21 +424,23 @@ def test_remove_skill_and_resolve_conflicts_trash_instead_of_delete(tmp_path: pa
     assert (claude_skills / "orchestration-workflow").is_dir()
     assert (claude_skills / "kilo-mcp-orchestrator").is_dir()
 
-    # Resolve conflicts -> moves generic 'orchestration-workflow' to .ai-orch-trash/
+    # Resolve conflicts -> moves generic 'orchestration-workflow' to centralized trash
     rc = run_env(["resolve-conflicts"], fake_home)
     assert rc["ok"] is True
     assert not (claude_skills / "orchestration-workflow").exists()
     assert (claude_skills / "kilo-mcp-orchestrator").is_dir()
+    assert not (claude_skills / ".ai-orch-trash").exists()
 
-    trashed_conflict = list((claude_skills / ".ai-orch-trash").glob("*/orchestration-workflow/SKILL.md"))
+    claude_trash = fake_home / ".config" / "ai-orchestration" / "trash" / "claude" / "global"
+    trashed_conflict = list(claude_trash.glob("*/skills/orchestration-workflow/SKILL.md"))
     assert len(trashed_conflict) == 1
 
-    # Remove skill -> moves 'kilo-mcp-orchestrator' to .ai-orch-trash/
+    # Remove skill -> moves 'kilo-mcp-orchestrator' to centralized trash
     rm = run_env(["remove-skill", "kilo-mcp-orchestrator", "--assistant", "claude"], fake_home)
     assert rm["ok"] is True
     assert not (claude_skills / "kilo-mcp-orchestrator").exists()
 
-    trashed_rm = list((claude_skills / ".ai-orch-trash").glob("*/kilo-mcp-orchestrator/SKILL.md"))
+    trashed_rm = list(claude_trash.glob("*/skills/kilo-mcp-orchestrator/SKILL.md"))
     assert len(trashed_rm) == 1
 
 
@@ -455,3 +475,206 @@ claude = "generic"
     claude_res = next(r for r in rc["resolved"] if r["assistant"] == "claude")
     assert claude_res["kept"] == "orchestration-workflow"
     assert claude_res["removed"] == "kilo-mcp-orchestrator"
+
+
+def test_modify_source_skill_refuses_stale_plan_hash(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Create mock repo in cache dir
+    mock_repo = fake_home / ".ai-orchestration" / "repos" / "claude-mcp"
+    skill_dir = mock_repo / "plugins" / "architect-side" / "skills" / "my-mock-skill"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("# Initial Version\n")
+
+    # Dry-run computes plan hash
+    dry = run_env(["install-skills", "--repo", "claude-mcp", "--assistants", "claude", "--dry-run"], fake_home)
+    assert dry["ok"] is True
+    plan_hash = dry["plan_hash"]
+
+    # Modify the source skill file
+    skill_file.write_text("# Mutated Version After Dry Run\n")
+
+    # Apply with stale expect-plan-hash -> refused!
+    res = run_env_raw(
+        ["install-skills", "--repo", "claude-mcp", "--assistants", "claude", "--expect-plan-hash", plan_hash],
+        fake_home,
+    )
+    assert res.returncode != 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is False
+    assert "Plan hash mismatch" in data["error"]
+    assert not (fake_home / ".claude" / "skills" / "my-mock-skill").exists()
+
+
+def test_project_scope_trash_location_and_manifest(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    ws = tmp_path / "my-project"
+    ws.mkdir()
+
+    # Install skills into project scope for kilo
+    run_env(["install-skills", "--assistants", "kilo", "--scope", "project", "--workspace", str(ws)], fake_home)
+
+    target_skill = ws / ".kilo" / "skills" / "orchestration-workflow"
+    assert (target_skill / "SKILL.md").is_file()
+
+    # Modify the installed skill to make it modified-or-outdated
+    (target_skill / "SKILL.md").write_text("# Project modified content\n")
+
+    # Overwrite it so it gets trashed
+    run_env(
+        ["install-skills", "--assistants", "kilo", "--scope", "project", "--workspace", str(ws), "--overwrite", "orchestration-workflow"],
+        fake_home,
+    )
+
+    ws_abs = str(ws.resolve())
+    ws_hash = hashlib.sha256(ws_abs.encode("utf-8")).hexdigest()[:8]
+    scope_segment = f"project-{ws.name}-{ws_hash}"
+
+    trash_base = fake_home / ".config" / "ai-orchestration" / "trash" / "kilo" / scope_segment
+    assert trash_base.is_dir()
+
+    trashed_files = list(trash_base.glob("*/skills/orchestration-workflow/SKILL.md"))
+    assert len(trashed_files) == 1
+    assert trashed_files[0].read_text() == "# Project modified content\n"
+
+    manifest_files = list(trash_base.glob("*/manifest.json"))
+    assert len(manifest_files) >= 1
+    manifest = json.loads(manifest_files[0].read_text(encoding="utf-8"))
+    assert any(m["original_path"] == str(target_skill) for m in manifest)
+
+    # Nothing in project skills except valid skills
+    for child in (ws / ".kilo" / "skills").iterdir():
+        assert child.is_dir()
+        assert not child.name.startswith(".")
+        assert (child / "SKILL.md").is_file()
+
+
+def test_agent_receipts_no_clobber_and_trash(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    kilo_agents = fake_home / ".config" / "kilo" / "agents"
+
+    # Install skills & agents from kilo-mcp (which contains kilo-mcp-orchestrator-agent.md)
+    run_env(["install-skills", "--assistants", "kilo", "--scope", "global", "--repo", "kilo-mcp"], fake_home)
+
+    # Verify receipts file exists and is not a .md file
+    receipts_file = kilo_agents / ".ai-orch-receipts.json"
+    assert receipts_file.is_file()
+    receipts = json.loads(receipts_file.read_text(encoding="utf-8"))
+
+    agent_name = "kilo-mcp-orchestrator-agent.md"
+    assert agent_name in receipts
+    r = receipts[agent_name]
+    assert set(r.keys()) == {"repo", "plugin", "name", "source_hash", "installed_at", "mode"}
+    assert r["repo"] == "kilo-mcp"
+    assert r["name"] == agent_name
+    assert r["mode"] == "copy"
+
+    # Locally modify the agent
+    agent_path = kilo_agents / agent_name
+    agent_path.write_text("# Local modified agent content\n")
+
+    # Status identifies it as modified-or-outdated
+    st = run_env(["status"], fake_home)
+    assert st["environments"]["kilo"]["global"]["agents"][agent_name]["state"] == "modified-or-outdated"
+
+    # Install without --overwrite: skips it, leaves modified content intact
+    inst_skip = run_env(["install-skills", "--assistants", "kilo", "--scope", "global", "--repo", "kilo-mcp"], fake_home)
+    plan_by_path = {p["path"]: p for p in inst_skip["plan"]}
+    assert plan_by_path[str(agent_path)]["action"] == "skip"
+    assert agent_path.read_text() == "# Local modified agent content\n"
+
+    # Install with --overwrite: replaces and trashes
+    inst_ovw = run_env(["install-skills", "--assistants", "kilo", "--scope", "global", "--repo", "kilo-mcp", "--overwrite", agent_name], fake_home)
+    assert inst_ovw["ok"] is True
+    assert agent_path.read_text() != "# Local modified agent content\n"
+
+    trash_base = fake_home / ".config" / "ai-orchestration" / "trash" / "kilo" / "global"
+    trashed_agents = list(trash_base.glob(f"*/agents/{agent_name}"))
+    assert len(trashed_agents) == 1
+    assert trashed_agents[0].read_text() == "# Local modified agent content\n"
+
+    manifest_files = list(trash_base.glob("*/manifest.json"))
+    assert len(manifest_files) >= 1
+    manifest = json.loads(manifest_files[0].read_text(encoding="utf-8"))
+    assert any(m["original_path"] == str(agent_path) for m in manifest)
+
+    # Ensure no trash dir under agents
+    assert not (kilo_agents / ".ai-orch-trash").exists()
+
+
+def test_fetch_repos_dry_run_and_plan_hashes(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    res = run_env(["fetch-repos", "--dry-run"], fake_home)
+    assert res["ok"] is True
+    assert res["dry_run"] is True
+    assert len(res["plan"]) > 0
+    assert len(res["plan_hash"]) == 64
+
+    for item in res["plan"]:
+        assert item["action"] in ("git-clone", "git-pull", "skip")
+        assert "before_sha256" in item
+        assert "after_sha256" in item
+
+
+def test_register_mcp_provision_venv_dry_run_and_plan_hashes(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    res = run_env(["register-mcp", "kilo-mcp", "--provision-venv", "--dry-run", "--assistants", "claude"], fake_home)
+    assert res["ok"] is True
+    assert res["dry_run"] is True
+    assert len(res["plan"]) > 0
+    assert len(res["plan_hash"]) == 64
+
+    actions = [item["action"] for item in res["plan"]]
+    assert "edit" in actions
+
+    for item in res["plan"]:
+        assert "before_sha256" in item
+        assert "after_sha256" in item
+
+
+def test_receipt_file_excluded_from_hash_directory(tmp_path: pathlib.Path) -> None:
+    from orchestration_env import hash_directory
+
+    test_dir = tmp_path / "my-skill"
+    test_dir.mkdir()
+    (test_dir / "SKILL.md").write_text("# My Skill\n")
+
+    h_before = hash_directory(test_dir)
+
+    # Write .ai-orch-source.json inside skill directory
+    (test_dir / ".ai-orch-source.json").write_text(json.dumps({"dummy": "receipt"}))
+
+    h_after = hash_directory(test_dir)
+    assert h_before == h_after
+
+
+def test_env_lock_held_during_execution(tmp_path: pathlib.Path) -> None:
+    import fcntl
+    import pytest
+    from orchestration_env import env_lock, get_env_lock_path
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # When lock is held, attempting non-blocking lock fails with BlockingIOError / OSError
+    with env_lock(fake_home):
+        lock_path = get_env_lock_path(fake_home)
+        assert lock_path.is_file()
+        with open(lock_path, "a") as f2:
+            with pytest.raises((BlockingIOError, OSError)):
+                fcntl.flock(f2.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    # Once released, lock can be acquired again non-blocking
+    with open(lock_path, "a") as f3:
+        fcntl.flock(f3.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(f3.fileno(), fcntl.LOCK_UN)
