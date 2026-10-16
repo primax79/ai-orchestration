@@ -13,6 +13,9 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 3 | 03 | [Configuration & Task Management Skill + Python Scripts (`orchestration_config.py`, `tasks_engine.py`)](03-skill-and-script-engine/plan.md) | done | 02 | M |
 | 4 | 04 | [Orchestration Methodology & Skill Refinements (Review Tier 2)](04-methodology-refinements/plan.md) | partial (`T003`–`T005` done; `T006` open) | 01 | M |
 | 5 | 05 | [Standalone CLI (`ai-orch`), From-Scratch Installer & Extension Control Plane](05-cli-and-ui-handoff/plan.md) | done | 02, 03 | L |
+| 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](06-control-plane-safety/plan.md) | open (E1, E2 fixed in `2ca3377`; wave 1: 06.1, 06.2, 06.5) | 05 | L |
+| 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | open (07.1 in wave A) | 05, 06 | L |
+| 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | open | 06 | M |
 
 ## Specs
 
@@ -21,6 +24,9 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [orchestration-config-and-agents-md](specs/orchestration-config-and-agents-md.md) | 02, 03 |
 | [task-and-state-model](specs/task-and-state-model.md) | 02, 03, 05 |
 | [orchestration-extension-spec](specs/orchestration-extension-spec.md) | 05 |
+| [control-plane-safety](specs/control-plane-safety.md) | 06 |
+| [agent-runs-from-ui](specs/agent-runs-from-ui.md) | 07 |
+| [blocking-questions](specs/blocking-questions.md) | 08 |
 
 ## Next up
 
@@ -74,9 +80,15 @@ flowchart TB
     I02["02: Formal Task & Config Spec (done)"]
     I03["03: Skill + Python Scripts: orchestration_config.py & tasks_engine.py (done)"]
     I04["04: Methodology Refinements (T003-T005 done, T006 open)"]
-    I05["05: CLI (05.1/05.2 done) & UI Control Plane (05.3/05.4 open)"]
+    I05["05: CLI & UI Control Plane (done)"]
+    I06["06: Control-plane safety (open)"]
+    I07["07: Agent runs from the control plane (open)"]
+    I08["08: Blocking questions (open)"]
     MCP["T001, T002 (done) / T007, T008 (open): Standalone MCP Servers (kilo-mcp & claude-mcp)"]
 
-    I01 --> I02 --> I03 --> I05
+    I01 --> I02 --> I03 --> I05 --> I06
+    I06 --> I07
+    I06 --> I08
+    I08 -.->|answer and resume| I07
     I01 --> I04
 ```
