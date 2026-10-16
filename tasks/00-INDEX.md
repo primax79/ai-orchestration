@@ -16,6 +16,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](06-control-plane-safety/plan.md) | open (E1, E2 fixed in `2ca3377`; wave 1: 06.1, 06.2, 06.5) | 05 | L |
 | 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | open (07.1 in wave A) | 05, 06 | L |
 | 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | open | 06 | M |
+| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | open | 06 (07 for agent triage) | M |
 
 ## Specs
 
@@ -27,6 +28,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [control-plane-safety](specs/control-plane-safety.md) | 06 |
 | [agent-runs-from-ui](specs/agent-runs-from-ui.md) | 07 |
 | [blocking-questions](specs/blocking-questions.md) | 08 |
+| [inbox-notes](specs/inbox-notes.md) | 09 |
 
 ## Next up
 
@@ -92,11 +94,14 @@ flowchart TB
     I06["06: Control-plane safety (open)"]
     I07["07: Agent runs from the control plane (open)"]
     I08["08: Blocking questions (open)"]
+    I09["09: Inbox notes and screenshots to tasks (open)"]
     MCP["T001, T002 (done) / T007, T008 (open): Standalone MCP Servers (kilo-mcp & claude-mcp)"]
 
     I01 --> I02 --> I03 --> I05 --> I06
     I06 --> I07
     I06 --> I08
+    I06 --> I09
+    I07 -.->|agent triage| I09
     I08 -.->|answer and resume| I07
     I01 --> I04
 ```
