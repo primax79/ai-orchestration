@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -635,7 +636,7 @@ def test_register_mcp_provision_venv_dry_run_and_plan_hashes(tmp_path: pathlib.P
     assert len(res["plan_hash"]) == 64
 
     actions = [item["action"] for item in res["plan"]]
-    assert "edit" in actions
+    assert any(a in actions for a in ("edit", "cli"))
 
     for item in res["plan"]:
         assert "before_sha256" in item
@@ -1178,4 +1179,297 @@ def test_no_duplicate_conflict_entries_and_plan_paths(tmp_path: pathlib.Path) ->
     plan = rc["plan"]
     plan_paths = [item["path"] for item in plan]
     assert len(plan_paths) == len(set(plan_paths)), f"Duplicate paths found in plan: {plan_paths}"
+
+
+# ---------------------------------------------------------------------------
+# Task 06.4: Real MCP Configs Tests
+# ---------------------------------------------------------------------------
+
+def test_jsonc_stripper_and_parser() -> None:
+    from orchestration_env import strip_jsonc_comments, strip_trailing_commas, parse_jsonc
+
+    # 1. Line and block comments outside strings
+    sample = """
+    {
+      // single line comment
+      "key1": "value1", /* inline block comment */
+      /*
+         multiline
+         block comment
+      */
+      "key2": 123
+    }
+    """
+    res = parse_jsonc(sample)
+    assert res == {"key1": "value1", "key2": 123}
+
+    # 2. Comments inside strings preserved
+    sample_strings = """
+    {
+      "url": "https://example.com/api//test",
+      "comment_like": "/* not a comment */ and // not line comment",
+      "escaped_quote": "text \\" // still inside string",
+      "double_slash_escaped": "path\\\\//still not comment",
+      "trailing_comma_in_string": "value, }"
+    }
+    """
+    res2 = parse_jsonc(sample_strings)
+    assert res2["url"] == "https://example.com/api//test"
+    assert res2["comment_like"] == "/* not a comment */ and // not line comment"
+    assert res2["escaped_quote"] == 'text " // still inside string'
+    assert res2["trailing_comma_in_string"] == "value, }"
+
+    # 3. Trailing commas in arrays and objects
+    sample_commas = """
+    {
+      "arr": [1, 2, 3, ],
+      "obj": {
+        "a": "b",
+      },
+    }
+    """
+    res3 = parse_jsonc(sample_commas)
+    assert res3 == {"arr": [1, 2, 3], "obj": {"a": "b"}}
+
+
+def test_kilo_merged_view_provenance_and_overrides(tmp_path: pathlib.Path) -> None:
+    from orchestration_env import inspect_environment
+
+    fake_home = tmp_path / "home"
+    kilo_dir = fake_home / ".config" / "kilo"
+    kilo_dir.mkdir(parents=True)
+
+    # 1. config.json (lowest precedence)
+    (kilo_dir / "config.json").write_text(json.dumps({
+        "mcp": {
+            "server-base": {"command": "cmd-base"},
+            "server-shared": {"command": "cmd-base-shared"},
+        }
+    }))
+
+    # 2. kilo.json (overrides config.json)
+    (kilo_dir / "kilo.json").write_text(json.dumps({
+        "mcp": {
+            "server-shared": {"command": "cmd-kilo-shared"},
+            "server-kilo": {"command": "cmd-kilo"},
+        }
+    }))
+
+    # 3. kilo.jsonc (overrides kilo.json, contains JSONC comments)
+    (kilo_dir / "kilo.jsonc").write_text("""
+    {
+      // Kilo JSONC config
+      "mcp": {
+        /* overrides shared */
+        "server-shared": {"command": "cmd-jsonc-shared"},
+        "server-jsonc": {"command": "cmd-jsonc"},
+      },
+    }
+    """)
+
+    st = inspect_environment(home=fake_home)
+    k_env = st["environments"]["kilo"]["global"]
+    assert k_env["registered_mcps"] == ["server-base", "server-jsonc", "server-kilo", "server-shared"]
+
+    mcp_servers = k_env["mcp_servers"]
+    assert mcp_servers["server-base"]["provenance"] == str(kilo_dir / "config.json")
+    assert mcp_servers["server-base"]["overrides"] == []
+    assert mcp_servers["server-base"]["command"] == "cmd-base"
+
+    assert mcp_servers["server-kilo"]["provenance"] == str(kilo_dir / "kilo.json")
+    assert mcp_servers["server-kilo"]["overrides"] == []
+
+    assert mcp_servers["server-jsonc"]["provenance"] == str(kilo_dir / "kilo.jsonc")
+    assert mcp_servers["server-jsonc"]["overrides"] == []
+
+    assert mcp_servers["server-shared"]["provenance"] == str(kilo_dir / "kilo.jsonc")
+    assert mcp_servers["server-shared"]["overrides"] == [
+        str(kilo_dir / "config.json"),
+        str(kilo_dir / "kilo.json"),
+    ]
+    assert mcp_servers["server-shared"]["command"] == "cmd-jsonc-shared"
+
+
+def test_stray_codex_config_json_reported_without_deletion(tmp_path: pathlib.Path) -> None:
+    from orchestration_env import inspect_environment
+
+    fake_home = tmp_path / "home"
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True)
+
+    # Stray config.json
+    stray_file = codex_dir / "config.json"
+    stray_file.write_text(json.dumps({"mcpServers": {"old-server": {"command": "old"}}}))
+
+    # Real config.toml
+    (codex_dir / "config.toml").write_text("""
+    [mcp_servers.real-server]
+    command = "python"
+    args = ["server.py"]
+    """)
+
+    st = inspect_environment(home=fake_home)
+    assert st["stray"] == [str(stray_file)]
+    assert stray_file.is_file()  # Never deleted
+    assert st["environments"]["codex"]["global"]["registered_mcps"] == ["real-server"]
+
+
+def test_cli_registration_with_stubs(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import pytest
+    from orchestration_env import register_mcp_server
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    log_file = tmp_path / "cli.log"
+
+    claude_stub = stub_dir / "claude"
+    claude_stub.write_text(f"""#!/bin/sh
+echo "claude $@" >> "{log_file}"
+""")
+    claude_stub.chmod(0o755)
+
+    codex_stub = stub_dir / "codex"
+    codex_stub.write_text(f"""#!/bin/sh
+echo "codex $@" >> "{log_file}"
+""")
+    codex_stub.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{stub_dir}:{os.environ['PATH']}")
+
+    # 1. Dry run produces plan with action: "cli"
+    dry = register_mcp_server(
+        "kilo-mcp",
+        assistants=["claude", "codex", "kilo"],
+        scope="global",
+        home=fake_home,
+        dry_run=True,
+    )
+    assert dry["ok"] is True
+    plan_by_asst = {item.get("assistant"): item for item in dry["plan"]}
+    assert plan_by_asst["claude"]["action"] == "cli"
+    assert plan_by_asst["claude"]["argv"][:7] == ["claude", "mcp", "add", "--transport", "stdio", "--scope", "user"]
+    assert plan_by_asst["claude"]["argv"][7] == "kilo-mcp"
+    assert plan_by_asst["claude"]["argv"][8] == "--"
+
+    assert plan_by_asst["codex"]["action"] == "cli"
+    assert plan_by_asst["codex"]["argv"][:5] == ["codex", "mcp", "add", "kilo-mcp", "--"]
+
+    assert plan_by_asst[None]["action"] == "edit"  # Kilo edit
+    assert plan_by_asst[None]["path"] == str(fake_home / ".config" / "kilo" / "kilo.json")
+
+    # 2. Execution runs stubs and records invocations
+    res = register_mcp_server(
+        "kilo-mcp",
+        assistants=["claude", "codex", "kilo"],
+        scope="global",
+        home=fake_home,
+        dry_run=False,
+    )
+    assert res["ok"] is True
+    assert len(res["updated_configs"]) == 3
+
+    log_lines = log_file.read_text().splitlines()
+    assert any("claude mcp add --transport stdio --scope user kilo-mcp --" in line for line in log_lines)
+    assert any("codex mcp add kilo-mcp --" in line for line in log_lines)
+
+
+def test_codex_project_scope_refused(tmp_path: pathlib.Path) -> None:
+    from orchestration_env import register_mcp_server
+    import pytest
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    with pytest.raises(ValueError, match="Codex does not support project-scoped MCP registration"):
+        register_mcp_server("kilo-mcp", assistants=["codex"], scope="project", home=fake_home)
+
+
+def test_codex_toml_fallback_refused_on_existing_table(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from orchestration_env import register_mcp_server
+    import pytest
+
+    fake_home = tmp_path / "home"
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    cfg_file = codex_dir / "config.toml"
+    cfg_file.write_text("""
+[mcp_servers.kilo-mcp]
+command = "python"
+args = ["server.py"]
+""")
+    original_text = cfg_file.read_text()
+
+    monkeypatch.setenv("PATH", "")
+
+    with pytest.raises(ValueError, match="already exists"):
+        register_mcp_server("kilo-mcp", assistants=["codex"], scope="global", home=fake_home)
+
+    assert cfg_file.read_text() == original_text
+
+
+def test_codex_toml_fallback_surgical_append(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from orchestration_env import register_mcp_server, inspect_environment
+
+    fake_home = tmp_path / "home"
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    cfg_file = codex_dir / "config.toml"
+    initial_toml = """[projects."/my/project"]
+trust_level = "trusted"
+
+[mcp_servers.other]
+command = "node"
+args = ["other.js"]
+"""
+    cfg_file.write_text(initial_toml)
+
+    monkeypatch.setenv("PATH", "")
+
+    res = register_mcp_server("kilo-mcp", assistants=["codex"], scope="global", home=fake_home)
+    assert res["ok"] is True
+
+    updated_toml = cfg_file.read_text()
+    assert '[projects."/my/project"]' in updated_toml
+    assert "[mcp_servers.other]" in updated_toml
+    assert "[mcp_servers.kilo-mcp]" in updated_toml
+    assert (codex_dir / "config.toml.ai-orch.bak").is_file()
+
+    st = inspect_environment(home=fake_home)
+    assert set(st["environments"]["codex"]["global"]["registered_mcps"]) == {"other", "kilo-mcp"}
+
+
+def test_claude_fallback_refused_while_process_running(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from orchestration_env import register_mcp_server
+    import pytest
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    monkeypatch.setenv("PATH", "")
+
+    with pytest.raises(ValueError, match="a claude process is running"):
+        register_mcp_server(
+            "kilo-mcp",
+            assistants=["claude"],
+            scope="global",
+            home=fake_home,
+            claude_running_detector=lambda: True,
+        )
+
+    res = register_mcp_server(
+        "kilo-mcp",
+        assistants=["claude"],
+        scope="global",
+        home=fake_home,
+        claude_running_detector=lambda: False,
+    )
+    assert res["ok"] is True
+    claude_json = fake_home / ".claude.json"
+    assert claude_json.is_file()
+    data = json.loads(claude_json.read_text())
+    assert "kilo-mcp" in data["mcpServers"]
+
 

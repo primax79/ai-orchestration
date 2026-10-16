@@ -20,11 +20,16 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore
+from typing import Any, Callable
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ASSISTANTS = ("kilo", "claude", "codex")
@@ -282,7 +287,7 @@ def assistant_mcp_config_path(
     if assistant == "kilo":
         return (h / ".config" / "kilo" / "kilo.json") if scope == "global" else (ws / ".kilo" / "kilo.json")
     if assistant == "codex":
-        return (h / ".codex" / "config.json") if scope == "global" else (ws / ".codex" / "config.json")
+        return (h / ".codex" / "config.toml") if scope == "global" else (ws / ".codex" / "config.toml")
     raise ValueError(f"Unknown assistant: {assistant}")
 
 
@@ -582,16 +587,337 @@ def check_cli_binary(cmd: str) -> dict[str, Any]:
     return {"installed": True, "path": exe, "version": ver}
 
 
+# ---------------------------------------------------------------------------
+# JSONC Stripper & Process / TOML Helpers
+# ---------------------------------------------------------------------------
+
+def strip_jsonc_comments(text: str) -> str:
+    """Strip // line comments and /* */ block comments outside string literals."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    escape = False
+
+    while i < n:
+        c = text[i]
+
+        if in_string:
+            out.append(c)
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+            continue
+
+        if c == "/" and i + 1 < n:
+            next_c = text[i + 1]
+            if next_c == "/":
+                i += 2
+                while i < n and text[i] != "\n":
+                    i += 1
+                continue
+            elif next_c == "*":
+                i += 2
+                while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                    i += 1
+                i += 2
+                continue
+
+        out.append(c)
+        i += 1
+
+    return "".join(out)
+
+
+def strip_trailing_commas(text: str) -> str:
+    """Remove trailing commas before ']' or '}' outside string literals."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    escape = False
+
+    while i < n:
+        c = text[i]
+
+        if in_string:
+            out.append(c)
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+            continue
+
+        if c == ",":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "]}":
+                i += 1
+                continue
+
+        out.append(c)
+        i += 1
+
+    return "".join(out)
+
+
+def parse_jsonc(text: str) -> Any:
+    """Parse JSONC text by stripping comments and trailing commas."""
+    cleaned = strip_trailing_commas(strip_jsonc_comments(text))
+    return json.loads(cleaned)
+
+
+_claude_process_detector: Any = None
+
+
+def is_claude_running() -> bool:
+    """Detect if a claude process is running via pgrep or ps."""
+    if callable(_claude_process_detector):
+        return bool(_claude_process_detector())
+    try:
+        res = subprocess.run(["pgrep", "-x", "claude"], capture_output=True, check=False)
+        if res.returncode == 0:
+            return True
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    try:
+        res = subprocess.run(["ps", "-A", "-o", "comm="], capture_output=True, text=True, check=False)
+        lines = [line.strip().rsplit("/", 1)[-1] for line in res.stdout.splitlines()]
+        return "claude" in lines
+    except Exception:
+        pass
+    return False
+
+
+def format_toml_server_entry(name: str, command: str, args: list[str]) -> str:
+    """Format a surgical [mcp_servers.<name>] TOML table block."""
+    key = name if re.match(r"^[A-Za-z0-9_-]+$", name) else json.dumps(name)
+    lines = [f"[mcp_servers.{key}]"]
+    lines.append(f"command = {json.dumps(command)}")
+    lines.append(f"args = {json.dumps(args)}")
+    return "\n".join(lines) + "\n"
+
+
 def read_registered_mcps(config_path: pathlib.Path, assistant: str) -> dict[str, Any]:
     if not config_path.exists():
         return {}
     try:
-        data = json.loads(config_path.read_text(encoding="utf-8"))
+        if config_path.suffix == ".toml":
+            data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            return data.get("mcp_servers", {}) if isinstance(data, dict) else {}
+        elif config_path.suffix == ".jsonc":
+            data = parse_jsonc(config_path.read_text(encoding="utf-8"))
+        else:
+            try:
+                data = json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception:
+                data = parse_jsonc(config_path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+    if not isinstance(data, dict):
+        return {}
     if assistant == "kilo":
-        return data.get("mcp", data.get("mcpServers", {})) if isinstance(data, dict) else {}
-    return data.get("mcpServers", data.get("mcp_servers", {})) if isinstance(data, dict) else {}
+        return data.get("mcp", data.get("mcpServers", {}))
+    return data.get("mcpServers", data.get("mcp_servers", {}))
+
+
+def read_kilo_merged_mcps(
+    scope: str,
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Read Kilo MCP servers in Kilo's merge precedence order with provenance and overrides."""
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+    servers: dict[str, dict[str, Any]] = {}
+
+    if scope == "global":
+        cfg_dir = h / ".config" / "kilo"
+        # Precedence order from references/kilocode/kilocode/packages/opencode/src/config/config.ts:366-372
+        candidates = [
+            cfg_dir / "config.json",
+            cfg_dir / "kilo.json",
+            cfg_dir / "kilo.jsonc",
+            cfg_dir / "opencode.json",
+            cfg_dir / "opencode.jsonc",
+        ]
+    else:
+        if ws is None:
+            return {}
+        candidates = [
+            ws / "config.json",
+            ws / "kilo.json",
+            ws / "kilo.jsonc",
+            ws / ".kilo" / "config.json",
+            ws / ".kilo" / "kilo.json",
+            ws / ".kilo" / "kilo.jsonc",
+            ws / "opencode.json",
+            ws / "opencode.jsonc",
+            ws / ".kilo" / "opencode.json",
+            ws / ".kilo" / "opencode.jsonc",
+        ]
+
+    for cand in candidates:
+        if not cand.is_file():
+            continue
+        try:
+            raw_text = cand.read_text(encoding="utf-8")
+            data = parse_jsonc(raw_text)
+            if not isinstance(data, dict):
+                continue
+            file_mcps = data.get("mcp") or data.get("mcpServers") or {}
+            if not isinstance(file_mcps, dict):
+                continue
+            for sname, scfg in file_mcps.items():
+                if sname in servers:
+                    servers[sname]["overrides"].append(servers[sname]["provenance"])
+                    servers[sname]["provenance"] = str(cand)
+                    servers[sname]["config"] = scfg
+                    servers[sname]["command"] = scfg.get("command") if isinstance(scfg, dict) else None
+                    servers[sname]["args"] = scfg.get("args") if isinstance(scfg, dict) else None
+                else:
+                    servers[sname] = {
+                        "name": sname,
+                        "scope": scope,
+                        "provenance": str(cand),
+                        "overrides": [],
+                        "config": scfg,
+                        "command": scfg.get("command") if isinstance(scfg, dict) else None,
+                        "args": scfg.get("args") if isinstance(scfg, dict) else None,
+                    }
+        except Exception:
+            continue
+
+    return servers
+
+
+def read_claude_mcps(
+    scope: str,
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Read Claude MCP servers for user, project, or local scope."""
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+    servers: dict[str, dict[str, Any]] = {}
+
+    if scope == "global":
+        cfg = h / ".claude.json"
+        if cfg.is_file():
+            try:
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    raw_mcps = data.get("mcpServers", {})
+                    if isinstance(raw_mcps, dict):
+                        for name, s_cfg in raw_mcps.items():
+                            servers[name] = {
+                                "name": name,
+                                "scope": "user",
+                                "provenance": str(cfg),
+                                "config": s_cfg,
+                                "command": s_cfg.get("command") if isinstance(s_cfg, dict) else None,
+                                "args": s_cfg.get("args") if isinstance(s_cfg, dict) else None,
+                            }
+            except Exception:
+                pass
+    elif scope == "project" and ws is not None:
+        proj_cfg = ws / ".mcp.json"
+        if proj_cfg.is_file():
+            try:
+                p_data = json.loads(proj_cfg.read_text(encoding="utf-8"))
+                if isinstance(p_data, dict):
+                    raw_mcps = p_data.get("mcpServers", {})
+                    if isinstance(raw_mcps, dict):
+                        for name, s_cfg in raw_mcps.items():
+                            servers[name] = {
+                                "name": name,
+                                "scope": "project",
+                                "provenance": str(proj_cfg),
+                                "config": s_cfg,
+                                "command": s_cfg.get("command") if isinstance(s_cfg, dict) else None,
+                                "args": s_cfg.get("args") if isinstance(s_cfg, dict) else None,
+                            }
+            except Exception:
+                pass
+
+        user_cfg = h / ".claude.json"
+        if user_cfg.is_file():
+            try:
+                u_data = json.loads(user_cfg.read_text(encoding="utf-8"))
+                if isinstance(u_data, dict):
+                    projects = u_data.get("projects", {})
+                    if isinstance(projects, dict):
+                        for p_key, p_val in projects.items():
+                            try:
+                                if pathlib.Path(p_key).resolve() == ws and isinstance(p_val, dict):
+                                    loc_mcps = p_val.get("mcpServers", {})
+                                    if isinstance(loc_mcps, dict):
+                                        for name, s_cfg in loc_mcps.items():
+                                            servers[name] = {
+                                                "name": name,
+                                                "scope": "local",
+                                                "provenance": f"{user_cfg} (projects[{p_key}])",
+                                                "config": s_cfg,
+                                                "command": s_cfg.get("command") if isinstance(s_cfg, dict) else None,
+                                                "args": s_cfg.get("args") if isinstance(s_cfg, dict) else None,
+                                            }
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+    return servers
+
+
+def read_codex_mcps(
+    scope: str,
+    home: pathlib.Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Read Codex MCP servers from ~/.codex/config.toml (global only)."""
+    h = home or get_home_dir()
+    servers: dict[str, dict[str, Any]] = {}
+    if scope == "global":
+        cfg = h / ".codex" / "config.toml"
+        if cfg.is_file():
+            try:
+                data = tomllib.loads(cfg.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    raw_mcps = data.get("mcp_servers", {})
+                    if isinstance(raw_mcps, dict):
+                        for name, s_cfg in raw_mcps.items():
+                            servers[name] = {
+                                "name": name,
+                                "scope": "global",
+                                "provenance": str(cfg),
+                                "config": s_cfg,
+                                "command": s_cfg.get("command") if isinstance(s_cfg, dict) else None,
+                                "args": s_cfg.get("args") if isinstance(s_cfg, dict) else None,
+                            }
+            except Exception:
+                pass
+    return servers
 
 
 # ---------------------------------------------------------------------------
@@ -938,8 +1264,22 @@ def inspect_environment(
 
             structured_conflicts = list(structured_conflicts_map.values())
 
-            mcp_cfg_path = assistant_mcp_config_path(assistant, scope, ws, h)
-            mcps = read_registered_mcps(mcp_cfg_path, assistant)
+            if assistant == "kilo":
+                mcp_servers = read_kilo_merged_mcps(scope, ws, h)
+                mcp_cfg_path = assistant_mcp_config_path(assistant, scope, ws, h)
+                registered_mcps = sorted(mcp_servers.keys())
+            elif assistant == "claude":
+                mcp_servers = read_claude_mcps(scope, ws, h)
+                mcp_cfg_path = assistant_mcp_config_path(assistant, scope, ws, h)
+                registered_mcps = sorted(mcp_servers.keys())
+            elif assistant == "codex":
+                mcp_servers = read_codex_mcps(scope, h)
+                mcp_cfg_path = assistant_mcp_config_path(assistant, scope, ws, h) if scope == "global" else None
+                registered_mcps = sorted(mcp_servers.keys())
+            else:
+                mcp_servers = {}
+                mcp_cfg_path = assistant_mcp_config_path(assistant, scope, ws, h)
+                registered_mcps = []
 
             environments[assistant][scope] = {
                 "skills_dir": str(sdir),
@@ -950,15 +1290,22 @@ def inspect_environment(
                 "agents": installed_agents,
                 "conflicts": conflicts,
                 "structured_conflicts": structured_conflicts,
-                "mcp_config_path": str(mcp_cfg_path),
-                "registered_mcps": sorted(mcps.keys()),
+                "mcp_config_path": str(mcp_cfg_path) if mcp_cfg_path else None,
+                "registered_mcps": registered_mcps,
+                "mcp_servers": mcp_servers,
             }
+
+    stray: list[str] = []
+    codex_json = h / ".codex" / "config.json"
+    if codex_json.is_file():
+        stray.append(str(codex_json))
 
     return {
         "clis": clis,
         "source_repos": repos_status,
         "available_catalog_count": len(catalog),
         "environments": environments,
+        "stray": stray,
     }
 
 
@@ -1783,9 +2130,13 @@ def register_mcp_server(
     home: pathlib.Path | None = None,
     dry_run: bool = False,
     expect_plan_hash: str | None = None,
+    claude_running_detector: Any = None,
 ) -> dict[str, Any]:
     h = home or get_home_dir()
     ws = workspace.resolve() if workspace else pathlib.Path.cwd()
+
+    if "codex" in assistants and scope != "global":
+        raise ValueError("Codex does not support project-scoped MCP registration. Only global scope is supported.")
 
     if server_repo == "codex-mcp":
         codex_exe = shutil.which("codex") or "codex"
@@ -1799,9 +2150,10 @@ def register_mcp_server(
         cmd = str(venv_py) if venv_py.is_file() else sys.executable
         cmd_args = [str(rpath / "server.py")]
 
-    def _build_plan() -> tuple[list[dict[str, Any]], list[tuple[str, pathlib.Path, dict[str, Any], str]], bool]:
+    def _build_plan():
         p: list[dict[str, Any]] = []
-        c_updates: list[tuple[str, pathlib.Path, dict[str, Any], str]] = []
+        cli_ops: list[dict[str, Any]] = []
+        file_updates: list[dict[str, Any]] = []
         needs_venv = False
 
         if server_repo != "codex-mcp" and provision_venv:
@@ -1830,57 +2182,176 @@ def register_mcp_server(
                         "after_sha256": None,
                     })
 
-        for assistant in assistants:
-            cfg_path = assistant_mcp_config_path(assistant, scope, ws, h)
-            data: dict[str, Any] = {}
-            if cfg_path.exists():
-                # Never fall back to {} on a parse error: that would overwrite the whole file
-                # (e.g. ~/.claude.json holds all of Claude Code's state) with a single key.
-                try:
-                    data = json.loads(cfg_path.read_text(encoding="utf-8"))
-                except Exception as exc:
-                    raise ValueError(f"Refusing to modify {cfg_path}: it is not valid JSON ({exc}). Fix or register the server manually.") from exc
-                if not isinstance(data, dict):
-                    raise ValueError(f"Refusing to modify {cfg_path}: top-level JSON value is not an object.")
-                mcps = read_registered_mcps(cfg_path, assistant)
-                cur_state = "registered" if server_repo in mcps else "unregistered"
-            else:
-                cur_state = "missing"
+        effective_cmd = str(rpath / ".venv" / "bin" / "python") if (provision_venv and server_repo != "codex-mcp") else cmd
 
-            new_data = json.loads(json.dumps(data))
-            effective_cmd = str(rpath / ".venv" / "bin" / "python") if (provision_venv and server_repo != "codex-mcp") else cmd
-            if assistant == "kilo":
-                mcp_block = new_data.setdefault("mcp", {})
-                mcp_block[server_repo] = {
+        for assistant in assistants:
+            if assistant == "claude":
+                claude_bin = shutil.which("claude")
+                scope_flag = "user" if scope == "global" else "project"
+                cfg_path = assistant_mcp_config_path("claude", scope, ws, h)
+
+                if cfg_path.exists():
+                    try:
+                        existing_data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                        if not isinstance(existing_data, dict):
+                            raise ValueError(f"Refusing to modify {cfg_path}: top-level JSON value is not an object.")
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(f"Refusing to modify {cfg_path}: it is not valid JSON ({exc}). Fix or register the server manually.") from exc
+
+                if claude_bin is not None:
+                    argv = ["claude", "mcp", "add", "--transport", "stdio", "--scope", scope_flag, server_repo, "--", effective_cmd, *cmd_args]
+                    mcps = read_claude_mcps(scope, ws, h)
+                    cur_state = "registered" if server_repo in mcps else "unregistered"
+                    p.append({
+                        "action": "cli",
+                        "assistant": "claude",
+                        "scope": scope,
+                        "path": "claude",
+                        "command": " ".join(shlex.quote(a) for a in argv),
+                        "argv": argv,
+                        "reason": f"Register MCP server '{server_repo}' in claude ({scope}) via CLI",
+                        "current_state": cur_state,
+                        "before_sha256": None,
+                        "after_sha256": None,
+                    })
+                    cli_ops.append({
+                        "assistant": "claude",
+                        "argv": argv,
+                        "cfg_path": cfg_path,
+                        "cwd": str(ws) if scope == "project" else None,
+                    })
+                else:
+                    detector = claude_running_detector or _claude_process_detector or is_claude_running
+                    if callable(detector) and detector():
+                        raise ValueError("Refusing to modify Claude config: a claude process is running. Exit Claude Code or install the claude CLI to register MCP servers safely.")
+
+                    data: dict[str, Any] = {}
+                    if cfg_path.exists():
+                        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                        cur_state = "registered" if server_repo in data.get("mcpServers", {}) else "unregistered"
+                    else:
+                        cur_state = "missing"
+
+                    new_data = json.loads(json.dumps(data))
+                    new_data.setdefault("mcpServers", {})[server_repo] = {
+                        "type": "stdio",
+                        "command": effective_cmd,
+                        "args": cmd_args,
+                    }
+                    new_json_str = json.dumps(new_data, indent=2) + "\n"
+                    p.append({
+                        "action": "edit",
+                        "path": str(cfg_path),
+                        "reason": f"Register MCP server '{server_repo}' in claude ({scope})",
+                        "current_state": cur_state,
+                        "before_sha256": compute_target_hash(cfg_path),
+                        "after_sha256": hashlib.sha256(new_json_str.encode("utf-8")).hexdigest(),
+                    })
+                    file_updates.append({
+                        "assistant": "claude",
+                        "cfg_path": cfg_path,
+                        "content": new_json_str,
+                    })
+
+            elif assistant == "codex":
+                codex_bin = shutil.which("codex")
+                cfg_path = assistant_mcp_config_path("codex", "global", ws, h)
+
+                if codex_bin is not None:
+                    argv = ["codex", "mcp", "add", server_repo, "--", effective_cmd, *cmd_args]
+                    mcps = read_codex_mcps("global", h)
+                    cur_state = "registered" if server_repo in mcps else "unregistered"
+                    p.append({
+                        "action": "cli",
+                        "assistant": "codex",
+                        "scope": "global",
+                        "path": "codex",
+                        "command": " ".join(shlex.quote(a) for a in argv),
+                        "argv": argv,
+                        "reason": f"Register MCP server '{server_repo}' in codex (global) via CLI",
+                        "current_state": cur_state,
+                        "before_sha256": None,
+                        "after_sha256": None,
+                    })
+                    cli_ops.append({
+                        "assistant": "codex",
+                        "argv": argv,
+                        "cfg_path": cfg_path,
+                        "cwd": None,
+                    })
+                else:
+                    if cfg_path.is_file():
+                        raw_toml = cfg_path.read_text(encoding="utf-8")
+                        try:
+                            parsed = tomllib.loads(raw_toml)
+                        except Exception as exc:
+                            raise ValueError(f"Refusing to modify {cfg_path}: it is not valid TOML ({exc}).") from exc
+                        if server_repo in parsed.get("mcp_servers", {}):
+                            raise ValueError(f"Refusing to append to {cfg_path}: table [mcp_servers.{server_repo}] already exists. Edit config.toml manually or use `codex mcp add`.")
+                        cur_state = "unregistered"
+                        existing = raw_toml
+                    else:
+                        existing = ""
+                        cur_state = "missing"
+
+                    entry_toml = format_toml_server_entry(server_repo, effective_cmd, cmd_args)
+                    sep = ""
+                    if existing:
+                        sep = "\n" if existing.endswith("\n\n") else ("\n\n" if not existing.endswith("\n") else "\n")
+                    new_toml = existing + sep + entry_toml
+                    p.append({
+                        "action": "edit",
+                        "path": str(cfg_path),
+                        "reason": f"Register MCP server '{server_repo}' in codex (global) via config.toml append",
+                        "current_state": cur_state,
+                        "before_sha256": compute_target_hash(cfg_path),
+                        "after_sha256": hashlib.sha256(new_toml.encode("utf-8")).hexdigest(),
+                    })
+                    file_updates.append({
+                        "assistant": "codex",
+                        "cfg_path": cfg_path,
+                        "content": new_toml,
+                    })
+
+            elif assistant == "kilo":
+                cfg_path = assistant_mcp_config_path("kilo", scope, ws, h)
+                data = {}
+                if cfg_path.exists():
+                    try:
+                        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                        if not isinstance(data, dict):
+                            raise ValueError(f"Refusing to modify {cfg_path}: top-level JSON value is not an object.")
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(f"Refusing to modify {cfg_path}: it is not valid JSON ({exc}). Fix or register the server manually.") from exc
+                    cur_state = "registered" if server_repo in data.get("mcp", {}) else "unregistered"
+                else:
+                    data = {"$schema": "https://app.kilo.ai/config.json"}
+                    cur_state = "missing"
+
+                new_data = json.loads(json.dumps(data))
+                new_data.setdefault("mcp", {})[server_repo] = {
                     "type": "local",
                     "command": [effective_cmd, *cmd_args],
                     "enabled": True,
                 }
-            else:
-                mcp_block = new_data.setdefault("mcpServers", {})
-                mcp_block[server_repo] = {
-                    "type": "stdio",
-                    "command": effective_cmd,
-                    "args": cmd_args,
-                }
+                new_json_str = json.dumps(new_data, indent=2) + "\n"
+                p.append({
+                    "action": "edit",
+                    "path": str(cfg_path),
+                    "reason": f"Register MCP server '{server_repo}' in kilo ({scope})",
+                    "current_state": cur_state,
+                    "before_sha256": compute_target_hash(cfg_path),
+                    "after_sha256": hashlib.sha256(new_json_str.encode("utf-8")).hexdigest(),
+                })
+                file_updates.append({
+                    "assistant": "kilo",
+                    "cfg_path": cfg_path,
+                    "content": new_json_str,
+                })
 
-            new_json_str = json.dumps(new_data, indent=2) + "\n"
-            after_sha = hashlib.sha256(new_json_str.encode("utf-8")).hexdigest()
-            before_sha = compute_target_hash(cfg_path)
+        return p, cli_ops, file_updates, needs_venv
 
-            p.append({
-                "action": "edit",
-                "path": str(cfg_path),
-                "reason": f"Register MCP server '{server_repo}' in {assistant} ({scope})",
-                "current_state": cur_state,
-                "before_sha256": before_sha,
-                "after_sha256": after_sha,
-            })
-            c_updates.append((assistant, cfg_path, new_data, new_json_str))
-
-        return p, c_updates, needs_venv
-
-    plan, configs_to_update, needs_venv = _build_plan()
+    plan, cli_ops, file_updates, needs_venv = _build_plan()
     plan_hash = compute_plan_hash(plan)
 
     if expect_plan_hash is not None and expect_plan_hash != plan_hash:
@@ -1903,7 +2374,7 @@ def register_mcp_server(
         }
 
     with env_lock(h):
-        plan, configs_to_update, needs_venv = _build_plan()
+        plan, cli_ops, file_updates, needs_venv = _build_plan()
         plan_hash = compute_plan_hash(plan)
         if expect_plan_hash is not None and expect_plan_hash != plan_hash:
             return {
@@ -1922,10 +2393,23 @@ def register_mcp_server(
             cmd = str(venv_py)
 
         updated_configs: list[str] = []
-        for assistant, cfg_path, data, content_str in configs_to_update:
-            cfg_path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write_with_backup(cfg_path, content_str)
-            updated_configs.append(str(cfg_path))
+
+        for op in cli_ops:
+            cfg_p = op["cfg_path"]
+            if cfg_p.exists():
+                shutil.copy2(cfg_p, cfg_p.with_name(cfg_p.name + ".ai-orch.bak"))
+            run_env = {**os.environ, "HOME": str(h)}
+            res = subprocess.run(op["argv"], capture_output=True, text=True, timeout=60, check=False, env=run_env, cwd=op.get("cwd"))
+            if res.returncode != 0:
+                err_msg = (res.stderr or res.stdout or f"exit code {res.returncode}").strip()
+                raise RuntimeError(f"Command '{' '.join(op['argv'])}' failed: {err_msg}")
+            updated_configs.append(str(cfg_p))
+
+        for fup in file_updates:
+            cfg_p = fup["cfg_path"]
+            cfg_p.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_with_backup(cfg_p, fup["content"])
+            updated_configs.append(str(cfg_p))
 
         return {
             "ok": True,
@@ -1969,8 +2453,20 @@ def cmd_status(args: argparse.Namespace) -> int:
                 if entry.get("origin") != "standalone":
                     en_str = "enabled" if entry.get("enabled") else "disabled"
                     print(f"  - {entry['name']:<30} [{entry['state']}] ({entry['origin']}, {en_str})")
+            if sinfo.get("mcp_servers"):
+                for mname, mdata in sinfo["mcp_servers"].items():
+                    prov = mdata.get("provenance", "")
+                    overrides = mdata.get("overrides", [])
+                    ov_str = f" (overrides: {', '.join(overrides)})" if overrides else ""
+                    mscope = mdata.get("scope", scope)
+                    print(f"  * [mcp] {mname:<25} [scope: {mscope}] (source: {prov}){ov_str}")
             for c in sinfo["conflicts"]:
                 print(f"  ! CONFLICT: {c}")
+
+    if report.get("stray"):
+        print("\n=== Stray Config Files ===")
+        for s in report["stray"]:
+            print(f"  ! STRAY: {s} (not read by tool)")
     return 0
 
 
@@ -2047,7 +2543,7 @@ def cmd_register_mcp(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             expect_plan_hash=args.expect_plan_hash,
         )
-    except (ValueError, FileNotFoundError) as exc:
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
         if args.json:
             print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
         else:
