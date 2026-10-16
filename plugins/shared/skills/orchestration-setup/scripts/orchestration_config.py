@@ -15,11 +15,14 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime
+import difflib
+import hashlib
 import json
 import os
 import pathlib
 import re
 import sys
+import uuid
 from typing import Any
 
 try:
@@ -50,6 +53,7 @@ ALLOWED_PLACEHOLDERS = {
     "cwd",
     "model",
     "variant",
+    "effort",
     "session_id",
     "permission_mode",
     "sandbox",
@@ -528,10 +532,10 @@ def set_toml_value(text: str, table_path: list[str], key: str, value: Any) -> st
 
 def write_file_atomic(path: pathlib.Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    temp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
     try:
         temp_path.write_text(content, encoding="utf-8")
-        temp_path.replace(path)
+        os.replace(temp_path, path)
     finally:
         if temp_path.exists():
             try:
@@ -1041,22 +1045,44 @@ def cmd_init_global(args: argparse.Namespace) -> int:
 
 def cmd_set_profile(args: argparse.Namespace) -> int:
     if args.profile not in PROFILE_SET:
-        print(f"[FAIL] invalid profile {args.profile!r}; must be one of {sorted(PROFILES)}", file=sys.stderr)
+        msg = f"invalid profile {args.profile!r}; must be one of {sorted(PROFILES)}"
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": msg}))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
         return 2
     if args.basis and args.basis not in BASIS_VALUES:
-        print(f"[FAIL] invalid basis {args.basis!r}; must be one of {sorted(BASIS_VALUES)}", file=sys.stderr)
+        msg = f"invalid basis {args.basis!r}; must be one of {sorted(BASIS_VALUES)}"
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": msg}))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
         return 2
 
     gpath = getattr(args, "global_config", None)
     if args.scope == "project":
         ws = pathlib.Path(args.workspace or ".").resolve()
         target_path = find_project_config_path(ws, gpath)
-        text = target_path.read_text(encoding="utf-8") if target_path.exists() else ""
+        if target_path.exists():
+            current_bytes = target_path.read_bytes()
+            current_hash = hashlib.sha256(current_bytes).hexdigest()
+            existing_text = current_bytes.decode("utf-8")
+        else:
+            current_bytes = b""
+            current_hash = hashlib.sha256(b"").hexdigest()
+            existing_text = ""
+        text = existing_text
     else:
         target_path = gpath or default_global_config_path()
         if target_path.exists():
-            text = target_path.read_text(encoding="utf-8")
+            current_bytes = target_path.read_bytes()
+            current_hash = hashlib.sha256(current_bytes).hexdigest()
+            existing_text = current_bytes.decode("utf-8")
+            text = existing_text
         else:
+            current_bytes = b""
+            current_hash = hashlib.sha256(b"").hexdigest()
+            existing_text = ""
             text = dump_toml(DEFAULT_GLOBAL_CONFIG)
 
     table_path = ["tools", args.tool, "profiles", args.profile]
@@ -1069,6 +1095,56 @@ def cmd_set_profile(args: argparse.Namespace) -> int:
         text = set_toml_value(text, table_path, "variant", None)
     if args.basis is not None:
         text = set_toml_value(text, table_path, "basis", args.basis)
+
+    if getattr(args, "diff", False):
+        diff_str = "".join(
+            difflib.unified_diff(
+                existing_text.splitlines(keepends=True),
+                text.splitlines(keepends=True),
+                fromfile=f"a/{target_path.name}",
+                tofile=f"b/{target_path.name}",
+            )
+        )
+        changed = existing_text != text
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "path": str(target_path),
+                        "diff": diff_str,
+                        "hash": current_hash,
+                        "changed": changed,
+                    }
+                )
+            )
+        else:
+            if diff_str:
+                sys.stdout.write(diff_str)
+            else:
+                print(f"[ok] no changes in {target_path}")
+        return 0
+
+    if getattr(args, "expect_hash", None) is not None:
+        disk_bytes = target_path.read_bytes() if target_path.exists() else b""
+        actual_hash = hashlib.sha256(disk_bytes).hexdigest()
+        if actual_hash.lower() != args.expect_hash.strip().lower():
+            msg = f"hash mismatch for {target_path}: expected {args.expect_hash}, found {actual_hash}"
+            if getattr(args, "json", False):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": msg,
+                            "expected_hash": args.expect_hash,
+                            "actual_hash": actual_hash,
+                            "path": str(target_path),
+                        }
+                    )
+                )
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
 
     write_file_atomic(target_path, text)
 
@@ -1151,7 +1227,16 @@ def cmd_set_routing(args: argparse.Namespace) -> int:
     else:
         target_path = gpath or default_global_config_path()
 
-    text = target_path.read_text(encoding="utf-8") if target_path.exists() else ""
+    if target_path.exists():
+        current_bytes = target_path.read_bytes()
+        current_hash = hashlib.sha256(current_bytes).hexdigest()
+        existing_text = current_bytes.decode("utf-8")
+    else:
+        current_bytes = b""
+        current_hash = hashlib.sha256(b"").hexdigest()
+        existing_text = ""
+
+    text = existing_text
 
     if args.orchestrator is not None:
         text = set_toml_value(text, ["routing"], "default_orchestrator", args.orchestrator)
@@ -1161,6 +1246,56 @@ def cmd_set_routing(args: argparse.Namespace) -> int:
         text = set_toml_value(text, ["routing"], "default_profile", args.default_profile)
     if args.verification_mode is not None:
         text = set_toml_value(text, ["verification"], "default_mode", args.verification_mode)
+
+    if getattr(args, "diff", False):
+        diff_str = "".join(
+            difflib.unified_diff(
+                existing_text.splitlines(keepends=True),
+                text.splitlines(keepends=True),
+                fromfile=f"a/{target_path.name}",
+                tofile=f"b/{target_path.name}",
+            )
+        )
+        changed = existing_text != text
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "path": str(target_path),
+                        "diff": diff_str,
+                        "hash": current_hash,
+                        "changed": changed,
+                    }
+                )
+            )
+        else:
+            if diff_str:
+                sys.stdout.write(diff_str)
+            else:
+                print(f"[ok] no changes in {target_path}")
+        return 0
+
+    if getattr(args, "expect_hash", None) is not None:
+        disk_bytes = target_path.read_bytes() if target_path.exists() else b""
+        actual_hash = hashlib.sha256(disk_bytes).hexdigest()
+        if actual_hash.lower() != args.expect_hash.strip().lower():
+            msg = f"hash mismatch for {target_path}: expected {args.expect_hash}, found {actual_hash}"
+            if getattr(args, "json", False):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": msg,
+                            "expected_hash": args.expect_hash,
+                            "actual_hash": actual_hash,
+                            "path": str(target_path),
+                        }
+                    )
+                )
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
 
     write_file_atomic(target_path, text)
 
@@ -1304,6 +1439,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_sp.add_argument("--basis", default=None, help=f"Ranking basis ({', '.join(sorted(BASIS_VALUES))})")
     p_sp.add_argument("--scope", choices=("global", "project"), default="global")
     p_sp.add_argument("--workspace", default=None)
+    p_sp.add_argument("--diff", action="store_true", default=False, help="Preview changes as unified diff without writing")
+    p_sp.add_argument("--expect-hash", default=None, help="Expected sha256 hash of target file before writing; refuse on mismatch")
     p_sp.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_sp.set_defaults(func=cmd_set_profile)
@@ -1322,6 +1459,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sr.add_argument("--scope", choices=("global", "project"), required=True, help="Config scope (global or project)")
     p_sr.add_argument("--workspace", default=None, help="Workspace root for project scope")
+    p_sr.add_argument("--diff", action="store_true", default=False, help="Preview changes as unified diff without writing")
+    p_sr.add_argument("--expect-hash", default=None, help="Expected sha256 hash of target file before writing; refuse on mismatch")
     p_sr.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_sr.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_sr.set_defaults(func=cmd_set_routing)

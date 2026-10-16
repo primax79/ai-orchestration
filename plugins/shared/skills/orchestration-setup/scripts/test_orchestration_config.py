@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -608,3 +609,248 @@ def test_set_routing_validation_and_refusals(tmp_path: pathlib.Path) -> None:
     assert merged["routing"]["default_executor"] == "kilo"
     assert merged["routing"]["default_profile"] == "orchestration"
     assert merged["verification"]["default_mode"] == "panel"
+
+
+def test_set_routing_and_set_profile_diff_preview(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    run_cli("--global-config", str(global_cfg_path), "init-global")
+
+    before_bytes = global_cfg_path.read_bytes()
+    expected_hash = hashlib.sha256(before_bytes).hexdigest()
+
+    # 1. set-routing with --diff writes nothing and diff contains only the target line
+    res_diff_sr = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--scope",
+        "global",
+        "--diff",
+    )
+    assert res_diff_sr.returncode == 0, res_diff_sr.stdout + res_diff_sr.stderr
+    assert global_cfg_path.read_bytes() == before_bytes  # bytes on disk unchanged!
+
+    payload_sr = json.loads(res_diff_sr.stdout)
+    assert payload_sr["ok"] is True
+    assert payload_sr["changed"] is True
+    assert payload_sr["path"] == str(global_cfg_path)
+    assert payload_sr["hash"] == expected_hash
+
+    diff_lines_sr = [
+        l
+        for l in payload_sr["diff"].splitlines()
+        if (l.startswith("+") or l.startswith("-")) and not (l.startswith("+++") or l.startswith("---"))
+    ]
+    assert len(diff_lines_sr) == 2
+    assert diff_lines_sr[0] == '-default_orchestrator = "kilo"'
+    assert diff_lines_sr[1] == '+default_orchestrator = "claude"'
+
+    # When no values change, changed is False and diff is empty
+    res_no_change = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "kilo",
+        "--scope",
+        "global",
+        "--diff",
+    )
+    assert res_no_change.returncode == 0
+    payload_nc = json.loads(res_no_change.stdout)
+    assert payload_nc["ok"] is True
+    assert payload_nc["changed"] is False
+    assert payload_nc["diff"] == ""
+
+    # 2. set-profile with --diff writes nothing and diff contains only the target line
+    res_diff_sp = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-profile",
+        "kilo",
+        "deep-reasoning",
+        "--model",
+        "custom/reasoner-v99",
+        "--scope",
+        "global",
+        "--diff",
+    )
+    assert res_diff_sp.returncode == 0, res_diff_sp.stdout + res_diff_sp.stderr
+    assert global_cfg_path.read_bytes() == before_bytes  # still unchanged!
+
+    payload_sp = json.loads(res_diff_sp.stdout)
+    assert payload_sp["ok"] is True
+    assert payload_sp["changed"] is True
+    assert payload_sp["path"] == str(global_cfg_path)
+    assert payload_sp["hash"] == expected_hash
+
+    diff_lines_sp = [
+        l
+        for l in payload_sp["diff"].splitlines()
+        if (l.startswith("+") or l.startswith("-")) and not (l.startswith("+++") or l.startswith("---"))
+    ]
+    assert len(diff_lines_sp) == 2
+    assert diff_lines_sp[0] == '-model = "google/gemini-4-argon"'
+    assert diff_lines_sp[1] == '+model = "custom/reasoner-v99"'
+
+
+def test_expect_hash_match_and_mismatch(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    run_cli("--global-config", str(global_cfg_path), "init-global")
+
+    initial_bytes = global_cfg_path.read_bytes()
+    initial_hash = hashlib.sha256(initial_bytes).hexdigest()
+
+    # 1. Mismatch refuses and leaves file untouched
+    res_mismatch = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--scope",
+        "global",
+        "--expect-hash",
+        "deadbeef" * 8,
+    )
+    assert res_mismatch.returncode != 0
+    payload_mismatch = json.loads(res_mismatch.stdout)
+    assert payload_mismatch["ok"] is False
+    assert "hash mismatch" in payload_mismatch["error"]
+    assert global_cfg_path.read_bytes() == initial_bytes  # file untouched!
+
+    # 2. Match succeeds and writes file
+    res_match = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--scope",
+        "global",
+        "--expect-hash",
+        initial_hash,
+    )
+    assert res_match.returncode == 0, res_match.stdout + res_match.stderr
+    payload_match = json.loads(res_match.stdout)
+    assert payload_match["ok"] is True
+    assert global_cfg_path.read_bytes() != initial_bytes
+    assert 'default_orchestrator = "claude"' in global_cfg_path.read_text(encoding="utf-8")
+
+    # 3. set-profile mismatch also refuses and leaves file untouched
+    current_bytes = global_cfg_path.read_bytes()
+    res_sp_mismatch = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-profile",
+        "kilo",
+        "deep-reasoning",
+        "--model",
+        "custom/bad-model",
+        "--scope",
+        "global",
+        "--expect-hash",
+        "cafebabe" * 8,
+    )
+    assert res_sp_mismatch.returncode != 0
+    payload_sp_mismatch = json.loads(res_sp_mismatch.stdout)
+    assert payload_sp_mismatch["ok"] is False
+    assert global_cfg_path.read_bytes() == current_bytes  # file untouched!
+
+
+def test_missing_file_diff_returns_hash_of_empty(tmp_path: pathlib.Path) -> None:
+    missing_cfg = tmp_path / "nonexistent" / "orchestration.toml"
+    assert not missing_cfg.exists()
+    empty_hash = hashlib.sha256(b"").hexdigest()
+
+    # --diff on missing file returns hash of empty bytes and writes nothing
+    res_diff = run_cli(
+        "--global-config",
+        str(missing_cfg),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--scope",
+        "global",
+        "--diff",
+    )
+    assert res_diff.returncode == 0, res_diff.stdout + res_diff.stderr
+    payload = json.loads(res_diff.stdout)
+    assert payload["ok"] is True
+    assert payload["hash"] == empty_hash
+    assert payload["changed"] is True
+    assert not missing_cfg.exists()
+
+    # --expect-hash mismatch on missing file refuses and creates nothing
+    res_refused = run_cli(
+        "--global-config",
+        str(missing_cfg),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--scope",
+        "global",
+        "--expect-hash",
+        "0000" * 16,
+    )
+    assert res_refused.returncode != 0
+    assert not missing_cfg.exists()
+
+    # --expect-hash match with empty_hash succeeds and creates the file
+    res_created = run_cli(
+        "--global-config",
+        str(missing_cfg),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--scope",
+        "global",
+        "--expect-hash",
+        empty_hash,
+    )
+    assert res_created.returncode == 0, res_created.stdout + res_created.stderr
+    assert missing_cfg.exists()
+    assert 'default_orchestrator = "claude"' in missing_cfg.read_text(encoding="utf-8")
+
+
+def test_effort_placeholder_accepted() -> None:
+    assert "effort" in oc.ALLOWED_PLACEHOLDERS
+
+    cfg = {
+        "tools": {
+            "claude": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+                "headless": {
+                    "argv": ["claude", "-m", "{model}", "--effort", "{effort}", "--dir", "{cwd}"],
+                    "resume_argv": ["claude", "resume", "{session_id}", "--effort", "{effort}"],
+                    "prompt_via": "stdin",
+                },
+            }
+        }
+    }
+    errors, warnings = oc.validate_config(cfg)
+    assert errors == [], f"Expected no errors for {{effort}} placeholder but got: {errors}"
+
+
+def test_ai_orch_describe_catalog_entries() -> None:
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    proc = subprocess.run([sys.executable, str(bin_ai_orch), "describe", "--json"], capture_output=True, text=True, check=True)
+    catalog = json.loads(proc.stdout)
+    config_subs = catalog["commands"]["config"]["subcommands"]
+
+    assert "--diff" in config_subs["set-routing"]["usage"]
+    assert "--expect-hash" in config_subs["set-routing"]["usage"]
+    assert "--diff" in config_subs["set-profile"]["usage"]
+    assert "--expect-hash" in config_subs["set-profile"]["usage"]

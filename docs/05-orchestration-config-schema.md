@@ -85,7 +85,16 @@ cli_command = "codex"
 #   allowed_tools: list[str]    - Tool allowlist for the process
 #
 # Allowed placeholders inside argv / resume_argv:
-#   {cwd}, {model}, {variant}, {session_id}, {permission_mode}, {sandbox}, {prompt_file}
+#   {cwd}, {model}, {variant}, {effort}, {session_id}, {permission_mode}, {sandbox}, {prompt_file}
+#
+#   - {cwd}: target workspace directory
+#   - {model}: resolved model identifier for the profile
+#   - {variant}: model reasoning variant (e.g. "low", "medium", "high")
+#   - {effort}: model reasoning effort level (e.g. "low", "medium", "high", "max")
+#   - {session_id}: unique session identifier for resumption
+#   - {permission_mode}: tool-specific permission mode (e.g. "acceptEdits")
+#   - {sandbox}: tool-specific sandbox mode (e.g. "workspace-write")
+#   - {prompt_file}: path to temporary prompt file (when prompt_via = "file")
 
 [tools.kilo.headless]
 argv = ["kilo", "run", "--format", "json", "--dir", "{cwd}", "-m", "{model}", "-f", "{prompt_file}", "Follow the attached task prompt."]
@@ -260,6 +269,8 @@ ai-orch config set-routing \
   --scope global|project \
   [--workspace <dir>] \
   [--global-config <path>] \
+  [--diff] \
+  [--expect-hash <hash>] \
   [--json]
 ```
 
@@ -268,3 +279,40 @@ ai-orch config set-routing \
   - `--orchestrator` and `--executor` validate that the given tool id is defined and `enabled = true` in the effective merged configuration.
   - `--default-profile` and `--verification-mode` validate against known standard enums.
   - Updates `[routing].default_orchestrator`, `default_executor`, `default_profile`, and `[verification].default_mode`.
+
+### 4.2 `ai-orch config set-profile`
+
+Atomically sets or updates a model assignment for a `(tool, profile)` pair in global or project scope:
+
+```sh
+ai-orch config set-profile <tool> <profile> --model <id> \
+  [--variant <variant>] \
+  [--effort <effort>] \
+  [--basis <basis>] \
+  [--scope global|project] \
+  [--workspace <dir>] \
+  [--global-config <path>] \
+  [--diff] \
+  [--expect-hash <hash>] \
+  [--json]
+```
+
+- Mutually exclusive variant/effort: setting `--variant` clears `effort`, and setting `--effort` clears `variant`.
+- Updates `[tools.<tool>.profiles.<profile>]`.
+
+### 4.3 Preview (`--diff`) and Optimistic Concurrency (`--expect-hash`)
+
+Both `set-routing` and `set-profile` support preview-before-apply and optimistic locking (Control-Plane Safety §0 item A10):
+
+- **`--diff` (Preview mode):** Computes the surgical edit without writing to disk. Outputs JSON:
+  ```json
+  {
+    "ok": true,
+    "path": "/path/to/orchestration.toml",
+    "diff": "--- a/orchestration.toml\n+++ b/orchestration.toml\n...",
+    "hash": "<sha256 of current file bytes, or sha256(b'') if file does not exist>",
+    "changed": true
+  }
+  ```
+  If `--json` is omitted, the raw unified diff is printed to stdout. Target file on disk is untouched.
+- **`--expect-hash <hash>` (Write protection):** Re-reads the target file, computes its current sha256 hash, and compares with `<hash>`. If the hash differs (e.g. concurrent modification), the write is refused with a non-zero exit code (`ok: false`), leaving the file untouched. Without `--expect-hash`, edits apply unconditionally.

@@ -92,17 +92,19 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "set-profile": {
                     "usage": (
                         "ai-orch config set-profile <tool> <profile> --model <id> "
-                        "[--variant <v>] [--effort <e>] [--basis <b>] [--scope global|project] [--workspace <dir>] [--json]"
+                        "[--variant <v>] [--effort <e>] [--basis <b>] [--scope global|project] [--workspace <dir>] "
+                        "[--diff] [--expect-hash <hash>] [--json]"
                     ),
-                    "description": "Atomically set or update a (tool, profile) model assignment.",
+                    "description": "Atomically set or update a (tool, profile) model assignment (supports --diff preview and --expect-hash).",
                 },
                 "set-routing": {
                     "usage": (
                         "ai-orch config set-routing [--orchestrator <tool>] [--executor <tool>] "
                         "[--default-profile <profile>] [--verification-mode <mode>] "
-                        "--scope global|project [--workspace <dir>] [--global-config <file>] [--json]"
+                        "--scope global|project [--workspace <dir>] [--global-config <file>] "
+                        "[--diff] [--expect-hash <hash>] [--json]"
                     ),
-                    "description": "Atomically set default orchestrator, executor, profile, and/or verification mode.",
+                    "description": "Atomically set default orchestrator, executor, profile, and/or verification mode (supports --diff preview and --expect-hash).",
                 },
                 "render-agents-md": {
                     "usage": "ai-orch config render-agents-md [--workspace <dir>] [--apply | --check] [--json]",
