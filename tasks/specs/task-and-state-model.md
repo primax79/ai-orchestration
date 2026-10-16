@@ -90,3 +90,20 @@ flowchart TB
    - When verification fails, the failing criterion or blocking findings (`B1..Bn`) are appended to `PROGRESS.md` and passed back to the **same** Executor session (`continue_session_id`).
 4. **Closure Side-Effect (`→ done` / `done with a caveat` / `dropped`):**
    - Moves the task file/folder via `git mv` into `tasks/done/<category>/`, rewrites relative links if needed, and updates `tasks/00-INDEX.md`.
+
+---
+
+## 4. Blocking Questions & Decision Linkage
+
+Formalized in [`tasks/specs/blocking-questions.md`](blocking-questions.md) (Initiative 08):
+
+1. **Question Entities (`tasks/questions/Q###-<slug>.md`)**:
+   - ID format: `Q###` (unique across tree, reserved via atomic `O_EXCL` file creation).
+   - Strict 10-field header (`id`, `question`, `status`, `blocks`, `decider`, `asked-by`, `asked`, `origin-run`, `open-answer`, `recommended`).
+   - Three required sections: `## Context`, `## Options` (labeled bullets `- **A** — <label>: <consequence>`), and `## Answer` (`choice`, `answered-by`, `answered`, plus multi-line fenced text block).
+2. **Task Linkage & State Transitions**:
+   - `questions ask`: transitions blocked `open` / `in progress` tasks to `waiting`, setting `decider: Q###` and recording prior state in the question header (`blocks: T013 (in progress)`). If already `waiting` on other questions, appends the new question (`decider: Q004, Q007`) and records `(waiting)`. Asking against tasks waiting/blocked for non-question reasons or terminal tasks is refused.
+   - `questions answer` / `withdraw`: when all questions in a task's `decider` are resolved, restores the task to the prior state recorded by the earliest linked question and resets `decider: -`.
+3. **Waiting Invariant**:
+   - `tasks transition` refuses to move a task out of `waiting` while its `decider` lists open questions.
+   - `--force-unblock --reason TEXT` allows owners to bypass the invariant, automatically withdrawing the open questions with the provided reason.

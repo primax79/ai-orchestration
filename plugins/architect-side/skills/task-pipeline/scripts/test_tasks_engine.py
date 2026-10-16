@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
@@ -1145,3 +1147,733 @@ def test_validate_lock_file_git_ignore_warning(tmp_path: pathlib.Path) -> None:
     errors2, warnings2, emergent2, initiatives2 = te.validate_tasks_tree(tasks_dir)
     assert len(errors2) == 0
     assert not any(".ai-orch.lock" in w for w in warnings2)
+
+
+# ---------------------------------------------------------------------------
+# 08.1 Blocking Questions Tests
+# ---------------------------------------------------------------------------
+
+def _write_sample_question(
+    path: pathlib.Path,
+    qid: str = "Q001",
+    title: str = "Sample question",
+    question: str = "Should we use option A or B?",
+    status: str = "open",
+    blocks: str = "T001 (waiting)",
+    decider: str = "owner",
+    asked_by: str = "owner",
+    asked: str = "2026-10-17",
+    origin_run: str = "-",
+    open_answer: str = "no",
+    recommended: str = "A",
+    context: str = "Detailed context.",
+    options: list[tuple[str, str, str | None]] | None = None,
+    choice: str = "-",
+    answered_by: str = "-",
+    answered: str = "-",
+    text: str | None = None,
+) -> None:
+    if options is None:
+        options = [
+            ("A", "First option", "Safe choice"),
+            ("B", "Second option", "Risky choice"),
+        ]
+    content = te.format_question_content(
+        id=qid,
+        title=title,
+        question=question,
+        status=status,
+        blocks=blocks,
+        decider=decider,
+        asked_by=asked_by,
+        asked=asked,
+        origin_run=origin_run,
+        open_answer=open_answer,
+        recommended=recommended,
+        context=context,
+        options=options,
+        choice=choice,
+        answered_by=answered_by,
+        answered=answered,
+        text=text,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def test_question_validator_rules(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    q_file = tasks_dir / "questions" / "Q001-sample-question.md"
+
+    # Base valid setup
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="waiting",
+        decider="Q001",
+    )
+    _write_sample_question(q_file, qid="Q001", blocks="T001 (waiting)")
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+    assert warnings == []
+
+    # 1. Invalid question id format
+    _write_sample_question(q_file, qid="Q01")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("invalid question id 'Q01'" in e for e in errors)
+
+    # 2. Header out of order
+    bad_order_content = """# Q001 Sample question
+
+- id: Q001
+- status: open
+- question: Should we use option A or B?
+- blocks: T001 (waiting)
+- decider: owner
+- asked-by: owner
+- asked: 2026-10-17
+- origin-run: -
+- open-answer: no
+- recommended: A
+
+## Context
+
+Context.
+
+## Options
+
+- **A** — First: safe
+- **B** — Second: risky
+
+## Answer
+
+- choice: -
+- answered-by: -
+- answered: -
+"""
+    q_file.write_text(bad_order_content, encoding="utf-8")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("header fields out of order" in e for e in errors)
+
+    # 3. Question does not end with '?'
+    _write_sample_question(q_file, question="Does not end with question mark")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("must end with '?'" in e for e in errors)
+
+    # 4. Question exceeds 160 characters
+    long_q = "A" * 161 + "?"
+    _write_sample_question(q_file, question=long_q)
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("exceeds 160 characters" in e for e in errors)
+
+    # 5. Duplicate option labels
+    _write_sample_question(q_file, options=[("A", "First", "conseq"), ("A", "Duplicate", "conseq")])
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("duplicate option labels" in e for e in errors)
+
+    # 6. open-answer: no with fewer than 2 options
+    _write_sample_question(q_file, open_answer="no", options=[("A", "Only one", "conseq")])
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("at least 2 options required when open-answer is 'no'" in e for e in errors)
+
+    # 7. open-answer: yes with 1 option (must be 0 or >= 2)
+    _write_sample_question(q_file, open_answer="yes", options=[("A", "Only one", "conseq")], recommended="A")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("options must be empty (pure open question) or have at least 2 options" in e for e in errors)
+
+    # 8. Pure open question (0 options) but recommended != '-'
+    _write_sample_question(q_file, open_answer="yes", options=[], recommended="A")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("recommended must be '-' when options are empty" in e for e in errors)
+
+    # 9. >= 2 options with unknown recommended label
+    _write_sample_question(q_file, recommended="Z")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("recommended option 'Z' not found in options" in e for e in errors)
+
+    # 10. Option bullet contains (recommended) marker
+    bad_bullet_content = te.format_question_content(
+        id="Q001",
+        title="Sample",
+        question="Which one?",
+        status="open",
+        blocks="T001 (waiting)",
+        decider="owner",
+        asked_by="owner",
+        asked="2026-10-17",
+        origin_run="-",
+        open_answer="no",
+        recommended="A",
+        context="Context.",
+        options=[("A (recommended)", "First", "safe"), ("B", "Second", "risky")],
+    )
+    q_file.write_text(bad_bullet_content, encoding="utf-8")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("option bullet contains '(recommended)' marker" in e for e in errors)
+
+    # 11. Answer consistency
+    # Open status with choice != '-'
+    _write_sample_question(q_file, status="open", choice="A")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("status is 'open' but choice is 'A'" in e for e in errors)
+
+    # Answered status with choice: open but open-answer: no
+    _write_sample_question(q_file, status="answered", open_answer="no", choice="open", answered_by="owner", answered="2026-10-17", text="Some text")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("choice is 'open' but open-answer is 'no'" in e for e in errors)
+
+    # Answered status with choice: open but missing text block
+    _write_sample_question(q_file, status="answered", open_answer="yes", options=[], recommended="-", choice="open", answered_by="owner", answered="2026-10-17", text=None)
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("choice is 'open' requires a non-empty text block" in e for e in errors)
+
+    # Withdrawn status without reason text
+    _write_sample_question(q_file, status="withdrawn", choice="withdrawn", answered_by="owner", answered="2026-10-17", text=None)
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("withdrawn question requires reason in text block" in e for e in errors)
+
+    # 12. Blocks consistency
+    # Blocked task does not exist
+    _write_sample_question(q_file, blocks="T999 (waiting)")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("blocked task 'T999' not found" in e for e in errors)
+
+    # Blocked task invalid format
+    _write_sample_question(q_file, blocks="08.1 (waiting)")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("invalid task ID '08.1' in blocks (must be format T###)" in e for e in errors)
+
+    # Question is open but task is not waiting
+    _write_sample_task(tasks_dir / "features" / "T001-task.md", task_id="T001", category="features", state="in progress", decider="Q001")
+    _write_sample_question(q_file, blocks="T001 (in progress)")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("question is 'open' but blocked task 'T001' is in state 'in progress'" in e for e in errors)
+
+    # Question is open but task decider does not reference Q001
+    _write_sample_task(tasks_dir / "features" / "T001-task.md", task_id="T001", category="features", state="waiting", decider="-")
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("question is 'open' but task 'T001' decider '-' does not reference Q001" in e for e in errors)
+
+    # 13. Warnings
+    # Context not completed warning
+    _write_sample_task(tasks_dir / "features" / "T001-task.md", task_id="T001", category="features", state="waiting", decider="Q001")
+    _write_sample_question(
+        q_file,
+        open_answer="yes",
+        options=[],
+        recommended="-",
+        context="Converted from the legacy decider header of T001; context to be completed by the owner.",
+        blocks="T001 (waiting)",
+    )
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+    assert any("context-not-completed" in w for w in warnings)
+
+    # Legacy decider warning on task
+    _write_sample_task(tasks_dir / "features" / "T002-legacy.md", task_id="T002", category="features", state="waiting", decider="owner: Should we do X?")
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("legacy free-text decider 'owner: Should we do X?'" in w for w in warnings)
+
+
+def test_ask_and_answer_single_file_and_folder_tasks(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+
+    # Single-file task
+    _write_sample_task(
+        tasks_dir / "features" / "T001-single.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+    # Folder task
+    folder_task_dir = tasks_dir / "features" / "T002-folder"
+    _write_sample_task(
+        folder_task_dir / "README.md",
+        task_id="T002",
+        category="features",
+        state="in progress",
+    )
+    (folder_task_dir / "PROGRESS.md").write_text("# Progress\n\n## Log (newest first)\n\n", encoding="utf-8")
+
+    # 1. Ask on single-file task
+    ok_ask1, res_ask1 = te.ask_question(
+        tasks_dir,
+        question="Which approach for single file?",
+        context="Context for T001.",
+        options=[("A", "Approach A", "Fast"), ("B", "Approach B", "Thorough")],
+        blocks="T001",
+    )
+    assert ok_ask1 is True
+    assert res_ask1["id"] == "Q001"
+
+    t1 = te.parse_emergent_task_file(tasks_dir / "features" / "T001-single.md", tasks_dir)
+    assert t1["state"] == "waiting"
+    assert t1["decider"] == "Q001"
+
+    q1 = te.parse_question_file(pathlib.Path(res_ask1["file_path"]), tasks_dir)
+    assert q1["blocks"] == "T001 (in progress)"
+
+    # 2. Ask on folder task
+    ok_ask2, res_ask2 = te.ask_question(
+        tasks_dir,
+        question="Which approach for folder task?",
+        context="Context for T002.",
+        options=[("A", "Approach A", "Fast"), ("B", "Approach B", "Thorough")],
+        blocks="T002",
+    )
+    assert ok_ask2 is True
+    assert res_ask2["id"] == "Q002"
+
+    t2 = te.parse_emergent_task_file(folder_task_dir / "README.md", tasks_dir)
+    assert t2["state"] == "waiting"
+    assert t2["decider"] == "Q002"
+    prog2 = (folder_task_dir / "PROGRESS.md").read_text(encoding="utf-8")
+    assert "Blocked by question Q002" in prog2
+
+    # Validate tree
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+    assert warnings == []
+
+    # 3. Answer Q001 -> restores single-file task to in progress
+    ok_ans1, res_ans1 = te.answer_question(tasks_dir, "Q001", choice="A", text="Use approach A")
+    assert ok_ans1 is True
+    assert res_ans1["unblocked_tasks"] == ["T001"]
+
+    t1_after = te.parse_emergent_task_file(tasks_dir / "features" / "T001-single.md", tasks_dir)
+    assert t1_after["state"] == "in progress"
+    assert t1_after["decider"] == "-"
+
+    # 4. Answer Q002 -> restores folder task to in progress
+    ok_ans2, res_ans2 = te.answer_question(tasks_dir, "Q002", choice="B")
+    assert ok_ans2 is True
+    assert res_ans2["unblocked_tasks"] == ["T002"]
+
+    t2_after = te.parse_emergent_task_file(folder_task_dir / "README.md", tasks_dir)
+    assert t2_after["state"] == "in progress"
+    assert t2_after["decider"] == "-"
+    prog2_after = (folder_task_dir / "PROGRESS.md").read_text(encoding="utf-8")
+    assert "Unblocked: question Q002 answered" in prog2_after
+
+
+def test_two_questions_on_one_task_earliest_prior_state(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+
+    # 1. Ask first question when task is in progress
+    ok1, res1 = te.ask_question(
+        tasks_dir,
+        question="First question on T001?",
+        context="Context 1",
+        options=[("A", "Opt A", "Conseq A"), ("B", "Opt B", "Conseq B")],
+        blocks="T001",
+    )
+    assert ok1 is True
+    assert res1["id"] == "Q001"
+
+    t_mid1 = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_mid1["state"] == "waiting"
+    assert t_mid1["decider"] == "Q001"
+
+    # 2. Ask second question when task is waiting
+    ok2, res2 = te.ask_question(
+        tasks_dir,
+        question="Second question on T001?",
+        context="Context 2",
+        options=[("A", "Opt A", "Conseq A"), ("B", "Opt B", "Conseq B")],
+        blocks="T001",
+    )
+    assert ok2 is True
+    assert res2["id"] == "Q002"
+
+    t_mid2 = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_mid2["state"] == "waiting"
+    assert t_mid2["decider"] == "Q001, Q002"
+
+    q2 = te.parse_question_file(pathlib.Path(res2["file_path"]), tasks_dir)
+    assert q2["blocks"] == "T001 (waiting)"
+
+    # Validation clean
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+    assert warnings == []
+
+    # 3. Answer Q001 first: task must remain waiting
+    ok_ans1, res_ans1 = te.answer_question(tasks_dir, "Q001", choice="A")
+    assert ok_ans1 is True
+    assert res_ans1["unblocked_tasks"] == []
+
+    t_after_q1 = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_after_q1["state"] == "waiting"
+    assert "Q002" in t_after_q1["decider"]
+
+    # 4. Answer Q002: now both are resolved -> restores to earliest prior state ('in progress')
+    ok_ans2, res_ans2 = te.answer_question(tasks_dir, "Q002", choice="B")
+    assert ok_ans2 is True
+    assert res_ans2["unblocked_tasks"] == ["T001"]
+
+    t_final = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_final["state"] == "in progress"
+    assert t_final["decider"] == "-"
+
+
+def test_concurrent_ask_on_same_task(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+
+    results: list[dict[str, Any]] = []
+    errors_list: list[Exception] = []
+
+    def worker(q_num: int) -> None:
+        try:
+            ok, res = te.ask_question(
+                tasks_dir,
+                question=f"Concurrent question {q_num} on T001?",
+                context=f"Context {q_num}",
+                options=[("A", "Opt A", "Conseq A"), ("B", "Opt B", "Conseq B")],
+                blocks="T001",
+            )
+            if ok:
+                results.append(res)
+            else:
+                errors_list.append(Exception(res.get("error")))
+        except Exception as e:
+            errors_list.append(e)
+
+    t1 = threading.Thread(target=worker, args=(1,))
+    t2 = threading.Thread(target=worker, args=(2,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert len(errors_list) == 0
+    assert len(results) == 2
+    ids = {r["id"] for r in results}
+    assert len(ids) == 2
+    assert "Q001" in ids
+    assert "Q002" in ids
+
+    t_task = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_task["state"] == "waiting"
+    assert "Q001" in t_task["decider"]
+    assert "Q002" in t_task["decider"]
+
+
+def test_ask_rollback_on_task_write_failure(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+    initial_content = (tasks_dir / "features" / "T001-task.md").read_text(encoding="utf-8")
+
+    # Monkeypatch _update_task_file_headers_and_state to fail
+    def failing_update(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Simulated task write failure")
+
+    monkeypatch.setattr(te, "_update_task_file_headers_and_state", failing_update)
+
+    with pytest.raises(RuntimeError, match="Simulated task write failure"):
+        te.ask_question(
+            tasks_dir,
+            question="Will rollback work?",
+            context="Rollback context",
+            options=[("A", "Yes", "Good"), ("B", "No", "Bad")],
+            blocks="T001",
+        )
+
+    # 1. Question file must not exist
+    q_files = list((tasks_dir / "questions").glob("Q*.md"))
+    assert q_files == []
+
+    # 2. Task file must be restored to original content
+    restored_content = (tasks_dir / "features" / "T001-task.md").read_text(encoding="utf-8")
+    assert restored_content == initial_content
+
+
+def test_answer_multiline_and_unicode_roundtrip(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+
+    ok, res = te.ask_question(
+        tasks_dir,
+        question="Can answer contain special formatting?",
+        context="Context for unicode & multiline answer.",
+        options=[("A", "Option A", "Desc A"), ("B", "Option B", "Desc B")],
+        open_answer="yes",
+        blocks="T001",
+    )
+    assert ok is True
+    qid = res["id"]
+
+    complex_answer_text = (
+        "Heading 1:\n# Section 1\n"
+        "Colons: `foo: bar` and `status: active`\n"
+        "Pipes: | col1 | col2 |\n"
+        "Backticks in text:\n"
+        "```python\n"
+        "def hello():\n"
+        "    return 'world'\n"
+        "```\n"
+        "Unicode: Hello 🌍! Testing with € and 日本語 text.\n"
+    )
+
+    ok_ans, res_ans = te.answer_question(
+        tasks_dir,
+        qid,
+        choice="open",
+        text=complex_answer_text,
+    )
+    assert ok_ans is True
+
+    # Read back and verify exact round-trip
+    q_data = te.parse_question_file(pathlib.Path(res["file_path"]), tasks_dir)
+    assert q_data["answer"]["choice"] == "open"
+    assert q_data["answer"]["text"] == complex_answer_text.strip()
+
+    # Tree validates with 0 errors
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+
+
+def test_withdraw_format_and_unblock(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+
+    ok, res = te.ask_question(
+        tasks_dir,
+        question="Will this question be withdrawn?",
+        context="Context.",
+        options=[("A", "Opt A", "Desc A"), ("B", "Opt B", "Desc B")],
+        blocks="T001",
+    )
+    assert ok is True
+    qid = res["id"]
+
+    # Withdraw with reason
+    reason_text = "Spec changed: question no longer applicable."
+    ok_w, res_w = te.withdraw_question(tasks_dir, qid, reason=reason_text)
+    assert ok_w is True
+    assert res_w["status"] == "withdrawn"
+    assert res_w["unblocked_tasks"] == ["T001"]
+
+    q_data = te.parse_question_file(pathlib.Path(res["file_path"]), tasks_dir)
+    assert q_data["status"] == "withdrawn"
+    assert q_data["answer"]["choice"] == "withdrawn"
+    assert q_data["answer"]["text"] == reason_text
+
+    t_task = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_task["state"] == "in progress"
+    assert t_task["decider"] == "-"
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+
+
+def test_from_task_golden_output(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T007-task.md",
+        task_id="T007",
+        category="features",
+        state="waiting",
+        decider="owner: Which permission mode should headless Claude runs use by default?",
+    )
+
+    res = run_cli("questions", "ask", "--from-task", "T007", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is True
+    qid = payload["id"]
+    assert qid == "Q001"
+
+    # Verify task decider updated
+    t_after = te.parse_emergent_task_file(tasks_dir / "features" / "T007-task.md", tasks_dir)
+    assert t_after["state"] == "waiting"
+    assert t_after["decider"] == "Q001"
+
+    # Verify pure open question file
+    q_file = tasks_dir / payload["rel_path"]
+    q_content = q_file.read_text(encoding="utf-8")
+
+    assert "- id: Q001" in q_content
+    assert "- question: Which permission mode should headless Claude runs use by default?" in q_content
+    assert "- status: open" in q_content
+    assert "- blocks: T007 (waiting)" in q_content
+    assert "- open-answer: yes" in q_content
+    assert "- recommended: -" in q_content
+    assert "Converted from the legacy decider header of T007; context to be completed by the owner." in q_content
+
+    # Tree validation: 0 errors, warning is context-not-completed
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+    assert any("context-not-completed" in w for w in warnings)
+
+
+def test_waiting_invariant_and_force_unblock(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+
+    # Ask question Q001
+    ok_ask, res_ask = te.ask_question(
+        tasks_dir,
+        question="Should we proceed?",
+        context="Context.",
+        options=[("A", "Yes", "Go"), ("B", "No", "Stop")],
+        blocks="T001",
+    )
+    assert ok_ask is True
+
+    # 1. Normal transition out of waiting is refused
+    res_tr1 = run_cli("transition", "T001", "in progress", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tr1.returncode == 1
+    p1 = json.loads(res_tr1.stdout)
+    assert "Waiting invariant violated" in p1["error"]
+
+    # 2. Transition with --force-unblock but no reason is refused
+    res_tr2 = run_cli("transition", "T001", "in progress", "--force-unblock", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tr2.returncode == 1
+    p2 = json.loads(res_tr2.stdout)
+    assert "--force-unblock requires non-empty --reason" in p2["error"]
+
+    # 3. Transition with --force-unblock and --reason succeeds
+    res_tr3 = run_cli(
+        "transition",
+        "T001",
+        "in progress",
+        "--force-unblock",
+        "--reason",
+        "Owner decided to bypass question",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--json",
+    )
+    assert res_tr3.returncode == 0
+    p3 = json.loads(res_tr3.stdout)
+    assert p3["ok"] is True
+
+    # Task is now in progress with decider: -
+    t_after = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_after["state"] == "in progress"
+    assert t_after["decider"] == "-"
+
+    # Question Q001 is withdrawn with reason
+    q_after = te.parse_question_file(pathlib.Path(res_ask["file_path"]), tasks_dir)
+    assert q_after["status"] == "withdrawn"
+    assert q_after["answer"]["choice"] == "withdrawn"
+    assert "Owner decided to bypass question" in q_after["answer"]["text"]
+
+
+def test_decisions_region_sync_index(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "features" / "README.md").write_text("# features\n\nowner-session: s1\n\n## Goal and scope\n\nFeature tasks.\n", encoding="utf-8")
+
+    # T001 is waiting on Q001
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="waiting",
+        decider="Q001",
+    )
+    # T002 is waiting with legacy decider
+    _write_sample_task(
+        tasks_dir / "features" / "T002-legacy.md",
+        task_id="T002",
+        category="features",
+        state="waiting",
+        decider="owner: Legacy decision needed?",
+    )
+
+    # Q001 is open
+    _write_sample_question(
+        tasks_dir / "questions" / "Q001-permission-mode.md",
+        qid="Q001",
+        question="Which permission mode should we use?",
+        blocks="T001 (waiting)",
+        recommended="A",
+    )
+
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        """# Task Index
+
+## Next up
+
+<!-- ai-orch:generated next-up -->
+<!-- /ai-orch:generated next-up -->
+
+## Tasks by category
+
+<!-- ai-orch:generated tasks-by-category -->
+<!-- /ai-orch:generated tasks-by-category -->
+
+## Decisions waiting
+
+<!-- ai-orch:generated decisions -->
+| Key | Question | Blocks | Decider | Recommended |
+| --- | --- | --- | --- | --- |
+| - | None. | - | - | - |
+<!-- /ai-orch:generated decisions -->
+
+## Done
+
+<!-- ai-orch:generated done -->
+<!-- /ai-orch:generated done -->
+""",
+        encoding="utf-8",
+    )
+
+    res_sync = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--json")
+    assert res_sync.returncode == 0
+
+    idx_text = index_path.read_text(encoding="utf-8")
+
+    # Table header is 5 columns
+    assert "| Key | Question | Blocks | Decider | Recommended |" in idx_text
+
+    # Open question Q001 row appears first
+    assert "| [Q001](questions/Q001-permission-mode.md) | Which permission mode should we use? | T001 | owner | A |" in idx_text
+
+    # Legacy decider row appears after question rows
+    assert "| T002 | Legacy decision needed? | - | owner | - |" in idx_text
+
+    # Position check: Q001 comes before T002 in Decisions waiting
+    q001_pos = idx_text.index("[Q001]")
+    t002_pos = idx_text.index("| T002 | Legacy decision needed?")
+    assert q001_pos < t002_pos
+
+    # Check sync-index --check passes
+    res_chk = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--check", "--json")
+    assert res_chk.returncode == 0

@@ -185,6 +185,36 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
             },
         },
+        "questions": {
+            "script": str(TASKS_ENGINE_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch questions <subcommand> [options] [--json]",
+            "subcommands": {
+                "list": {
+                    "usage": "ai-orch questions list [--status open|answered|withdrawn|all] [--blocks <id>] [--tasks-dir <dir>] [--json]",
+                    "description": "List blocking questions in the tasks/ tree.",
+                },
+                "show": {
+                    "usage": "ai-orch questions show <id> [--tasks-dir <dir>] [--json]",
+                    "description": "Show one blocking question with its context, options, and answer.",
+                },
+                "ask": {
+                    "usage": (
+                        "ai-orch questions ask --question <text> (--context <text> | --context-file <path>) "
+                        "[--option <opt>...] [--recommended <label>] [--open-answer yes|no] --blocks <ids> "
+                        "[--decider <who>] [--asked-by <who>] [--origin-run <run>] [--from-task <id>] [--tasks-dir <dir>] [--json]"
+                    ),
+                    "description": "File a new blocking question, transitioning blocked tasks to waiting.",
+                },
+                "answer": {
+                    "usage": "ai-orch questions answer <id> --choice <opt|open> [--text <text>] [--by <who>] [--tasks-dir <dir>] [--json]",
+                    "description": "Answer a blocking question, unblocking tasks whose questions are resolved.",
+                },
+                "withdraw": {
+                    "usage": "ai-orch questions withdraw <id> --reason <text> [--by <who>] [--tasks-dir <dir>] [--json]",
+                    "description": "Withdraw a blocking question with a reason, unblocking tasks whose questions are resolved.",
+                },
+            },
+        },
         "render-agents-md": {
             "script": str(ORCH_CONFIG_SCRIPT.relative_to(REPO_ROOT)),
             "usage": (
@@ -261,6 +291,10 @@ def main() -> int:
 
     if group == "tasks":
         proc = subprocess.run([sys.executable, str(TASKS_ENGINE_SCRIPT), *rest], check=False)
+        return proc.returncode
+
+    if group == "questions":
+        proc = subprocess.run([sys.executable, str(TASKS_ENGINE_SCRIPT), "questions", *rest], check=False)
         return proc.returncode
 
     if group == "env":

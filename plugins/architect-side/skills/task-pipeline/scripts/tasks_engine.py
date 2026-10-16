@@ -93,7 +93,25 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 }
 
 REQUIRED_SECTIONS: tuple[str, ...] = ("## Goal", "## Steps", "## Verification")
-RESERVED_DIRS: set[str] = {"_inbox", "_reviews", "specs", "done", "merged", "notes", "reviews"}
+RESERVED_DIRS: set[str] = {"_inbox", "_reviews", "specs", "done", "merged", "notes", "reviews", "questions"}
+
+QUESTION_HEADER_FIELDS: tuple[str, ...] = (
+    "id",
+    "question",
+    "status",
+    "blocks",
+    "decider",
+    "asked-by",
+    "asked",
+    "origin-run",
+    "open-answer",
+    "recommended",
+)
+
+QUESTION_STATUSES: set[str] = {"open", "answered", "withdrawn"}
+QUESTION_ID_RE = re.compile(r"^Q\d{3,}$")
+QUESTION_FILE_RE = re.compile(r"^(Q\d{3,})-([a-z0-9-]+)\.md$")
+OPTION_LINE_RE = re.compile(r"^-\s+\*\*([A-Za-z0-9]+)\*\*\s+[—–-]\s+(.+?)(?::\s*(.*))?$")
 
 CANONICAL_TASKS_AGENTS_MD = """# tasks/ convention (task-pipeline + emergent tasks)
 
@@ -424,6 +442,281 @@ def parse_emergent_task_file(
     return task_dict
 
 
+# ---------------------------------------------------------------------------
+# Blocking Questions (Q###) Data Model & Parsing
+# ---------------------------------------------------------------------------
+
+def parse_blocks_header(raw_blocks: str) -> list[tuple[str, str | None]]:
+    if not raw_blocks or raw_blocks.strip() == "-":
+        return []
+    items: list[tuple[str, str | None]] = []
+    for piece in raw_blocks.split(","):
+        p = piece.strip()
+        if not p:
+            continue
+        m = re.match(r"^([^\s(]+)(?:\s*\(([^)]+)\))?$", p)
+        if m:
+            items.append((m.group(1).strip(), m.group(2).strip() if m.group(2) else None))
+        else:
+            items.append((p, None))
+    return items
+
+
+def _format_fenced_text(text: str) -> str:
+    runs = re.findall(r"`+", text)
+    max_len = max((len(r) for r in runs), default=0)
+    fence_len = max(3, max_len + 1)
+    fence = "`" * fence_len
+    return f"{fence}text\n{text}\n{fence}"
+
+
+def format_question_content(
+    id: str,
+    title: str,
+    question: str,
+    status: str,
+    blocks: str,
+    decider: str,
+    asked_by: str,
+    asked: str,
+    origin_run: str,
+    open_answer: str,
+    recommended: str,
+    context: str,
+    options: list[tuple[str, str, str | None]] | None = None,
+    choice: str = "-",
+    answered_by: str = "-",
+    answered: str = "-",
+    text: str | None = None,
+) -> str:
+    lines = [
+        f"# {id} {title}",
+        "",
+        f"- id: {id}",
+        f"- question: {question}",
+        f"- status: {status}",
+        f"- blocks: {blocks}",
+        f"- decider: {decider}",
+        f"- asked-by: {asked_by}",
+        f"- asked: {asked}",
+        f"- origin-run: {origin_run}",
+        f"- open-answer: {open_answer}",
+        f"- recommended: {recommended}",
+        "",
+        "## Context",
+        "",
+        context.strip(),
+        "",
+        "## Options",
+        "",
+    ]
+    if options:
+        for opt in options:
+            label, opt_title, consequence = opt
+            if consequence:
+                lines.append(f"- **{label}** — {opt_title}: {consequence}")
+            else:
+                lines.append(f"- **{label}** — {opt_title}")
+    lines.extend([
+        "",
+        "## Answer",
+        "",
+        f"- choice: {choice}",
+        f"- answered-by: {answered_by}",
+        f"- answered: {answered}",
+    ])
+    if text and text.strip():
+        lines.extend([
+            "",
+            _format_fenced_text(text.strip()),
+        ])
+    lines.append("")
+    return "\n".join(lines)
+
+
+def parse_question_file(
+    file_path: pathlib.Path,
+    tasks_dir: pathlib.Path,
+) -> dict[str, Any]:
+    text = file_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    rel_path = file_path.relative_to(tasks_dir).as_posix()
+
+    h1_idx: int | None = None
+    h1_text = ""
+    for i, line in enumerate(lines):
+        if line.startswith("# "):
+            h1_idx = i
+            h1_text = line[2:].strip()
+            break
+
+    title = h1_text
+    if h1_text:
+        parts = h1_text.split(None, 1)
+        if len(parts) > 1 and QUESTION_ID_RE.match(parts[0]):
+            title = parts[1].strip()
+
+    header_keys: list[str] = []
+    headers: dict[str, str] = {}
+    header_end = 0
+
+    if h1_idx is not None:
+        idx = h1_idx + 1
+        while idx < len(lines) and not lines[idx].strip():
+            idx += 1
+        while idx < len(lines):
+            m = HEADER_LINE_RE.match(lines[idx])
+            if not m:
+                break
+            k, v = m.group(1), m.group(2).strip()
+            header_keys.append(k)
+            headers[k] = v
+            idx += 1
+        header_end = idx
+
+    sections_present: list[str] = []
+    for m in re.finditer(r"^##\s+(.+?)\s*$", text, re.MULTILINE):
+        sec_name = f"## {m.group(1).strip()}"
+        sections_present.append(sec_name)
+
+    context_text = ""
+    options_text = ""
+    answer_text = ""
+
+    def _extract_section_body(name: str) -> str:
+        pattern = re.compile(rf"^##\s+{re.escape(name)}\s*\n(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+        sm = pattern.search(text)
+        return sm.group(1).strip() if sm else ""
+
+    if "## Context" in sections_present:
+        context_text = _extract_section_body("Context")
+    if "## Options" in sections_present:
+        options_text = _extract_section_body("Options")
+    if "## Answer" in sections_present:
+        answer_text = _extract_section_body("Answer")
+
+    options: list[dict[str, str | None]] = []
+    for line in options_text.splitlines():
+        line_s = line.strip()
+        if not line_s.startswith("-"):
+            continue
+        om = OPTION_LINE_RE.match(line_s)
+        if om:
+            lbl = om.group(1).strip()
+            opt_title = om.group(2).strip()
+            conseq = om.group(3).strip() if om.group(3) else None
+            options.append({"label": lbl, "title": opt_title, "consequence": conseq, "raw": line_s})
+        else:
+            options.append({"label": "", "title": line_s, "consequence": None, "raw": line_s})
+
+    choice = "-"
+    answered_by = "-"
+    answered = "-"
+    fenced_text: str | None = None
+
+    for line in answer_text.splitlines():
+        line_s = line.strip()
+        if line_s.startswith("- choice:"):
+            choice = line_s.split(":", 1)[1].strip()
+        elif line_s.startswith("- answered-by:"):
+            answered_by = line_s.split(":", 1)[1].strip()
+        elif line_s.startswith("- answered:"):
+            answered = line_s.split(":", 1)[1].strip()
+
+    fence_m = re.search(r"(?ms)^(`{3,})text\r?\n(.*?)\r?\n\1[ \t]*$", answer_text)
+    if fence_m:
+        fenced_text = fence_m.group(2)
+
+    blocks_raw = headers.get("blocks", "")
+    blocks_parsed = parse_blocks_header(blocks_raw)
+
+    return {
+        "id": headers.get("id", ""),
+        "question": headers.get("question", ""),
+        "status": headers.get("status", ""),
+        "blocks": blocks_raw,
+        "blocks_parsed": blocks_parsed,
+        "decider": headers.get("decider", ""),
+        "asked_by": headers.get("asked-by", ""),
+        "asked": headers.get("asked", ""),
+        "origin_run": headers.get("origin-run", ""),
+        "open_answer": headers.get("open-answer", ""),
+        "recommended": headers.get("recommended", ""),
+        "title": title,
+        "context": context_text,
+        "options": options,
+        "answer": {
+            "choice": choice,
+            "answered_by": answered_by,
+            "answered": answered,
+            "text": fenced_text,
+        },
+        "header_keys": header_keys,
+        "headers": headers,
+        "sections_present": sections_present,
+        "file_path": str(file_path),
+        "rel_path": rel_path,
+        "filename": file_path.name,
+    }
+
+
+def discover_questions(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
+    questions_dir = tasks_dir / "questions"
+    if not questions_dir.is_dir():
+        return []
+    questions: list[dict[str, Any]] = []
+    for entry in sorted(questions_dir.iterdir()):
+        if entry.is_file() and entry.suffix == ".md" and QUESTION_ID_RE.match(entry.name.split("-")[0]):
+            try:
+                q = parse_question_file(entry, tasks_dir)
+                questions.append(q)
+            except Exception:
+                pass
+    return questions
+
+
+def _find_earliest_prior_state_for_task(tasks_dir: pathlib.Path, task_id: str, question_ids: list[str]) -> str:
+    all_questions = discover_questions(tasks_dir)
+    q_map = {q["id"]: q for q in all_questions}
+    sorted_qids = sorted(question_ids)
+    for qid in sorted_qids:
+        q = q_map.get(qid)
+        if not q:
+            continue
+        for tid, prior_state in q["blocks_parsed"]:
+            if tid == task_id and prior_state and prior_state != "waiting" and prior_state in CANONICAL_STATES:
+                return prior_state
+    return "open"
+
+
+def parse_option_arg(opt: str) -> tuple[str, str, str | None]:
+    opt = opt.strip()
+    m = re.match(r"^(?:-\s+)?\*\*([A-Za-z0-9]+)\*\*\s+[—–-]\s+(.+?)(?::\s*(.*))?$", opt)
+    if m:
+        label = m.group(1).strip()
+        title = m.group(2).strip()
+        consequence = m.group(3).strip() if m.group(3) else None
+        return label, title, consequence
+    if "=" in opt:
+        label, rest = opt.split("=", 1)
+        label = label.strip()
+        if ":" in rest:
+            title, consequence = rest.split(":", 1)
+            return label, title.strip(), consequence.strip()
+        return label, rest.strip(), None
+    m2 = re.match(r"^([A-Za-z0-9]+)\s+[—–-]\s+(.+?)(?::\s*(.*))?$", opt)
+    if m2:
+        label = m2.group(1).strip()
+        title = m2.group(2).strip()
+        consequence = m2.group(3).strip() if m2.group(3) else None
+        return label, title, consequence
+    if ":" in opt:
+        label, title = opt.split(":", 1)
+        return label.strip(), title.strip(), None
+    return opt, opt, None
+
+
 def discover_emergent_tasks(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     if not tasks_dir.is_dir():
@@ -704,6 +997,15 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 f"(expected one of {sorted(VERIFICATION_MODES)})."
             )
 
+        # Legacy decider warning
+        raw_dec = task.get("decider", "").strip()
+        if raw_dec and raw_dec != "-":
+            if not re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", raw_dec):
+                warnings.append(
+                    f"{rel}: legacy free-text decider {raw_dec!r}; "
+                    f"consider converting with 'questions ask --from-task {tid}'."
+                )
+
         # Required sections
         missing_sections = [s for s in REQUIRED_SECTIONS if s not in task["sections_present"]]
         if missing_sections:
@@ -760,6 +1062,208 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
     except (FileNotFoundError, OSError):
         pass
 
+    # Validate question files
+    questions_dir = tasks_dir / "questions"
+    emergent_map = {t["id"]: t for t in emergent}
+    seen_q_ids: dict[str, str] = {}
+
+    if questions_dir.is_dir():
+        for q_entry in sorted(questions_dir.iterdir()):
+            if q_entry.name.startswith(".") or not q_entry.is_file() or q_entry.suffix != ".md":
+                continue
+            q_rel = q_entry.relative_to(tasks_dir).as_posix()
+
+            # Filename check
+            fm = QUESTION_FILE_RE.match(q_entry.name)
+            if not fm:
+                errors.append(f"{q_rel}: invalid question filename {q_entry.name!r} (expected format Q###-<slug>.md).")
+
+            try:
+                q = parse_question_file(q_entry, tasks_dir)
+            except Exception as e:
+                errors.append(f"{q_rel}: failed to parse question file: {e}")
+                continue
+
+            qid = q["id"]
+            if not qid:
+                errors.append(f"{q_rel}: missing required 'id' header field.")
+            else:
+                if not QUESTION_ID_RE.match(qid):
+                    errors.append(f"{q_rel}: invalid question id {qid!r} (expected format Q###).")
+                if fm and fm.group(1) != qid:
+                    errors.append(f"{q_rel}: id header {qid!r} does not match filename prefix {fm.group(1)!r}.")
+                if qid in seen_q_ids:
+                    errors.append(f"{q_rel}: duplicate question id {qid!r} (already defined in {seen_q_ids[qid]}).")
+                else:
+                    seen_q_ids[qid] = q_rel
+
+            # Validate header fields & order
+            keys = q["header_keys"]
+            missing_q_hdr = [k for k in QUESTION_HEADER_FIELDS if k not in keys]
+            if missing_q_hdr:
+                errors.append(f"{q_rel}: missing mandatory header field(s): {', '.join(missing_q_hdr)}.")
+
+            unknown_q_hdr = [k for k in keys if k not in QUESTION_HEADER_FIELDS]
+            if unknown_q_hdr:
+                errors.append(f"{q_rel}: unknown header field(s): {', '.join(unknown_q_hdr)}.")
+
+            expected_order = [k for k in QUESTION_HEADER_FIELDS if k in keys]
+            if keys != expected_order:
+                errors.append(f"{q_rel}: header fields out of order: got {keys}, expected {list(QUESTION_HEADER_FIELDS)}.")
+
+            # Check empty values
+            for k in QUESTION_HEADER_FIELDS:
+                if k in q["headers"] and q["headers"][k] == "":
+                    errors.append(f"{q_rel}: header field '{k}' cannot be empty (use '-' when empty).")
+
+            # Question text
+            q_text = q["question"]
+            if not q_text:
+                errors.append(f"{q_rel}: 'question' header field cannot be empty.")
+            else:
+                if "\n" in q_text:
+                    errors.append(f"{q_rel}: 'question' must be a single line.")
+                if len(q_text) > 160:
+                    errors.append(f"{q_rel}: 'question' text exceeds 160 characters ({len(q_text)} chars).")
+                if not q_text.endswith("?"):
+                    errors.append(f"{q_rel}: 'question' must end with '?'.")
+
+            # Status
+            st = q["status"]
+            if st not in QUESTION_STATUSES:
+                errors.append(f"{q_rel}: invalid status {st!r} (expected one of {sorted(QUESTION_STATUSES)}).")
+
+            # Asked date
+            asked_date = q["asked"]
+            if asked_date and asked_date != "-":
+                try:
+                    datetime.date.fromisoformat(asked_date)
+                except ValueError:
+                    errors.append(f"{q_rel}: invalid ISO date for 'asked': {asked_date!r}.")
+
+            # Open answer
+            oa = q["open_answer"]
+            if oa not in ("yes", "no"):
+                errors.append(f"{q_rel}: invalid open-answer {oa!r} (expected 'yes' or 'no').")
+
+            # Required sections and order
+            expected_sections = ["## Context", "## Options", "## Answer"]
+            if q["sections_present"] != expected_sections:
+                errors.append(
+                    f"{q_rel}: sections must be exactly {expected_sections} in order; got {q['sections_present']}."
+                )
+
+            # Context
+            ctx = q["context"]
+            if not ctx:
+                errors.append(f"{q_rel}: '## Context' section cannot be empty.")
+            elif "Converted from the legacy decider header of " in ctx and "context to be completed by the owner." in ctx:
+                warnings.append(f"{q_rel}: context-not-completed (converted from legacy decider).")
+
+            # Options
+            opts = q["options"]
+            labels = [opt["label"] for opt in opts if opt["label"]]
+            if len(labels) != len(set(labels)):
+                errors.append(f"{q_rel}: duplicate option labels: {labels}.")
+
+            for opt in opts:
+                if "(recommended)" in opt["raw"].lower():
+                    errors.append(f"{q_rel}: option bullet contains '(recommended)' marker: {opt['raw']!r}.")
+                if not opt["label"]:
+                    errors.append(f"{q_rel}: invalid option bullet format: {opt['raw']!r}.")
+
+            if oa == "no":
+                if len(opts) < 2:
+                    errors.append(f"{q_rel}: at least 2 options required when open-answer is 'no' (got {len(opts)}).")
+            elif oa == "yes":
+                if len(opts) == 1:
+                    errors.append(f"{q_rel}: options must be empty (pure open question) or have at least 2 options (got 1).")
+
+            # Recommended
+            rec = q["recommended"]
+            if len(opts) == 0:
+                if rec != "-":
+                    errors.append(f"{q_rel}: recommended must be '-' when options are empty (got {rec!r}).")
+            else:
+                if rec != "-" and rec not in labels:
+                    errors.append(f"{q_rel}: recommended option {rec!r} not found in options {labels}.")
+
+            # Answer consistency
+            ans = q["answer"]
+            choice = ans["choice"]
+            ans_by = ans["answered_by"]
+            ans_date = ans["answered"]
+            ans_text = ans["text"]
+
+            if st == "open":
+                if choice != "-":
+                    errors.append(f"{q_rel}: status is 'open' but choice is {choice!r} (expected '-').")
+                if ans_by != "-":
+                    errors.append(f"{q_rel}: status is 'open' but answered-by is {ans_by!r} (expected '-').")
+                if ans_date != "-":
+                    errors.append(f"{q_rel}: status is 'open' but answered is {ans_date!r} (expected '-').")
+                if ans_text is not None and ans_text.strip():
+                    errors.append(f"{q_rel}: status is 'open' but answer contains free text.")
+            elif st == "answered":
+                if choice == "open":
+                    if oa != "yes":
+                        errors.append(f"{q_rel}: choice is 'open' but open-answer is 'no'.")
+                    if not ans_text or not ans_text.strip():
+                        errors.append(f"{q_rel}: choice is 'open' requires a non-empty text block.")
+                elif choice in labels:
+                    pass
+                else:
+                    errors.append(f"{q_rel}: invalid choice {choice!r} (expected one of {labels} or 'open').")
+                if ans_by in ("", "-"):
+                    errors.append(f"{q_rel}: answered question requires answered-by.")
+                if ans_date in ("", "-"):
+                    errors.append(f"{q_rel}: answered question requires answered date.")
+                else:
+                    try:
+                        datetime.date.fromisoformat(ans_date)
+                    except ValueError:
+                        errors.append(f"{q_rel}: invalid ISO date for 'answered': {ans_date!r}.")
+            elif st == "withdrawn":
+                if choice != "withdrawn":
+                    errors.append(f"{q_rel}: status is 'withdrawn' but choice is {choice!r} (expected 'withdrawn').")
+                if ans_by in ("", "-"):
+                    errors.append(f"{q_rel}: withdrawn question requires answered-by.")
+                if ans_date in ("", "-"):
+                    errors.append(f"{q_rel}: withdrawn question requires answered date.")
+                else:
+                    try:
+                        datetime.date.fromisoformat(ans_date)
+                    except ValueError:
+                        errors.append(f"{q_rel}: invalid ISO date for 'answered': {ans_date!r}.")
+                if not ans_text or not ans_text.strip():
+                    errors.append(f"{q_rel}: withdrawn question requires reason in text block.")
+
+            # Blocks & status consistency
+            for tid, prior_st in q["blocks_parsed"]:
+                if not EMERGENT_ID_RE.match(tid):
+                    errors.append(f"{q_rel}: invalid task ID {tid!r} in blocks (must be format T###).")
+                elif tid not in emergent_map:
+                    errors.append(f"{q_rel}: blocked task {tid!r} not found in tasks tree.")
+                else:
+                    target_task = emergent_map[tid]
+                    target_st = target_task["canonical_state"]
+                    target_dec = target_task.get("decider", "")
+                    if st == "open":
+                        if target_st != "waiting":
+                            errors.append(
+                                f"{q_rel}: question is 'open' but blocked task {tid!r} is in state {target_task['state']!r} (expected 'waiting')."
+                            )
+                        if qid and qid not in re.findall(r"Q\d{3,}", target_dec):
+                            errors.append(
+                                f"{q_rel}: question is 'open' but task {tid!r} decider {target_dec!r} does not reference {qid}."
+                            )
+                    else:
+                        target_dec_qids = re.findall(r"Q\d{3,}", target_dec)
+                        if target_st != "waiting" and qid in target_dec_qids:
+                            errors.append(
+                                f"{q_rel}: question is resolved ({st}) and task {tid!r} is '{target_task['state']}', but task decider still references {qid}."
+                            )
+
     return errors, warnings, emergent, initiatives
 
 
@@ -791,6 +1295,7 @@ def _update_task_file_headers_and_state(
     file_path: pathlib.Path,
     new_state: str,
     verifier: str | None = None,
+    decider: str | None = None,
     clear_next_up: bool = False,
 ) -> None:
     text = file_path.read_text(encoding="utf-8")
@@ -812,6 +1317,8 @@ def _update_task_file_headers_and_state(
         key = m.group(1)
         if key == "state":
             lines[header_end] = f"- state: {new_state}"
+        elif key == "decider" and decider is not None:
+            lines[header_end] = f"- decider: {decider}"
         elif key == "next-up" and clear_next_up:
             lines[header_end] = "- next-up: no"
         elif key == "verifier":
@@ -926,6 +1433,7 @@ def transition_task(
     verifier: str | None = None,
     reason: str | None = None,
     expect_task_hash: str | None = None,
+    force_unblock: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -968,6 +1476,44 @@ def transition_task(
             old_state = target["state"]
             old_canon = target["canonical_state"]
             new_canon = normalize_state(new_state)
+
+            decider_to_set: str | None = None
+            if old_canon == "waiting":
+                raw_dec = target.get("decider", "").strip()
+                q_ids = re.findall(r"Q\d{3,}", raw_dec)
+                if q_ids:
+                    all_questions = discover_questions(tasks_dir)
+                    q_map = {q["id"]: q for q in all_questions}
+                    open_q = [qid for qid in q_ids if qid in q_map and q_map[qid]["status"] == "open"]
+                    if open_q:
+                        if not force_unblock:
+                            return False, {
+                                "ok": False,
+                                "task_id": task_id,
+                                "old_state": old_state,
+                                "new_state": new_state,
+                                "error": (
+                                    f"Waiting invariant violated: task {task_id!r} is waiting on open question(s): "
+                                    f"{', '.join(open_q)}. Resolve them via 'questions answer' or 'questions withdraw', "
+                                    "or pass --force-unblock --reason TEXT."
+                                ),
+                            }
+                        if not (reason and reason.strip()):
+                            return False, {
+                                "ok": False,
+                                "task_id": task_id,
+                                "old_state": old_state,
+                                "new_state": new_state,
+                                "error": "Transitioning with --force-unblock requires non-empty --reason TEXT.",
+                            }
+                        for qid in open_q:
+                            _withdraw_question_file_only(
+                                tasks_dir,
+                                q_map[qid],
+                                reason=reason.strip(),
+                                by=actor or "owner",
+                            )
+                        decider_to_set = "-"
 
             if old_canon in ("open", "in progress") and new_canon in ("done", "done with a caveat", "verified"):
                 return False, {
@@ -1055,6 +1601,7 @@ def transition_task(
                 file_path,
                 effective_state,
                 verifier=verifier,
+                decider=decider_to_set,
                 clear_next_up=is_terminal,
             )
             _append_progress_log(target, old_state, effective_state, actor, verifier, reason)
@@ -1489,11 +2036,37 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     m_dec = _marker_pattern("decisions").search(existing_index) if existing_index.strip() else None
     existing_dec_region = m_dec.group(1) if m_dec else existing_index
 
-    hdr_dec, sep_dec = _extract_existing_table_header(existing_dec_region, 4) or (
-        "| Task / Initiative | Question (exact) | Decider | Blocks |",
-        "| --- | --- | --- | --- |",
-    )
+    all_questions = discover_questions(tasks_dir)
+    open_questions = [q for q in all_questions if q["status"] == "open"]
+    open_questions.sort(key=lambda q: int(q["id"][1:]) if QUESTION_ID_RE.match(q["id"]) else 0)
+
+    # Determine whether to use 5-column table (open questions or existing 5-col table)
+    existing_5_col = _extract_existing_table_header(existing_dec_region, 5) is not None
+
+    if open_questions or existing_5_col:
+        hdr_dec, sep_dec = _extract_existing_table_header(existing_dec_region, 5) or (
+            "| Key | Question | Blocks | Decider | Recommended |",
+            "| --- | --- | --- | --- | --- |",
+        )
+        use_5_cols = True
+    else:
+        hdr_dec, sep_dec = _extract_existing_table_header(existing_dec_region, 4) or (
+            "| Task / Initiative | Question (exact) | Decider | Blocks |",
+            "| --- | --- | --- | --- |",
+        )
+        use_5_cols = False
+
     dec_lines = [hdr_dec, sep_dec]
+
+    # Render open question rows first
+    if use_5_cols:
+        for q in open_questions:
+            q_key = f"[{q['id']}](questions/{q['filename']})"
+            q_text = q["question"]
+            blocks_clean = ", ".join(
+                [re.sub(r"\s*\([^)]*\)", "", b).strip() for b in q["blocks"].split(",") if b.strip()]
+            ) or "-"
+            dec_lines.append(f"| {q_key} | {q_text} | {blocks_clean} | {q['decider']} | {q['recommended']} |")
 
     existing_dec_rows: list[tuple[str, list[str]]] = []
     if existing_dec_region:
@@ -1502,18 +2075,19 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             if not line_s.startswith("|"):
                 continue
             cells = [c.strip() for c in line_s.strip("|").split("|")]
-            if not cells or cells[0] in ("Task", "Task / Initiative", "---") or cells[0].startswith("---"):
+            if not cells or cells[0] in ("Key", "Task", "Task / Initiative", "---") or cells[0].startswith("---"):
                 continue
             if cells[0] != "-":
                 existing_dec_rows.append((cells[0], cells))
 
-    # Only tasks in state waiting or blocked with a decider belong in ## Decisions waiting
+    # Only tasks in state waiting or blocked with a non-question decider belong in legacy decisions
     qualifying_tasks: dict[str, dict[str, Any]] = {
         t["id"]: t
         for t in active_tasks
         if t["canonical_state"] in ("waiting", "blocked")
         and t["decider"]
         and t["decider"].strip() not in ("", "-")
+        and not re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", t["decider"].strip())
     }
 
     blocks_map: dict[str, list[str]] = {tid: [] for tid in qualifying_tasks}
@@ -1536,8 +2110,11 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
     seen_dec_ids: set[str] = set()
 
-    # 1. Existing rows in original order
+    # 1. Existing legacy rows in original order
     for row_id, cells in existing_dec_rows:
+        if row_id.startswith("Q") or row_id.startswith("[Q"):
+            # Question rows handled above from live question files
+            continue
         if row_id in qualifying_tasks:
             seen_dec_ids.add(row_id)
             wt = qualifying_tasks[row_id]
@@ -1549,16 +2126,26 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             raw_dec = wt["decider"]
             who = raw_dec.split(":", 1)[0].strip() if ":" in raw_dec else raw_dec
             blocks_str = ", ".join(blocks_map.get(row_id, [])) or "-"
-            dec_lines.append(f"| {row_id} | {q_cell} | {who} | {blocks_str} |")
+            if use_5_cols:
+                dec_lines.append(f"| {row_id} | {q_cell} | {blocks_str} | {who} | - |")
+            else:
+                dec_lines.append(f"| {row_id} | {q_cell} | {who} | {blocks_str} |")
         elif row_id not in resolved_ids:
             seen_dec_ids.add(row_id)
             task_cell = f"{row_id} (missing)" if not row_id.endswith("(missing)") else row_id
             q_cell = cells[1] if len(cells) > 1 else "-"
-            dec_cell = cells[2] if len(cells) > 2 else "-"
-            blk_cell = cells[3] if len(cells) > 3 else "-"
-            dec_lines.append(f"| {task_cell} | {q_cell} | {dec_cell} | {blk_cell} |")
+            if len(cells) >= 5:
+                blk_cell = cells[2]
+                dec_cell = cells[3]
+            else:
+                dec_cell = cells[2] if len(cells) > 2 else "-"
+                blk_cell = cells[3] if len(cells) > 3 else "-"
+            if use_5_cols:
+                dec_lines.append(f"| {task_cell} | {q_cell} | {blk_cell} | {dec_cell} | - |")
+            else:
+                dec_lines.append(f"| {task_cell} | {q_cell} | {dec_cell} | {blk_cell} |")
 
-    # 2. Append new qualifying tasks
+    # 2. Append new qualifying legacy tasks
     new_dec_tasks = [
         t for tid, t in qualifying_tasks.items()
         if tid not in seen_dec_ids and tid not in existing_waiting_ids_without_dec
@@ -1571,10 +2158,16 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         else:
             who, question = raw_dec, raw_dec
         blocks_str = ", ".join(blocks_map.get(wt["id"], [])) or "-"
-        dec_lines.append(f"| {wt['id']} | {question} | {who} | {blocks_str} |")
+        if use_5_cols:
+            dec_lines.append(f"| {wt['id']} | {question} | {blocks_str} | {who} | - |")
+        else:
+            dec_lines.append(f"| {wt['id']} | {question} | {who} | {blocks_str} |")
 
     if len(dec_lines) == 2:
-        dec_lines.append("| - | None. | - | - |")
+        if use_5_cols:
+            dec_lines.append("| - | None. | - | - | - |")
+        else:
+            dec_lines.append("| - | None. | - | - |")
     dec_content = "\n".join(dec_lines)
 
     # 4. Done section
@@ -1753,6 +2346,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_transition(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     expect_task_hash = getattr(args, "expect_task_hash", None)
+    force_unblock = getattr(args, "force_unblock", False)
     ok, payload = transition_task(
         tasks_dir=tasks_dir,
         task_id=args.task_id,
@@ -1761,6 +2355,7 @@ def cmd_transition(args: argparse.Namespace) -> int:
         verifier=args.verifier,
         reason=args.reason,
         expect_task_hash=expect_task_hash,
+        force_unblock=force_unblock,
     )
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
@@ -2164,6 +2759,655 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     return 0 if res["ok"] else 1
 
 
+# ---------------------------------------------------------------------------
+# Blocking Questions Operations & Commands
+# ---------------------------------------------------------------------------
+
+def ask_question(
+    tasks_dir: pathlib.Path,
+    question: str | None = None,
+    context: str | None = None,
+    context_file: str | pathlib.Path | None = None,
+    options: list[tuple[str, str, str | None]] | None = None,
+    recommended: str = "-",
+    open_answer: str = "no",
+    blocks: str | None = None,
+    decider: str = "owner",
+    asked_by: str = "owner",
+    origin_run: str = "-",
+    from_task: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    try:
+        with task_write_lock(tasks_dir):
+            emergent = discover_emergent_tasks(tasks_dir)
+            emergent_map = {t["id"]: t for t in emergent}
+
+            tasks_to_update: list[tuple[dict[str, Any], str, str]] = []
+            blocks_entries: list[str] = []
+
+            if from_task:
+                if from_task not in emergent_map:
+                    return False, {"ok": False, "error": f"Task {from_task!r} not found in {tasks_dir}."}
+                target_t = emergent_map[from_task]
+                raw_dec = target_t.get("decider", "").strip()
+                if not raw_dec or raw_dec == "-":
+                    return False, {"ok": False, "error": f"Task {from_task!r} has no legacy decider to convert."}
+                if re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", raw_dec):
+                    return False, {"ok": False, "error": f"Task {from_task!r} already has a question decider ({raw_dec})."}
+
+                if ":" in raw_dec:
+                    actor, q_txt = [p.strip() for p in raw_dec.split(":", 1)]
+                else:
+                    actor = "owner"
+                    q_txt = raw_dec.strip()
+
+                if not q_txt.endswith("?"):
+                    q_txt += "?"
+                if len(q_txt) > 160:
+                    q_txt = q_txt[:159] + "?"
+
+                question = q_txt
+                context = f"Converted from the legacy decider header of {from_task}; context to be completed by the owner."
+                options = []
+                recommended = "-"
+                open_answer = "yes"
+                decider = actor or "owner"
+                asked_by = actor or "owner"
+                origin_run = "-"
+                tasks_to_update.append((target_t, "waiting", "SET"))
+                blocks_entries.append(f"{from_task} ({target_t['state']})")
+            else:
+                if not question or not question.strip():
+                    return False, {"ok": False, "error": "Missing required --question."}
+                question = question.strip()
+                if not question.endswith("?"):
+                    return False, {"ok": False, "error": "Question must end with '?'."}
+                if len(question) > 160:
+                    return False, {"ok": False, "error": f"Question length ({len(question)}) exceeds 160 characters."}
+                if "\n" in question:
+                    return False, {"ok": False, "error": "Question must be a single line."}
+
+                if context_file:
+                    cpath = pathlib.Path(context_file)
+                    if not cpath.is_file():
+                        return False, {"ok": False, "error": f"Context file not found: {context_file}"}
+                    context = cpath.read_text(encoding="utf-8")
+                if not context or not context.strip():
+                    return False, {"ok": False, "error": "Missing required context (via --context or --context-file)."}
+
+                if not blocks or not blocks.strip():
+                    return False, {"ok": False, "error": "Missing required --blocks."}
+
+                options = options or []
+                opt_labels = [opt[0] for opt in options if opt[0]]
+                if len(opt_labels) != len(set(opt_labels)):
+                    return False, {"ok": False, "error": f"Option labels must be unique: {opt_labels}."}
+
+                if open_answer not in ("yes", "no"):
+                    return False, {"ok": False, "error": f"Invalid open-answer: {open_answer!r}."}
+
+                if open_answer == "no" and len(options) < 2:
+                    return False, {"ok": False, "error": f"At least 2 options required when open-answer is 'no' (got {len(options)})."}
+                if open_answer == "yes" and len(options) == 1:
+                    return False, {"ok": False, "error": "Options must be empty (pure open question) or have at least 2 options (got 1)."}
+
+                if len(options) == 0:
+                    if recommended != "-":
+                        return False, {"ok": False, "error": f"recommended must be '-' when options are empty (got {recommended!r})."}
+                else:
+                    if recommended != "-" and recommended not in opt_labels:
+                        return False, {"ok": False, "error": f"recommended option {recommended!r} not found in options {opt_labels}."}
+
+                # Parse blocks and check task states
+                blocks_list = [b.strip() for b in blocks.split(",") if b.strip()]
+                for b in blocks_list:
+                    bm = re.match(r"^(T\d{3,})", b)
+                    if not bm:
+                        return False, {"ok": False, "error": f"Invalid task ID {b!r} in blocks (must be T###)."}
+                    tid = bm.group(1)
+                    if tid not in emergent_map:
+                        return False, {"ok": False, "error": f"Blocked task {tid!r} not found in tasks tree."}
+                    t = emergent_map[tid]
+                    cstate = t["canonical_state"]
+
+                    if cstate in TERMINAL_STATES:
+                        return False, {"ok": False, "error": f"Cannot block task {tid!r} in terminal state '{cstate}'."}
+                    if cstate in ("waiting", "blocked"):
+                        raw_dec = t.get("decider", "").strip()
+                        if cstate == "waiting" and re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", raw_dec):
+                            tasks_to_update.append((t, "waiting", "APPEND"))
+                            blocks_entries.append(f"{tid} (waiting)")
+                        else:
+                            return False, {
+                                "ok": False,
+                                "error": f"Asking against task {tid!r} waiting/blocked for a non-question reason is refused.",
+                            }
+                    elif cstate in ("open", "in progress"):
+                        tasks_to_update.append((t, "waiting", "SET"))
+                        blocks_entries.append(f"{tid} ({cstate})")
+                    else:
+                        return False, {"ok": False, "error": f"Cannot block task {tid!r} in state '{t['state']}'."}
+
+            created_files: list[pathlib.Path] = []
+            modified_files: dict[pathlib.Path, str] = {}
+            for t, _, _ in tasks_to_update:
+                tp = pathlib.Path(t["file_path"])
+                if tp not in modified_files:
+                    modified_files[tp] = tp.read_text(encoding="utf-8")
+                if t["is_folder"]:
+                    pp = tp.parent / "PROGRESS.md"
+                    if pp.is_file() and pp not in modified_files:
+                        modified_files[pp] = pp.read_text(encoding="utf-8")
+
+            # Allocate Q### with O_EXCL
+            questions_dir = tasks_dir / "questions"
+            questions_dir.mkdir(parents=True, exist_ok=True)
+            existing_nums = []
+            for f in questions_dir.iterdir():
+                if f.is_file() and f.suffix == ".md":
+                    m_num = QUESTION_ID_RE.match(f.name.split("-")[0])
+                    if m_num:
+                        existing_nums.append(int(f.name.split("-")[0][1:]))
+            next_num = max(existing_nums, default=0) + 1
+
+            slug = re.sub(r"[^a-z0-9]+", "-", question.lower()).strip("-")
+            slug = slug[:50].rstrip("-") or "question"
+
+            fd: int | None = None
+            q_file_path: pathlib.Path | None = None
+            q_id = ""
+            filename = ""
+            while True:
+                q_id = f"Q{next_num:03d}"
+                filename = f"{q_id}-{slug}.md"
+                q_file_path = questions_dir / filename
+                try:
+                    fd = os.open(str(q_file_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                    created_files.append(q_file_path)
+                    break
+                except FileExistsError:
+                    next_num += 1
+
+            try:
+                title = question.rstrip("?").strip()
+                today = datetime.date.today().isoformat()
+                blocks_header_val = ", ".join(blocks_entries)
+                content = format_question_content(
+                    id=q_id,
+                    title=title,
+                    question=question,
+                    status="open",
+                    blocks=blocks_header_val,
+                    decider=decider or "owner",
+                    asked_by=asked_by or "owner",
+                    asked=today,
+                    origin_run=origin_run or "-",
+                    open_answer=open_answer,
+                    recommended=recommended,
+                    context=context,
+                    options=options,
+                    choice="-",
+                    answered_by="-",
+                    answered="-",
+                    text=None,
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+
+                # Update tasks
+                for t, new_st, dec_mode in tasks_to_update:
+                    tp = pathlib.Path(t["file_path"])
+                    if dec_mode == "SET":
+                        new_dec = q_id
+                    else:
+                        new_dec = f"{t['decider']}, {q_id}"
+                    _update_task_file_headers_and_state(tp, new_st, decider=new_dec)
+                    _append_progress_log(
+                        t,
+                        t["state"],
+                        new_st,
+                        asked_by,
+                        verifier=None,
+                        reason=f"Blocked by question {q_id}",
+                    )
+
+                return True, {
+                    "ok": True,
+                    "id": q_id,
+                    "filename": filename,
+                    "file_path": str(q_file_path),
+                    "rel_path": f"questions/{filename}",
+                }
+            except Exception:
+                for cp in created_files:
+                    try:
+                        if cp.is_file():
+                            cp.unlink()
+                    except OSError:
+                        pass
+                for mp, orig_text in modified_files.items():
+                    try:
+                        _atomic_write_text(mp, orig_text)
+                    except OSError:
+                        pass
+                raise
+    except LockTimeoutError:
+        return False, {
+            "ok": False,
+            "error": "lock-timeout",
+            "message": "Timed out waiting for task-write lock in tasks/.",
+        }
+
+
+def answer_question(
+    tasks_dir: pathlib.Path,
+    question_id: str,
+    choice: str,
+    text: str | None = None,
+    by: str = "owner",
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    try:
+        with task_write_lock(tasks_dir):
+            questions = discover_questions(tasks_dir)
+            target_q = next((q for q in questions if q["id"] == question_id), None)
+            if target_q is None:
+                return False, {"ok": False, "error": f"Question {question_id!r} not found in {tasks_dir}."}
+            if target_q["status"] != "open":
+                return False, {"ok": False, "error": f"Question {question_id!r} is not open (status: {target_q['status']!r})."}
+
+            opt_labels = [opt["label"] for opt in target_q["options"] if opt["label"]]
+            if choice == "open":
+                if target_q["open_answer"] != "yes":
+                    return False, {"ok": False, "error": f"Choice 'open' is not allowed (open-answer is 'no')."}
+                if not text or not text.strip():
+                    return False, {"ok": False, "error": "Choice 'open' requires non-empty text."}
+            elif choice in opt_labels:
+                pass
+            else:
+                return False, {"ok": False, "error": f"Invalid choice {choice!r}. Allowed options: {opt_labels} or 'open'."}
+
+            q_file = pathlib.Path(target_q["file_path"])
+            modified_files: dict[pathlib.Path, str] = {q_file: q_file.read_text(encoding="utf-8")}
+
+            emergent = discover_emergent_tasks(tasks_dir)
+            emergent_map = {t["id"]: t for t in emergent}
+
+            for tid, _ in target_q["blocks_parsed"]:
+                if tid in emergent_map:
+                    t = emergent_map[tid]
+                    tp = pathlib.Path(t["file_path"])
+                    if tp not in modified_files:
+                        modified_files[tp] = tp.read_text(encoding="utf-8")
+                    if t["is_folder"]:
+                        pp = tp.parent / "PROGRESS.md"
+                        if pp.is_file() and pp not in modified_files:
+                            modified_files[pp] = pp.read_text(encoding="utf-8")
+
+            try:
+                today = datetime.date.today().isoformat()
+                new_q_content = format_question_content(
+                    id=target_q["id"],
+                    title=target_q["title"],
+                    question=target_q["question"],
+                    status="answered",
+                    blocks=target_q["blocks"],
+                    decider=target_q["decider"],
+                    asked_by=target_q["asked_by"],
+                    asked=target_q["asked"],
+                    origin_run=target_q["origin_run"],
+                    open_answer=target_q["open_answer"],
+                    recommended=target_q["recommended"],
+                    context=target_q["context"],
+                    options=[(opt["label"], opt["title"], opt["consequence"]) for opt in target_q["options"]],
+                    choice=choice,
+                    answered_by=by or "owner",
+                    answered=today,
+                    text=text.strip() if text else None,
+                )
+                _atomic_write_text(q_file, new_q_content)
+
+                q_status_map = {q["id"]: q["status"] for q in questions}
+                q_status_map[question_id] = "answered"
+
+                unblocked: list[str] = []
+                for tid, _ in target_q["blocks_parsed"]:
+                    if tid not in emergent_map:
+                        continue
+                    t = emergent_map[tid]
+                    tp = pathlib.Path(t["file_path"])
+                    t_dec = t.get("decider", "").strip()
+                    linked_qids = [qid.strip() for qid in t_dec.split(",") if qid.strip()]
+
+                    all_resolved = all(q_status_map.get(qid) in ("answered", "withdrawn") for qid in linked_qids)
+                    if all_resolved:
+                        restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, linked_qids)
+                        _update_task_file_headers_and_state(tp, restored_state, decider="-")
+                        _append_progress_log(
+                            t,
+                            "waiting",
+                            restored_state,
+                            by or "owner",
+                            verifier=None,
+                            reason=f"Unblocked: question {question_id} answered",
+                        )
+                        unblocked.append(tid)
+
+                return True, {
+                    "ok": True,
+                    "id": question_id,
+                    "status": "answered",
+                    "choice": choice,
+                    "unblocked_tasks": unblocked,
+                }
+            except Exception:
+                for mp, orig_text in modified_files.items():
+                    try:
+                        _atomic_write_text(mp, orig_text)
+                    except OSError:
+                        pass
+                raise
+    except LockTimeoutError:
+        return False, {
+            "ok": False,
+            "error": "lock-timeout",
+            "message": "Timed out waiting for task-write lock in tasks/.",
+        }
+
+
+def _withdraw_question_file_only(
+    tasks_dir: pathlib.Path,
+    q_dict: dict[str, Any],
+    reason: str,
+    by: str = "owner",
+) -> None:
+    q_file = pathlib.Path(q_dict["file_path"])
+    today = datetime.date.today().isoformat()
+    new_q_content = format_question_content(
+        id=q_dict["id"],
+        title=q_dict["title"],
+        question=q_dict["question"],
+        status="withdrawn",
+        blocks=q_dict["blocks"],
+        decider=q_dict["decider"],
+        asked_by=q_dict["asked_by"],
+        asked=q_dict["asked"],
+        origin_run=q_dict["origin_run"],
+        open_answer=q_dict["open_answer"],
+        recommended=q_dict["recommended"],
+        context=q_dict["context"],
+        options=[(opt["label"], opt["title"], opt["consequence"]) for opt in q_dict["options"]],
+        choice="withdrawn",
+        answered_by=by or "owner",
+        answered=today,
+        text=reason.strip(),
+    )
+    _atomic_write_text(q_file, new_q_content)
+
+
+def withdraw_question(
+    tasks_dir: pathlib.Path,
+    question_id: str,
+    reason: str,
+    by: str = "owner",
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    try:
+        with task_write_lock(tasks_dir):
+            questions = discover_questions(tasks_dir)
+            target_q = next((q for q in questions if q["id"] == question_id), None)
+            if target_q is None:
+                return False, {"ok": False, "error": f"Question {question_id!r} not found in {tasks_dir}."}
+            if target_q["status"] != "open":
+                return False, {"ok": False, "error": f"Question {question_id!r} is not open (status: {target_q['status']!r})."}
+
+            if not reason or not reason.strip():
+                return False, {"ok": False, "error": "Withdrawing a question requires non-empty --reason."}
+
+            q_file = pathlib.Path(target_q["file_path"])
+            modified_files: dict[pathlib.Path, str] = {q_file: q_file.read_text(encoding="utf-8")}
+
+            emergent = discover_emergent_tasks(tasks_dir)
+            emergent_map = {t["id"]: t for t in emergent}
+
+            for tid, _ in target_q["blocks_parsed"]:
+                if tid in emergent_map:
+                    t = emergent_map[tid]
+                    tp = pathlib.Path(t["file_path"])
+                    if tp not in modified_files:
+                        modified_files[tp] = tp.read_text(encoding="utf-8")
+                    if t["is_folder"]:
+                        pp = tp.parent / "PROGRESS.md"
+                        if pp.is_file() and pp not in modified_files:
+                            modified_files[pp] = pp.read_text(encoding="utf-8")
+
+            try:
+                _withdraw_question_file_only(tasks_dir, target_q, reason=reason, by=by)
+
+                q_status_map = {q["id"]: q["status"] for q in questions}
+                q_status_map[question_id] = "withdrawn"
+
+                unblocked: list[str] = []
+                for tid, _ in target_q["blocks_parsed"]:
+                    if tid not in emergent_map:
+                        continue
+                    t = emergent_map[tid]
+                    tp = pathlib.Path(t["file_path"])
+                    t_dec = t.get("decider", "").strip()
+                    linked_qids = [qid.strip() for qid in t_dec.split(",") if qid.strip()]
+
+                    all_resolved = all(q_status_map.get(qid) in ("answered", "withdrawn") for qid in linked_qids)
+                    if all_resolved:
+                        restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, linked_qids)
+                        _update_task_file_headers_and_state(tp, restored_state, decider="-")
+                        _append_progress_log(
+                            t,
+                            "waiting",
+                            restored_state,
+                            by or "owner",
+                            verifier=None,
+                            reason=f"Unblocked: question {question_id} withdrawn: {reason.strip()}",
+                        )
+                        unblocked.append(tid)
+
+                return True, {
+                    "ok": True,
+                    "id": question_id,
+                    "status": "withdrawn",
+                    "reason": reason.strip(),
+                    "unblocked_tasks": unblocked,
+                }
+            except Exception:
+                for mp, orig_text in modified_files.items():
+                    try:
+                        _atomic_write_text(mp, orig_text)
+                    except OSError:
+                        pass
+                raise
+    except LockTimeoutError:
+        return False, {
+            "ok": False,
+            "error": "lock-timeout",
+            "message": "Timed out waiting for task-write lock in tasks/.",
+        }
+
+
+def show_question(tasks_dir: pathlib.Path, question_id: str) -> tuple[bool, dict[str, Any]]:
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    questions = discover_questions(tasks_dir)
+    target_q = next((q for q in questions if q["id"] == question_id), None)
+    if target_q is None:
+        return False, {"ok": False, "error": f"Question {question_id!r} not found in {tasks_dir}."}
+    return True, {"ok": True, "question": target_q}
+
+
+def list_questions(
+    tasks_dir: pathlib.Path,
+    status: str = "all",
+    blocks: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    questions = discover_questions(tasks_dir)
+
+    filtered = questions
+    if status != "all":
+        filtered = [q for q in filtered if q["status"] == status]
+    if blocks:
+        filtered = [q for q in filtered if any(tid == blocks for tid, _ in q["blocks_parsed"])]
+
+    def _sort_key(q: dict[str, Any]) -> tuple[int, int]:
+        is_open = 0 if q["status"] == "open" else 1
+        num = int(q["id"][1:]) if QUESTION_ID_RE.match(q["id"]) else 0
+        return (is_open, -num)
+
+    filtered.sort(key=_sort_key)
+    return True, {"ok": True, "questions": filtered}
+
+
+def cmd_questions_list(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    status = getattr(args, "status", "all")
+    blocks = getattr(args, "blocks", None)
+    ok, res = list_questions(tasks_dir, status=status, blocks=blocks)
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        qs = res.get("questions", [])
+        if not qs:
+            print(f"No questions found in {tasks_dir}/questions.")
+        else:
+            print(f"Questions ({len(qs)}):")
+            for q in qs:
+                blocks_clean = ", ".join(
+                    [re.sub(r"\s*\([^)]*\)", "", b).strip() for b in q["blocks"].split(",") if b.strip()]
+                ) or "-"
+                print(f"  [{q['id']}] ({q['status']}) {q['question']} (blocks: {blocks_clean}, decider: {q['decider']})")
+    return 0 if ok else 1
+
+
+def cmd_questions_show(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = show_question(tasks_dir, args.question_id)
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            q = res["question"]
+            print(f"Question: {q['id']} — {q['question']}")
+            print(f"Status  : {q['status']}")
+            print(f"Blocks  : {q['blocks']}")
+            print(f"Decider : {q['decider']}")
+            print(f"Asked by: {q['asked_by']} on {q['asked']}")
+            print(f"Rec     : {q['recommended']}")
+            print(f"\nContext:\n{q['context']}")
+            if q["options"]:
+                print("\nOptions:")
+                for opt in q["options"]:
+                    if opt["consequence"]:
+                        print(f"  - **{opt['label']}** — {opt['title']}: {opt['consequence']}")
+                    else:
+                        print(f"  - **{opt['label']}** — {opt['title']}")
+            print("\nAnswer:")
+            print(f"  Choice     : {q['answer']['choice']}")
+            print(f"  Answered by: {q['answer']['answered_by']}")
+            print(f"  Answered on: {q['answer']['answered']}")
+            if q["answer"]["text"]:
+                print(f"  Text       :\n{q['answer']['text']}")
+        else:
+            print(f"[FAIL] {res.get('error', 'not found')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_questions_ask(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    raw_options = getattr(args, "option", [])
+    parsed_options = [parse_option_arg(opt) for opt in raw_options] if raw_options else []
+
+    ok, res = ask_question(
+        tasks_dir=tasks_dir,
+        question=args.question,
+        context=args.context,
+        context_file=args.context_file,
+        options=parsed_options,
+        recommended=args.recommended,
+        open_answer=args.open_answer,
+        blocks=args.blocks,
+        decider=args.decider,
+        asked_by=args.asked_by,
+        origin_run=args.origin_run,
+        from_task=args.from_task,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Created question {res['id']}: {res['rel_path']}")
+        else:
+            print(f"[FAIL] {res.get('error', 'ask failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_questions_answer(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = answer_question(
+        tasks_dir=tasks_dir,
+        question_id=args.question_id,
+        choice=args.choice,
+        text=args.text,
+        by=args.by,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            unb = ", ".join(res["unblocked_tasks"]) if res["unblocked_tasks"] else "none"
+            print(f"[ok] Answered {res['id']} with choice {res['choice']!r} (unblocked tasks: {unb})")
+        else:
+            print(f"[FAIL] {res.get('error', 'answer failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_questions_withdraw(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = withdraw_question(
+        tasks_dir=tasks_dir,
+        question_id=args.question_id,
+        reason=args.reason,
+        by=args.by,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            unb = ", ".join(res["unblocked_tasks"]) if res["unblocked_tasks"] else "none"
+            print(f"[ok] Withdrew {res['id']} with reason {res['reason']!r} (unblocked tasks: {unb})")
+        else:
+            print(f"[FAIL] {res.get('error', 'withdraw failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", action="store_true", help="Output structured JSON on stdout")
@@ -2187,9 +3431,66 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("--verifier", default=None, help="Independent verifier identifier (e.g. claude:deep-reasoning, blind-subagent:deep-reasoning, owner)")
     p_tr.add_argument("--reason", default=None, help="Bounce findings (B1..Bn), caveat reason, or transition note")
     p_tr.add_argument("--expect-task-hash", default=None, help="Refuse to transition if task bundle SHA256 does not match this hash")
+    p_tr.add_argument("--force-unblock", action="store_true", help="Force move task out of waiting, withdrawing open questions with --reason")
     p_tr.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_tr.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_tr.set_defaults(func=cmd_transition)
+
+    p_q = sub.add_parser("questions", help="Manage blocking question files (Q###) and task decision linkage")
+    p_q.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_q.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    q_sub = p_q.add_subparsers(dest="q_cmd", required=True)
+
+    # questions list
+    p_ql = q_sub.add_parser("list", help="List blocking questions")
+    p_ql.add_argument("--status", choices=["open", "answered", "withdrawn", "all"], default="all")
+    p_ql.add_argument("--blocks", default=None, help="Filter by blocked task id")
+    p_ql.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_ql.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_ql.set_defaults(func=cmd_questions_list)
+
+    # questions show
+    p_qs = q_sub.add_parser("show", help="Show a blocking question")
+    p_qs.add_argument("question_id", help="Question ID (e.g. Q001)")
+    p_qs.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_qs.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_qs.set_defaults(func=cmd_questions_show)
+
+    # questions ask
+    p_qa = q_sub.add_parser("ask", help="Ask a blocking question")
+    p_qa.add_argument("--question", default=None, help="Question text (<= 160 chars, ends with ?)")
+    p_qa.add_argument("--context", default=None, help="Context text")
+    p_qa.add_argument("--context-file", default=None, help="Path to file containing context Markdown")
+    p_qa.add_argument("--option", action="append", default=[], help="Option formatted as 'A=Title: consequence' or '- **A** — Title: consequence'")
+    p_qa.add_argument("--recommended", default="-", help="Recommended option label or -")
+    p_qa.add_argument("--open-answer", choices=["yes", "no"], default="no", help="Whether open free-text answers are allowed")
+    p_qa.add_argument("--blocks", default=None, help="Comma-separated blocked task IDs (e.g. T013, T014)")
+    p_qa.add_argument("--decider", default="owner", help="Decider role or person")
+    p_qa.add_argument("--asked-by", default="owner", help="Who asked the question")
+    p_qa.add_argument("--origin-run", default="-", help="Origin run ID or -")
+    p_qa.add_argument("--from-task", default=None, help="Convert legacy decider header from task T###")
+    p_qa.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_qa.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_qa.set_defaults(func=cmd_questions_ask)
+
+    # questions answer
+    p_qans = q_sub.add_parser("answer", help="Answer a blocking question")
+    p_qans.add_argument("question_id", help="Question ID (e.g. Q001)")
+    p_qans.add_argument("--choice", required=True, help="Selected option label or 'open'")
+    p_qans.add_argument("--text", default=None, help="Free-text answer")
+    p_qans.add_argument("--by", default="owner", help="Who answered the question")
+    p_qans.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_qans.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_qans.set_defaults(func=cmd_questions_answer)
+
+    # questions withdraw
+    p_qw = q_sub.add_parser("withdraw", help="Withdraw a blocking question")
+    p_qw.add_argument("question_id", help="Question ID (e.g. Q001)")
+    p_qw.add_argument("--reason", required=True, help="Reason for withdrawing the question")
+    p_qw.add_argument("--by", default="owner", help="Who withdrew the question")
+    p_qw.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_qw.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_qw.set_defaults(func=cmd_questions_withdraw)
 
     p_sync = sub.add_parser("sync-index", help="Deterministically synchronize tasks/00-INDEX.md tables from task headers")
     p_sync.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
