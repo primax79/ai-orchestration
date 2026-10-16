@@ -18,7 +18,7 @@
 
 ### 07.1 - `config set-routing`, surgical TOML updater, `[tools.<t>.headless]` schema, correct project-config path text
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-16) · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py`, `.../scripts/test_orchestration_config.py`, `bin/ai-orch` (catalog text), `docs/05-orchestration-config-schema.md`
 - **Goal:** Implement spec §9:
   - a surgical updater used by both `set-routing` and `set-profile`;

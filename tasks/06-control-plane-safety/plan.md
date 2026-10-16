@@ -18,7 +18,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.1 - Lossless `sync-index` with generated-region markers (I1–I4)
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-16) · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../scripts/test_tasks_engine.py`, `.../scripts/fixtures/index-regression/` (new), `tasks/00-INDEX.md` (adopt markers)
 - **Goal:** Implement spec §2.2 completely:
   - markers, plus `--adopt`;
@@ -39,7 +39,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.2 - Doctor: `--dry-run` plans with hash, no-clobber install, trash instead of delete, explicit obsolete cleanup (E4, E6, E7)
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-16) · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_env.py`, `scripts/test_orchestration_env.py`
 - **Goal:** Implement spec §2.1:
   - the "Every mutating `env` command" and "No clobbering" bullets: `--dry-run` with `plan` + `plan_hash`, `--expect-plan-hash`, `--overwrite`, `.ai-orch-trash/`;
@@ -89,7 +89,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.5 - UI backend: auth, non-blocking CLI calls, fixed workspace, watcher (U1, U4, U5, U6)
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-16) · **Profile:** `bulk-execution` · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`, `start.sh`, `README.md`, `frontend/src/api.ts`, `frontend/index.html`
 - **Goal:** Implement spec §2.3:
   - "Auth" (persisted token, meta injection with `no-store`, header and WS query checks, Host allowlist, CORS removed);
@@ -109,7 +109,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.6 - Core: `render-agents-md --diff` with hash precondition
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-16) · **Profile:** `bulk-execution` · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py`, `.../scripts/test_orchestration_config.py`
 - **Goal:** `render-agents-md --diff` returns `{diff, hash}` (hash of the current `AGENTS.md`, or of empty when the file is missing). `--apply --expect-hash H` refuses on mismatch. The write is atomic.
 - **Verification:** Tests: a diff for a missing block, a present block and an up-to-date block; a hash mismatch is refused and the file is unchanged.
