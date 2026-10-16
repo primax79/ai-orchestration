@@ -168,7 +168,7 @@ The spec now opens with §0 "Amendments after review 2" (A1–A12). These change
 
 ### 06.10 - Core: task-write lock, `--expect-task-hash`, atomic writes (A9)
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 06.1 (same file) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 06.1 (same file) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../scripts/test_tasks_engine.py`, `README.md` (platform note)
 - **Goal:**
   - Spec A9: an exclusive `flock` on `<tasks_dir>/.ai-orch.lock` around every mutating command;
