@@ -255,6 +255,26 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
     if not tasks_dir.is_dir():
         return initiatives
 
+    # Try parsing initiative statuses from 00-INDEX.md if present
+    index_path = tasks_dir / "00-INDEX.md"
+    index_statuses: dict[str, str] = {}
+    if index_path.is_file():
+        idx_text = index_path.read_text(encoding="utf-8")
+        for line in idx_text.splitlines():
+            m_idx = re.match(
+                r"^\|\s*\d+\s*\|\s*(\d{2,})\s*\|\s*\[([^\]]+)\]\(([^)]+)\)\s*\|\s*([^|]+)\|",
+                line,
+            )
+            if m_idx:
+                inum = m_idx.group(1)
+                st_col = m_idx.group(4).lower()
+                if "not merged" in st_col or "in progress" in st_col or "progress" in st_col:
+                    index_statuses[inum] = "in progress"
+                elif "merged" in st_col or "done" in st_col:
+                    index_statuses[inum] = "done"
+                else:
+                    index_statuses[inum] = "open"
+
     search_roots: list[tuple[pathlib.Path, str]] = [
         (tasks_dir, "active"),
         (tasks_dir / "done", "done"),
@@ -277,10 +297,57 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
             text = plan_path.read_text(encoding="utf-8")
             h1_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
             title = h1_match.group(1).strip() if h1_match else entry.name
+
+            # Determine initiative status
+            if location in ("merged", "done") or (entry / "summary.md").is_file():
+                init_status = "done"
+            elif num in index_statuses:
+                init_status = index_statuses[num]
+            else:
+                status_m = re.search(
+                    r"^\s*>\s*\*\*Status:\*\*\s*([^\n·]+)", text, re.MULTILINE | re.IGNORECASE
+                )
+                if status_m:
+                    st_raw = status_m.group(1).lower()
+                    if "not merged" in st_raw or "in progress" in st_raw or "progress" in st_raw:
+                        init_status = "in progress"
+                    elif "done" in st_raw or "merged" in st_raw:
+                        init_status = "done"
+                    else:
+                        init_status = "open"
+                else:
+                    init_status = "open"
+
             inline_tasks = [
-                {"id": tm.group(1), "title": tm.group(2).strip()}
+                {"id": tm.group(1), "title": tm.group(2).strip(), "state": init_status}
                 for tm in INLINE_TASK_HEADING_RE.finditer(text)
             ]
+
+            # Also check table tasks in plan.md (e.g. | **T1** | **Title**: desc |)
+            table_tasks = []
+            for line in text.splitlines():
+                tm = re.match(r"^\|\s*\*\*(T\w+|\d+\.\d+)\*\*\s*\|\s*(.+?)\s*\|", line)
+                if tm:
+                    sub_id, raw_content = tm.groups()
+                    title_m = re.match(r"^\*\*([^*]+)\*\*[:\s]*(.*)$", raw_content.strip())
+                    sub_title = title_m.group(1).strip() if title_m else raw_content.strip()
+                    # Check if log mentions this task as verified
+                    sub_state = init_status
+                    if init_status == "in progress":
+                        if re.search(rf"\b{re.escape(sub_id)}\b.*?\bverified\b", text, re.IGNORECASE):
+                            sub_state = "verified"
+                        elif re.search(rf"\b{re.escape(sub_id)}\b.*?\bdelivered\b", text, re.IGNORECASE):
+                            sub_state = "delivered"
+                        elif re.search(rf"\b{re.escape(sub_id)}\b.*?\bqueued\b", text, re.IGNORECASE):
+                            sub_state = "open"
+                    table_tasks.append(
+                        {
+                            "id": sub_id,
+                            "title": sub_title,
+                            "state": sub_state,
+                        }
+                    )
+
             # Also check expanded NN.T-*.md files
             expanded_tasks = []
             for sub in sorted(entry.glob(f"{num}.*-*.md")):
@@ -291,18 +358,23 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
                             "id": sub_m.group(1),
                             "title": sub_m.group(2),
                             "rel_path": sub.relative_to(tasks_dir).as_posix(),
+                            "state": init_status,
                         }
                     )
+
+            chosen_tasks = expanded_tasks or inline_tasks or table_tasks
+
             initiatives.append(
                 {
                     "id": num,
                     "slug": slug,
                     "folder": entry.name,
                     "title": title,
+                    "status": init_status,
                     "location": location,
                     "rel_path": plan_path.relative_to(tasks_dir).as_posix(),
                     "has_summary": (entry / "summary.md").is_file(),
-                    "tasks": expanded_tasks if expanded_tasks else inline_tasks,
+                    "tasks": chosen_tasks,
                 }
             )
     return initiatives
@@ -964,11 +1036,54 @@ def cmd_list(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     emergent = discover_emergent_tasks(tasks_dir)
     initiatives = discover_initiatives(tasks_dir)
+
+    all_tasks: list[dict[str, Any]] = list(emergent)
+    for init in initiatives:
+        init_st = init.get("status", "open")
+        for sub_t in init.get("tasks", []):
+            sub_id = sub_t["id"]
+            if not (sub_id.startswith(init["id"]) or sub_id.startswith("T") or sub_id.startswith(f"INIT-{init['id']}")):
+                sub_id = f"{init['id']}.{sub_id}"
+            all_tasks.append(
+                {
+                    "kind": "initiative_task",
+                    "id": sub_id,
+                    "title": sub_t["title"],
+                    "category": init.get("slug", init.get("folder", "initiative")),
+                    "priority": sub_t.get("priority", "P1"),
+                    "priority_reason": sub_t.get("priority_reason", f"Subtask of Initiative #{init['id']}"),
+                    "next_up": "yes" if init_st == "in progress" and sub_t.get("state") != "done" else "no",
+                    "state": sub_t.get("state", init_st),
+                    "executor": sub_t.get("executor", "kilo"),
+                    "handoff": sub_t.get("handoff", f"Work on task {sub_id} in {init.get('rel_path')}"),
+                    "file_path": str(tasks_dir / init["rel_path"]),
+                    "in_done": sub_t.get("state", init_st) == "done",
+                }
+            )
+        if not init.get("tasks"):
+            all_tasks.append(
+                {
+                    "kind": "initiative",
+                    "id": f"INIT-{init['id']}",
+                    "title": init["title"],
+                    "category": init.get("slug", init.get("folder", "initiative")),
+                    "priority": "P1",
+                    "priority_reason": f"Initiative container #{init['id']}",
+                    "next_up": "yes" if init_st == "in progress" else "no",
+                    "state": init_st,
+                    "executor": "architect",
+                    "handoff": f"Review plan for Initiative #{init['id']} in {init.get('rel_path')}",
+                    "file_path": str(tasks_dir / init["rel_path"]),
+                    "in_done": init_st == "done",
+                }
+            )
+
     payload = {
         "ok": True,
         "tasks_dir": str(tasks_dir),
         "emergent_tasks": emergent,
         "initiatives": initiatives,
+        "all_tasks": all_tasks,
     }
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
@@ -981,6 +1096,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         for t in emergent:
             loc = "done" if t["in_done"] else t["category"]
             print(f"  [{t['id']}] ({t['priority']}, {t['state']}, exec={t['executor']}, {loc}) {t['title']}")
+        print(f"Total tasks: {len(all_tasks)}")
     return 0
 
 
