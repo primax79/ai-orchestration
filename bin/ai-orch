@@ -155,8 +155,12 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "Transition task state enforcing state-machine guards and moving closed tasks to tasks/done/.",
                 },
                 "sync-index": {
-                    "usage": "ai-orch tasks sync-index [--tasks-dir <dir>] [--apply | --check] [--json]",
-                    "description": "Deterministically regenerate or check tasks/00-INDEX.md tables from task headers.",
+                    "usage": "ai-orch tasks sync-index [--tasks-dir <dir>] [--apply] [--check] [--json]",
+                    "description": "Deterministically synchronize 00-INDEX.md with task headers on disk.",
+                },
+                "upgrade": {
+                    "usage": "ai-orch tasks upgrade [--tasks-dir <dir>] [--json]",
+                    "description": "Upgrade an existing tasks/ directory to the latest task-pipeline v0.3.0 convention.",
                 },
             },
         },

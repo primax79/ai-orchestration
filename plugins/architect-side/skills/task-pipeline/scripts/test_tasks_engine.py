@@ -83,6 +83,23 @@ Build the scraper module.
     path.write_text(content, encoding="utf-8")
 
 
+def test_upgrade_tasks_tree(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    # Write old-style AGENTS.md
+    (tasks_dir / "AGENTS.md").write_text("# old convention\nmacroplan-authoring\n", encoding="utf-8")
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n\n## Initiatives\n\n| 1 | 01 | [Test](01-test/plan.md) | in progress |\n", encoding="utf-8")
+
+    res = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is True
+    assert any("AGENTS.md" in f for f in payload["upgraded_files"])
+    assert (tasks_dir / "_inbox" / "to-analyze").is_dir()
+    assert (tasks_dir / "_inbox" / "analyzed").is_dir()
+    assert "task-pipeline" in (tasks_dir / "AGENTS.md").read_text()
+
+
 def test_real_repo_tasks_validate_and_list() -> None:
     tasks_dir = REPO_ROOT / "tasks"
     res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")

@@ -83,6 +83,21 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 REQUIRED_SECTIONS: tuple[str, ...] = ("## Goal", "## Steps", "## Verification")
 RESERVED_DIRS: set[str] = {"_inbox", "_reviews", "specs", "done", "merged", "notes", "reviews"}
 
+CANONICAL_TASKS_AGENTS_MD = """# tasks/ convention (task-pipeline + emergent tasks)
+
+Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`).
+
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `NN.T` sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids:** `T###`, unique across `done/` too; reserve the id by creating the file immediately.
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`.
+- **States:** `open`, `in progress`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+"""
+
 TASK_ID_RE = re.compile(r"^(?:T\d{3,}|\d{2,}\.\d+)$")
 EMERGENT_ID_RE = re.compile(r"^T\d{3,}$")
 INITIATIVE_DIR_RE = re.compile(r"^(\d{2,})-(.+)$")
@@ -1181,6 +1196,68 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def upgrade_tasks_tree(tasks_dir: pathlib.Path) -> dict[str, Any]:
+    """Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention:
+      1. Updates tasks/AGENTS.md with canonical task-pipeline rules and skill names.
+      2. Ensures standard directories exist (_inbox/to-analyze, _inbox/analyzed).
+      3. Regenerates/updates 00-INDEX.md with standard tables (Initiatives, Specs, Next up, Tasks by category, Decisions waiting, Done).
+      4. Validates the upgraded tree.
+    """
+    upgraded_files: list[str] = []
+
+    # 1. Update tasks/AGENTS.md
+    agents_md = tasks_dir / "AGENTS.md"
+    existing_agents = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
+    if existing_agents.strip() != CANONICAL_TASKS_AGENTS_MD.strip():
+        agents_md.write_text(CANONICAL_TASKS_AGENTS_MD, encoding="utf-8")
+        upgraded_files.append(str(agents_md))
+
+    # 2. Ensure standard directories
+    (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
+
+    # 3. Re-sync 00-INDEX.md
+    idx_path = tasks_dir / "00-INDEX.md"
+    existing_idx = idx_path.read_text(encoding="utf-8") if idx_path.is_file() else ""
+    rendered_idx = render_synced_index(tasks_dir, existing_idx)
+    if existing_idx.strip() != rendered_idx.strip():
+        idx_path.write_text(rendered_idx, encoding="utf-8")
+        upgraded_files.append(str(idx_path))
+
+    # 4. Validate
+    errors, warnings, emergent, initiatives = validate_tasks_tree(tasks_dir)
+
+    return {
+        "ok": len(errors) == 0,
+        "upgraded_files": upgraded_files,
+        "emergent_count": len(emergent),
+        "initiative_count": len(initiatives),
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def cmd_upgrade(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    res = upgrade_tasks_tree(tasks_dir)
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res["upgraded_files"]:
+            print(f"[ok] Upgraded {len(res['upgraded_files'])} file(s) in {tasks_dir}:")
+            for f in res["upgraded_files"]:
+                print(f"  - {f}")
+        else:
+            print(f"[ok] {tasks_dir} is already up-to-date with latest task-pipeline convention.")
+        if res["warnings"]:
+            for w in res["warnings"]:
+                print(f"[WARN] {w}")
+        if res["errors"]:
+            for e in res["errors"]:
+                print(f"[FAIL] {e}")
+    return 0 if res["ok"] else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", action="store_true", help="Output structured JSON on stdout")
@@ -1213,6 +1290,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--check", action="store_true", help="Exit non-zero if 00-INDEX.md is out of sync")
     p_sync.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_sync.set_defaults(func=cmd_sync_index)
+
+    p_upg = sub.add_parser("upgrade", help="Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention")
+    p_upg.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_upg.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_upg.set_defaults(func=cmd_upgrade)
 
     return ap
 

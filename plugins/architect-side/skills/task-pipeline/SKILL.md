@@ -473,7 +473,29 @@ python3 scripts/tasks_engine.py [--json] transition <task_id> <new_state> \
 
 # Deterministically regenerate or verify tasks/00-INDEX.md tables from task headers on disk
 python3 scripts/tasks_engine.py [--json] sync-index [--tasks-dir tasks] [--apply | --check]
+
+# Upgrade an older tasks/ tree to the latest task-pipeline convention
+python3 scripts/tasks_engine.py [--json] upgrade [--tasks-dir tasks]
 ```
+
+## Upgrading an Existing Project to the Latest Convention
+
+When working on a project created with older conventions (e.g. legacy `macroplan-authoring v0.1` without emergent tasks, or missing `tasks/AGENTS.md` rules, or lacking `Next up` / `Tasks by category` in `00-INDEX.md`):
+
+1. **Via CLI (`ai-orch tasks upgrade`)**:
+   ```bash
+   ./bin/ai-orch tasks upgrade [--tasks-dir /path/to/project/tasks]
+   ```
+   This automatically:
+   - Upgrades `tasks/AGENTS.md` to the canonical `task-pipeline` rules and updated skill names (`task-pipeline`, `orchestration-workflow`, `task-spec-authoring`, `task-worktree-ops`, `executor-contract`, `orchestration-setup`);
+   - Scaffolds standard directories (`_inbox/to-analyze`, `_inbox/analyzed`);
+   - Re-syncs `tasks/00-INDEX.md` with standard tables (`Initiatives`, `Specs`, `Next up`, `Tasks by category`, `Decisions waiting`, `Done`);
+   - Runs `validate` across the tree.
+
+2. **Via Skill (in Chat)**:
+   Ask the assistant in your project window:
+   > *"Use the `task-pipeline` skill to upgrade this project's `tasks/` directory to the latest model, align `tasks/AGENTS.md`, and run `ai-orch tasks sync-index --apply`."*
+   The assistant inspects the tasks, updates the rules, assigns `profile: bulk-execution` or `deep-reasoning` to active tasks, and validates the result.
 
 ## Reference
 
