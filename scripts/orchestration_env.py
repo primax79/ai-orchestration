@@ -594,6 +594,145 @@ def read_registered_mcps(config_path: pathlib.Path, assistant: str) -> dict[str,
     return data.get("mcpServers", data.get("mcp_servers", {})) if isinstance(data, dict) else {}
 
 
+# ---------------------------------------------------------------------------
+# Claude Plugin Discovery & Settings
+# ---------------------------------------------------------------------------
+
+def load_claude_plugin_settings(
+    home: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+) -> tuple[dict[str, bool], dict[str, bool]]:
+    """Load Claude plugin enablement maps.
+    Returns:
+        (global_enabled, project_enabled)
+    where each is a dict of plugin_id -> bool.
+    Project settings (<ws>/.claude/settings.json and <ws>/.claude/settings.local.json)
+    override user settings (~/.claude/settings.json).
+    Missing entries default to True when evaluated.
+    """
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+
+    global_enabled: dict[str, bool] = {}
+    user_settings_path = h / ".claude" / "settings.json"
+    if user_settings_path.is_file():
+        try:
+            udata = json.loads(user_settings_path.read_text(encoding="utf-8"))
+            if isinstance(udata, dict) and isinstance(udata.get("enabledPlugins"), dict):
+                for k, v in udata["enabledPlugins"].items():
+                    global_enabled[k] = bool(v)
+        except Exception:
+            pass
+
+    project_enabled = dict(global_enabled)
+    if ws is not None:
+        for fname in ("settings.json", "settings.local.json"):
+            ps_path = ws / ".claude" / fname
+            if ps_path.is_file():
+                try:
+                    pdata = json.loads(ps_path.read_text(encoding="utf-8"))
+                    if isinstance(pdata, dict) and isinstance(pdata.get("enabledPlugins"), dict):
+                        for k, v in pdata["enabledPlugins"].items():
+                            project_enabled[k] = bool(v)
+                except Exception:
+                    pass
+
+    return global_enabled, project_enabled
+
+
+def discover_claude_plugin_skills(
+    home: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+) -> list[dict[str, Any]]:
+    """Inspect ~/.claude/plugins/installed_plugins.json and discover installed plugin skills.
+    Returns list of dicts with keys:
+        plugin_id: str (e.g. 'architect-side@ai-orchestration')
+        scope: str ('user', 'project', 'local')
+        project_path: str | None
+        skill_name: str
+        path: str (path to skill directory)
+        origin: str ('plugin:<plugin_id>')
+    """
+    h = home or get_home_dir()
+    reg_path = h / ".claude" / "plugins" / "installed_plugins.json"
+    if not reg_path.is_file():
+        return []
+
+    try:
+        data = json.loads(reg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    plugins_map = data.get("plugins", {})
+    if not isinstance(plugins_map, dict):
+        return []
+
+    results: list[dict[str, Any]] = []
+
+    for plugin_id, installs in sorted(plugins_map.items()):
+        if isinstance(installs, dict):
+            installs_list = [installs]
+        elif isinstance(installs, list):
+            installs_list = installs
+        else:
+            continue
+
+        for install in installs_list:
+            if not isinstance(install, dict):
+                continue
+            iscope = install.get("scope", "user")
+            project_path = install.get("projectPath")
+            ip_str = install.get("installPath")
+            if not ip_str:
+                continue
+            ip = pathlib.Path(ip_str).expanduser()
+            if not ip.is_dir():
+                continue
+
+            # Check skills layout: <installPath>/skills/<name>/SKILL.md
+            skills_dir = ip / "skills"
+            if skills_dir.is_dir():
+                for child in sorted(skills_dir.iterdir()):
+                    if child.name.startswith(".") or not child.is_dir():
+                        continue
+                    if (child / "SKILL.md").is_file():
+                        results.append({
+                            "plugin_id": plugin_id,
+                            "scope": iscope,
+                            "project_path": project_path,
+                            "skill_name": child.name,
+                            "path": str(child),
+                            "origin": f"plugin:{plugin_id}",
+                        })
+            elif (ip / "SKILL.md").is_file():
+                # Single skill in installPath root
+                skill_name = plugin_id.split("@", 1)[0]
+                try:
+                    content = (ip / "SKILL.md").read_text(encoding="utf-8")
+                    if content.startswith("---"):
+                        parts = content.split("---", 2)
+                        if len(parts) >= 3:
+                            for line in parts[1].splitlines():
+                                line_s = line.strip()
+                                if line_s.startswith("name:"):
+                                    parsed = line_s.split(":", 1)[1].strip().strip("\"'")
+                                    if parsed:
+                                        skill_name = parsed
+                                        break
+                except Exception:
+                    pass
+                results.append({
+                    "plugin_id": plugin_id,
+                    "scope": iscope,
+                    "project_path": project_path,
+                    "skill_name": skill_name,
+                    "path": str(ip),
+                    "origin": f"plugin:{plugin_id}",
+                })
+
+    return results
+
+
 def inspect_environment(
     workspace: pathlib.Path | None = None,
     home: pathlib.Path | None = None,
@@ -616,6 +755,8 @@ def inspect_environment(
 
     environments: dict[str, Any] = {}
     scopes_to_check = ["global"] + (["project"] if ws else [])
+    global_plugin_enabled, project_plugin_enabled = load_claude_plugin_settings(h, ws)
+    claude_plugins = discover_claude_plugin_skills(h, ws)
 
     for assistant in ASSISTANTS:
         environments[assistant] = {}
@@ -641,6 +782,57 @@ def inspect_environment(
                         "source_repo": src_repo,
                         "source_hash": src_hash,
                     }
+
+            # Build list-shaped skill_entries
+            skill_entries: list[dict[str, Any]] = []
+            for sname, sdata in installed_skills.items():
+                child_path = sdir / sname
+                skill_entries.append({
+                    "name": sname,
+                    "origin": "standalone",
+                    "scope": scope,
+                    "path": str(child_path),
+                    "enabled": True,
+                    "state": sdata["state"],
+                })
+
+            if assistant == "claude":
+                if scope == "global":
+                    for ps in claude_plugins:
+                        if ps["scope"] == "user":
+                            en = global_plugin_enabled.get(ps["plugin_id"], True)
+                            skill_entries.append({
+                                "name": ps["skill_name"],
+                                "origin": ps["origin"],
+                                "scope": "user",
+                                "path": ps["path"],
+                                "enabled": en,
+                                "state": "plugin",
+                            })
+                elif scope == "project" and ws is not None:
+                    for ps in claude_plugins:
+                        if ps["scope"] == "user":
+                            en = project_plugin_enabled.get(ps["plugin_id"], True)
+                            skill_entries.append({
+                                "name": ps["skill_name"],
+                                "origin": ps["origin"],
+                                "scope": "user",
+                                "path": ps["path"],
+                                "enabled": en,
+                                "state": "plugin",
+                            })
+                        elif ps["scope"] in ("project", "local"):
+                            p_path = ps.get("project_path")
+                            if p_path and pathlib.Path(p_path).resolve() == ws:
+                                en = project_plugin_enabled.get(ps["plugin_id"], True)
+                                skill_entries.append({
+                                    "name": ps["skill_name"],
+                                    "origin": ps["origin"],
+                                    "scope": ps["scope"],
+                                    "path": ps["path"],
+                                    "enabled": en,
+                                    "state": "plugin",
+                                })
 
             # Inspect agents
             adir = assistant_agents_dir(assistant, scope, ws, h)
@@ -669,12 +861,47 @@ def inspect_environment(
                         "source_hash": src_hash,
                     }
 
-            # Detect conflict: generic orchestration-workflow + bound kilo-mcp-orchestrator both installed
-            conflicts = []
-            if "orchestration-workflow" in installed_skills and "kilo-mcp-orchestrator" in installed_skills:
+            # Conflicts computed over the UNION of enabled entries:
+            # per assistant+scope view; for Claude project view = standalone global + standalone project + enabled plugins
+            if assistant == "claude" and scope == "project":
+                global_entries = environments["claude"].get("global", {}).get("skill_entries", [])
+                standalone_global = [e for e in global_entries if e["origin"] == "standalone" and e["enabled"]]
+                enabled_for_conflicts = [e for e in skill_entries if e["enabled"]] + standalone_global
+            else:
+                enabled_for_conflicts = [e for e in skill_entries if e["enabled"]]
+
+            conflicts: list[str] = []
+            structured_conflicts: list[dict[str, Any]] = []
+
+            # 1. Trigger conflict: orchestration-workflow + kilo-mcp-orchestrator
+            generic_entries = [e for e in enabled_for_conflicts if e["name"] == "orchestration-workflow"]
+            bound_entries = [e for e in enabled_for_conflicts if e["name"] == "kilo-mcp-orchestrator"]
+            if generic_entries and bound_entries:
+                for g in generic_entries:
+                    for b in bound_entries:
+                        structured_conflicts.append({
+                            "kind": "trigger-conflict",
+                            "names": ["orchestration-workflow", "kilo-mcp-orchestrator"],
+                            "entries": [g, b],
+                        })
                 conflicts.append(
                     "Both generic 'orchestration-workflow' and bound 'kilo-mcp-orchestrator' are installed in the same scope; they compete for the same trigger."
                 )
+
+            # 2. Duplicate name conflict across origins
+            by_name: dict[str, list[dict[str, Any]]] = {}
+            for e in enabled_for_conflicts:
+                by_name.setdefault(e["name"], []).append(e)
+
+            for name, entries_for_name in sorted(by_name.items()):
+                if len(entries_for_name) > 1:
+                    structured_conflicts.append({
+                        "kind": "duplicate-name",
+                        "names": [name],
+                        "entries": entries_for_name,
+                    })
+                    origins_str = ", ".join(sorted({e["origin"] for e in entries_for_name}))
+                    conflicts.append(f"Duplicate skill '{name}' found across origins: {origins_str}")
 
             mcp_cfg_path = assistant_mcp_config_path(assistant, scope, ws, h)
             mcps = read_registered_mcps(mcp_cfg_path, assistant)
@@ -683,9 +910,11 @@ def inspect_environment(
                 "skills_dir": str(sdir),
                 "installed_count": len(installed_skills),
                 "skills": installed_skills,
+                "skill_entries": skill_entries,
                 "agents_dir": str(adir),
                 "agents": installed_agents,
                 "conflicts": conflicts,
+                "structured_conflicts": structured_conflicts,
                 "mcp_config_path": str(mcp_cfg_path),
                 "registered_mcps": sorted(mcps.keys()),
             }
@@ -1264,37 +1493,82 @@ def resolve_conflicts(
     def _build_plan() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         p: list[dict[str, Any]] = []
         c_items: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+
+        env_report = inspect_environment(ws, h)
+
         for assistant in ASSISTANTS:
             for scope in scopes_to_check:
-                sdir = assistant_skills_dir(assistant, scope, ws, h)
-                has_generic = (sdir / "orchestration-workflow").exists()
-                has_bound = (sdir / "kilo-mcp-orchestrator").exists()
-                if has_generic and has_bound:
-                    keep_target = policy.get(assistant, "generic" if assistant == "kilo" else "bound")
-                    if keep_target == "generic":
-                        to_remove = "kilo-mcp-orchestrator"
-                        to_keep = "orchestration-workflow"
-                    else:
-                        to_remove = "orchestration-workflow"
-                        to_keep = "kilo-mcp-orchestrator"
-                    target_path = sdir / to_remove
-                    p_item = {
-                        "action": "trash",
-                        "path": str(target_path),
-                        "reason": f"Resolve conflict in {assistant} ({scope}): keep '{to_keep}', trash '{to_remove}' per policy",
-                        "current_state": "conflict",
-                        "before_sha256": compute_target_hash(target_path),
-                        "after_sha256": None,
-                    }
-                    p.append(p_item)
-                    c_items.append({
-                        "assistant": assistant,
-                        "scope": scope,
-                        "removed": to_remove,
-                        "kept": to_keep,
-                        "path": target_path,
-                        "reason": p_item["reason"],
-                    })
+                sinfo = env_report["environments"][assistant].get(scope, {})
+                for sc in sinfo.get("structured_conflicts", []):
+                    kind = sc.get("kind")
+                    entries = sc.get("entries", [])
+                    if kind == "trigger-conflict":
+                        keep_target = policy.get(assistant, "generic" if assistant == "kilo" else "bound")
+                        if keep_target == "generic":
+                            to_remove_name = "kilo-mcp-orchestrator"
+                            to_keep_name = "orchestration-workflow"
+                        else:
+                            to_remove_name = "orchestration-workflow"
+                            to_keep_name = "kilo-mcp-orchestrator"
+
+                        for e in entries:
+                            if e.get("name") == to_remove_name:
+                                e_path = e.get("path")
+                                if not e_path or e_path in seen_paths:
+                                    continue
+                                seen_paths.add(e_path)
+                                origin = e.get("origin", "")
+                                if origin == "standalone":
+                                    target_path = pathlib.Path(e_path)
+                                    p_item = {
+                                        "action": "trash",
+                                        "path": str(target_path),
+                                        "reason": f"Resolve conflict in {assistant} ({scope}): keep '{to_keep_name}', trash '{to_remove_name}' per policy",
+                                        "current_state": "conflict",
+                                        "before_sha256": compute_target_hash(target_path),
+                                        "after_sha256": None,
+                                    }
+                                    p.append(p_item)
+                                    c_items.append({
+                                        "assistant": assistant,
+                                        "scope": scope,
+                                        "removed": to_remove_name,
+                                        "kept": to_keep_name,
+                                        "path": target_path,
+                                        "reason": p_item["reason"],
+                                    })
+                                elif origin.startswith("plugin:"):
+                                    plugin_id = origin.split("plugin:", 1)[1]
+                                    target_path = pathlib.Path(e_path)
+                                    p_item = {
+                                        "action": "advise",
+                                        "path": str(target_path),
+                                        "reason": f"disable plugin {plugin_id} in ~/.claude/settings.json (enabledPlugins) or uninstall it",
+                                        "current_state": "conflict",
+                                        "before_sha256": compute_target_hash(target_path),
+                                        "after_sha256": None,
+                                    }
+                                    p.append(p_item)
+                    elif kind == "duplicate-name":
+                        for e in entries:
+                            origin = e.get("origin", "")
+                            e_path = e.get("path")
+                            if not e_path or e_path in seen_paths:
+                                continue
+                            if origin.startswith("plugin:"):
+                                seen_paths.add(e_path)
+                                plugin_id = origin.split("plugin:", 1)[1]
+                                target_path = pathlib.Path(e_path)
+                                p_item = {
+                                    "action": "advise",
+                                    "path": str(target_path),
+                                    "reason": f"disable plugin {plugin_id} in ~/.claude/settings.json (enabledPlugins) or uninstall it",
+                                    "current_state": "conflict",
+                                    "before_sha256": compute_target_hash(target_path),
+                                    "after_sha256": None,
+                                }
+                                p.append(p_item)
         return p, c_items
 
     plan, conflict_items = _build_plan()
@@ -1565,6 +1839,10 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"\n[{assistant} — {scope}] ({sinfo['installed_count']} skill(s), MCPs: {', '.join(sinfo['registered_mcps']) or 'none'})")
             for sname, sdata in sinfo["skills"].items():
                 print(f"  - {sname:<30} [{sdata['state']}] (source: {sdata['source_repo'] or 'local'})")
+            for entry in sinfo.get("skill_entries", []):
+                if entry.get("origin") != "standalone":
+                    en_str = "enabled" if entry.get("enabled") else "disabled"
+                    print(f"  - {entry['name']:<30} [{entry['state']}] ({entry['origin']}, {en_str})")
             for c in sinfo["conflicts"]:
                 print(f"  ! CONFLICT: {c}")
     return 0

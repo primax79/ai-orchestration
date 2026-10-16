@@ -694,3 +694,220 @@ def test_reinstall_of_identical_skills_is_a_noop(tmp_path: pathlib.Path) -> None
     run_env(["install-skills", "--assistants", "claude", "--scope", "global"], fake_home)
     after = sorted(p for p in trash_root.rglob("*")) if trash_root.exists() else []
     assert after == before
+
+
+def test_claude_plugin_skills_inventory_and_settings_enablement(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_ws = tmp_path / "project"
+    other_ws = tmp_path / "other_project"
+    fake_home.mkdir()
+    fake_ws.mkdir()
+    other_ws.mkdir()
+
+    # Create plugin cache directories with skills
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_generic_skills = plugins_cache / "ai-orchestration" / "architect-side" / "0.3.0" / "skills"
+    p_bound_skills = plugins_cache / "kilo-mcp" / "architect-side" / "0.2.2" / "skills"
+    p_other_skills = plugins_cache / "other" / "project-plugin" / "0.1.0" / "skills"
+
+    (p_generic_skills / "orchestration-workflow").mkdir(parents=True)
+    (p_generic_skills / "orchestration-workflow" / "SKILL.md").write_text("---\nname: orchestration-workflow\n---\n# Generic Workflow\n")
+
+    (p_bound_skills / "kilo-mcp-orchestrator").mkdir(parents=True)
+    (p_bound_skills / "kilo-mcp-orchestrator" / "SKILL.md").write_text("---\nname: kilo-mcp-orchestrator\n---\n# Bound Orchestrator\n")
+
+    (p_other_skills / "other-tool").mkdir(parents=True)
+    (p_other_skills / "other-tool" / "SKILL.md").write_text("---\nname: other-tool\n---\n# Other Tool\n")
+
+    # Write installed_plugins.json
+    installed_plugins_data = {
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_generic_skills.parent),
+                    "version": "0.3.0",
+                }
+            ],
+            "architect-side@kilo-mcp": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_bound_skills.parent),
+                    "version": "0.2.2",
+                }
+            ],
+            "project-plugin@other": [
+                {
+                    "scope": "project",
+                    "projectPath": str(other_ws),
+                    "installPath": str(p_other_skills.parent),
+                    "version": "0.1.0",
+                }
+            ],
+        },
+    }
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps(installed_plugins_data, indent=2))
+
+    # User settings: architect-side@ai-orchestration enabled, architect-side@kilo-mcp disabled
+    user_settings = {
+        "enabledPlugins": {
+            "architect-side@ai-orchestration": True,
+            "architect-side@kilo-mcp": False,
+        }
+    }
+    settings_file = fake_home / ".claude" / "settings.json"
+    settings_file.write_text(json.dumps(user_settings, indent=2))
+
+    # Status check with workspace = fake_ws
+    st = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    claude_global = st["environments"]["claude"]["global"]
+    entries = claude_global["skill_entries"]
+
+    # Verify skill_entries list structure
+    generic_entry = next((e for e in entries if e["name"] == "orchestration-workflow"), None)
+    assert generic_entry is not None
+    assert generic_entry["origin"] == "plugin:architect-side@ai-orchestration"
+    assert generic_entry["scope"] == "user"
+    assert generic_entry["enabled"] is True
+    assert generic_entry["state"] == "plugin"
+
+    bound_entry = next((e for e in entries if e["name"] == "kilo-mcp-orchestrator"), None)
+    assert bound_entry is not None
+    assert bound_entry["origin"] == "plugin:architect-side@kilo-mcp"
+    assert bound_entry["scope"] == "user"
+    assert bound_entry["enabled"] is False
+    assert bound_entry["state"] == "plugin"
+
+    # other-tool is for other_ws, so must NOT appear in global or fake_ws project entries
+    assert not any(e["name"] == "other-tool" for e in entries)
+    claude_project = st["environments"]["claude"]["project"]
+    assert not any(e["name"] == "other-tool" for e in claude_project["skill_entries"])
+
+    # Because kilo-mcp-orchestrator is disabled in settings, no conflict is reported
+    assert claude_global["conflicts"] == []
+    assert claude_global["structured_conflicts"] == []
+
+    # Project settings override: enable architect-side@kilo-mcp in fake_ws
+    ws_claude = fake_ws / ".claude"
+    ws_claude.mkdir(parents=True)
+    (ws_claude / "settings.json").write_text(json.dumps({
+        "enabledPlugins": {
+            "architect-side@kilo-mcp": True,
+        }
+    }))
+
+    st2 = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    # Global still sees disabled kilo-mcp-orchestrator (user settings)
+    assert st2["environments"]["claude"]["global"]["conflicts"] == []
+    # Project view sees effective enabled kilo-mcp-orchestrator -> conflict reported!
+    proj_conflicts = st2["environments"]["claude"]["project"]["structured_conflicts"]
+    assert len(proj_conflicts) == 1
+    assert proj_conflicts[0]["kind"] == "trigger-conflict"
+    assert set(proj_conflicts[0]["names"]) == {"orchestration-workflow", "kilo-mcp-orchestrator"}
+
+
+def test_duplicate_name_conflict_between_standalone_and_plugin(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Install standalone orchestration-workflow
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+
+    # Set up enabled plugin providing orchestration-workflow
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_generic_skills = plugins_cache / "ai-orchestration" / "architect-side" / "0.3.0" / "skills"
+    (p_generic_skills / "orchestration-workflow").mkdir(parents=True)
+    (p_generic_skills / "orchestration-workflow" / "SKILL.md").write_text("# Plugin Generic Workflow\n")
+
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_generic_skills.parent),
+                }
+            ]
+        }
+    }))
+
+    # Verify duplicate-name conflict is detected
+    st = run_env(["status"], fake_home)
+    s_conflicts = st["environments"]["claude"]["global"]["structured_conflicts"]
+    dup_conflicts = [c for c in s_conflicts if c["kind"] == "duplicate-name" and c["names"] == ["orchestration-workflow"]]
+    assert len(dup_conflicts) == 1
+    dup_entry = dup_conflicts[0]
+    assert len(dup_entry["entries"]) == 2
+    origins = {e["origin"] for e in dup_entry["entries"]}
+    assert origins == {"standalone", "plugin:architect-side@ai-orchestration"}
+    assert any("Duplicate skill 'orchestration-workflow'" in c for c in st["environments"]["claude"]["global"]["conflicts"])
+
+
+def test_resolve_conflicts_plan_never_contains_non_advise_action_on_plugin_path(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Install standalone orchestration-workflow
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+
+    # Set up plugin providing kilo-mcp-orchestrator AND plugin providing orchestration-workflow
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_bound_skills = plugins_cache / "kilo-mcp" / "architect-side" / "0.2.2" / "skills"
+    (p_bound_skills / "kilo-mcp-orchestrator").mkdir(parents=True)
+    (p_bound_skills / "kilo-mcp-orchestrator" / "SKILL.md").write_text("# Bound Orchestrator\n")
+
+    p_generic_skills = plugins_cache / "ai-orchestration" / "architect-side" / "0.3.0" / "skills"
+    (p_generic_skills / "orchestration-workflow").mkdir(parents=True)
+    (p_generic_skills / "orchestration-workflow" / "SKILL.md").write_text("# Plugin Generic Workflow\n")
+
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@kilo-mcp": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_bound_skills.parent),
+                }
+            ],
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_generic_skills.parent),
+                }
+            ],
+        }
+    }))
+
+    # 1. Check resolve-conflicts dry-run plan
+    rc = run_env(["resolve-conflicts", "--dry-run"], fake_home)
+    assert rc["ok"] is True
+    plan = rc["plan"]
+    assert len(plan) > 0
+
+    # Rule: plan never contains a non-advise action on a plugin path
+    plugin_cache_str = str(plugins_cache)
+    for item in plan:
+        path = item["path"]
+        if plugin_cache_str in path:
+            assert item["action"] == "advise", f"Expected 'advise' for plugin path, got {item['action']}: {item}"
+            assert "disable plugin" in item["reason"]
+            assert "(enabledPlugins) or uninstall it" in item["reason"]
+        else:
+            assert item["action"] == "trash"
+
+    # 2. Check execute (non-dry-run)
+    rc_exec = run_env(["resolve-conflicts"], fake_home)
+    assert rc_exec["ok"] is True
+    # Plugin directories are never removed or modified
+    assert (p_bound_skills / "kilo-mcp-orchestrator" / "SKILL.md").is_file()
+    assert (p_generic_skills / "orchestration-workflow" / "SKILL.md").is_file()
+    # Standalone generic copy was trashed
+    assert not (fake_home / ".claude" / "skills" / "orchestration-workflow").exists()
+
