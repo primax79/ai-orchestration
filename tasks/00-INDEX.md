@@ -37,6 +37,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | --- | --- | --- | --- | --- |
 | T008 | P1 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](server-and-bindings/T008-claude-mcp-phase1-spike.md) | claude | `Read tasks/server-and-bindings/T008-claude-mcp-phase1-spike.md and ../claude-mcp/SPEC.md, run the Phase 1 spike, record findings, and update the task and the registry.` |
 | T007 | P2 | [Structured verification gate tool in kilo-mcp](server-and-bindings/T007-verification-gate-tool.md) | kilo | `Read tasks/server-and-bindings/T007-verification-gate-tool.md, do the open steps, run the Verification, update the task and the registry.` |
+| T011 | P1 | [render-agents-md: render rules that match the actual orchestrator/executor topology](methodology/T011-render-agents-md-topology.md) | kilo | `Read tasks/methodology/T011-render-agents-md-topology.md, do the open steps, run the Verification, update the task and tasks/00-INDEX.md.` |
 <!-- /ai-orch:generated next-up -->
 
 ## Tasks by category
@@ -49,6 +50,7 @@ Evolutions and refinements to the orchestration skills (`orchestration-methodolo
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T006 | P3 | [Extract incident narratives to references/incidents.md (progressive disclosure)](methodology/T006-incidents-progressive-disclosure.md) | open | self | T003 |
+| T011 | P1 | [render-agents-md: render rules that match the actual orchestrator/executor topology](methodology/T011-render-agents-md-topology.md) | open | kilo | - |
 
 ### server-and-bindings
 
