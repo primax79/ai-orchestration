@@ -870,20 +870,41 @@ def inspect_environment(
             else:
                 enabled_for_conflicts = [e for e in skill_entries if e["enabled"]]
 
+            seen_conflict_paths: set[str] = set()
+            unique_enabled: list[dict[str, Any]] = []
+            for e in enabled_for_conflicts:
+                ep = e.get("path")
+                if ep and ep in seen_conflict_paths:
+                    continue
+                if ep:
+                    seen_conflict_paths.add(ep)
+                unique_enabled.append(e)
+            enabled_for_conflicts = unique_enabled
+
             conflicts: list[str] = []
-            structured_conflicts: list[dict[str, Any]] = []
+            structured_conflicts_map: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
 
             # 1. Trigger conflict: orchestration-workflow + kilo-mcp-orchestrator
             generic_entries = [e for e in enabled_for_conflicts if e["name"] == "orchestration-workflow"]
             bound_entries = [e for e in enabled_for_conflicts if e["name"] == "kilo-mcp-orchestrator"]
             if generic_entries and bound_entries:
-                for g in generic_entries:
-                    for b in bound_entries:
-                        structured_conflicts.append({
-                            "kind": "trigger-conflict",
-                            "names": ["orchestration-workflow", "kilo-mcp-orchestrator"],
-                            "entries": [g, b],
-                        })
+                names = ["orchestration-workflow", "kilo-mcp-orchestrator"]
+                key = ("trigger-conflict", tuple(sorted(names)))
+                combined_entries: list[dict[str, Any]] = []
+                seen_entry_paths: set[str] = set()
+                for e in generic_entries + bound_entries:
+                    ep = e.get("path")
+                    if ep and ep in seen_entry_paths:
+                        continue
+                    if ep:
+                        seen_entry_paths.add(ep)
+                    combined_entries.append(e)
+
+                structured_conflicts_map[key] = {
+                    "kind": "trigger-conflict",
+                    "names": names,
+                    "entries": combined_entries,
+                }
                 conflicts.append(
                     "Both generic 'orchestration-workflow' and bound 'kilo-mcp-orchestrator' are installed in the same scope; they compete for the same trigger."
                 )
@@ -894,14 +915,28 @@ def inspect_environment(
                 by_name.setdefault(e["name"], []).append(e)
 
             for name, entries_for_name in sorted(by_name.items()):
-                if len(entries_for_name) > 1:
-                    structured_conflicts.append({
+                unique_entries: list[dict[str, Any]] = []
+                seen_entry_paths = set()
+                for e in entries_for_name:
+                    ep = e.get("path")
+                    if ep and ep in seen_entry_paths:
+                        continue
+                    if ep:
+                        seen_entry_paths.add(ep)
+                    unique_entries.append(e)
+
+                if len(unique_entries) > 1:
+                    names = [name]
+                    key = ("duplicate-name", tuple(sorted(names)))
+                    structured_conflicts_map[key] = {
                         "kind": "duplicate-name",
-                        "names": [name],
-                        "entries": entries_for_name,
-                    })
-                    origins_str = ", ".join(sorted({e["origin"] for e in entries_for_name}))
+                        "names": names,
+                        "entries": unique_entries,
+                    }
+                    origins_str = ", ".join(sorted({e["origin"] for e in unique_entries}))
                     conflicts.append(f"Duplicate skill '{name}' found across origins: {origins_str}")
+
+            structured_conflicts = list(structured_conflicts_map.values())
 
             mcp_cfg_path = assistant_mcp_config_path(assistant, scope, ws, h)
             mcps = read_registered_mcps(mcp_cfg_path, assistant)
@@ -1495,6 +1530,7 @@ def resolve_conflicts(
         c_items: list[dict[str, Any]] = []
         seen_paths: set[str] = set()
 
+        catalog = discover_available_skills(h)
         env_report = inspect_environment(ws, h)
 
         for assistant in ASSISTANTS:
@@ -1512,53 +1548,42 @@ def resolve_conflicts(
                             to_remove_name = "orchestration-workflow"
                             to_keep_name = "kilo-mcp-orchestrator"
 
-                        for e in entries:
-                            if e.get("name") == to_remove_name:
+                        to_remove_entries = [e for e in entries if e.get("name") == to_remove_name]
+                        standalone_to_remove = [e for e in to_remove_entries if not e.get("origin", "").startswith("plugin:")]
+                        plugin_to_remove = [e for e in to_remove_entries if e.get("origin", "").startswith("plugin:")]
+
+                        if standalone_to_remove:
+                            for e in standalone_to_remove:
+                                e_path = e.get("path")
+                                if not e_path or e_path in seen_paths:
+                                    continue
+                                seen_paths.add(e_path)
+                                target_path = pathlib.Path(e_path)
+                                p_item = {
+                                    "action": "trash",
+                                    "path": str(target_path),
+                                    "reason": f"Resolve conflict in {assistant} ({scope}): keep '{to_keep_name}', trash '{to_remove_name}' per policy",
+                                    "current_state": "conflict",
+                                    "before_sha256": compute_target_hash(target_path),
+                                    "after_sha256": None,
+                                }
+                                p.append(p_item)
+                                c_items.append({
+                                    "assistant": assistant,
+                                    "scope": e.get("scope", scope),
+                                    "removed": to_remove_name,
+                                    "kept": to_keep_name,
+                                    "path": target_path,
+                                    "reason": p_item["reason"],
+                                })
+                        elif plugin_to_remove:
+                            for e in plugin_to_remove:
                                 e_path = e.get("path")
                                 if not e_path or e_path in seen_paths:
                                     continue
                                 seen_paths.add(e_path)
                                 origin = e.get("origin", "")
-                                if origin == "standalone":
-                                    target_path = pathlib.Path(e_path)
-                                    p_item = {
-                                        "action": "trash",
-                                        "path": str(target_path),
-                                        "reason": f"Resolve conflict in {assistant} ({scope}): keep '{to_keep_name}', trash '{to_remove_name}' per policy",
-                                        "current_state": "conflict",
-                                        "before_sha256": compute_target_hash(target_path),
-                                        "after_sha256": None,
-                                    }
-                                    p.append(p_item)
-                                    c_items.append({
-                                        "assistant": assistant,
-                                        "scope": scope,
-                                        "removed": to_remove_name,
-                                        "kept": to_keep_name,
-                                        "path": target_path,
-                                        "reason": p_item["reason"],
-                                    })
-                                elif origin.startswith("plugin:"):
-                                    plugin_id = origin.split("plugin:", 1)[1]
-                                    target_path = pathlib.Path(e_path)
-                                    p_item = {
-                                        "action": "advise",
-                                        "path": str(target_path),
-                                        "reason": f"disable plugin {plugin_id} in ~/.claude/settings.json (enabledPlugins) or uninstall it",
-                                        "current_state": "conflict",
-                                        "before_sha256": compute_target_hash(target_path),
-                                        "after_sha256": None,
-                                    }
-                                    p.append(p_item)
-                    elif kind == "duplicate-name":
-                        for e in entries:
-                            origin = e.get("origin", "")
-                            e_path = e.get("path")
-                            if not e_path or e_path in seen_paths:
-                                continue
-                            if origin.startswith("plugin:"):
-                                seen_paths.add(e_path)
-                                plugin_id = origin.split("plugin:", 1)[1]
+                                plugin_id = origin.split("plugin:", 1)[1] if origin.startswith("plugin:") else ""
                                 target_path = pathlib.Path(e_path)
                                 p_item = {
                                     "action": "advise",
@@ -1569,6 +1594,107 @@ def resolve_conflicts(
                                     "after_sha256": None,
                                 }
                                 p.append(p_item)
+
+                    elif kind == "duplicate-name":
+                        standalone_entries = [e for e in entries if not e.get("origin", "").startswith("plugin:")]
+                        plugin_entries = [e for e in entries if e.get("origin", "").startswith("plugin:")]
+
+                        if standalone_entries and plugin_entries:
+                            plugin_hashes: dict[str, str] = {}
+                            for pe in plugin_entries:
+                                pp = pe.get("path")
+                                if pp:
+                                    ph = compute_target_hash(pathlib.Path(pp))
+                                    if ph:
+                                        plugin_hashes[pp] = ph
+
+                            skill_name = sc.get("names", [""])[0] or (standalone_entries[0].get("name", ""))
+                            cat_hashes = [
+                                entry["hash"]
+                                for entry in catalog.values()
+                                if entry.get("name") == skill_name and entry.get("hash")
+                            ]
+
+                            for se in standalone_entries:
+                                sp_str = se.get("path")
+                                if not sp_str or sp_str in seen_paths:
+                                    continue
+                                seen_paths.add(sp_str)
+                                sp = pathlib.Path(sp_str)
+                                s_hash = compute_target_hash(sp)
+
+                                matching_plugin = next(
+                                    (pe for pe in plugin_entries if plugin_hashes.get(pe.get("path")) == s_hash),
+                                    None,
+                                )
+
+                                is_up_to_date = se.get("state") == "up-to-date"
+                                is_byte_identical = matching_plugin is not None
+                                matches_cat = bool(s_hash and s_hash in cat_hashes)
+
+                                if is_up_to_date or is_byte_identical or matches_cat:
+                                    target_plugin = matching_plugin or plugin_entries[0]
+                                    target_plugin_id = target_plugin.get("origin", "").split("plugin:", 1)[1]
+                                    p_item = {
+                                        "action": "trash",
+                                        "path": str(sp),
+                                        "reason": f"duplicate of plugin {target_plugin_id}; plugin copy kept",
+                                        "current_state": "conflict",
+                                        "before_sha256": s_hash,
+                                        "after_sha256": None,
+                                    }
+                                    p.append(p_item)
+                                    c_items.append({
+                                        "assistant": assistant,
+                                        "scope": se.get("scope", scope),
+                                        "removed": se.get("name", skill_name),
+                                        "kept": f"plugin:{target_plugin_id}",
+                                        "path": sp,
+                                        "reason": p_item["reason"],
+                                    })
+                                else:
+                                    if len(plugin_entries) == 1:
+                                        target_plugin_id = plugin_entries[0].get("origin", "").split("plugin:", 1)[1]
+                                    else:
+                                        target_plugin_id = ", ".join(sorted({
+                                            pe.get("origin", "").split("plugin:", 1)[1]
+                                            for pe in plugin_entries
+                                            if pe.get("origin", "").startswith("plugin:")
+                                        }))
+                                    p_item = {
+                                        "action": "advise",
+                                        "path": str(sp),
+                                        "reason": f"standalone copy differs from plugin {target_plugin_id}: review and remove one manually",
+                                        "current_state": "conflict",
+                                        "before_sha256": s_hash,
+                                        "after_sha256": None,
+                                    }
+                                    p.append(p_item)
+
+                        elif len(plugin_entries) >= 2 and not standalone_entries:
+                            p_paths = [pe.get("path") for pe in plugin_entries if pe.get("path")]
+                            if any(pp in seen_paths for pp in p_paths):
+                                continue
+                            for pp in p_paths:
+                                seen_paths.add(pp)
+
+                            plugin_ids = sorted({
+                                pe.get("origin", "").split("plugin:", 1)[1]
+                                for pe in plugin_entries
+                                if pe.get("origin", "").startswith("plugin:")
+                            })
+                            plugins_str = ", ".join(plugin_ids)
+                            target_path_str = p_paths[0]
+                            target_path = pathlib.Path(target_path_str)
+                            p_item = {
+                                "action": "advise",
+                                "path": target_path_str,
+                                "reason": f"same skill name provided by plugins {plugins_str}: disable one in enabledPlugins",
+                                "current_state": "conflict",
+                                "before_sha256": compute_target_hash(target_path),
+                                "after_sha256": None,
+                            }
+                            p.append(p_item)
         return p, c_items
 
     plan, conflict_items = _build_plan()

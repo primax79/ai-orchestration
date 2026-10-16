@@ -911,3 +911,271 @@ def test_resolve_conflicts_plan_never_contains_non_advise_action_on_plugin_path(
     # Standalone generic copy was trashed
     assert not (fake_home / ".claude" / "skills" / "orchestration-workflow").exists()
 
+
+def test_duplicate_name_standalone_identical_to_plugin_trashes_standalone(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_skills = plugins_cache / "ai-orchestration" / "architect-side" / "0.3.0" / "skills"
+    (p_skills / "task-pipeline").mkdir(parents=True)
+    (p_skills / "task-pipeline" / "SKILL.md").write_text("# Task Pipeline Plugin\n")
+
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_skills.parent),
+                }
+            ]
+        }
+    }))
+
+    standalone_dir = fake_home / ".claude" / "skills" / "task-pipeline"
+    standalone_dir.mkdir(parents=True)
+    (standalone_dir / "SKILL.md").write_text("# Task Pipeline Plugin\n")
+
+    rc = run_env(["resolve-conflicts", "--dry-run"], fake_home)
+    assert rc["ok"] is True
+    plan = rc["plan"]
+    assert len(plan) == 1
+    assert plan[0]["action"] == "trash"
+    assert plan[0]["path"] == str(standalone_dir)
+    assert plan[0]["reason"] == "duplicate of plugin architect-side@ai-orchestration; plugin copy kept"
+    assert not any(item["action"] == "advise" for item in plan)
+
+    rc_exec = run_env(["resolve-conflicts"], fake_home)
+    assert rc_exec["ok"] is True
+    assert rc_exec["resolved_count"] == 1
+    assert not standalone_dir.exists()
+    assert (p_skills / "task-pipeline" / "SKILL.md").is_file()
+
+
+def test_duplicate_name_standalone_modified_vs_plugin_advises(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_skills = plugins_cache / "ai-orchestration" / "architect-side" / "0.3.0" / "skills"
+    (p_skills / "task-pipeline").mkdir(parents=True)
+    (p_skills / "task-pipeline" / "SKILL.md").write_text("# Task Pipeline Plugin\n")
+
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_skills.parent),
+                }
+            ]
+        }
+    }))
+
+    standalone_dir = fake_home / ".claude" / "skills" / "task-pipeline"
+    standalone_dir.mkdir(parents=True)
+    (standalone_dir / "SKILL.md").write_text("# Locally Modified Task Pipeline\n")
+
+    rc = run_env(["resolve-conflicts", "--dry-run"], fake_home)
+    assert rc["ok"] is True
+    plan = rc["plan"]
+    assert len(plan) == 1
+    assert plan[0]["action"] == "advise"
+    assert plan[0]["path"] == str(standalone_dir)
+    assert plan[0]["reason"] == "standalone copy differs from plugin architect-side@ai-orchestration: review and remove one manually"
+    assert not any(item["action"] == "trash" for item in plan)
+
+    rc_exec = run_env(["resolve-conflicts"], fake_home)
+    assert rc_exec["ok"] is True
+    assert rc_exec["resolved_count"] == 0
+    assert standalone_dir.exists()
+    assert (p_skills / "task-pipeline" / "SKILL.md").is_file()
+
+
+def test_duplicate_name_two_plugins_same_name_single_advise(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p1_skills = plugins_cache / "market-a" / "plugin-a" / "1.0.0" / "skills"
+    (p1_skills / "shared-skill").mkdir(parents=True)
+    (p1_skills / "shared-skill" / "SKILL.md").write_text("# Shared Skill in Plugin A\n")
+
+    p2_skills = plugins_cache / "market-b" / "plugin-b" / "2.0.0" / "skills"
+    (p2_skills / "shared-skill").mkdir(parents=True)
+    (p2_skills / "shared-skill" / "SKILL.md").write_text("# Shared Skill in Plugin B\n")
+
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "plugin-a@market-a": [
+                {
+                    "scope": "user",
+                    "installPath": str(p1_skills.parent),
+                }
+            ],
+            "plugin-b@market-b": [
+                {
+                    "scope": "user",
+                    "installPath": str(p2_skills.parent),
+                }
+            ],
+        }
+    }))
+
+    rc = run_env(["resolve-conflicts", "--dry-run"], fake_home)
+    assert rc["ok"] is True
+    plan = rc["plan"]
+    assert len(plan) == 1
+    assert plan[0]["action"] == "advise"
+    assert plan[0]["reason"] == "same skill name provided by plugins plugin-a@market-a, plugin-b@market-b: disable one in enabledPlugins"
+    assert not any(item["action"] == "trash" for item in plan)
+
+
+def test_trigger_conflict_standalone_dropped_vs_plugin_only_dropped(tmp_path: pathlib.Path) -> None:
+    # Part A: Dropped copy is standalone -> trash
+    fake_home_a = tmp_path / "home_a"
+    fake_home_a.mkdir()
+
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home_a)
+
+    plugins_cache_a = fake_home_a / ".claude" / "plugins" / "cache"
+    p_bound_a = plugins_cache_a / "kilo-mcp" / "architect-side" / "0.2.2" / "skills"
+    (p_bound_a / "kilo-mcp-orchestrator").mkdir(parents=True)
+    (p_bound_a / "kilo-mcp-orchestrator" / "SKILL.md").write_text("# Bound Orchestrator\n")
+
+    reg_a = fake_home_a / ".claude" / "plugins" / "installed_plugins.json"
+    reg_a.parent.mkdir(parents=True, exist_ok=True)
+    reg_a.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@kilo-mcp": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_bound_a.parent),
+                }
+            ]
+        }
+    }))
+
+    rc_a = run_env(["resolve-conflicts", "--dry-run"], fake_home_a)
+    assert rc_a["ok"] is True
+    plan_a = rc_a["plan"]
+    assert len(plan_a) == 1
+    assert plan_a[0]["action"] == "trash"
+    assert plan_a[0]["path"] == str(fake_home_a / ".claude" / "skills" / "orchestration-workflow")
+
+    # Part B: Dropped copy is plugin-only (no standalone) -> advise
+    fake_home_b = tmp_path / "home_b"
+    fake_home_b.mkdir()
+
+    plugins_cache_b = fake_home_b / ".claude" / "plugins" / "cache"
+    p_generic_b = plugins_cache_b / "ai-orchestration" / "architect-side" / "0.3.0" / "skills"
+    (p_generic_b / "orchestration-workflow").mkdir(parents=True)
+    (p_generic_b / "orchestration-workflow" / "SKILL.md").write_text("# Plugin Generic\n")
+
+    p_bound_b = plugins_cache_b / "kilo-mcp" / "architect-side" / "0.2.2" / "skills"
+    (p_bound_b / "kilo-mcp-orchestrator").mkdir(parents=True)
+    (p_bound_b / "kilo-mcp-orchestrator" / "SKILL.md").write_text("# Bound Orchestrator\n")
+
+    reg_b = fake_home_b / ".claude" / "plugins" / "installed_plugins.json"
+    reg_b.parent.mkdir(parents=True, exist_ok=True)
+    reg_b.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_generic_b.parent),
+                }
+            ],
+            "architect-side@kilo-mcp": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_bound_b.parent),
+                }
+            ]
+        }
+    }))
+
+    rc_b = run_env(["resolve-conflicts", "--dry-run"], fake_home_b)
+    assert rc_b["ok"] is True
+    plan_b = rc_b["plan"]
+    assert len(plan_b) == 1
+    assert plan_b[0]["action"] == "advise"
+    assert plan_b[0]["path"] == str(p_generic_b / "orchestration-workflow")
+    assert "disable plugin architect-side@ai-orchestration in ~/.claude/settings.json (enabledPlugins) or uninstall it" in plan_b[0]["reason"]
+    assert not any(item["action"] == "trash" for item in plan_b)
+
+
+def test_no_duplicate_conflict_entries_and_plan_paths(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    fake_ws = tmp_path / "workspace"
+    fake_ws.mkdir()
+
+    # Install standalone orchestration-workflow globally
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+
+    # Install standalone kilo-mcp-orchestrator globally
+    run_env(["install-skills", "--assistants", "claude", "--repo", "kilo-mcp"], fake_home)
+
+    # Also install plugins for both
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_generic = plugins_cache / "ai-orchestration" / "architect-side" / "0.3.0" / "skills"
+    (p_generic / "orchestration-workflow").mkdir(parents=True)
+    (p_generic / "orchestration-workflow" / "SKILL.md").write_text("# Plugin Generic\n")
+
+    p_bound = plugins_cache / "kilo-mcp" / "architect-side" / "0.2.2" / "skills"
+    (p_bound / "kilo-mcp-orchestrator").mkdir(parents=True)
+    (p_bound / "kilo-mcp-orchestrator" / "SKILL.md").write_text("# Plugin Bound\n")
+
+    reg = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    reg.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_generic.parent),
+                }
+            ],
+            "architect-side@kilo-mcp": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_bound.parent),
+                }
+            ]
+        }
+    }))
+
+    # 1. Verify structured_conflicts deduplication in status
+    st = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    for assistant in ["claude"]:
+        for scope in ["global", "project"]:
+            scs = st["environments"][assistant][scope]["structured_conflicts"]
+            seen_keys = set()
+            for sc in scs:
+                key = (sc["kind"], tuple(sorted(sc["names"])))
+                assert key not in seen_keys, f"Duplicate conflict key {key} in {assistant} {scope}"
+                seen_keys.add(key)
+
+            tcs = [sc for sc in scs if sc["kind"] == "trigger-conflict"]
+            assert len(tcs) == 1
+
+    # 2. Verify plan has no duplicate paths
+    rc = run_env(["resolve-conflicts", "--dry-run", "--workspace", str(fake_ws)], fake_home)
+    assert rc["ok"] is True
+    plan = rc["plan"]
+    plan_paths = [item["path"] for item in plan]
+    assert len(plan_paths) == len(set(plan_paths)), f"Duplicate paths found in plan: {plan_paths}"
+
