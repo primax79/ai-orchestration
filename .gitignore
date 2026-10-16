@@ -8,6 +8,10 @@ STATUS.md
 .kilo/worktrees/
 agent-manager.json
 
+### ai-orchestration runtime ###
+.ai-orch.lock
+.ai-orchestration/
+
 ### Local Environment Overrides ###
 *.local
 .env.local
