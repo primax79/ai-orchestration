@@ -5,6 +5,7 @@ Dispatches:
   - `ai-orch config <subcommand> [args...]` -> `orchestration_config.py`
   - `ai-orch tasks <subcommand> [args...]`  -> `tasks_engine.py`
   - `ai-orch env <subcommand> [args...]`    -> `orchestration_env.py`
+  - `ai-orch run <subcommand> [args...]`    -> `orchestration_runs.py`
   - `ai-orch render-agents-md [args...]`    -> `orchestration_config.py render-agents-md`
   - `ai-orch describe [--json]`             -> machine-readable command & schema catalog
 """
@@ -36,6 +37,7 @@ TASKS_ENGINE_SCRIPT = (
     / "tasks_engine.py"
 )
 ORCH_ENV_SCRIPT = REPO_ROOT / "scripts" / "orchestration_env.py"
+ORCH_RUNS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_runs.py"
 
 CLI_DESCRIPTION: dict[str, Any] = {
     "name": "ai-orch",
@@ -191,6 +193,33 @@ CLI_DESCRIPTION: dict[str, Any] = {
             ),
             "description": "Shortcut alias for `ai-orch config render-agents-md`.",
         },
+        "run": {
+            "script": str(ORCH_RUNS_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch run <subcommand> [options] [--json]",
+            "subcommands": {
+                "options": {
+                    "usage": "ai-orch run options --task <id> [--workspace <dir>] [--json]",
+                    "description": "Show available tools, resolved defaults, and usable verify targets for a task.",
+                },
+                "preview": {
+                    "usage": (
+                        "ai-orch run preview --task <id> [--mode <orchestrate|execute|verify>] "
+                        "[--tool <tool>] [--profile <profile>] [--model <model>] [--variant <variant>] "
+                        "[--effort <effort>] [--isolation <worktree|none>] [--target-run <id|none>] "
+                        "[--instructions <text>] [--allow-same-tool] [--force] [--workspace <dir>] [--json]"
+                    ),
+                    "description": "Validate launch request and return prompt, redacted argv, cwd, planned worktree/branch, and binding plan_hash.",
+                },
+                "list": {
+                    "usage": "ai-orch run list [--task <id>] [--active] [--workspace <dir>] [--json]",
+                    "description": "List agent runs, newest first, after reconciliation.",
+                },
+                "show": {
+                    "usage": "ai-orch run show <run_id> [--workspace <dir>] [--json]",
+                    "description": "Display a specific run record after reconciliation.",
+                },
+            },
+        },
     },
 }
 
@@ -236,6 +265,10 @@ def main() -> int:
 
     if group == "env":
         proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), *rest], check=False)
+        return proc.returncode
+
+    if group == "run":
+        proc = subprocess.run([sys.executable, str(ORCH_RUNS_SCRIPT), *rest], check=False)
         return proc.returncode
 
     if group == "render-agents-md":
