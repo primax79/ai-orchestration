@@ -119,3 +119,48 @@
 - **Verification:**
   - `npm run compile` is clean, and the handler-map test is green.
   - Live in an Extension Development Host: launch and cancel a stub run from the webview.
+
+## Amendments after review 2 (2026-10-16)
+
+The spec now opens with §0 "Amendments after review 2" (R1–R14). These changes to the tasks follow from it, and the lane order is in `../06-control-plane-safety/plan.md`:
+
+- **07.1** also covers:
+  - the `{effort}` placeholder (R3);
+  - `--diff`/`--expect-hash` on `set-routing` and `set-profile` (spec 06 A10).
+
+  It was dispatched before the review; the delta follows in the same Kilo session.
+- **07.2** also covers:
+  - R1: a binding `plan_hash` in `preview`;
+  - R4: the allowed modes per state;
+  - R8: the task bundle hash, reusing 06.10's hash function, **so 07.2 depends on 06.10**;
+  - R10: the platform refusal;
+  - R13: secret references and redaction.
+- **07.3** also covers:
+  - R2: separate process identities;
+  - R9: log chunks with logical offsets;
+  - R11: Claude refuses to launch without a configured `allowed_tools`.
+- **07.4** also covers:
+  - R5: the verification modes, including the panel;
+  - R6: `run mark-delivered`;
+  - R7: the artifact invariants, adding to the tests a branch that advances, a reset, and `target_run: none` with HEAD drift;
+  - R12: cleanup over continuation chains.
+- **07.5** must prove a real test-and-commit run under the permission policy the owner chooses (R11).
+- **07.8** depends on **07.7** (shared `api.ts`, `types.ts`, `dist`).
+- **07.9** focus files add `src/cli-client.ts` and its tests.
+
+### 07.10 - Core: run supervisor files blocking questions (R14, spec 08 Q8)
+
+- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 08.1 · **Repo:** `ai-orchestration/`
+- **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
+- **Goal:**
+  - At the end of a run, parse ` ```ai-orch-question ` blocks from the **final** assistant message.
+  - File each one in the **main** workspace through the `questions ask` engine API. The supervisor sets `asked-by` and `origin-run` itself and forces `blocks` to the run's task.
+  - Record the ids in `run.json` `questions`.
+  - A malformed block → recorded as `question_errors`, never silently dropped.
+- **Verification:** Tests with the stub agent emitting a valid block, a malformed block, and a block that names another task in `blocks` (forced to the run's task).
+
+## Decisions waiting
+
+| Key | Question | Blocks | Decider |
+| --- | --- | --- | --- |
+| R11 | Which Bash/MCP allow-list should headless Claude runs get by default, per mode (execute, orchestrate, verify)? To be converted into the first `Q###` question once 08.1 lands. | 07.3 default, 07.5 | owner |

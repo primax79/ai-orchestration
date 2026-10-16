@@ -5,6 +5,38 @@
 - **Extends:** [`task-and-state-model`](task-and-state-model.md). The `decider` header and the `## Decisions waiting` table become views over question files.
 - **Depends on:** [`control-plane-safety`](control-plane-safety.md) (generated index regions, UI auth, confirmation modal). The "answer and resume" action depends on [`agent-runs-from-ui`](agent-runs-from-ui.md).
 
+## 0. Amendments after review 2 (normative; each overrides the section it names)
+
+- **Q1 — §2 `blocks` holds `T###` only** (initiative tasks have no mutable state yet; this matches spec 07 §1).
+- **Q2 — §2 the prior state is recorded in the question.** The header field `blocks` records each blocked task's state at the time of asking: `blocks: T013 (in progress), T014 (open)`. The restore uses this value. `PROGRESS.md` is not used for this, because single-file tasks have none.
+- **Q3 — §3 several questions on one task.**
+  - `ask` also links a task that is already `waiting` because of other questions: it appends to `decider` (`Q004, Q007`) and records `(waiting)` as the prior state in the new question.
+  - A task is restored only when **all** questions in its `decider` are answered or withdrawn. It goes back to the prior state recorded by the **earliest** linked question (the state before the first question).
+  - Asking against a task that is `waiting`/`blocked` for a non-question reason, or in a terminal state, is refused.
+- **Q4 — §3 one lock for the whole operation.** `ask`, `answer` and `withdraw` hold the `tasks/.ai-orch.lock` (spec 06 A9) across id allocation, validation, the exclusive file creation (`O_EXCL`) and every task update. If any step fails, the files already written are rolled back. A concurrent test covers two asks on the same task.
+- **Q5 — §3 the waiting invariant.**
+  - `tasks transition` refuses to move a task out of `waiting` while its `decider` lists an open question; only `questions answer` / `withdraw` may do that.
+  - `--force-unblock --reason` exists for the owner, and it withdraws the open questions with that reason.
+- **Q6 — §2 withdrawn questions.** `## Answer` uses `choice: withdrawn` with `answered-by` and `answered` filled in, and the reason as text.
+- **Q7 — §2 answer text is multi-line-safe (overrides the `text` bullet).**
+  - `## Answer` has three bullets: `choice`, `answered-by`, `answered`.
+  - The free text follows as a fenced block (` ```text `). Its fence is longer than any backtick run in the text.
+  - An empty text means no block.
+  - The same rule applies to option consequences and to the context: they are Markdown and never parsed as headers.
+  - Tests cover newlines, colons, pipes, headings, Markdown and Unicode.
+- **Q8 — §4 questions from agent runs go through the supervisor only.** An agent in a run never calls `questions ask` (its worktree has a different `tasks/` and its sandbox may forbid writing to the main workspace).
+  - The agent emits the ` ```ai-orch-question ` block as the last thing in its final message.
+  - The **run supervisor** files the question in the **main workspace**.
+  - The supervisor injects `asked-by` (`<tool>:<profile>`) and `origin-run` itself, and forces `blocks` to the run's own task. It ignores any `blocks` value in the block.
+
+  Interactive sessions (not runs) use `questions ask` directly.
+- **Q9 — §3 `--from-task` output.** It produces a valid **pure open question**:
+  - `question` is the legacy text, made to end with `?`;
+  - `## Context` holds `Converted from the legacy decider header of T###; context to be completed by the owner.`;
+  - the options are empty, with `open-answer: yes` and `recommended: -`;
+  - the validator warning is `context-not-completed`.
+- **Q10 — §5 rendering.** The context and options are rendered under spec 06 A12 (HTML escaped, safe links, CSP).
+
 ## 1. Problem
 
 Today a blocking question is a free-text `decider: owner: <question>` header on a task, plus a hand-written row in `## Decisions waiting`. That is fine for a person reading the file, but:

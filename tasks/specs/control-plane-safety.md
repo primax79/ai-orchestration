@@ -4,6 +4,45 @@
 - **Drives:** initiative [06](../06-control-plane-safety/plan.md). It is a prerequisite of 07 (agent runs) and 08 (blocking questions).
 - **Repos:** `ai-orchestration` (core), `ai-orchestration-ui`, `vscode-ai-orchestration`
 
+## 0. Amendments after review 2 (normative; each overrides the section it names)
+
+Codex reviewed the second round of specs on 2026-10-16 (4 blockers, 35 major, 3 minor across specs 06, 07, 08). The items for this spec:
+
+- **A1 — §1 E3 corrected.** Kilo **merges** `config.json`, `kilo.json`, `kilo.jsonc`, `opencode.json` and `opencode.jsonc` (`references/kilocode/kilocode/packages/opencode/src/config/config.ts:366-372`).
+  - `~/.config/kilo/kilo.json` is therefore a real config file, not a stray one, and the Kilo registration done by older versions works.
+  - Only `~/.codex/config.json` is stray, because Codex reads only `config.toml`.
+  - `env status` reports, for Kilo, the merged view with per-entry provenance (which file defines each server, and which entries override others).
+- **A2 — §2.1 plan hash covers content.** Each plan entry carries `before_sha256` (the current target: a file hash or a canonical tree hash, or `null`) and `after_sha256` (the source content that will be written, or `null` for delete/trash). `plan_hash` is computed over these. The apply recomputes the plan **under an exclusive lock** (`fcntl.flock` on `<home>/.config/ai-orchestration/env.lock`) and refuses on any difference.
+- **A3 — §2.1 coverage.**
+  - Agent files installed by `install-skills` get the same inventory, preview, no-clobber and trash rules as skill directories.
+  - `fetch-repos` and `register-mcp --provision-venv` are mutating, so they are part of the plan: clone/pull targets with the current `HEAD`, the venv path and the pip command. Both commands support `--dry-run` / `--expect-plan-hash`.
+- **A4 — §2.1 provenance receipts.** Every install writes `<target>/.ai-orch-source.json` with `{repo, plugin, name, source_hash, installed_at, mode}`; in link mode, provenance comes from the symlink target. Classification:
+  - a matching receipt with a matching hash → `up-to-date`;
+  - a matching receipt with a different hash → `modified-or-outdated`;
+  - no receipt and no hash match → `foreign`.
+- **A5 — §2.1 plugin inventory (overrides "Plugin-aware inventory").**
+  - Enablement comes from the effective Claude settings: `~/.claude/settings.json` `enabledPlugins`, then the project's `.claude/settings.json` and `.claude/settings.local.json` for project scope.
+  - Install paths and scope come from `installed_plugins.json`. Local/project installs are filtered by the workspace.
+  - Skills are reported as a **list** of `{name, origin, scope, path, enabled}` entries, not as a name-keyed map, so that a standalone copy and several plugin copies of the same name can coexist.
+- **A6 — §2.1 MCP registration scopes (overrides "MCP registration through the real configs").**
+  - Codex: `codex mcp add` has no scope option. It is used for **global** scope only; project scope for Codex is refused with an explanation.
+  - Claude: `claude mcp add --scope user|project`. The file fallback maps user → `~/.claude.json` and project → `<workspace>/.mcp.json`.
+  - Kilo: global → an atomic edit of `~/.config/kilo/kilo.json` (strict JSON, already merged by Kilo); `kilo.jsonc` is never edited.
+- **A7 — §2.2 adoption.** `sync-index --adopt` alone is preview-only. Writing requires `--adopt --apply --expect-hash H`. Plain `--apply` on an unmarked index is refused.
+- **A8 — §2.3 subprocess cleanup.** Every CLI child is started in a new session (`start_new_session=True`). On timeout or cancel, its whole process group gets TERM, then KILL after 5 s. Pipes are drained to avoid deadlocks. A test covers a grandchild process.
+- **A9 — new §2.6, task writes are serialized** (needed once the backend calls the CLI concurrently).
+  - Every mutating `tasks_engine` command (`transition`, `sync-index --apply`, and the `questions` writes of spec 08) takes an exclusive `fcntl.flock` on `<tasks_dir>/.ai-orch.lock` for its whole read-modify-write.
+  - These commands accept `--expect-task-hash` (sha256 over the task bundle: every file of a folder task, or the single file) and refuse on mismatch.
+  - They write atomically.
+  - The backend maps refusals for a stale hash to HTTP 409.
+  - **Platform:** the core targets macOS and Linux only, and says so in the README. On Windows, the `ai-orch` commands that need `fcntl` or process groups refuse with a clear error.
+- **A10 — §2.4 config writes are previewed too.** `config set-routing` and `config set-profile` accept `--diff` (returns `{diff, hash}`) and `--expect-hash`. The Config tab uses preview → apply like every other mutating action.
+- **A11 — §2.5 the extension builds standalone.** The `dist-webview` sync from the sibling `ai-orchestration-ui` checkout is a **development-only** script (`npm run sync-webview`). `dist-webview/` stays committed, so a clean standalone clone compiles without the sibling. `npm run compile` does **not** depend on the sibling.
+- **A12 — UI content safety (all specs).**
+  - Markdown from files or agents (task bodies, question context, run logs) is rendered with raw HTML escaped, and links limited to `http:`, `https:` and relative paths.
+  - The backend sends `Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`.
+  - XSS fixtures (an HTML/script payload inside a question context and inside a task title) are part of the frontend verification.
+
 ## 1. Why
 
 The control plane can already destroy data or act on the user's behalf without their knowledge. No feature that lets it launch agents may land before this initiative is done. Findings (2026-10-16):

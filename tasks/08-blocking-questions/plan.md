@@ -81,3 +81,12 @@
   - spec §5 "Answer and resume run";
   - spec §4 fallback-block filing by the run supervisor, if 07.3 did not already do it.
 - **Verification:** Live with a real run (one tool is enough) that is instructed to ask: the question appears; "Answer and resume" continues the same session, and the agent acknowledges the answer.
+
+## Amendments after review 2 (2026-10-16)
+
+The spec now opens with §0 "Amendments after review 2" (Q1–Q10). These changes to the tasks follow from it, and the lane order is in `../06-control-plane-safety/plan.md`:
+
+- **08.1** now depends on **06.10** (task-write lock), not only on 06.1. It also covers Q1–Q7 and Q9. Its live verification uses a **disposable fixture** with legacy `decider: owner: <text>` tasks: T007, T009 and T010 carry `decider: -`, so the earlier plan text was wrong.
+- **08.2** documents Q8 for skills: agents in runs emit the block, interactive sessions call `questions ask`.
+- **08.4** adds Q10 and spec 06 A12 (XSS fixtures: a `<script>` / `<img onerror>` payload in a question context renders inert).
+- **08.6** no longer owns supervisor filing; that moved to **07.10**. 08.6 is UI only: "Answer and resume run", after 07.7, 07.10 and 08.4.

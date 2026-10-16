@@ -149,3 +149,47 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
   - Live in an Extension Development Host:
     - open the dashboard, trigger one preview and one refused action, and see the error;
     - record whether native `confirm()` is blocked (V3) in the spec.
+
+## Amendments after review 2 (2026-10-16)
+
+The spec now opens with §0 "Amendments after review 2" (A1–A12). These changes to the tasks follow from it:
+
+- **06.2** also covers A2 (content hashes in the plan, apply under `env.lock`), A3 (agent files, `fetch-repos`, `--provision-venv`) and A4 (receipts). It was dispatched before the review; the delta is sent as a follow-up in the same Kilo session.
+- **06.3** follows A5 (enablement from settings; list of `{name, origin, scope, path, enabled}`).
+- **06.4** follows A1 and A6:
+  - Kilo `kilo.json` is a real merged config, not stray;
+  - Codex is global-only through `codex mcp add`;
+  - the Claude file fallback is scope-aware.
+- **06.5** also covers A8 (process-group cleanup on timeout). It was dispatched before the review; the delta follows in the same session.
+- **06.6** also covers A10 for `render-agents-md` (already in scope). The `set-routing`/`set-profile` `--diff`/`--expect-hash` part goes to 07.1.
+- **06.7** now depends on 06.3, 06.4 and **06.10**. The backend maps stale-hash refusals to 409.
+- **06.8** adds A12 (escaped Markdown rendering, CSP check, XSS fixtures) to its verification.
+- **06.9** follows A11: `dist-webview/` committed, sync script for development only, compile independent of the sibling repo.
+
+### 06.10 - Core: task-write lock, `--expect-task-hash`, atomic writes (A9)
+
+- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 06.1 (same file) · **Repo:** `ai-orchestration/`
+- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../scripts/test_tasks_engine.py`, `README.md` (platform note)
+- **Goal:**
+  - Spec A9: an exclusive `flock` on `<tasks_dir>/.ai-orch.lock` around every mutating command;
+  - a task bundle hash, with `--expect-task-hash` on `transition`;
+  - atomic writes for task files and `PROGRESS.md`;
+  - a clear refusal on Windows;
+  - `tasks list --json` exposes `bundle_sha256` per task.
+- **Verification:**
+  - Tests: two concurrent transitions of the same task → exactly one wins and the other is refused (stale hash or lock wait, then refusal); a stale hash → refused with the file unchanged; a crash mid-write (simulated) leaves either the old or the new file, never a truncated one.
+
+## UI lane order (shared files across 06, 07, 08)
+
+Backend, frontend and `vscode-ai-orchestration` files are shared by the three initiatives. Their tasks run **in this order and never in parallel within a lane**:
+
+- **Backend** (`ai-orchestration-ui/backend/*`): 06.5 → 06.7 → 07.6 → 08.3
+- **Frontend** (`ai-orchestration-ui/frontend/**`): 06.8 → 07.7 → 07.8 → 08.4 → 08.6
+- **VS Code** (`vscode-ai-orchestration/**`): 06.9 → 07.9 → 08.5
+
+Core lanes:
+
+- **`tasks_engine.py`:** 06.1 → 06.10 → 08.1
+- **`orchestration_env.py`:** 06.2 → 06.3 → 06.4
+- **`orchestration_config.py`:** 07.1 → 06.6
+- **`orchestration_runs.py`:** 07.2 → 07.3 → 07.4 → 07.5 → 07.10

@@ -6,6 +6,67 @@
 - **Related:** [`blocking-questions`](blocking-questions.md) (initiative 08): runs that ask questions, and answer-and-resume.
 - **Repos:** `ai-orchestration` (core engine + CLI), `ai-orchestration-ui`, `vscode-ai-orchestration`
 
+## 0. Amendments after review 2 (normative; each overrides the section it names)
+
+- **R1 — §4 a preview is binding.**
+  - `run preview` returns `plan_hash`, a sha256 over the canonical request, the task bundle hash, the effective adapter argv (redacted), the prompt hash, the target repo `HEAD` and the effective config hash.
+  - `run start` and `run cleanup` require `--expect-plan-hash` when called by the UI or the extension (`--requested-by ui|vscode`), and refuse on mismatch. The CLI may omit it.
+- **R2 — §5.1/§5.3 separate process identities.**
+  - `run.json` records `supervisor: {pid, start_time}` and `agent: {pid, pgid, start_time}` separately.
+  - The supervisor writes its own identity **before** spawning the agent, and the agent identity right after.
+  - Reconciliation checks each identity independently. A supervisor that dies before the agent identity was recorded → `lost`, and the supervisor scans its own session for a child (the run's command line is matched with `pgrep -s`) to kill.
+  - Tests reuse each PID.
+- **R3 — §5.5/§5.7 continuation keeps the execution settings.**
+  - `model`, `variant` and `effort` are stored separately and passed on every resume. The placeholders gain `{effort}`.
+  - Resume argv: Claude gets `--model`/`--effort`; Codex gets `-m` and `-c model_reasoning_effort=`; Kilo gets `-m`/`--variant`.
+- **R4 — §3 actions per state (overrides the `mode` default):**
+
+  | Task state | Allowed modes |
+  | --- | --- |
+  | `open`, `bounced` | `execute` (default), `orchestrate` |
+  | `in progress` | `execute` (continue only, when a run exists), `orchestrate` |
+  | `delivered` | `verify` (default), `orchestrate` |
+  | `waiting`, `blocked` | `orchestrate` only |
+  | `verified` | none: only "Close" |
+  | `done`, `done with a caveat`, `dropped` | none |
+
+  The Run dialog shows only the allowed modes.
+- **R5 — §3/§5.6 verification modes.**
+  - `verify` honours the full `<tool>:<profile>` entries of `verification.cross_agent_order`.
+  - The modes map as follows:
+    - `cross-agent` → one verify run with a different tool;
+    - `independent-session` → the same tool in a fresh session (`--allow-same-tool`);
+    - `panel` → N verify runs, one per `panel_reviewers` entry, launched together; `panel_require_blind` means the prompts do not include each other's verdicts. "Apply verdict" requires all of them and applies `verified` only if all agree; any `bounced` bounces, with the merged findings;
+    - `owner` → no run, only the existing "Approve Verified";
+    - `self` → refused for runs.
+- **R6 — §3 a delivery gate in the core.**
+  - `run mark-delivered RUN_ID --expect-task-hash H` is the only path from a run to `delivered`.
+  - It checks under the task lock:
+    - the run `succeeded`;
+    - the worktree is on `run/<run_id>`, clean, and its `HEAD == final_commit`;
+    - `base_commit` is an ancestor of it, with ≥ 1 commit after it;
+    - a Final Report was parsed.
+  - Both UIs use it; the generic transition endpoint refuses `delivered` for a task that has a run.
+- **R7 — §5.3/§5.6 artifact invariants.**
+  - On completion, the supervisor records `final_commit` only when the branch and cleanliness invariants hold; otherwise the status is `failed` with the reason.
+  - Verify start checks that the target branch `HEAD == final_commit`.
+  - The verdict is bound to `target_commit`, and `apply-verdict` refuses if the branch moved.
+  - Tests cover a branch that advances, a reset, and `target_run: none` with `HEAD` drift.
+- **R8 — §5.1 bundle hash.** `task_file_sha256` is replaced by `task_bundle_sha256`, a canonical hash over every file of a folder task (`README.md`, `CONTEXT.md`, `PROGRESS.md`), or the single file. It is used by verify, apply-verdict, mark-delivered and the preview.
+- **R9 — §5.1/§6 log offsets.** Logs are never truncated in place. They rotate into immutable chunks (`events.000.jsonl`, …, 10 MB each), and `run logs` offsets are logical (monotonic across chunks). Retention deletes whole old chunks and reports `first_available_offset`.
+- **R10 — §5.2/§5.3 platform.** macOS and Linux only (spec 06 A9). On Windows, the run commands refuse.
+- **R11 — §5.7 a usable default permission policy, decided by the owner.**
+  - `acceptEdits` + `--permission-prompts none` denies every Bash command that is not allow-listed, so an execute run could not run tests or commit.
+  - The default allow-list per mode is **the first blocking question of this initiative**. It is filed in spec 08's format as soon as 08.1 lands; until then it is recorded in the initiative 07 plan under "Decisions waiting".
+  - 07.3 ships with no default for Claude: a launch without a configured `allowed_tools` for the mode is refused with a clear message.
+  - 07.5 proves a real test-and-commit run under the chosen policy.
+- **R12 — §4 cleanup is race-free.** `run cleanup` refuses while any active run references the same worktree, through the whole continuation chain. It cleans a chain only when all its runs are terminal.
+- **R13 — §5.1 secrets.**
+  - Headless argv overrides may not contain literal secrets: values for flags matching `token|key|secret|password` must be `{env:NAME}` references, expanded only at spawn time.
+  - `argv_display`, `preview` and the logs show `{env:NAME}`, never the value.
+  - Tests cover the redaction.
+- **R14 — question integration is a core task.** The run supervisor files ` ```ai-orch-question ` blocks (spec 08 Q8) and links their ids in `run.json` `questions`, in a dedicated task (07.10, after 07.3 and 08.1).
+
 ## 1. Goal
 
 From the web UI or the VS Code dashboard, the owner requests the execution of a task and chooses **who** does it: which tool (Kilo, Claude, Codex), in which **mode**, with which profile and model. The owner can watch the run, cancel it, continue it, and apply the verdict of a verification run.
