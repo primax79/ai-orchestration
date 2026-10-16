@@ -959,6 +959,7 @@ def test_render_agents_md_diff_scenarios(tmp_path: pathlib.Path) -> None:
         "--workspace",
         str(ws_outdated),
         "--apply",
+        "--allow-global-routing",
     )
     assert res_apply.returncode == 0
     up_to_date_bytes = agents_outdated.read_bytes()
@@ -1043,6 +1044,7 @@ def test_render_agents_md_expect_hash_match_and_mismatch(tmp_path: pathlib.Path)
         "--apply",
         "--expect-hash",
         initial_hash,
+        "--allow-global-routing",
     )
     assert res_match.returncode == 0, res_match.stdout + res_match.stderr
     payload_match = json.loads(res_match.stdout)
@@ -1067,6 +1069,7 @@ def test_render_agents_md_expect_hash_match_and_mismatch(tmp_path: pathlib.Path)
         "--apply",
         "--expect-hash",
         "deadbeef" * 8,
+        "--allow-global-routing",
     )
     assert res_missing_mismatch.returncode != 0
     payload_mm = json.loads(res_missing_mismatch.stdout)
@@ -1086,6 +1089,7 @@ def test_render_agents_md_expect_hash_match_and_mismatch(tmp_path: pathlib.Path)
         "--apply",
         "--expect-hash",
         empty_hash,
+        "--allow-global-routing",
     )
     assert res_missing_match.returncode == 0, res_missing_match.stdout + res_missing_match.stderr
     payload_m_match = json.loads(res_missing_match.stdout)
@@ -1102,6 +1106,7 @@ def test_render_agents_md_expect_hash_match_and_mismatch(tmp_path: pathlib.Path)
         "--workspace",
         str(ws),
         "--apply",
+        "--allow-global-routing",
     )
     assert res_no_hash.returncode == 0
 
@@ -1159,6 +1164,7 @@ def test_render_agents_md_handwritten_content_byte_identical_after_apply(tmp_pat
         "--apply",
         "--expect-hash",
         before_hash,
+        "--allow-global-routing",
     )
     assert res.returncode == 0, res.stdout + res.stderr
 
@@ -1173,3 +1179,319 @@ def test_render_agents_md_handwritten_content_byte_identical_after_apply(tmp_pat
     # Verify text after END_MARKER is byte-identical
     end_idx = after_text.index(oc.END_MARKER) + len(oc.END_MARKER)
     assert after_text[end_idx:] == footer_text
+
+
+def test_render_agents_md_three_topology_pairs(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    run_cli("--global-config", str(global_cfg_path), "init-global")
+
+    # Pair 1: claude -> kilo (multi-framework MCP)
+    ws_claude_kilo = tmp_path / "ws_claude_kilo"
+    ws_claude_kilo.mkdir()
+    run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "init-project",
+        "--workspace",
+        str(ws_claude_kilo),
+        "--orchestrator",
+        "claude",
+        "--executor",
+        "kilo",
+    )
+    res_ck = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_claude_kilo),
+    )
+    assert res_ck.returncode == 0
+    block_ck = json.loads(res_ck.stdout)["rendered_block"]
+    assert '`kilo_implement(isolation="worktree")`' in block_ck
+    assert "agent_manager" not in block_ck
+    assert '`primary_orchestrator = "claude"`' in block_ck
+    assert '`default_executor = "kilo"`' in block_ck
+
+    # Pair 2: kilo -> kilo (single-framework native)
+    ws_kilo_kilo = tmp_path / "ws_kilo_kilo"
+    ws_kilo_kilo.mkdir()
+    run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "init-project",
+        "--workspace",
+        str(ws_kilo_kilo),
+        "--orchestrator",
+        "kilo",
+        "--executor",
+        "kilo",
+        "--verification-mode",
+        "independent-session",
+    )
+    res_kk = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_kilo_kilo),
+    )
+    assert res_kk.returncode == 0
+    block_kk = json.loads(res_kk.stdout)["rendered_block"]
+    assert '`agent_manager(mode="worktree")`' in block_kk
+    assert "`task`" in block_kk
+    assert "kilo_implement" not in block_kk
+    assert '`primary_orchestrator = "kilo"`' in block_kk
+    assert '`default_executor = "kilo"`' in block_kk
+
+    # Pair 3: codex -> kilo (multi-framework MCP)
+    ws_codex_kilo = tmp_path / "ws_codex_kilo"
+    ws_codex_kilo.mkdir()
+    run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "init-project",
+        "--workspace",
+        str(ws_codex_kilo),
+        "--orchestrator",
+        "codex",
+        "--executor",
+        "kilo",
+    )
+    res_co_k = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_codex_kilo),
+    )
+    assert res_co_k.returncode == 0
+    block_co_k = json.loads(res_co_k.stdout)["rendered_block"]
+    assert '`kilo_implement(isolation="worktree")`' in block_co_k
+    assert "agent_manager" not in block_co_k
+    assert '`primary_orchestrator = "codex"`' in block_co_k
+    assert '`default_executor = "kilo"`' in block_co_k
+
+
+def test_render_agents_md_no_silent_global_defaults(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    run_cli("--global-config", str(global_cfg_path), "init-global")
+
+    ws = tmp_path / "ws_unconfigured"
+    ws.mkdir()
+    agents_md = ws / "AGENTS.md"
+
+    # 1. --apply without project config and without --allow-global-routing refuses
+    res_refuse = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws),
+        "--apply",
+    )
+    assert res_refuse.returncode != 0
+    payload_refuse = json.loads(res_refuse.stdout)
+    assert payload_refuse["ok"] is False
+    assert "workspace has no project config" in payload_refuse["error"]
+    assert "orchestrator='kilo'" in payload_refuse["error"]
+    assert not agents_md.exists()
+
+    # 2. --apply with --allow-global-routing succeeds
+    res_allow = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws),
+        "--apply",
+        "--allow-global-routing",
+    )
+    assert res_allow.returncode == 0
+    payload_allow = json.loads(res_allow.stdout)
+    assert payload_allow["ok"] is True
+    assert agents_md.exists()
+
+    # 3. --diff on unconfigured workspace returns warnings containing routing notice
+    res_diff = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws),
+        "--diff",
+    )
+    assert res_diff.returncode == 0
+    payload_diff = json.loads(res_diff.stdout)
+    assert payload_diff["ok"] is True
+    assert any("Workspace has no project config; using global routing" in w for w in payload_diff["warnings"])
+
+    # 4. Workspace WITH project config does NOT show routing warning
+    ws_configured = tmp_path / "ws_configured"
+    ws_configured.mkdir()
+    run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "init-project",
+        "--workspace",
+        str(ws_configured),
+        "--orchestrator",
+        "claude",
+        "--executor",
+        "kilo",
+    )
+    res_diff_conf = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_configured),
+        "--diff",
+    )
+    assert res_diff_conf.returncode == 0
+    payload_diff_conf = json.loads(res_diff_conf.stdout)
+    assert not any("Workspace has no project config" in w for w in payload_diff_conf["warnings"])
+
+
+def test_render_agents_md_strict_main_session_rule(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    run_cli("--global-config", str(global_cfg_path), "init-global")
+
+    # 1. Default (strict_main_session = false) -> softer wording
+    ws_soft = tmp_path / "ws_soft"
+    ws_soft.mkdir()
+    run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "init-project",
+        "--workspace",
+        str(ws_soft),
+    )
+    res_soft = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_soft),
+    )
+    assert res_soft.returncode == 0
+    block_soft = json.loads(res_soft.stdout)["rendered_block"]
+    assert "Rule 1: Focus the Main Session on Architecture & Orchestration" in block_soft
+    assert "Prefer delegating multi-file implementations" in block_soft
+    assert '("it\'s small, I\'ll just do it" is forbidden)' not in block_soft
+
+    # 2. strict_main_session = true -> strict wording
+    ws_strict = tmp_path / "ws_strict"
+    ws_strict.mkdir()
+    run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "init-project",
+        "--workspace",
+        str(ws_strict),
+    )
+    proj_cfg = oc.find_project_config_path(ws_strict, global_cfg_path)
+    proj_cfg_text = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg_text += "\n[agents_md]\nstrict_main_session = true\n"
+    proj_cfg.write_text(proj_cfg_text, encoding="utf-8")
+
+    res_strict = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws_strict),
+    )
+    assert res_strict.returncode == 0
+    block_strict = json.loads(res_strict.stdout)["rendered_block"]
+    assert "Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)" in block_strict
+    assert '("it\'s small, I\'ll just do it" is forbidden)' in block_strict
+
+
+def test_render_agents_md_model_catalog_validation(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    run_cli("--global-config", str(global_cfg_path), "init-global")
+
+    ws = tmp_path / "ws_models"
+    ws.mkdir()
+    run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "init-project",
+        "--workspace",
+        str(ws),
+        "--orchestrator",
+        "claude",
+        "--executor",
+        "kilo",
+    )
+
+    # Unknown model for kilo
+    run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "set-profile",
+        "kilo",
+        "bulk-execution",
+        "--model",
+        "unknown-provider/fake-model-xyz",
+        "--scope",
+        "project",
+        "--workspace",
+        str(ws),
+    )
+
+    # 1. --diff lists the unknown model and skipped validation for claude
+    res_diff = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws),
+        "--diff",
+    )
+    assert res_diff.returncode == 0
+    payload_diff = json.loads(res_diff.stdout)
+    assert any("unknown-provider/fake-model-xyz" in w for w in payload_diff["warnings"])
+    assert any("Skipping model catalog validation for 'claude'" in w for w in payload_diff["warnings"])
+
+    # 2. --apply refuses without --allow-unknown-models
+    res_apply_refuse = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws),
+        "--apply",
+    )
+    assert res_apply_refuse.returncode != 0
+    payload_refuse = json.loads(res_apply_refuse.stdout)
+    assert payload_refuse["ok"] is False
+    assert "unknown model id(s)" in payload_refuse["error"]
+
+    # 3. --apply with --allow-unknown-models succeeds
+    res_apply_allow = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "render-agents-md",
+        "--workspace",
+        str(ws),
+        "--apply",
+        "--allow-unknown-models",
+    )
+    assert res_apply_allow.returncode == 0
+    payload_allow = json.loads(res_apply_allow.stdout)
+    assert payload_allow["ok"] is True
+    assert (ws / "AGENTS.md").exists()

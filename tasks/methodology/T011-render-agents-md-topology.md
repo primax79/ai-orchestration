@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: An applied block steers every future session; a wrong block (wrong orchestrator, foreign tools, contradicting model rules) silently misleads agents
 - next-up: yes
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -43,3 +43,11 @@ A block applied to `ai-coding-tools/AGENTS.md` on 2026-10-16 had four problems:
 - `--apply` refuses on a workspace with no project config.
 - `--diff` on `/Users/Alfredo/works/ai-coding-tools` (read-only) shows the routing warning.
 - Nothing is applied to any real workspace.
+
+## Result
+
+Delivered implementation of Steps 1–4 in `orchestration_config.py` with accompanying tests:
+- **Topology-aware rendering:** Pair mechanisms and skills are derived dynamically from effective config tool tables (`native_*_tool`, `mcp_server`, `mcp_implement_tool`, `mcp_wait_tool`). Tested for claude→kilo, kilo→kilo, and codex→kilo pairs.
+- **No silent defaults:** Workspaces lacking project config cause `--apply` to refuse and state the fallback routing unless `--allow-global-routing` is passed; `--diff` includes the routing warning in `warnings`.
+- **Model catalog validation:** Listed model IDs for Kilo are verified against `kilo models` (with a 20 s timeout and in-memory caching), refusing on `--apply` unless `--allow-unknown-models` is provided; skipped validation for Claude and Codex is surfaced in warnings.
+- **Opt-in strict rules:** Rule 1 defaults to a softer architectural focus and only renders the strict prohibition on main-session implementation when `strict_main_session = true` is explicitly configured.

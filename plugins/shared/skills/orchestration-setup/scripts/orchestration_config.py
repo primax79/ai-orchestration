@@ -21,6 +21,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import uuid
 from typing import Any
@@ -104,6 +105,9 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
             "codex:deep-reasoning",
         ],
         "panel_require_blind": True,
+    },
+    "agents_md": {
+        "strict_main_session": False,
     },
     "tools": {
         "kilo": {
@@ -704,7 +708,75 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
             if p_id not in PROFILE_SET:
                 errors.append(f"[verification].{list_key} entry {item!r} references invalid profile {p_id!r}.")
 
+    agents_md = cfg.get("agents_md")
+    if agents_md is not None:
+        if not isinstance(agents_md, dict):
+            errors.append("[agents_md] must be a table.")
+        elif "strict_main_session" in agents_md and not isinstance(agents_md["strict_main_session"], bool):
+            errors.append("[agents_md].strict_main_session must be a boolean.")
+
     return errors, warnings
+
+
+# ---------------------------------------------------------------------------
+# Catalog & Topology Helpers
+# ---------------------------------------------------------------------------
+
+_KILO_MODELS_CACHE: set[str] | None = None
+
+
+def get_kilo_models(timeout: float = 20.0) -> set[str] | None:
+    """Return set of model IDs from `kilo models`, or None if command fails/unavailable."""
+    global _KILO_MODELS_CACHE
+    if _KILO_MODELS_CACHE is not None:
+        return _KILO_MODELS_CACHE
+    try:
+        proc = subprocess.run(
+            ["kilo", "models"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if proc.returncode == 0:
+            models = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+            _KILO_MODELS_CACHE = models
+            return _KILO_MODELS_CACHE
+    except Exception:
+        pass
+    return None
+
+
+def reset_kilo_models_cache(cached: set[str] | None = None) -> None:
+    """Reset or preset the in-memory cache of `kilo models`."""
+    global _KILO_MODELS_CACHE
+    _KILO_MODELS_CACHE = cached
+
+
+def get_active_tool_ids(cfg: dict[str, Any]) -> list[str]:
+    """Return ordered list of tool IDs relevant to the active topology and verification."""
+    proj = cfg.get("project", {})
+    routing = cfg.get("routing", {})
+    ver = cfg.get("verification", {})
+    tools = cfg.get("tools", {})
+
+    orchestrator_id = proj.get("primary_orchestrator") or routing.get("default_orchestrator", "kilo")
+    executor_id = routing.get("default_executor", orchestrator_id)
+    v_mode = ver.get("default_mode", "cross-agent")
+
+    active_tool_ids: list[str] = []
+    for tid in (orchestrator_id, executor_id):
+        if tid in tools and tid not in active_tool_ids:
+            active_tool_ids.append(tid)
+
+    if v_mode in ("cross-agent", "panel"):
+        check_list = ver.get("cross_agent_order", []) if v_mode == "cross-agent" else ver.get("panel_reviewers", [])
+        for item in check_list:
+            t = str(item).split(":", 1)[0]
+            if t in tools and tools[t].get("enabled", True) and t not in active_tool_ids:
+                active_tool_ids.append(t)
+
+    return active_tool_ids
 
 
 # ---------------------------------------------------------------------------
@@ -731,23 +803,78 @@ def render_agents_md_block(
     exec_tool = tools.get(executor_id, orch_tool)
 
     # Determine dispatch tools description:
-    # - When orchestrator == executor (Single-Framework Native mode): only native mechanisms are shown by default
-    #   unless external MCP is also explicitly enabled for cross-framework delegation.
+    # - When orchestrator == executor (Single-Framework Native mode): only native mechanisms are shown.
     # - When orchestrator != executor (Cross-Framework MCP mode): MCP implement tool is primary.
     same_framework = orchestrator_id == executor_id
-    worktree_mech = (
-        orch_tool.get("native_worktree_tool")
-        if same_framework
-        else (exec_tool.get("mcp_implement_tool") or orch_tool.get("native_worktree_tool") or "worktree")
+
+    agents_md_cfg = cfg.get("agents_md", {})
+    if not isinstance(agents_md_cfg, dict):
+        agents_md_cfg = {}
+    strict_main_session = bool(
+        agents_md_cfg.get("strict_main_session", False)
+        or proj.get("strict_main_session", False)
+        or proj.get("agents_md", {}).get("strict_main_session", False)
     )
-    subagent_mech = orch_tool.get("native_subagent_tool", "task")
-    local_mech = orch_tool.get("native_local_tool", "local session")
-    mcp_impl = exec_tool.get("mcp_implement_tool")
-    mcp_note = (
-        f' (or `{mcp_impl}(isolation="worktree")` when delegating via MCP)'
-        if mcp_impl and not same_framework
-        else ""
-    )
+
+    if strict_main_session:
+        main_role_phrase = (
+            "acts strictly as the **Architect & Orchestrator** (discovery, task specification, "
+            "parallel dispatch, verification, and integration), delegating implementation and "
+            "heavy exploration to isolated **Worktree sessions** and **Subagents**."
+        )
+        rule_1_heading = "### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)"
+        rule_1_body = (
+            "- The main session exists to **analyze requirements, design task specs, "
+            "orchestrate parallel execution, and evaluate/verify results** with the user.\n"
+            "- **Do not perform feature implementation or multi-file coding in the main session**, "
+            'even when a change looks quick ("it\'s small, I\'ll just do it" is forbidden).\n'
+            "- **Only exception:** During Phase 5 (Verification), the Architect may apply a "
+            "trivial 1–5 line fix (e.g., typo, missing import) directly in the Executor's "
+            "worktree rather than doing a full round-trip. Any logic or multi-line change must "
+            "be bounced back to the Executor session.\n"
+            "- **Capture emergent work immediately:** If a bug, follow-up, or side requirement "
+            "surfaces mid-conversation and won't be finished in the current turn, record it in "
+            "`tasks/` (`task-pipeline`) and update `tasks/00-INDEX.md` before continuing. "
+            "Keep the main session's context lean."
+        )
+    else:
+        main_role_phrase = (
+            "acts primarily as the **Architect & Orchestrator** (discovery, task specification, "
+            "parallel dispatch, verification, and integration), delegating larger implementation "
+            "work and heavy exploration to isolated **Worktree sessions** and **Subagents**."
+        )
+        rule_1_heading = "### Rule 1: Focus the Main Session on Architecture & Orchestration"
+        rule_1_body = (
+            "- The main session focuses on **analyzing requirements, designing task specs, "
+            "orchestrating execution, and evaluating/verifying results** with the user.\n"
+            "- **Prefer delegating multi-file implementations, large refactors, or parallel tasks** "
+            "to isolated worktrees or subagents to keep the main session context clean and focused. "
+            "Small, direct adjustments and surgical edits may be performed in the main session "
+            "when appropriate.\n"
+            "- **Capture emergent work immediately:** If a bug, follow-up, or side requirement "
+            "surfaces mid-conversation and won't be finished in the current turn, record it in "
+            "`tasks/` (`task-pipeline`) and update `tasks/00-INDEX.md` before continuing. "
+            "Keep the main session's context lean."
+        )
+
+    if same_framework:
+        orch_skill_line = (
+            "- **`orchestration-workflow`** — Core 6-phase Architect/Executor loop "
+            "(Discovery → Isolation → Delegation → Monitoring → Verification → Closure & Merge)."
+        )
+    else:
+        mcp_srv = exec_tool.get("mcp_server", "")
+        if mcp_srv == "kilo-mcp":
+            mcp_skill_name = "kilo-mcp-orchestrator"
+        elif mcp_srv:
+            mcp_skill_name = f"{mcp_srv}-orchestrator"
+        else:
+            mcp_skill_name = "orchestration-workflow"
+        orch_skill_line = (
+            f"- **`orchestration-workflow`** (or **`{mcp_skill_name}`** when driving via MCP) — "
+            "Core 6-phase Architect/Executor loop (Discovery → Isolation → Delegation → "
+            "Monitoring → Verification → Closure & Merge)."
+        )
 
     domain_skills = proj.get("domain_skills", [])
     domain_skill_lines = []
@@ -803,14 +930,32 @@ def render_agents_md_block(
     )
     isolation_block = "\n".join(isolation_bullets)
 
+    # Dispatch mechanisms for Rule 3
+    if same_framework:
+        worktree_mech = f'`{orch_tool.get("native_worktree_tool", "worktree")}`'
+        sub_tool = orch_tool.get("native_subagent_tool", "subagent")
+        if orchestrator_id == "kilo":
+            subagent_mech = f'`{sub_tool}` (`explore` or `general`)'
+        else:
+            subagent_mech = f'`{sub_tool}`'
+        local_mech = f'`{orch_tool.get("native_local_tool", "local session")}`'
+    else:
+        mcp_impl = exec_tool.get("mcp_implement_tool")
+        if mcp_impl:
+            worktree_mech = f'`{mcp_impl}(isolation="worktree")`'
+            local_mech = f'`{mcp_impl}(continue_session_id=...)`'
+        else:
+            worktree_mech = f'`{orch_tool.get("native_worktree_tool", "worktree")}`'
+            local_mech = f'`{orch_tool.get("native_local_tool", "local session")}`'
+
+        sub_tool = orch_tool.get("native_subagent_tool", "subagent")
+        if orchestrator_id == "kilo":
+            subagent_mech = f'`{sub_tool}` (`explore` or `general`)'
+        else:
+            subagent_mech = f'`{sub_tool}`'
+
     # Build Role-to-Model table for the active executor/orchestrator tools
-    active_tool_ids = []
-    for tid in (orchestrator_id, executor_id):
-        if tid in tools and tid not in active_tool_ids:
-            active_tool_ids.append(tid)
-    for tid, tcfg in tools.items():
-        if isinstance(tcfg, dict) and tcfg.get("enabled", True) and tid not in active_tool_ids:
-            active_tool_ids.append(tid)
+    active_tool_ids = get_active_tool_ids(cfg)
 
     role_rows = []
     for prof in PROFILES:
@@ -849,13 +994,20 @@ def render_agents_md_block(
         )
     v_checks_block = "\n".join(v_check_lines)
 
+    # Monitoring mechanism
+    if not same_framework and exec_tool.get("mcp_wait_tool"):
+        wait_tool = exec_tool["mcp_wait_tool"]
+        monitor_mech = f" (or await via `{wait_tool}` / background completion watcher)"
+    else:
+        monitor_mech = " (via background completion watcher or status checks)"
+
     return f"""{BEGIN_MARKER}
 # Agent Orchestration & Development Guidelines (`AGENTS.md`)
 
 > **Managed by `ai-orchestration` (`orchestration_config.py render-agents-md`).**
 > Edit `{proj_cfg_path}` (project) or `{gpath}` (global) and re-run `render-agents-md --apply` to update.
 
-This repository uses an **Architect / Executor** development workflow (`primary_orchestrator = "{orchestrator_id}"`, `default_executor = "{executor_id}"`, `verification_mode = "{v_mode}"`). The **main session** acts strictly as the **Architect & Orchestrator** (discovery, task specification, parallel dispatch, verification, and integration), delegating implementation and heavy exploration to isolated **Worktree sessions** and **Subagents**.
+This repository uses an **Architect / Executor** development workflow (`primary_orchestrator = "{orchestrator_id}"`, `default_executor = "{executor_id}"`, `verification_mode = "{v_mode}"`). The **main session** {main_role_phrase}
 
 ---
 
@@ -863,7 +1015,7 @@ This repository uses an **Architect / Executor** development workflow (`primary_
 
 Load and follow these skills whenever planning, delegating, executing, or reviewing work:
 
-- **`orchestration-workflow`** (or **`kilo-mcp-orchestrator`** when driving via MCP) — Core 6-phase Architect/Executor loop (Discovery → Isolation → Delegation → Monitoring → Verification → Closure & Merge).
+{orch_skill_line}
 - **`task-spec-authoring`** — Authoring unambiguous, grounded task specs (`focus_files`, caller tracing, negative-claim rule, disjoint parallel write scopes, one-task-one-commit, risk-calibrated verification).
 - **`task-pipeline`** — Structuring multi-task initiatives, specs, and emergent mid-session tasks inside `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `specs/`, `NN-<slug>/plan.md`, `T###-<slug>`).
 - **`task-worktree-ops`** — Operational git/worktree mechanics for inspecting, fixing, and merging Executor worktrees safely without racing active sessions.
@@ -875,12 +1027,9 @@ Load and follow these skills whenever planning, delegating, executing, or review
 
 ## 2. Core Operating Rules
 
-### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)
+{rule_1_heading}
 
-- The main session exists to **analyze requirements, design task specs, orchestrate parallel execution, and evaluate/verify results** with the user.
-- **Do not perform feature implementation or multi-file coding in the main session**, even when a change looks quick ("it's small, I'll just do it" is forbidden).
-- **Only exception:** During Phase 5 (Verification), the Architect may apply a trivial 1–5 line fix (e.g., typo, missing import) directly in the Executor's worktree rather than doing a full round-trip. Any logic or multi-line change must be bounced back to the Executor session.
-- **Capture emergent work immediately:** If a bug, follow-up, or side requirement surfaces mid-conversation and won't be finished in the current turn, record it in `tasks/` (`task-pipeline`) and update `tasks/00-INDEX.md` before continuing. Keep the main session's context lean.
+{rule_1_body}
 
 ### Rule 2: Define Execution Tasks Before Delegating
 
@@ -900,9 +1049,9 @@ Before dispatching, explicitly evaluate whether the task requires **Git Worktree
 
 | Execution Mode | Tool / Mechanism | When to Use |
 | :--- | :--- | :--- |
-| **Isolated Git Worktree** *(Default for parallel code changes)* | `{worktree_mech}`{mcp_note} | Parallel implementation tasks modifying tracked files; multi-file features or refactors; comparing alternative implementations; long-running implementation work while keeping the main session clean. |
-| **Background / Foreground Subagent** *(Read-only or strictly disjoint single-file work)* | `{subagent_mech}` (`explore` or `general`) | Codebase discovery, caller tracing, architectural analysis, **independent blind review of a draft spec or delivered task**, or strictly isolated single-file creation when no other git writer is active. |
-| **Local / Follow-up Session** | `{local_mech}` | Follow-up steering inside an already-created worktree or single sequential task when explicitly requested in the current checkout. |
+| **Isolated Git Worktree** *(Default for parallel code changes)* | {worktree_mech} | Parallel implementation tasks modifying tracked files; multi-file features or refactors; comparing alternative implementations; long-running implementation work while keeping the main session clean. |
+| **Background / Foreground Subagent** *(Read-only or strictly disjoint single-file work)* | {subagent_mech} | Codebase discovery, caller tracing, architectural analysis, **independent blind review of a draft spec or delivered task**, or strictly isolated single-file creation when no other git writer is active. |
+| **Local / Follow-up Session** | {local_mech} | Follow-up steering inside an already-created worktree or single sequential task when explicitly requested in the current checkout. |
 
 **Isolation Safety Checks (Shared Host Resources Are NOT Isolated by Worktrees):**
 
@@ -925,7 +1074,7 @@ Track every task through explicit states (`open` → `in progress` → `delivere
 
 1. **Discover:** Use fast read-only searches (`grep`, `glob`, `read`, or exploration subagents/RAG) to gather ground-truth context.
 2. **Specify & Dispatch:** Write the task spec(s) and launch non-blocking parallel sessions.
-3. **Monitor & Intervene:** Monitor progress (or await via `kilo_task_wait` / background completion watcher). If a session drifts off-spec or stalls, cancel/stop early and steer the same session.
+3. **Monitor & Intervene:** Monitor progress{monitor_mech}. If a session drifts off-spec or stalls, cancel/stop early and steer the same session.
 4. **Verify Independently (Default mode: `{v_mode}`, fallback order: {cross_order}):**
    - Never trust the Executor's `Final Report` alone. Inspect `git status` and `git diff` in the Executor's worktree.
    - Re-run the task's Verification checks (directly or by dispatching an independent **Cross-Agent Verifier != Executor** on the `deep-reasoning` profile):
@@ -1372,7 +1521,54 @@ def cmd_init_project(args: argparse.Namespace) -> int:
 def cmd_render_agents_md(args: argparse.Namespace) -> int:
     ws = pathlib.Path(args.workspace or ".").resolve()
     gpath = getattr(args, "global_config", None)
-    cfg, _ = resolve_config(gpath, ws)
+    cfg, meta = resolve_config(gpath, ws)
+
+    has_project_config = meta.get("project_config_exists", False)
+    proj = cfg.get("project", {})
+    routing = cfg.get("routing", {})
+    ver = cfg.get("verification", {})
+    tools = cfg.get("tools", {})
+
+    orchestrator_id = proj.get("primary_orchestrator") or routing.get("default_orchestrator", "kilo")
+    executor_id = routing.get("default_executor", orchestrator_id)
+    v_mode = ver.get("default_mode", "cross-agent")
+    routing_desc = f"orchestrator='{orchestrator_id}', executor='{executor_id}', verification_mode='{v_mode}'"
+
+    warnings: list[str] = []
+    if not has_project_config:
+        routing_warning = (
+            f"Workspace has no project config; using global routing ({routing_desc}). "
+            "Run 'ai-orch config init-project' to configure."
+        )
+        warnings.append(routing_warning)
+
+    # Active tools for model catalog checks
+    active_tool_ids = get_active_tool_ids(cfg)
+
+    unknown_models: list[tuple[str, str, str]] = []
+    for tid in active_tool_ids:
+        if tid == "kilo":
+            kilo_models = get_kilo_models(timeout=20.0)
+            if kilo_models is not None:
+                kilo_profiles = tools.get("kilo", {}).get("profiles", {})
+                for prof in PROFILES:
+                    pentry = kilo_profiles.get(prof, {})
+                    if isinstance(pentry, dict):
+                        m = str(pentry.get("model", "")).strip()
+                        if m and m not in kilo_models:
+                            unknown_models.append(("kilo", prof, m))
+                            warnings.append(
+                                f"Unknown model id '{m}' for tool 'kilo' (profile '{prof}') not found in 'kilo models' catalog."
+                            )
+            else:
+                warnings.append(
+                    "Tool 'kilo' catalog check skipped: 'kilo models' command unavailable or timed out."
+                )
+        else:
+            warnings.append(
+                f"Skipping model catalog validation for '{tid}': no reliable CLI catalog command available."
+            )
+
     block = render_agents_md_block(cfg, ws, gpath)
     agents_md_path = ws / "AGENTS.md"
 
@@ -1406,10 +1602,13 @@ def cmd_render_agents_md(args: argparse.Namespace) -> int:
                         "diff": diff_str,
                         "hash": current_hash,
                         "changed": changed,
+                        "warnings": warnings,
                     }
                 )
             )
         else:
+            for w in warnings:
+                print(f"[WARN] {w}", file=sys.stderr)
             if diff_str:
                 sys.stdout.write(diff_str)
             else:
@@ -1419,8 +1618,10 @@ def cmd_render_agents_md(args: argparse.Namespace) -> int:
     if getattr(args, "check", False):
         in_sync = existing == updated
         if getattr(args, "json", False):
-            print(json.dumps({"ok": in_sync, "path": str(agents_md_path)}))
+            print(json.dumps({"ok": in_sync, "path": str(agents_md_path), "warnings": warnings}))
         elif not in_sync:
+            for w in warnings:
+                print(f"[WARN] {w}", file=sys.stderr)
             print(f"[FAIL] {agents_md_path} orchestration block is out of sync")
         else:
             print(f"[ok] {agents_md_path} orchestration block is in sync")
@@ -1456,16 +1657,67 @@ def cmd_render_agents_md(args: argparse.Namespace) -> int:
             return 2
 
     if getattr(args, "apply", False):
+        if not has_project_config and not getattr(args, "allow_global_routing", False):
+            msg = (
+                f"Refusing to apply: workspace has no project config (would use global routing: {routing_desc}). "
+                "Pass --allow-global-routing to proceed or run 'ai-orch config init-project' first."
+            )
+            if getattr(args, "json", False):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": msg,
+                            "path": str(agents_md_path),
+                            "routing": {
+                                "primary_orchestrator": orchestrator_id,
+                                "default_executor": executor_id,
+                                "verification_mode": v_mode,
+                            },
+                            "warnings": warnings,
+                        }
+                    )
+                )
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
+
+        if unknown_models and not getattr(args, "allow_unknown_models", False):
+            unknown_strs = [f"{t}:{p}={m}" for t, p, m in unknown_models]
+            msg = (
+                f"Refusing to apply: unknown model id(s) not found in tool catalog: {', '.join(unknown_strs)}. "
+                "Pass --allow-unknown-models to proceed."
+            )
+            if getattr(args, "json", False):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": msg,
+                            "path": str(agents_md_path),
+                            "unknown_models": [
+                                {"tool": t, "profile": p, "model": m} for t, p, m in unknown_models
+                            ],
+                            "warnings": warnings,
+                        }
+                    )
+                )
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
+
         write_file_atomic(agents_md_path, updated)
         if getattr(args, "json", False):
-            print(json.dumps({"ok": True, "applied": True, "path": str(agents_md_path)}))
+            print(json.dumps({"ok": True, "applied": True, "path": str(agents_md_path), "warnings": warnings}))
         else:
             print(f"[ok] updated {agents_md_path}")
         return 0
 
     if getattr(args, "json", False):
-        print(json.dumps({"ok": True, "applied": False, "path": str(agents_md_path), "rendered_block": block}))
+        print(json.dumps({"ok": True, "applied": False, "path": str(agents_md_path), "rendered_block": block, "warnings": warnings}))
     else:
+        for w in warnings:
+            print(f"[WARN] {w}", file=sys.stderr)
         sys.stdout.write(block)
     return 0
 
@@ -1554,6 +1806,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ra.add_argument("--check", action="store_true", help="Exit non-zero if <workspace>/AGENTS.md is out of sync")
     p_ra.add_argument("--diff", action="store_true", default=False, help="Preview changes as unified diff without writing")
     p_ra.add_argument("--expect-hash", default=None, help="Expected sha256 hash of target file before writing; refuse on mismatch")
+    p_ra.add_argument("--allow-global-routing", action="store_true", default=False, help="Allow applying when workspace has no project config")
+    p_ra.add_argument("--allow-unknown-models", action="store_true", default=False, help="Allow applying with unknown model IDs")
     p_ra.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_ra.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_ra.set_defaults(func=cmd_render_agents_md)

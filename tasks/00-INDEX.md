@@ -50,7 +50,7 @@ Evolutions and refinements to the orchestration skills (`orchestration-methodolo
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T006 | P3 | [Extract incident narratives to references/incidents.md (progressive disclosure)](methodology/T006-incidents-progressive-disclosure.md) | open | self | T003 |
-| T011 | P1 | [render-agents-md: render rules that match the actual orchestrator/executor topology](methodology/T011-render-agents-md-topology.md) | open | kilo | - |
+| T011 | P1 | [render-agents-md: render rules that match the actual orchestrator/executor topology](methodology/T011-render-agents-md-topology.md) | delivered | kilo | - |
 
 ### server-and-bindings
 
