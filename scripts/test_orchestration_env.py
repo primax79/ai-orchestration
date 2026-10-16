@@ -94,3 +94,55 @@ def test_register_mcp_across_kilo_claude_codex(tmp_path: pathlib.Path) -> None:
     assert "codex-mcp" in st["environments"]["claude"]["global"]["registered_mcps"]
     assert "kilo-mcp" in st["environments"]["kilo"]["global"]["registered_mcps"]
     assert "kilo-mcp" in st["environments"]["codex"]["global"]["registered_mcps"]
+
+
+def run_env_raw(args: list[str], home: pathlib.Path) -> subprocess.CompletedProcess[str]:
+    cmd = [sys.executable, str(SCRIPT), "--home", str(home), "--json", *args]
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+
+def test_remove_skill_rejects_path_traversal(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    (fake_home / ".claude" / "skills" / "foo").mkdir(parents=True)
+    (fake_home / ".claude" / "skills" / "foo" / "SKILL.md").write_text("x")
+    (fake_home / ".claude" / "settings.json").write_text("keep")
+    (fake_home / "precious.txt").write_text("keep")
+
+    for bad in ("..", "../..", "foo/../..", ".", "", "/etc", "a/b"):
+        res = run_env_raw(["remove-skill", bad, "--assistant", "claude", "--scope", "global"], fake_home)
+        assert res.returncode != 0, bad
+        assert json.loads(res.stdout)["ok"] is False, bad
+
+    assert (fake_home / ".claude" / "settings.json").read_text() == "keep"
+    assert (fake_home / "precious.txt").read_text() == "keep"
+    assert (fake_home / ".claude" / "skills" / "foo" / "SKILL.md").is_file()
+
+    ok = run_env(["remove-skill", "foo", "--assistant", "claude", "--scope", "global"], fake_home)
+    assert ok["ok"] is True
+    assert not (fake_home / ".claude" / "skills" / "foo").exists()
+
+
+def test_register_mcp_refuses_to_overwrite_unparseable_config(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    claude_json = fake_home / ".claude.json"
+    original = '{"projects": {"x": 1}, // not strict JSON\n "mcpServers": {}}'
+    claude_json.write_text(original)
+
+    res = run_env_raw(["register-mcp", "codex-mcp", "--assistants", "claude", "--scope", "global"], fake_home)
+    assert res.returncode != 0
+    assert json.loads(res.stdout)["ok"] is False
+    assert claude_json.read_text() == original
+
+
+def test_register_mcp_preserves_other_keys_and_keeps_backup(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    claude_json = fake_home / ".claude.json"
+    claude_json.write_text(json.dumps({"projects": {"x": 1}, "mcpServers": {"other": {"command": "y"}}}))
+
+    run_env(["register-mcp", "codex-mcp", "--assistants", "claude", "--scope", "global"], fake_home)
+    data = json.loads(claude_json.read_text())
+    assert data["projects"] == {"x": 1}
+    assert set(data["mcpServers"]) == {"other", "codex-mcp"}
+    assert (fake_home / ".claude.json.ai-orch.bak").is_file()

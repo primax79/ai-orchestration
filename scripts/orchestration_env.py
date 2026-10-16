@@ -16,7 +16,9 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
+import tempfile
 import subprocess
 import sys
 from typing import Any
@@ -45,6 +47,9 @@ OBSOLETE_SKILL_RENAMES = {
 OBSOLETE_AGENT_RENAMES = {
     "mcp-orchestrator-agent.md": "kilo-mcp-orchestrator-agent.md",
 }
+
+# A skill name is a single directory name: no separators, no "." / ".." components.
+SKILL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +400,13 @@ def remove_skill(
 ) -> dict[str, Any]:
     h = home or get_home_dir()
     ws = workspace.resolve() if workspace else pathlib.Path.cwd()
-    dest_dir = assistant_skills_dir(assistant, scope, ws, h) / skill_name
+    if not SKILL_NAME_RE.fullmatch(skill_name or ""):
+        return {"ok": False, "message": f"Invalid skill name {skill_name!r}: expected a single directory name ([A-Za-z0-9][A-Za-z0-9._-]*)"}
+    skills_dir = assistant_skills_dir(assistant, scope, ws, h)
+    dest_dir = skills_dir / skill_name
+    # Defence in depth: the target must be a direct child of the skills dir (no traversal, no symlinked parent tricks)
+    if dest_dir.parent.resolve() != skills_dir.resolve():
+        return {"ok": False, "message": f"Refusing to remove {dest_dir}: not a direct child of {skills_dir}"}
     if not (dest_dir.exists() or dest_dir.is_symlink()):
         return {"ok": False, "message": f"Skill '{skill_name}' not found in {dest_dir.parent}"}
     if dest_dir.is_symlink() or dest_dir.is_file():
@@ -438,6 +449,22 @@ def resolve_conflicts(
     return {"ok": True, "resolved_count": len(resolved), "resolved": resolved}
 
 
+def _atomic_write_with_backup(path: pathlib.Path, content: str) -> None:
+    """Write `content` to `path` atomically, keeping the previous version as `<name>.ai-orch.bak`."""
+    if path.exists():
+        shutil.copy2(path, path.with_name(path.name + ".ai-orch.bak"))
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        if path.exists():
+            shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        pathlib.Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def register_mcp_server(
     server_repo: str,
     assistants: list[str],
@@ -470,10 +497,14 @@ def register_mcp_server(
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         data: dict[str, Any] = {}
         if cfg_path.exists():
+            # Never fall back to {} on a parse error: that would overwrite the whole file
+            # (e.g. ~/.claude.json holds all of Claude Code's state) with a single key.
             try:
                 data = json.loads(cfg_path.read_text(encoding="utf-8"))
-            except Exception:
-                data = {}
+            except Exception as exc:
+                raise ValueError(f"Refusing to modify {cfg_path}: it is not valid JSON ({exc}). Fix or register the server manually.") from exc
+            if not isinstance(data, dict):
+                raise ValueError(f"Refusing to modify {cfg_path}: top-level JSON value is not an object.")
 
         if assistant == "kilo":
             mcp_block = data.setdefault("mcp", {})
@@ -490,7 +521,7 @@ def register_mcp_server(
                 "args": cmd_args,
             }
 
-        cfg_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        _atomic_write_with_backup(cfg_path, json.dumps(data, indent=2) + "\n")
         updated_configs.append(str(cfg_path))
 
     return {
@@ -566,14 +597,21 @@ def cmd_install_skills(args: argparse.Namespace) -> int:
 def cmd_register_mcp(args: argparse.Namespace) -> int:
     assistants = list(ASSISTANTS) if "all" in args.assistants else args.assistants
     ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
-    res = register_mcp_server(
-        server_repo=args.server,
-        assistants=assistants,
-        scope=args.scope,
-        provision_venv=args.provision_venv,
-        workspace=ws,
-        home=args.home,
-    )
+    try:
+        res = register_mcp_server(
+            server_repo=args.server,
+            assistants=assistants,
+            scope=args.scope,
+            provision_venv=args.provision_venv,
+            workspace=ws,
+            home=args.home,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+        else:
+            print(f"[error] {exc}", file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps(res, indent=2))
     else:
