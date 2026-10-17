@@ -36,7 +36,7 @@
 
 ### 13.5 - P2-a + P2-d: history-aware classification of legacy installs (`outdated-legacy` + "Update")
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/13.5-legacy-classification) · **Size:** M
+- **Status:** `delivered` (2026-10-18; claude; merged; 47 env tests; live env status: 13 up-to-date-legacy (adopt), 14 outdated-legacy (update), 1 foreign; owner check of the UI actions pending) · **Size:** M
 - **Goal:** Pre-receipt copies that match an earlier source commit are `outdated-legacy`, not `foreign`, and the UI offers "Update". Standalone-only duplicates are handled too.
 
 ### 13.6 - P2-b + P2-c: Kilo effective view; install respects plugins and policy
