@@ -20,6 +20,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | open | 06, 09.1 | S |
 | 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | open | 06, 09.1 | M |
 | 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | open (spec in review) | 07, 08, 11 | L |
+| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | open | 06 | M |
 
 ## Specs
 
@@ -73,7 +74,6 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T014 | P2 | [One backend test failed once in eleven runs](micro/T014-flaky-backend-test.md) | open | kilo | - |
 | T015 | P3 | [Navbar labels wrap on narrow widths](micro/T015-navbar-narrow-width.md) | open | kilo | - |
 
 ### env-doctor
@@ -82,7 +82,7 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T016 | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | in progress | claude | - |
+| T016 | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | delivered | claude | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -90,7 +90,10 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 <!-- ai-orch:generated decisions -->
 | Key | Question | Blocks | Decider | Recommended |
 | --- | --- | --- | --- | --- |
-| - | None. | - | - | - |
+| [Q002](questions/Q002-were-the-project-scope-skills-in-ai-orchestration.md) | Were the project-scope skills in ai-orchestration (.claude, .codex, .kilo) installed on purpose, and should they stay? | - | owner | A |
+| [Q003](questions/Q003-should-both-architect-side-plugins-stay-enabled-in.md) | Should both architect-side plugins stay enabled in Claude, or should Claude keep only one? | - | owner | A |
+| [Q004](questions/Q004-should-we-bump-the-plugin-versions-and-update-the.md) | Should we bump the plugin versions and update the Claude plugins now? | - | owner | A |
+| [Q005](questions/Q005-for-gcube-jenkins-gcube-security-audit-and-fronten.md) | For gcube-jenkins, gcube-security-audit and frontend-design, which copy is canonical: the standalone one or the plugin one? | - | owner | C |
 <!-- /ai-orch:generated decisions -->
 
 ## Done
@@ -107,6 +110,7 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 | T001 | [Task completion wait (kilo_task_wait) and watcher guidance](done/server-and-bindings/T001-task-completion-wait-and-watcher.md) | done | 2026-10-15 |
 | T011 | [render-agents-md: render rules that match the actual orchestrator/executor topology](done/methodology/T011-render-agents-md-topology.md) | done | 2026-10-17 |
 | T013 | [Answer confirmation dialog says "No modifications required"](done/micro/T013-answer-dialog-wording.md) | done | 2026-10-17 |
+| T014 | [One backend test failed once in eleven runs](done/micro/T014-flaky-backend-test.md) | done | 2026-10-17 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

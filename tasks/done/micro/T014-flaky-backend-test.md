@@ -6,13 +6,14 @@
 - priority: P2
 - priority-reason: A flaky test hides real regressions and trains people to re-run instead of reading failures
 - next-up: no
-- state: open
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: architect review of 09.2 (2026-10-17): the first run after rebase reported "1 failed, 34 passed"; ten further runs were green and the failing test name was not captured
 - paths: ../ai-orchestration-ui/backend/test_server.py
 - handoff: Read tasks/micro/T014-flaky-backend-test.md and fix it.
+- verifier: claude:orchestration
 
 ## Goal
 

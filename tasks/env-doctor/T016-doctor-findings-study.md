@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: The owner sees many Doctor findings that never resolve; either they are false positives or the resolution path is broken, and both erode trust in the tool
 - next-up: yes
-- state: in progress
+- state: delivered
 - executor: claude
 - depends-on: -
 - decider: -
