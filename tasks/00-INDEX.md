@@ -19,6 +19,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1, 09.2; next: 09.3) | 06 (07 for agent triage) | M |
 | 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | open | 06, 09.1 | S |
 | 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | open | 06, 09.1 | M |
+| 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | open (spec in review) | 07, 08, 11 | L |
 
 ## Specs
 
@@ -33,6 +34,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [inbox-notes](specs/inbox-notes.md) | 09 |
 | [timeline-gantt](specs/timeline-gantt.md) | 10 |
 | [subtasks](specs/subtasks.md) | 11 (and 10.1 builds on 11.1) |
+| [events-and-triggers](specs/events-and-triggers.md) | 12 (supersedes 08.6) |
 
 ## Next up
 
@@ -113,6 +115,7 @@ flowchart TB
     I09["09: Inbox notes and screenshots to tasks (open)"]
     I10["10: Abstract timeline, dependencies and priorities (open)"]
     I11["11: Task hierarchy, N levels (open)"]
+    I12["12: Events, sessions, triggers (open)"]
     MCP["T001, T002 (done) / T007, T008 (open): Standalone MCP Servers (kilo-mcp & claude-mcp)"]
 
     I01 --> I02 --> I03 --> I05 --> I06
@@ -122,6 +125,8 @@ flowchart TB
     I06 --> I10
     I06 --> I11
     I11 --> I10
+    I07 --> I12
+    I08 --> I12
     I07 -.->|agent triage| I09
     I08 -.->|answer and resume| I07
     I01 --> I04

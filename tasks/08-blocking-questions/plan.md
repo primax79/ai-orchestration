@@ -90,3 +90,5 @@ The spec now opens with §0 "Amendments after review 2" (Q1–Q10). These change
 - **08.2** documents Q8 for skills: agents in runs emit the block, interactive sessions call `questions ask`.
 - **08.4** adds Q10 and spec 06 A12 (XSS fixtures: a `<script>` / `<img onerror>` payload in a question context renders inert).
 - **08.6** no longer owns supervisor filing; that moved to **07.10**. 08.6 is UI only: "Answer and resume run", after 07.7, 07.10 and 08.4.
+
+> **2026-10-17:** 08.6 "Answer and resume run" is superseded by initiative 12 (trigger rule `resume-origin` on `question.answered`, task 12.4). It is no longer worked on here.
