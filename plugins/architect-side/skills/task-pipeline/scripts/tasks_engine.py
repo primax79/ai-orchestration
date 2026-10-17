@@ -2197,7 +2197,9 @@ def parse_emergent_task_file(
         "file_path": str(file_path),
         "task_root": str(task_root),
         "rel_path": rel_path,
-        "attachments": attachments,
+        # `attachments` stays a list of names (UI contract since 09.2); details per file:
+        "attachments": [a["name"] for a in attachments],
+        "attachment_details": attachments,
     }
     task_dict["bundle_sha256"] = task_bundle_sha256(task_dict)
     return task_dict
@@ -6007,7 +6009,9 @@ def parse_note_folder(
         "produced": headers.get("produced", "-"),
         "processed_by": headers.get("processed-by", "-"),
         "body": body,
-        "attachments": attachments,
+        # `attachments` stays a list of names (UI contract since 09.2); details per file:
+        "attachments": [a["name"] for a in attachments],
+        "attachment_details": attachments,
         "bundle_sha256": bundle_hash,
         "legacy": False,
         "folder_name": folder_path.name,
@@ -6061,6 +6065,7 @@ def parse_legacy_note_file(
         "processed_by": "-",
         "body": text.strip(),
         "attachments": [],
+        "attachment_details": [],
         "bundle_sha256": bundle_hash,
         "legacy": True,
         "folder_name": file_path.name,

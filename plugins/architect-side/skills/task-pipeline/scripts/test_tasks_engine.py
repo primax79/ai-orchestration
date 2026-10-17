@@ -2593,7 +2593,8 @@ def test_inbox_attach_and_detach_and_limits(tmp_path: pathlib.Path) -> None:
 
     # Check show reports attachment
     show1 = json.loads(run_cli("inbox", "show", "N001", "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
-    assert show1["attachments"] == [{"name": "01-screenshot.png", "class": "image", "size": len(png_bytes)}]
+    assert show1["attachments"] == ["01-screenshot.png"]
+    assert show1["attachment_details"] == [{"name": "01-screenshot.png", "class": "image", "size": len(png_bytes)}]
 
     # 2. Refuse invalid image magic bytes (e.g. text file named fake.png)
     fake_png = tmp_path / "fake.png"
@@ -2642,7 +2643,7 @@ def test_inbox_attach_and_detach_and_limits(tmp_path: pathlib.Path) -> None:
     assert json.loads(res_det.stdout)["ok"] is True
 
     show_after_det = json.loads(run_cli("inbox", "show", "N001", "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
-    assert "01-screenshot.png" not in [a["name"] for a in show_after_det["attachments"]]
+    assert "01-screenshot.png" not in show_after_det["attachments"]
     assert len(show_after_det["attachments"]) == 29
 
 
@@ -3859,7 +3860,8 @@ def test_attachment_classes_and_validation(tmp_path: pathlib.Path) -> None:
     # Check show reports JSON objects {name, class, size}
     show_data = json.loads(run_cli("inbox", "show", note_id, "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
     assert len(show_data["attachments"]) == 4
-    for att in show_data["attachments"]:
+    assert all(isinstance(a, str) for a in show_data["attachments"])
+    for att in show_data["attachment_details"]:
         assert "name" in att and "class" in att and "size" in att
         assert att["class"] in ("image", "pdf", "text")
         assert att["size"] > 0
@@ -4034,7 +4036,8 @@ def test_task_attachments_lifecycle_file_to_folder_and_bundle_hash(tmp_path: pat
     list_res2 = json.loads(run_cli("list", "--tasks-dir", str(tasks_dir), "--json").stdout)
     matching_et2 = next(t for t in list_res2["emergent_tasks"] if t["id"] == task_id)
     assert len(matching_et2["attachments"]) == 1
-    assert matching_et2["attachments"][0] == {"name": "01-spec.pdf", "class": "pdf", "size": len(pdf_bytes)}
+    assert matching_et2["attachments"][0] == "01-spec.pdf"
+    assert matching_et2["attachment_details"][0] == {"name": "01-spec.pdf", "class": "pdf", "size": len(pdf_bytes)}
 
     # 5. Attach text file with optimistic locking check
     log_file = tmp_path / "debug.log"
@@ -4100,7 +4103,7 @@ def test_task_attachments_lifecycle_file_to_folder_and_bundle_hash(tmp_path: pat
     list_res3 = json.loads(run_cli("list", "--tasks-dir", str(tasks_dir), "--json").stdout)
     matching_et3 = next(t for t in list_res3["emergent_tasks"] if t["id"] == task_id)
     assert len(matching_et3["attachments"]) == 1
-    assert matching_et3["attachments"][0]["name"] == "02-debug.log"
+    assert matching_et3["attachments"][0] == "02-debug.log"
 
     # 7. Detach remaining file
     res_det2 = run_cli("detach", task_id, "--name", "02-debug.log", "--tasks-dir", str(tasks_dir), "--json")
@@ -4205,7 +4208,7 @@ def test_tasks_new_from_note_copies_attachments_and_rewrites_links(tmp_path: pat
     list_res = json.loads(run_cli("list", "--tasks-dir", str(tasks_dir), "--json").stdout)
     matching_task = next(t for t in list_res["emergent_tasks"] if t["id"] == task_id)
     assert len(matching_task["attachments"]) == 2
-    att_names = [a["name"] for a in matching_task["attachments"]]
+    att_names = matching_task["attachments"]
     assert "01-screen.png" in att_names
     assert "02-trace.log" in att_names
 
