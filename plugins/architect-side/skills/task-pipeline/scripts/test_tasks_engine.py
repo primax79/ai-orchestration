@@ -3236,3 +3236,17 @@ def test_transition_plan_task_rewrites_its_status_line(tmp_path: pathlib.Path) -
     assert not ok and res["error"] == "stale-task"
     ok, res = te.transition_task(tasks_dir, "05.9", "in progress")
     assert not ok and "not found" in res["error"]
+
+
+def test_plan_task_depends_on_from_status_line(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "05-sample").mkdir(parents=True)
+    (tasks_dir / "05-sample" / "plan.md").write_text(
+        "# 05 - Sample\n\n## Tasks\n\n"
+        "### 05.1 - A\n- **Status:** `done` · **Depends on:** - · **Repo:** x\n\n"
+        "### 05.2 - B\n- **Status:** `open` · **Depends on:** 05.1, 07.4 (same file), T012 · **Repo:** x\n",
+        encoding="utf-8",
+    )
+    deps = {t["id"]: t["depends_on"] for i in te.discover_initiatives(tasks_dir) for t in i["tasks"]}
+    assert deps["05.1"] == "-"
+    assert deps["05.2"] == "05.1, 07.4, T012"

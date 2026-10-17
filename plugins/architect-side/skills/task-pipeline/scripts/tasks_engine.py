@@ -151,6 +151,7 @@ EMERGENT_ID_RE = re.compile(r"^T\d{3,}$")
 INITIATIVE_DIR_RE = re.compile(r"^(\d{2,})-(.+)$")
 HEADER_LINE_RE = re.compile(r"^-\s+([a-z][a-z0-9-]*):\s*(.*)$")
 INLINE_TASK_HEADING_RE = re.compile(r"^###\s+(\d{2,}\.\d+)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
+PLAN_TASK_DEPENDS_RE = re.compile(r"\*\*Depends on:\*\*\s*([^·]+)")
 PLAN_TASK_STATUS_RE = re.compile(r"^\s*[-*]\s+\*\*Status:\*\*\s*`([^`]+)`")
 
 
@@ -1102,6 +1103,7 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
                         # The task's own `- **Status:** `<state>`` line (within the next few
                         # lines) wins over the initiative's state.
                         task_state = init_status
+                        task_deps = "-"
                         for nxt in scanned_lines[idx + 1 : idx + 6]:
                             if nxt.is_fenced or INLINE_TASK_HEADING_RE.match(nxt.text):
                                 break
@@ -1110,8 +1112,15 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
                                 cand = normalize_state(sm.group(1))
                                 if cand in CANONICAL_STATES:
                                     task_state = cand
+                                dm = PLAN_TASK_DEPENDS_RE.search(nxt.text)
+                                if dm:
+                                    # Keep only task ids; the prose notes ("same file", lanes) stay in the plan
+                                    ids = re.findall(r"\b(?:\d{2,}\.\d+[a-z]?|T\d{3,})\b", dm.group(1))
+                                    task_deps = ", ".join(dict.fromkeys(ids)) or "-"
                                 break
-                        inline_tasks.append({"id": tm.group(1), "title": tm.group(2).strip(), "state": task_state})
+                        inline_tasks.append(
+                            {"id": tm.group(1), "title": tm.group(2).strip(), "state": task_state, "depends_on": task_deps}
+                        )
 
             # Also check table tasks in plan.md (e.g. | **T1** | **Title**: desc |)
             table_tasks = []
@@ -2690,6 +2699,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                     "next_up": "yes" if init_st == "in progress" and sub_t.get("state") != "done" else "no",
                     "state": sub_t.get("state", init_st),
                     "executor": sub_t.get("executor", "kilo"),
+                    "depends_on": sub_t.get("depends_on", "-"),
                     "handoff": sub_t.get("handoff", f"Work on task {sub_id} in {init.get('rel_path')}"),
                     "file_path": str(tasks_dir / init["rel_path"]),
                     "in_done": sub_t.get("state", init_st) == "done",
