@@ -74,6 +74,11 @@ try:
         task_write_lock,
         ask_question,
         parse_option_arg,
+        find_inbox_note,
+        tasks_new_from_note,
+        inbox_resolve,
+        render_synced_index,
+        validate_tasks_tree,
     )
 except ImportError:
     discover_emergent_tasks = None  # type: ignore
@@ -84,6 +89,11 @@ except ImportError:
     task_write_lock = None  # type: ignore
     ask_question = None  # type: ignore
     parse_option_arg = None  # type: ignore
+    find_inbox_note = None  # type: ignore
+    tasks_new_from_note = None  # type: ignore
+    inbox_resolve = None  # type: ignore
+    render_synced_index = None  # type: ignore
+    validate_tasks_tree = None  # type: ignore
 
 
 @contextlib.contextmanager
@@ -112,11 +122,12 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 VALID_RUN_ID_RE = re.compile(
-    r"^[0-9]{8}-[0-9]{6}-T[0-9]{3}-(kilo|claude|codex)-[0-9a-f]{4}$"
+    r"^[0-9]{8}-[0-9]{6}-[TN][0-9]{3,}-(kilo|claude|codex)-[0-9a-f]{4}$"
 )
 
-VALID_MODES = {"orchestrate", "execute", "verify"}
+VALID_MODES = {"orchestrate", "execute", "verify", "triage"}
 VALID_TOOLS = {"kilo", "claude", "codex"}
+NOTE_ID_RE = re.compile(r"^N\d{3,}$")
 
 ACTIVE_STATES = {"starting", "running"}
 TERMINAL_STATES = {"succeeded", "failed", "cancelled", "lost"}
@@ -304,6 +315,15 @@ DEFAULT_CLAUDE_ALLOWED_TOOLS: dict[str, list[str]] = {
         "Bash(npm test:*)",
         "Bash(npm run build:*)",
         "mcp__kilo-mcp__*",
+    ],
+    "triage": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git log:*)",
+        "Bash(git show:*)",
     ],
 }
 
@@ -744,6 +764,73 @@ def process_run_questions(
         record["question_errors"] = question_errors
 
 
+def extract_triage_proposal_from_run(run_dir: pathlib.Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Parse and validate the ```ai-orch-triage JSON block from run logs (Spec §4, Task 09.4)."""
+    messages = extract_assistant_messages(run_dir)
+    if not messages:
+        return None, "No assistant messages found in run logs"
+
+    combined_text = "\n\n".join(messages)
+    pattern = re.compile(r"```ai-orch-triage\s*([\s\S]*?)\s*```")
+    matches = list(pattern.finditer(combined_text))
+
+    if not matches:
+        return None, "Missing ```ai-orch-triage block in agent output"
+    if len(matches) > 1:
+        return None, f"Found {len(matches)} ```ai-orch-triage blocks in agent output; expected exactly one"
+
+    raw_json = matches[0].group(1).strip()
+    try:
+        data = json.loads(raw_json)
+    except Exception as e:
+        return None, f"Invalid JSON in ai-orch-triage block: {e}"
+
+    if not isinstance(data, dict):
+        return None, "Triage proposal must be a JSON object"
+
+    # Validate 'tasks' list
+    tasks = data.get("tasks")
+    if tasks is None or not isinstance(tasks, list):
+        return None, "Triage proposal missing required 'tasks' list"
+
+    required_task_fields = ("title", "category", "priority", "goal", "steps", "verification")
+    for idx, t in enumerate(tasks):
+        if not isinstance(t, dict):
+            return None, f"Task {idx} in triage proposal must be an object"
+        for field in required_task_fields:
+            val = t.get(field)
+            if val is None or (isinstance(val, str) and not val.strip()) or (isinstance(val, list) and not val):
+                return None, f"Task {idx} in triage proposal missing or empty required field '{field}'"
+
+        p_reason = t.get("priority_reason") or t.get("priority-reason")
+        if not p_reason or not str(p_reason).strip():
+            return None, f"Task {idx} in triage proposal missing or empty required field 'priority_reason'"
+
+        pri = str(t.get("priority", "")).strip()
+        if pri not in ("P0", "P1", "P2", "P3"):
+            return None, f"Task {idx} has invalid priority '{pri}' (expected P0, P1, P2, or P3)"
+
+    # Validate updates
+    if "updates" in data and not isinstance(data["updates"], list):
+        return None, "Field 'updates' must be a list"
+    else:
+        data.setdefault("updates", [])
+
+    # Validate spec
+    if "spec" in data and data["spec"] is not None and not isinstance(data["spec"], dict):
+        return None, "Field 'spec' must be null or an object"
+    else:
+        data.setdefault("spec", None)
+
+    # Validate questions
+    if "questions" in data and not isinstance(data["questions"], list):
+        return None, "Field 'questions' must be a list"
+    else:
+        data.setdefault("questions", [])
+
+    return data, None
+
+
 # ---------------------------------------------------------------------------
 # Pure Guards
 # ---------------------------------------------------------------------------
@@ -765,6 +852,16 @@ def check_task_id(task_id: str) -> tuple[bool, str | None]:
     if re.match(r"^(?:NN|\d+)\.(?:T|\d+)", t_clean, re.IGNORECASE) or t_clean.upper() == "NN.T":
         return False, "Initiative tasks (NN.T) are not supported in v1; emergent tasks (T###) only"
     return False, f"Invalid task ID '{task_id}'; emergent tasks (T###) only"
+
+
+def check_note_id(note_id: str) -> tuple[bool, str | None]:
+    """Validate inbox note ID format (N###)."""
+    if not isinstance(note_id, str) or not note_id.strip():
+        return False, "Note ID cannot be empty"
+    n_clean = note_id.strip()
+    if NOTE_ID_RE.match(n_clean):
+        return True, None
+    return False, f"Invalid note ID '{note_id}'; inbox notes (N###) only"
 
 
 def get_allowed_modes_for_state(state: str, has_existing_run: bool = False, is_continue: bool = False) -> list[str]:
@@ -1221,7 +1318,7 @@ def resolve_tool(
 
         return "kilo" if "kilo" in tools else None
 
-    if mode == "orchestrate":
+    if mode in ("orchestrate", "triage"):
         # Layer 3: Project routing
         if project_cfg:
             p_orch = project_cfg.get("routing", {}).get("default_orchestrator")
@@ -1255,6 +1352,9 @@ def resolve_profile(
     """Resolve profile per mode and task (Spec §3)."""
     if requested_profile:
         return requested_profile
+
+    if mode == "triage":
+        return "deep-reasoning"
 
     if mode == "orchestrate":
         return "orchestration"
@@ -1388,14 +1488,16 @@ def build_adapter_argv(
     session_id: str | None = None,
     prompt_file: str | None = None,
     is_resume: bool = False,
+    attachment_paths: list[str] | None = None,
 ) -> list[str]:
-    """Build the adapter argv list for a given tool (Spec §5.7, R3)."""
+    """Build the adapter argv list for a given tool (Spec §5.7, R3, Task 09.4)."""
     headless = tool_cfg.get("headless", {})
     if not isinstance(headless, dict):
         headless = {}
 
     permission_mode = headless.get("permission_mode") or "acceptEdits"
-    sandbox = headless.get("sandbox") or "workspace-write"
+    default_sandbox = "read-only" if mode == "triage" else "workspace-write"
+    sandbox = headless.get("sandbox") or default_sandbox
     session_id_val = session_id or "{session_id}"
     prompt_file_val = prompt_file or "{prompt_file}"
 
@@ -1518,7 +1620,11 @@ def build_adapter_argv(
         ]
         if variant:
             argv.extend(["--variant", variant])
-        argv.extend(["-f", prompt_file_val, "Follow the attached task prompt."])
+        argv.extend(["-f", prompt_file_val])
+        if attachment_paths:
+            for att in attachment_paths:
+                argv.extend(["-f", att])
+        argv.extend(["--", "Follow the attached task prompt."])
         return argv
 
     if tool == "claude":
@@ -1560,6 +1666,9 @@ def build_adapter_argv(
         ]
         if effort:
             argv.extend(["-c", f"model_reasoning_effort={effort}"])
+        if attachment_paths:
+            for att in attachment_paths:
+                argv.extend(["-i", att])
         argv.append("-")
         return argv
 
@@ -1593,13 +1702,147 @@ def load_task_files_content(task: dict[str, Any]) -> str:
     return "\n\n".join(parts)
 
 
+def build_triage_prompt(
+    note: dict[str, Any],
+    workspace: pathlib.Path,
+    attachment_paths: list[str] | None = None,
+    instructions: str | None = None,
+) -> str:
+    """Prompt builder for triage mode (Spec §4, Task 09.4)."""
+    note_id = note.get("id", "-")
+    note_title = note.get("title", "")
+    note_kind = note.get("kind", "note")
+    note_status = note.get("status", "ready")
+    note_created = note.get("created", "-")
+    note_author = note.get("author", "owner")
+    note_about = note.get("about", "-")
+    note_produced = note.get("produced", "-")
+    note_processed_by = note.get("processed_by", "-")
+    note_body = note.get("body", "").strip()
+
+    blocks: list[str] = [
+        f"# Inbox Note: {note_id} — {note_title}",
+        "",
+        "## Note Header",
+        f"- id: {note_id}",
+        f"- title: {note_title}",
+        f"- kind: {note_kind}",
+        f"- status: {note_status}",
+        f"- created: {note_created}",
+        f"- author: {note_author}",
+        f"- about: {note_about}",
+        f"- produced: {note_produced}",
+        f"- processed-by: {note_processed_by}",
+        "",
+        "## Note Body",
+        "",
+        note_body if note_body else "(Empty note body)",
+        "",
+    ]
+
+    # Attachments
+    blocks.append("## Attachments")
+    blocks.append("")
+    if attachment_paths:
+        for att in attachment_paths:
+            blocks.append(f"- {att}")
+    else:
+        blocks.append("(No attachments)")
+    blocks.append("")
+
+    # Referenced Paths from about
+    if note_about and note_about != "-":
+        blocks.extend([
+            "## Referenced Paths (`about`)",
+            "",
+            note_about,
+            "",
+        ])
+
+    # Current tasks registry (tasks/00-INDEX.md)
+    idx_path = workspace / "tasks" / "00-INDEX.md"
+    idx_content = idx_path.read_text(encoding="utf-8").strip() if idx_path.is_file() else "(No tasks/00-INDEX.md found)"
+    blocks.extend([
+        "## Current Tasks Registry (`tasks/00-INDEX.md`)",
+        "",
+        idx_content,
+        "",
+    ])
+
+    # Emergent task rules
+    skill_path = "plugins/architect-side/skills/task-pipeline/SKILL.md"
+    blocks.extend([
+        "## Emergent Task Rules",
+        "",
+        f"Refer to the task-pipeline skill at `{skill_path}` (and `tasks/AGENTS.md`) for complete rules.",
+        "- Emergent tasks live in `tasks/<category>/T###-<slug>.md`.",
+        "- Closed header fields (exact order): `id`, `title`, `category`, `priority`, `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`.",
+        "- Mandatory sections: `## Goal`, `## Steps`, `## Verification`.",
+        "- Allowed priorities: `P0`, `P1`, `P2`, `P3`.",
+        "",
+    ])
+
+    # Mandate from spec
+    blocks.extend([
+        "## Triage Mandate",
+        "",
+        "You are acting as an expert triage agent analyzing this inbox note.",
+        "Your mandate:",
+        "1. Analyze the note, its body, its attachments, and any referenced files in the repository.",
+        "2. Propose new `T###` emergent tasks, updates to existing tasks, or a spec derived from this note.",
+        "3. Emit your recommendations in EXACTLY ONE ```ai-orch-triage JSON block matching this schema:",
+        "   ```ai-orch-triage",
+        "   {",
+        '     "tasks": [',
+        "       {",
+        '         "title": "Short descriptive title",',
+        '         "category": "valid-category-name",',
+        '         "priority": "P0 | P1 | P2 | P3",',
+        '         "priority_reason": "Explanation of priority",',
+        '         "goal": "Clear goal statement",',
+        '         "steps": ["Step 1", "Step 2"],',
+        '         "verification": ["Check 1", "Check 2"]',
+        "       }",
+        "     ],",
+        '     "updates": [],',
+        '     "spec": null,',
+        '     "questions": []',
+        "   }",
+        "   ```",
+        "4. If the note is ambiguous or missing critical technical decisions, you may emit one or more ```ai-orch-question blocks.",
+        "5. NEVER write or edit any files in the workspace or in `tasks/`. This is a strictly read-only triage run.",
+        "",
+    ])
+
+    if instructions and instructions.strip():
+        blocks.extend([
+            "## Additional Instructions",
+            "",
+            instructions.strip(),
+            "",
+        ])
+
+    return "\n".join(blocks).rstrip() + "\n"
+
+
 def build_prompt(
     mode: str,
     task: dict[str, Any],
     target_commit: str | None = None,
     instructions: str | None = None,
+    workspace: pathlib.Path | None = None,
+    attachment_paths: list[str] | None = None,
 ) -> str:
-    """Deterministic prompt builder per mode (Spec §3)."""
+    """Deterministic prompt builder per mode (Spec §3, §4)."""
+    if mode == "triage":
+        ws = workspace or pathlib.Path(".").resolve()
+        return build_triage_prompt(
+            note=task,
+            workspace=ws,
+            attachment_paths=attachment_paths,
+            instructions=instructions,
+        )
+
     task_id = task.get("id", "UNKNOWN")
     task_title = task.get("title", "")
     task_content = load_task_files_content(task)
@@ -1853,12 +2096,16 @@ def create_run_record(
     panel_id: str | None = None,
     verification_mode: str | None = None,
     keep_worktree: bool = False,
+    note_id: str | None = None,
+    note_bundle_sha256: str | None = None,
+    attachment_paths: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Initialize a run.json record structure (Spec §5.1, R2, R3, R8)."""
+    """Initialize a run.json record structure (Spec §5.1, R2, R3, R8, Task 09.4)."""
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     return {
         "run_id": run_id,
         "task_id": task_id,
+        "note_id": note_id,
         "mode": mode,
         "tool": tool,
         "profile": profile,
@@ -1878,6 +2125,8 @@ def create_run_record(
         "target_run": target_run,
         "target_commit": target_commit,
         "task_bundle_sha256": task_bundle_sha256,
+        "note_bundle_sha256": note_bundle_sha256,
+        "attachment_paths": list(attachment_paths or []),
         "plan_hash": plan_hash,
         "supervisor": {"pid": None, "start_time": None},
         "agent": {"pid": None, "pgid": None, "start_time": None},
@@ -1890,6 +2139,10 @@ def create_run_record(
         "continued_from": continued_from,
         "final_report": None,
         "verdict": None,
+        "proposal_status": None,
+        "proposal_error": None,
+        "accepted_tasks": [],
+        "accepted_at": None,
         "panel_id": panel_id,
         "verification_mode": verification_mode,
         "keep_worktree": keep_worktree,
@@ -1986,7 +2239,7 @@ def list_run_records(
         except Exception:
             continue
 
-        if task_id and record.get("task_id") != task_id:
+        if task_id and record.get("task_id") != task_id and record.get("note_id") != task_id:
             continue
         if active_only and record.get("status") not in ACTIVE_STATES:
             continue
@@ -2013,11 +2266,19 @@ def cmd_options(args: argparse.Namespace) -> int:
         print_error(args.json, plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)")
         return 1
 
-    task_id = args.task
-    valid_task, task_err = check_task_id(task_id)
-    if not valid_task:
-        reason = "initiative-tasks-not-supported" if "Initiative" in (task_err or "") else "invalid-task-id"
-        print_error(args.json, reason, task_err or "Invalid task ID")
+    note_id_arg = getattr(args, "note", None)
+    task_id_arg = getattr(args, "task", None)
+    target_is_note = False
+    if note_id_arg:
+        target_is_note = True
+        target_id = note_id_arg.strip()
+    elif task_id_arg and NOTE_ID_RE.match(task_id_arg.strip()):
+        target_is_note = True
+        target_id = task_id_arg.strip()
+    elif task_id_arg:
+        target_id = task_id_arg.strip()
+    else:
+        print_error(args.json, "missing-target", "Either --task or --note is required")
         return 1
 
     ws = pathlib.Path(args.workspace or ".").resolve()
@@ -2026,19 +2287,53 @@ def cmd_options(args: argparse.Namespace) -> int:
         print_error(args.json, "tasks-dir-not-found", f"Tasks directory not found at {tasks_dir}")
         return 1
 
-    if discover_emergent_tasks is None:
-        print_error(args.json, "engine-missing", "tasks_engine module could not be imported")
-        return 1
+    if target_is_note:
+        valid_note, note_err = check_note_id(target_id)
+        if not valid_note:
+            print_error(args.json, "invalid-note-id", note_err or "Invalid note ID")
+            return 1
 
-    all_tasks = discover_emergent_tasks(tasks_dir)
-    task = next((t for t in all_tasks if t["id"] == task_id), None)
-    if not task:
-        print_error(args.json, "task-not-found", f"Task '{task_id}' not found in tasks directory")
-        return 1
+        if find_inbox_note is None:
+            print_error(args.json, "engine-missing", "tasks_engine module could not be imported")
+            return 1
 
-    canonical_state = task.get("canonical_state", "open")
-    allowed_modes = get_allowed_modes_for_state(canonical_state)
-    default_mode = get_default_mode_for_state(canonical_state)
+        note = find_inbox_note(tasks_dir, target_id)
+        if not note:
+            print_error(args.json, "note-not-found", f"Inbox note '{target_id}' not found in tasks/_inbox/")
+            return 1
+
+        canonical_state = note.get("status", "draft")
+        allowed_modes = ["triage"]
+        default_mode = "triage"
+        task = {
+            "id": note["id"],
+            "title": note.get("title", ""),
+            "state": canonical_state,
+            "status": canonical_state,
+            "author": note.get("author", "owner"),
+            "about": note.get("about", "-"),
+            "bundle_sha256": note.get("bundle_sha256"),
+        }
+    else:
+        valid_task, task_err = check_task_id(target_id)
+        if not valid_task:
+            reason = "initiative-tasks-not-supported" if "Initiative" in (task_err or "") else "invalid-task-id"
+            print_error(args.json, reason, task_err or "Invalid task ID")
+            return 1
+
+        if discover_emergent_tasks is None:
+            print_error(args.json, "engine-missing", "tasks_engine module could not be imported")
+            return 1
+
+        all_tasks = discover_emergent_tasks(tasks_dir)
+        task = next((t for t in all_tasks if t["id"] == target_id), None)
+        if not task:
+            print_error(args.json, "task-not-found", f"Task '{target_id}' not found in tasks directory")
+            return 1
+
+        canonical_state = task.get("canonical_state", "open")
+        allowed_modes = get_allowed_modes_for_state(canonical_state)
+        default_mode = get_default_mode_for_state(canonical_state)
 
     gpath = getattr(args, "global_config", None)
     merged_cfg, _ = resolve_config(gpath, ws)
@@ -2076,7 +2371,7 @@ def cmd_options(args: argparse.Namespace) -> int:
                 }
         models_per_profile[tname] = prof_map
 
-    all_runs = list_run_records(ws, task_id=task_id)
+    all_runs = list_run_records(ws, task_id=target_id)
     usable_verify_targets = [
         {
             "run_id": r["run_id"],
@@ -2090,7 +2385,8 @@ def cmd_options(args: argparse.Namespace) -> int:
     latest_verify_target = usable_verify_targets[0]["run_id"] if usable_verify_targets else "none"
 
     resolved_defaults: dict[str, Any] = {}
-    for m in ("execute", "orchestrate", "verify"):
+    modes_to_resolve = ("triage",) if target_is_note else ("execute", "orchestrate", "verify")
+    for m in modes_to_resolve:
         res_tool, _ = resolve_tool(
             mode=m,
             requested_tool=None,
@@ -2128,7 +2424,7 @@ def cmd_options(args: argparse.Namespace) -> int:
         }
         if m == "execute":
             entry_def["isolation"] = "worktree"
-        elif m == "orchestrate":
+        elif m in ("orchestrate", "triage"):
             entry_def["isolation"] = "none"
         elif m == "verify":
             entry_def["isolation"] = "worktree"
@@ -2156,7 +2452,8 @@ def cmd_options(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
-        print(f"Task ID      : {task['id']} ({canonical_state})")
+        label = "Note ID" if target_is_note else "Task ID"
+        print(f"{label:<12} : {task['id']} ({canonical_state})")
         print(f"Allowed modes: {', '.join(allowed_modes) if allowed_modes else 'none'}")
         print(f"Default mode : {default_mode}")
         print("\nTools:")
@@ -2174,16 +2471,226 @@ def validate_run_request(
     if plat_err:
         return False, (plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)"), None
 
-    task_id = args.task
-    valid_task, task_err = check_task_id(task_id)
-    if not valid_task:
-        reason = "initiative-tasks-not-supported" if "Initiative" in (task_err or "") else "invalid-task-id"
-        return False, (reason, task_err or "Invalid task ID"), None
+    note_id_arg = getattr(args, "note", None)
+    task_id_arg = getattr(args, "task", None)
+    target_is_note = False
+    if note_id_arg:
+        target_is_note = True
+        target_id = note_id_arg.strip()
+    elif task_id_arg and NOTE_ID_RE.match(task_id_arg.strip()):
+        target_is_note = True
+        target_id = task_id_arg.strip()
+    elif task_id_arg:
+        target_id = task_id_arg.strip()
+    else:
+        return False, ("missing-target", "Either --task or --note is required"), None
 
     ws = pathlib.Path(args.workspace or ".").resolve()
     tasks_dir = ws / "tasks"
     if not tasks_dir.is_dir():
         return False, ("tasks-dir-not-found", f"Tasks directory not found at {tasks_dir}"), None
+
+    if target_is_note:
+        valid_note, note_err = check_note_id(target_id)
+        if not valid_note:
+            return False, ("invalid-note-id", note_err or "Invalid note ID"), None
+
+        if find_inbox_note is None:
+            return False, ("engine-missing", "tasks_engine module could not be imported"), None
+
+        note = find_inbox_note(tasks_dir, target_id)
+        if not note:
+            return False, ("note-not-found", f"Inbox note '{target_id}' not found in tasks/_inbox/"), None
+
+        note_status = note.get("status", "draft")
+        if note_status in ("processed", "discarded") or note.get("in_analyzed"):
+            return False, ("note-already-final", f"Inbox note '{target_id}' is already {note_status}; reopen it to process again"), None
+
+        req_mode = getattr(args, "mode", None)
+        if req_mode and req_mode != "triage":
+            return False, ("invalid-mode-for-note", f"Inbox notes only support mode 'triage', got '{req_mode}'"), None
+        mode = "triage"
+
+        gpath = getattr(args, "global_config", None)
+        merged_cfg, _ = resolve_config(gpath, ws)
+        project_cfg_path = find_project_config_path(ws, gpath)
+        project_cfg = load_toml_file(project_cfg_path) if project_cfg_path.exists() else None
+        global_cfg = load_toml_file(gpath or default_global_config_path())
+
+        tool, _ = resolve_tool(
+            mode=mode,
+            requested_tool=args.tool,
+            task={},
+            merged_cfg=merged_cfg,
+            project_cfg=project_cfg,
+            global_cfg=global_cfg,
+        )
+        if not tool:
+            return False, ("no-tool-available", "No suitable tool available for triage mode"), None
+
+        tools = merged_cfg.get("tools", {})
+        if tool not in tools or not tools[tool].get("enabled", True):
+            return False, ("tool-disabled", f"Tool '{tool}' is disabled in configuration"), None
+
+        tool_cfg = tools[tool]
+        avail, ver_str, err_str = check_tool_availability(tool, tool_cfg)
+        if not avail:
+            return False, ("tool-not-available", f"Tool '{tool}' is not available: {err_str}"), None
+
+        profile = resolve_profile(
+            mode=mode,
+            requested_profile=args.profile,
+            task={},
+            merged_cfg=merged_cfg,
+            project_cfg=project_cfg,
+            global_cfg=global_cfg,
+        )
+
+        model, variant, effort = resolve_model_and_variants(
+            tool=tool,
+            profile=profile,
+            requested_model=args.model,
+            requested_variant=args.variant,
+            requested_effort=args.effort,
+            merged_cfg=merged_cfg,
+        )
+        if not model:
+            return False, ("model-not-configured", f"No model configured for tool '{tool}' profile '{profile}'"), None
+
+        isolation = "none"
+        cwd = str(ws)
+        planned_branch = None
+        planned_worktree = None
+        target_repo = ws
+
+        all_runs = list_run_records(ws, task_id=target_id)
+        active_runs = [r for r in all_runs if r.get("status") in ACTIVE_STATES]
+        task_act_valid, task_act_err = check_same_task_active(target_id, active_runs, force=args.force)
+        if not task_act_valid:
+            return False, ("same-task-active", task_act_err or "Note already has an active run"), None
+
+        cwd_act_valid, cwd_act_err = check_same_cwd_active(cwd, isolation, active_runs)
+        if not cwd_act_valid:
+            return False, ("same-cwd-active", cwd_act_err or "Working directory already has an active run with isolation 'none'"), None
+
+        # Find attachments
+        attachment_paths: list[str] = []
+        if note.get("folder_path"):
+            att_dir = pathlib.Path(note["folder_path"]) / "attachments"
+            if att_dir.is_dir():
+                for f in sorted(att_dir.iterdir()):
+                    if f.is_file() and not f.name.startswith("."):
+                        try:
+                            rel_p = f.relative_to(ws).as_posix()
+                        except ValueError:
+                            rel_p = str(f)
+                        attachment_paths.append(rel_p)
+
+        prompt = build_prompt(
+            mode="triage",
+            task=note,
+            instructions=args.instructions,
+            workspace=ws,
+            attachment_paths=attachment_paths,
+        )
+        prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+        raw_argv = build_adapter_argv(
+            tool=tool,
+            tool_cfg=tool_cfg,
+            mode="triage",
+            cwd=cwd,
+            model=model,
+            variant=variant,
+            effort=effort,
+            session_id="{session_id}",
+            prompt_file="{prompt_file}",
+            attachment_paths=attachment_paths,
+        )
+        argv_display = redact_argv(raw_argv)
+
+        headless = tool_cfg.get("headless", {})
+        allowed_tools, allowed_tools_source = (
+            resolve_claude_allowed_tools(headless, "triage") if tool == "claude" else (None, None)
+        )
+
+        canonical_request = {
+            "allow_dirty_base": bool(getattr(args, "allow_dirty_base", False)),
+            "allow_same_tool": bool(getattr(args, "allow_same_tool", False)),
+            "effort": effort,
+            "instructions": getattr(args, "instructions", None),
+            "isolation": isolation,
+            "mode": mode,
+            "model": model,
+            "note": target_id,
+            "profile": profile,
+            "target_run": "none",
+            "task": target_id,
+            "tool": tool,
+            "variant": variant,
+        }
+
+        bundle_hash = note.get("bundle_sha256") or ""
+        repo_head = get_repo_head(ws)
+        plan_hash = compute_plan_hash(
+            canonical_request=canonical_request,
+            task_bundle_hash=bundle_hash,
+            effective_argv_redacted=argv_display,
+            prompt=prompt,
+            repo_head=repo_head,
+            effective_config=merged_cfg,
+        )
+
+        data = {
+            "task_id": target_id,
+            "note_id": target_id,
+            "task": note,
+            "note": note,
+            "canonical_state": note_status,
+            "mode": "triage",
+            "ws": ws,
+            "merged_cfg": merged_cfg,
+            "project_cfg": project_cfg,
+            "global_cfg": global_cfg,
+            "target_repo": target_repo,
+            "target_run_id": None,
+            "target_run_tool": None,
+            "target_commit": None,
+            "tool": tool,
+            "tool_cfg": tool_cfg,
+            "profile": profile,
+            "model": model,
+            "variant": variant,
+            "effort": effort,
+            "isolation": isolation,
+            "cwd": cwd,
+            "planned_branch": None,
+            "planned_worktree": None,
+            "prompt": prompt,
+            "prompt_sha256": prompt_sha256,
+            "raw_argv": raw_argv,
+            "argv_display": argv_display,
+            "canonical_request": canonical_request,
+            "bundle_hash": bundle_hash,
+            "repo_head": repo_head,
+            "plan_hash": plan_hash,
+            "warnings": [],
+            "allowed_tools": allowed_tools,
+            "allowed_tools_source": allowed_tools_source,
+            "verification_mode": None,
+            "attachment_paths": attachment_paths,
+        }
+        return True, None, data
+
+    # Target is task (T###)
+    task_id = target_id
+    if getattr(args, "mode", None) == "triage":
+        return False, ("invalid-target-for-triage", "Mode 'triage' requires an inbox note target (N###), not a task (T###)"), None
+
+    valid_task, task_err = check_task_id(task_id)
+    if not valid_task:
+        reason = "initiative-tasks-not-supported" if "Initiative" in (task_err or "") else "invalid-task-id"
+        return False, (reason, task_err or "Invalid task ID"), None
 
     if discover_emergent_tasks is None:
         return False, ("engine-missing", "tasks_engine module could not be imported"), None
@@ -2674,8 +3181,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         return 0
 
     # --- Normal launch flow ---
-    if not getattr(args, "task", None):
-        print_error(args.json, "missing-task", "--task is required for run start")
+    if not getattr(args, "task", None) and not getattr(args, "note", None):
+        print_error(args.json, "missing-target", "Either --task or --note is required for run start")
         return 1
 
     if req_by in ("ui", "vscode") and not getattr(args, "expect_plan_hash", None):
@@ -2929,6 +3436,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             effort=data["effort"],  # type: ignore
             session_id="{session_id}",
             prompt_file=str(prompt_path),
+            attachment_paths=data.get("attachment_paths"),
         )
         argv_display = redact_argv(raw_argv)
 
@@ -2955,6 +3463,9 @@ def cmd_start(args: argparse.Namespace) -> int:
             target_commit=target_commit,
             verification_mode=data.get("verification_mode"),
             keep_worktree=bool(getattr(args, "keep_worktree", False)),
+            note_id=data.get("note_id"),
+            note_bundle_sha256=data.get("bundle_hash") if data["mode"] == "triage" else None,
+            attachment_paths=data.get("attachment_paths"),
         )
         if session_id:
             record["session_id"] = session_id
@@ -3029,6 +3540,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         session_id=session_id or "{session_id}",
         prompt_file=str(prompt_path),
         is_resume=is_resume,
+        attachment_paths=record.get("attachment_paths"),
     )
 
     prompt_via = headless_cfg.get("prompt_via")
@@ -3274,6 +3786,21 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             else:
                 record["worktree_removed"] = False
 
+    # 09.4: Extract triage proposal if triage mode
+    if record.get("mode") == "triage":
+        if exit_code != 0:
+            record["proposal_status"] = "invalid"
+            record["proposal_error"] = f"Agent process exited with non-zero code {exit_code}"
+        else:
+            proposal, prop_err = extract_triage_proposal_from_run(run_dir)
+            if proposal is not None:
+                proposal_file = run_dir / "triage-proposal.json"
+                proposal_file.write_text(json.dumps(proposal, indent=2), encoding="utf-8")
+                record["proposal_status"] = "pending"
+            else:
+                record["proposal_status"] = "invalid"
+                record["proposal_error"] = prop_err or "Missing or invalid triage proposal"
+
     # 07.10: process blocking questions from final assistant message
     process_run_questions(workspace, record, run_dir)
 
@@ -3492,7 +4019,8 @@ def cmd_list(args: argparse.Namespace) -> int:
         return 1
 
     ws = pathlib.Path(args.workspace or ".").resolve()
-    runs = list_run_records(ws, task_id=args.task, active_only=args.active)
+    target_id = getattr(args, "note", None) or getattr(args, "task", None)
+    runs = list_run_records(ws, task_id=target_id, active_only=args.active)
 
     if args.json:
         print(json.dumps({"ok": True, "runs": runs}, indent=2))
@@ -3854,6 +4382,259 @@ def cmd_apply_verdict(args: argparse.Namespace) -> int:
         return 0
 
 
+def _format_checklist_items(val: list[str] | str) -> str:
+    if isinstance(val, list):
+        lines = []
+        for item in val:
+            s = str(item).strip()
+            if not s.startswith("- "):
+                lines.append(f"- [ ] {s}")
+            else:
+                lines.append(s)
+        return "\n".join(lines)
+    return str(val).strip()
+
+
+def _update_task_steps_and_verification(
+    task_file: pathlib.Path,
+    steps: list[str] | str | None,
+    verification: list[str] | str | None,
+) -> None:
+    if not task_file.is_file():
+        return
+    text = task_file.read_text(encoding="utf-8")
+
+    if steps:
+        steps_text = _format_checklist_items(steps)
+        pattern_steps = re.compile(r"## Steps\s*\n\n.*?(?=\n## |\Z)", re.DOTALL)
+        if pattern_steps.search(text):
+            text = pattern_steps.sub(f"## Steps\n\n{steps_text}\n", text)
+
+    if verification:
+        ver_text = _format_checklist_items(verification)
+        pattern_ver = re.compile(r"## Verification\s*\n\n.*?(?=\n## |\Z)", re.DOTALL)
+        if pattern_ver.search(text):
+            text = pattern_ver.sub(f"## Verification\n\n{ver_text}\n", text)
+
+    task_file.write_text(text, encoding="utf-8")
+
+
+def cmd_accept_triage(args: argparse.Namespace) -> int:
+    """Accept a triage proposal, create accepted emergent tasks, and resolve inbox note (Task 09.4)."""
+    plat_err = check_platform()
+    if plat_err:
+        print_error(args.json, plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)")
+        return 1
+
+    run_id = args.run_id
+    if not validate_run_id(run_id):
+        print_error(args.json, "invalid-run-id", f"Invalid run_id format '{run_id}'")
+        return 1
+
+    ws = pathlib.Path(args.workspace or ".").resolve()
+    record = load_run_record(ws, run_id)
+    if not record:
+        print_error(args.json, "run-not-found", f"Run '{run_id}' not found")
+        return 1
+
+    if record.get("mode") != "triage":
+        print_error(args.json, "not-triage-run", f"Run '{run_id}' mode is '{record.get('mode')}', expected 'triage'")
+        return 1
+
+    if record.get("status") not in TERMINAL_STATES:
+        print_error(args.json, "run-not-terminal", f"Run '{run_id}' status is '{record.get('status')}', must be terminal")
+        return 1
+
+    if record.get("proposal_status") != "pending":
+        print_error(
+            args.json,
+            "proposal-not-pending",
+            f"Run '{run_id}' proposal_status is '{record.get('proposal_status')}', expected 'pending'",
+        )
+        return 1
+
+    run_dir = ws / ".ai-orchestration" / "runs" / run_id
+    proposal_file = run_dir / "triage-proposal.json"
+    if not proposal_file.is_file():
+        print_error(args.json, "proposal-missing", f"Triage proposal file not found at {proposal_file}")
+        return 1
+
+    try:
+        proposal = json.loads(proposal_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        print_error(args.json, "proposal-corrupted", f"Failed to parse triage proposal JSON: {e}")
+        return 1
+
+    tasks_dir = ws / "tasks"
+    if not tasks_dir.is_dir():
+        print_error(args.json, "tasks-dir-not-found", f"Tasks directory not found at {tasks_dir}")
+        return 1
+
+    if find_inbox_note is None or tasks_new_from_note is None or inbox_resolve is None:
+        print_error(args.json, "engine-missing", "tasks_engine functions are unavailable")
+        return 1
+
+    note_id = record.get("note_id") or record.get("task_id")
+    with safe_task_write_lock(tasks_dir):
+        note = find_inbox_note(tasks_dir, note_id)
+        if not note:
+            print_error(args.json, "note-not-found", f"Inbox note '{note_id}' not found in tasks/")
+            return 1
+
+        cur_note_hash = note.get("bundle_sha256") or ""
+        rec_note_hash = record.get("note_bundle_sha256") or record.get("task_bundle_sha256") or ""
+
+        if rec_note_hash and cur_note_hash.lower() != rec_note_hash.lower():
+            print_error(
+                args.json,
+                "stale-note-hash",
+                f"Inbox note '{note_id}' has changed since triage run started (hash mismatch)",
+            )
+            return 1
+
+        expect_hash = getattr(args, "expect_note_hash", None)
+        if expect_hash and cur_note_hash.lower() != expect_hash.strip().lower():
+            print_error(
+                args.json,
+                "note-hash-mismatch",
+                f"Inbox note '{note_id}' hash mismatch: expected {expect_hash}, got {cur_note_hash}",
+            )
+            return 1
+
+        proposed_tasks = proposal.get("tasks", [])
+        if not isinstance(proposed_tasks, list):
+            print_error(args.json, "invalid-proposal", "Proposal tasks must be a list")
+            return 1
+
+        # Handle --only filter
+        only_arg = getattr(args, "only", None)
+        selected_tasks: list[dict[str, Any]] = []
+        if only_arg:
+            tokens = [t.strip() for t in only_arg.split(",") if t.strip()]
+            indices_to_take: list[int] = []
+
+            for tok in tokens:
+                if tok.isdigit():
+                    idx = int(tok)
+                    if 0 <= idx < len(proposed_tasks):
+                        indices_to_take.append(idx)
+                    elif 1 <= idx <= len(proposed_tasks) and not any(int(t) == 0 for t in tokens if t.isdigit()):
+                        indices_to_take.append(idx - 1)
+                    else:
+                        print_error(
+                            args.json,
+                            "invalid-only-index",
+                            f"Index {tok} out of range (proposal has {len(proposed_tasks)} tasks)",
+                        )
+                        return 1
+                else:
+                    matched = [i for i, pt in enumerate(proposed_tasks) if pt.get("id") == tok or pt.get("title") == tok]
+                    if matched:
+                        indices_to_take.extend(matched)
+                    else:
+                        print_error(
+                            args.json,
+                            "invalid-only-token",
+                            f"Filter item '{tok}' did not match any proposed task",
+                        )
+                        return 1
+
+            for idx in sorted(set(indices_to_take)):
+                selected_tasks.append(proposed_tasks[idx])
+        else:
+            selected_tasks = list(proposed_tasks)
+
+        created_task_ids: list[str] = []
+        for t_spec in selected_tasks:
+            title = t_spec.get("title", "").strip()
+            category = t_spec.get("category", "").strip()
+            priority = t_spec.get("priority", "P2").strip()
+            priority_reason = (t_spec.get("priority_reason") or t_spec.get("priority-reason") or "").strip()
+            goal = t_spec.get("goal", "").strip()
+            executor = (t_spec.get("executor") or "kilo").strip()
+            depends_on = (t_spec.get("depends-on") or t_spec.get("depends_on") or "-").strip()
+            decider = (t_spec.get("decider") or "-").strip()
+            paths = (t_spec.get("paths") or "-").strip()
+
+            ok_task, res_task = tasks_new_from_note(
+                tasks_dir=tasks_dir,
+                from_note=note_id,
+                category=category,
+                title=title,
+                priority=priority,
+                priority_reason=priority_reason,
+                executor=executor,
+                depends_on=depends_on,
+                decider=decider,
+                goal=goal,
+                paths=paths if paths != "-" else None,
+            )
+            if not ok_task:
+                print_error(
+                    args.json,
+                    "task-creation-failed",
+                    f"Failed to create task '{title}': {res_task.get('error', 'unknown error')}",
+                )
+                return 1
+
+            t_id = res_task["id"]
+            created_task_ids.append(t_id)
+
+            steps = t_spec.get("steps")
+            verification = t_spec.get("verification")
+            if steps or verification:
+                task_file = pathlib.Path(res_task["file_path"])
+                _update_task_steps_and_verification(task_file, steps, verification)
+
+        produced_str = ", ".join(created_task_ids) if created_task_ids else "-"
+        tool = record.get("tool") or "tool"
+        profile = record.get("profile") or "deep-reasoning"
+        processed_by = f"{tool}:{profile} (run {run_id})"
+
+        ok_res, res_res = inbox_resolve(
+            tasks_dir=tasks_dir,
+            target=note_id,
+            produced=produced_str,
+            by=processed_by,
+        )
+        if not ok_res:
+            print_error(
+                args.json,
+                "inbox-resolve-failed",
+                f"Failed to resolve note '{note_id}': {res_res.get('error', 'unknown error')}",
+            )
+            return 1
+
+        # Re-sync 00-INDEX.md if available
+        idx_path = tasks_dir / "00-INDEX.md"
+        if render_synced_index is not None and idx_path.is_file():
+            try:
+                new_idx = render_synced_index(tasks_dir, idx_path.read_text(encoding="utf-8"))
+                idx_path.write_text(new_idx, encoding="utf-8")
+            except Exception:
+                pass
+
+        record["proposal_status"] = "accepted"
+        record["accepted_tasks"] = created_task_ids
+        record["accepted_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        save_run_record(ws, record)
+
+    if args.json:
+        payload = {
+            "ok": True,
+            "run_id": run_id,
+            "note_id": note_id,
+            "proposal_status": "accepted",
+            "tasks_created": created_task_ids,
+            "produced": produced_str,
+            "processed_by": processed_by,
+        }
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Accepted triage proposal for note {note_id} (run {run_id}): created {len(created_task_ids)} task(s) ({produced_str}).")
+    return 0
+
+
 def cmd_cleanup(args: argparse.Namespace) -> int:
     """Remove run worktree and branch for terminal runs (Spec §4, R12)."""
     plat_err = check_platform()
@@ -3994,8 +4775,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     # options
-    p_opt = sub.add_parser("options", help="Show tools availability and resolved defaults for a task")
-    p_opt.add_argument("--task", required=True, help="Task ID (e.g. T007)")
+    p_opt = sub.add_parser("options", help="Show tools availability and resolved defaults for a task or note")
+    p_opt.add_argument("--task", default=None, help="Task ID (e.g. T007) or inbox note ID (e.g. N001)")
+    p_opt.add_argument("--note", default=None, help="Inbox note ID (e.g. N001)")
     p_opt.add_argument("--workspace", default=None, help="Project workspace root")
     p_opt.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_opt.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -4003,8 +4785,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # preview
     p_prev = sub.add_parser("preview", help="Validate launch request and return binding preview")
-    p_prev.add_argument("--task", required=True, help="Task ID (e.g. T007)")
-    p_prev.add_argument("--mode", choices=("orchestrate", "execute", "verify"), default=None)
+    p_prev.add_argument("--task", default=None, help="Task ID (e.g. T007) or inbox note ID (e.g. N001)")
+    p_prev.add_argument("--note", default=None, help="Inbox note ID (e.g. N001)")
+    p_prev.add_argument("--mode", choices=("orchestrate", "execute", "verify", "triage"), default=None)
     p_prev.add_argument("--tool", default=None, help="Target tool (kilo, claude, codex)")
     p_prev.add_argument("--profile", default=None, help="Role profile")
     p_prev.add_argument("--model", default=None, help="Model identifier")
@@ -4024,9 +4807,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # start
     p_start = sub.add_parser("start", help="Start agent run with supervisor")
-    p_start.add_argument("--task", default=None, help="Task ID (e.g. T007)")
+    p_start.add_argument("--task", default=None, help="Task ID (e.g. T007) or inbox note ID (e.g. N001)")
+    p_start.add_argument("--note", default=None, help="Inbox note ID (e.g. N001)")
     p_start.add_argument("--continue", dest="continue_run_id", default=None, help="Continue a terminal run")
-    p_start.add_argument("--mode", choices=("orchestrate", "execute", "verify"), default=None)
+    p_start.add_argument("--mode", choices=("orchestrate", "execute", "verify", "triage"), default=None)
     p_start.add_argument("--tool", default=None, help="Target tool (kilo, claude, codex)")
     p_start.add_argument("--profile", default=None, help="Role profile")
     p_start.add_argument("--model", default=None, help="Model identifier")
@@ -4064,6 +4848,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_app.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_app.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_app.set_defaults(func=cmd_apply_verdict)
+
+    # accept-triage
+    p_acc_triage = sub.add_parser("accept-triage", help="Accept triage proposal, create emergent tasks, and resolve note")
+    p_acc_triage.add_argument("run_id", help="Triage run ID")
+    p_acc_triage.add_argument("--only", default=None, help="Comma-separated indices or IDs of tasks in proposal to accept (e.g. 0,1)")
+    p_acc_triage.add_argument("--expect-note-hash", default=None, help="Expected inbox note bundle hash")
+    p_acc_triage.add_argument("--workspace", default=None, help="Project workspace root")
+    p_acc_triage.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+    p_acc_triage.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_acc_triage.set_defaults(func=cmd_accept_triage)
 
     # cleanup
     p_clean = sub.add_parser("cleanup", help="Remove run worktree and branch for terminal runs")
@@ -4105,6 +4899,7 @@ def build_parser() -> argparse.ArgumentParser:
     # list
     p_list = sub.add_parser("list", help="List agent runs after reconciliation")
     p_list.add_argument("--task", default=None, help="Filter by task ID")
+    p_list.add_argument("--note", default=None, help="Filter by inbox note ID")
     p_list.add_argument("--active", action="store_true", help="Filter by active runs only")
     p_list.add_argument("--workspace", default=None, help="Project workspace root")
     p_list.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)

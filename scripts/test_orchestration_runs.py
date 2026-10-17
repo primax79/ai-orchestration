@@ -2887,3 +2887,854 @@ def test_supervisor_multiple_questions_in_final_message(sample_workspace: pathli
     assert f"decider: {q1_id}, {q2_id}" in t_content
 
 
+# ---------------------------------------------------------------------------
+# Task 09.4 — Agent Triage Mode, Proposal Parsing, and Accept-Triage
+# ---------------------------------------------------------------------------
+
+def test_triage_permission_list_contains_no_write_tools():
+    """Verify that DEFAULT_CLAUDE_ALLOWED_TOOLS['triage'] contains no write tools."""
+    assert "triage" in DEFAULT_CLAUDE_ALLOWED_TOOLS
+    tools = DEFAULT_CLAUDE_ALLOWED_TOOLS["triage"]
+    assert "Read" in tools
+    assert "Glob" in tools
+    assert "Grep" in tools
+
+    # Strictly forbidden write tools
+    forbidden = ["Edit", "Write", "Bash(git add:*)", "Bash(git commit:*)", "Bash(pytest:*)", "Bash(npm test:*)"]
+    for f in forbidden:
+        assert f not in tools, f"Write tool '{f}' must not be in triage permissions"
+
+    # All Bash commands must be read-only
+    for t in tools:
+        if t.startswith("Bash("):
+            cmd_name = t[5:-1].strip()
+            assert any(cmd_name.startswith(ro) for ro in ("git status", "git diff", "git log", "git show")), (
+                f"Bash tool '{t}' is not recognized as a read-only command"
+            )
+
+
+def test_triage_preview_and_adapter_flags(sample_workspace: pathlib.Path):
+    """Test preview for triage mode: prompt contents, no worktree, read-only tools, attachment passing."""
+    tasks_dir = sample_workspace / "tasks"
+
+    # Create note N001
+    res = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "UI button alignment bug",
+            "--kind",
+            "bug",
+            "--body",
+            "Button overlaps header on mobile screens.",
+            "--about",
+            "frontend/components/button.tsx",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res.stdout)["id"]
+
+    # Attach an image
+    img = sample_workspace / "screenshot.png"
+    img.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "attach",
+            note_id,
+            "--file",
+            str(img),
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    # Preview with --note
+    res_p1 = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "preview", "--note", note_id, "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    prev1 = json.loads(res_p1.stdout)
+    assert prev1["ok"] is True
+    assert prev1["planned_worktree"] is None
+    assert prev1["planned_branch"] is None
+    assert prev1["cwd"] == str(sample_workspace)
+
+    prompt = prev1["prompt"]
+    assert note_id in prompt
+    assert "UI button alignment bug" in prompt
+    assert "Button overlaps header on mobile screens." in prompt
+    assert "01-screenshot.png" in prompt
+    assert "frontend/components/button.tsx" in prompt
+    assert "tasks/00-INDEX.md" in prompt
+    assert "plugins/architect-side/skills/task-pipeline/SKILL.md" in prompt
+    assert "```ai-orch-triage" in prompt
+
+    # Preview with --task N001 also works consistently
+    res_p2 = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "preview", "--task", note_id, "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    prev2 = json.loads(res_p2.stdout)
+    assert prev2["ok"] is True
+    assert prev2["plan_hash"] == prev1["plan_hash"]
+
+    # Preview with tool=kilo: verify -f <attachment> in argv
+    res_kilo = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--note",
+            note_id,
+            "--tool",
+            "kilo",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    prev_kilo = json.loads(res_kilo.stdout)
+    argv_kilo = prev_kilo["argv_display"]
+    assert "-f" in argv_kilo
+    # An attachment path should appear after -f
+    f_indices = [i for i, x in enumerate(argv_kilo) if x == "-f"]
+    assert len(f_indices) >= 2  # prompt file and attachment
+    assert any("01-screenshot.png" in argv_kilo[i + 1] for i in f_indices)
+
+    # Preview with tool=codex: verify -i <attachment> in argv
+    res_codex = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--note",
+            note_id,
+            "--tool",
+            "codex",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    prev_codex = json.loads(res_codex.stdout)
+    argv_codex = prev_codex["argv_display"]
+    assert "-i" in argv_codex
+    i_indices = [i for i, x in enumerate(argv_codex) if x == "-i"]
+    assert any("01-screenshot.png" in argv_codex[idx + 1] for idx in i_indices)
+    assert "-s" in argv_codex
+    s_idx = argv_codex.index("-s")
+    assert argv_codex[s_idx + 1] == "read-only"
+
+
+def test_triage_rejects_task_target_and_non_triage_rejects_note_target(sample_workspace: pathlib.Path):
+    """Test target validation: triage requires note (N###), non-triage requires task (T###)."""
+    tasks_dir = sample_workspace / "tasks"
+
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Target validation note",
+            "--body",
+            "Body",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    # T### task cannot be triaged
+    res_t = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "preview", "--task", "T007", "--mode", "triage", "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+    )
+    assert res_t.returncode != 0
+    data_t = json.loads(res_t.stdout)
+    assert data_t["reason"] == "invalid-target-for-triage"
+
+    # N### note cannot be executed, verified, or orchestrated
+    for bad_mode in ("execute", "verify", "orchestrate"):
+        res_n = subprocess.run(
+            [str(BIN_AI_ORCH), "run", "preview", "--note", note_id, "--mode", bad_mode, "--workspace", str(sample_workspace), "--json"],
+            capture_output=True,
+            text=True,
+        )
+        assert res_n.returncode != 0
+        data_n = json.loads(res_n.stdout)
+        assert data_n["reason"] == "invalid-mode-for-note"
+
+
+def test_triage_options_command(sample_workspace: pathlib.Path):
+    """Test options command for an inbox note."""
+    tasks_dir = sample_workspace / "tasks"
+
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Options test note",
+            "--body",
+            "Body",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    res_opt = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "options", "--note", note_id, "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    opt_data = json.loads(res_opt.stdout)
+    assert opt_data["ok"] is True
+    assert opt_data["allowed_modes"] == ["triage"]
+    assert opt_data["default_mode"] == "triage"
+    assert "triage" in opt_data["resolved_defaults"]
+    assert opt_data["resolved_defaults"]["triage"]["profile"] == "deep-reasoning"
+
+
+def test_triage_valid_proposal_stored(sample_workspace: pathlib.Path):
+    """Test that a triage run completes and stores triage-proposal.json with pending status."""
+    tasks_dir = sample_workspace / "tasks"
+
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Memory leak in session manager",
+            "--body",
+            "Analyze and fix memory leak",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    proposal = {
+        "tasks": [
+            {
+                "title": "Fix session cache leak",
+                "category": "server",
+                "priority": "P1",
+                "priority_reason": "High memory consumption",
+                "goal": "Introduce LRU cache for expired sessions",
+                "steps": ["Implement LRU cache", "Add eviction unit test"],
+                "verification": ["Run pytest tests/cache"],
+            },
+            {
+                "title": "Add session lifecycle metrics",
+                "category": "server",
+                "priority": "P2",
+                "priority_reason": "Monitoring improvement",
+                "goal": "Emit session open and close metrics",
+                "steps": ["Add prometheus counter", "Test metrics emission"],
+                "verification": ["Run pytest tests/metrics"],
+            },
+        ],
+        "updates": [],
+        "spec": None,
+        "questions": [],
+    }
+
+    mock_agent = sample_workspace / "triage_agent.py"
+    msg = "Triage recommendations:\n```ai-orch-triage\n" + json.dumps(proposal) + "\n```\n"
+    evt = {"type": "message", "role": "assistant", "content": msg}
+    mock_agent.write_text(
+        f"import sys, json\n"
+        f"sys.stdout.write(json.dumps({json.dumps(evt)}) + '\\n')\n"
+        f"sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{mock_agent}"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "configure triage agent"], cwd=str(sample_workspace), check=True)
+
+    # Count task files before run
+    tasks_before = list(tasks_dir.glob("*/*.md"))
+
+    res_start = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--note",
+            note_id,
+            "--tool",
+            "kilo",
+            "--force",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id = json.loads(res_start.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+    assert rec["proposal_status"] == "pending"
+
+    # Triage proposal file exists and matches
+    prop_path = sample_workspace / ".ai-orchestration" / "runs" / run_id / "triage-proposal.json"
+    assert prop_path.is_file()
+    saved_prop = json.loads(prop_path.read_text(encoding="utf-8"))
+    assert len(saved_prop["tasks"]) == 2
+    assert saved_prop["tasks"][0]["title"] == "Fix session cache leak"
+
+    # MANDATORY RULE 6: No writes to tasks/ during the run itself
+    tasks_after = list(tasks_dir.glob("*/*.md"))
+    assert len(tasks_after) == len(tasks_before), "No task files should be written to tasks/ during the triage run"
+
+
+def test_accept_triage_creates_tasks_and_resolves_note(sample_workspace: pathlib.Path):
+    """Test accept-triage: creates tasks in tasks/ and resolves inbox note to analyzed/."""
+    tasks_dir = sample_workspace / "tasks"
+
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Accept triage test note",
+            "--body",
+            "Propose new task",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    proposal = {
+        "tasks": [
+            {
+                "title": "Implement auth token refresh",
+                "category": "server",
+                "priority": "P1",
+                "priority_reason": "Security requirement",
+                "goal": "Refresh tokens before expiration",
+                "steps": ["Implement refresh endpoint", "Add refresh test"],
+                "verification": ["Run pytest tests/token_refresh"],
+            }
+        ],
+        "updates": [],
+        "spec": None,
+        "questions": [],
+    }
+
+    mock_agent = sample_workspace / "accept_agent.py"
+    msg = "Triage recommendations:\n```ai-orch-triage\n" + json.dumps(proposal) + "\n```\n"
+    evt = {"type": "message", "role": "assistant", "content": msg}
+    mock_agent.write_text(
+        f"import sys, json\n"
+        f"sys.stdout.write(json.dumps({json.dumps(evt)}) + '\\n')\n"
+        f"sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{mock_agent}"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "configure accept agent"], cwd=str(sample_workspace), check=True)
+
+    res_start = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--note",
+            note_id,
+            "--tool",
+            "kilo",
+            "--force",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id = json.loads(res_start.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+    assert rec["proposal_status"] == "pending"
+
+    # Accept triage
+    res_acc = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "accept-triage", run_id, "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    acc_data = json.loads(res_acc.stdout)
+    assert acc_data["ok"] is True
+    assert acc_data["proposal_status"] == "accepted"
+    new_task_ids = acc_data["tasks_created"]
+    assert len(new_task_ids) == 1
+    new_tid = new_task_ids[0]
+
+    # Verify task file exists on disk
+    task_files = list((tasks_dir / "server").glob(f"{new_tid}-*.md"))
+    assert len(task_files) == 1
+    task_content = task_files[0].read_text(encoding="utf-8")
+    assert "## Goal\n\nRefresh tokens before expiration" in task_content
+    assert "- [ ] Implement refresh endpoint" in task_content
+    assert "- [ ] Run pytest tests/token_refresh" in task_content
+    assert f"sources: _inbox/analyzed/" in task_content
+
+    # Validate tasks tree is clean
+    res_val = subprocess.run(
+        [str(BIN_AI_ORCH), "tasks", "validate", "--tasks-dir", str(tasks_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    val_data = json.loads(res_val.stdout)
+    assert val_data["errors"] == []
+
+    # Verify note was moved to analyzed/ and resolved
+    analyzed_notes = list((tasks_dir / "_inbox" / "analyzed").glob("*/note.md"))
+    assert len(analyzed_notes) >= 1
+    note_content = next(p.read_text(encoding="utf-8") for p in analyzed_notes if f"id: {note_id}" in p.read_text(encoding="utf-8"))
+    assert "status: processed" in note_content
+    assert f"produced: {new_tid}" in note_content
+    assert f"processed-by: kilo:deep-reasoning (run {run_id})" in note_content
+
+
+def test_accept_triage_only_subset(sample_workspace: pathlib.Path):
+    """Test accept-triage --only creates only the selected subset of tasks."""
+    tasks_dir = sample_workspace / "tasks"
+
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Subset test note",
+            "--body",
+            "Propose 3 tasks",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    proposal = {
+        "tasks": [
+            {
+                "title": "Task Alpha",
+                "category": "server",
+                "priority": "P1",
+                "priority_reason": "Alpha reason",
+                "goal": "Goal Alpha",
+                "steps": ["Step A"],
+                "verification": ["Ver A"],
+            },
+            {
+                "title": "Task Beta",
+                "category": "server",
+                "priority": "P2",
+                "priority_reason": "Beta reason",
+                "goal": "Goal Beta",
+                "steps": ["Step B"],
+                "verification": ["Ver B"],
+            },
+            {
+                "title": "Task Gamma",
+                "category": "server",
+                "priority": "P3",
+                "priority_reason": "Gamma reason",
+                "goal": "Goal Gamma",
+                "steps": ["Step C"],
+                "verification": ["Ver C"],
+            },
+        ],
+        "updates": [],
+        "spec": None,
+        "questions": [],
+    }
+
+    mock_agent = sample_workspace / "subset_agent.py"
+    msg = "```ai-orch-triage\n" + json.dumps(proposal) + "\n```\n"
+    evt = {"type": "message", "role": "assistant", "content": msg}
+    mock_agent.write_text(
+        f"import sys, json\n"
+        f"sys.stdout.write(json.dumps({json.dumps(evt)}) + '\\n')\n"
+        f"sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{mock_agent}"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "configure subset agent"], cwd=str(sample_workspace), check=True)
+
+    res_start = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--note",
+            note_id,
+            "--tool",
+            "kilo",
+            "--force",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id = json.loads(res_start.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+    assert rec["proposal_status"] == "pending"
+
+    # Accept only index 0 and index 2 (Task Alpha and Task Gamma)
+    res_acc = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "accept-triage", run_id, "--only", "0,2", "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    acc_data = json.loads(res_acc.stdout)
+    assert acc_data["ok"] is True
+    created = acc_data["tasks_created"]
+    assert len(created) == 2
+
+    # Task Beta should NOT have been created
+    all_server_files = [p.name for p in (tasks_dir / "server").glob("*.md")]
+    assert not any("task-beta" in name.lower() for name in all_server_files)
+    assert any("task-alpha" in name.lower() for name in all_server_files)
+    assert any("task-gamma" in name.lower() for name in all_server_files)
+
+    # Note resolved with only the 2 created task IDs
+    assert acc_data["produced"] == f"{created[0]}, {created[1]}"
+
+
+def test_accept_triage_refuses_stale_note_hash(sample_workspace: pathlib.Path):
+    """Test that accept-triage refuses when note content changed or --expect-note-hash mismatches."""
+    tasks_dir = sample_workspace / "tasks"
+
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Stale hash test note",
+            "--body",
+            "Original content",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    proposal = {
+        "tasks": [
+            {
+                "title": "Task for stale test",
+                "category": "server",
+                "priority": "P2",
+                "priority_reason": "Reason",
+                "goal": "Goal",
+                "steps": ["Step"],
+                "verification": ["Ver"],
+            }
+        ],
+        "updates": [],
+        "spec": None,
+        "questions": [],
+    }
+
+    mock_agent = sample_workspace / "stale_agent.py"
+    msg = "```ai-orch-triage\n" + json.dumps(proposal) + "\n```\n"
+    evt = {"type": "message", "role": "assistant", "content": msg}
+    mock_agent.write_text(
+        f"import sys, json\n"
+        f"sys.stdout.write(json.dumps({json.dumps(evt)}) + '\\n')\n"
+        f"sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{mock_agent}"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "configure stale agent"], cwd=str(sample_workspace), check=True)
+
+    res_start = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--note",
+            note_id,
+            "--tool",
+            "kilo",
+            "--force",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id = json.loads(res_start.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+    assert rec["proposal_status"] == "pending"
+
+    # Test wrong expect-note-hash
+    res_mismatch = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "accept-triage",
+            run_id,
+            "--expect-note-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_mismatch.returncode != 0
+    data_mismatch = json.loads(res_mismatch.stdout)
+    assert data_mismatch["reason"] == "note-hash-mismatch"
+
+    # Modify note body to simulate external modification
+    note_files = list((tasks_dir / "_inbox" / "to-analyze").glob("*/note.md"))
+    target_note_file = next(p for p in note_files if f"id: {note_id}" in p.read_text(encoding="utf-8"))
+    target_note_file.write_text(target_note_file.read_text(encoding="utf-8") + "\nEdited after run.", encoding="utf-8")
+
+    # Accept should now be refused with stale-note-hash
+    res_stale = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "accept-triage", run_id, "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+    )
+    assert res_stale.returncode != 0
+    data_stale = json.loads(res_stale.stdout)
+    assert data_stale["reason"] == "stale-note-hash"
+
+
+def test_triage_missing_or_invalid_block_records_invalid_status(sample_workspace: pathlib.Path):
+    """Test that missing or invalid ai-orch-triage block results in proposal_status == 'invalid'."""
+    tasks_dir = sample_workspace / "tasks"
+
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Invalid block test note",
+            "--body",
+            "Body",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    # 1. Agent emitting NO triage block
+    mock_agent = sample_workspace / "no_triage_agent.py"
+    evt = {"type": "message", "role": "assistant", "content": "Just a normal chat message with no block."}
+    mock_agent.write_text(
+        f"import sys, json\n"
+        f"sys.stdout.write(json.dumps({json.dumps(evt)}) + '\\n')\n"
+        f"sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{mock_agent}"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "configure no triage agent"], cwd=str(sample_workspace), check=True)
+
+    res_start = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--note",
+            note_id,
+            "--tool",
+            "kilo",
+            "--force",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id = json.loads(res_start.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+    assert rec["proposal_status"] == "invalid"
+    assert "Missing ```ai-orch-triage block" in rec["proposal_error"]
+
+    # Attempting to accept refuses
+    res_acc = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "accept-triage", run_id, "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+    )
+    assert res_acc.returncode != 0
+    data_acc = json.loads(res_acc.stdout)
+    assert data_acc["reason"] == "proposal-not-pending"
+
+    # 2. Agent emitting MALFORMED json block
+    mock_agent.write_text(
+        "import sys, json\n"
+        "evt = {'type': 'message', 'role': 'assistant', 'content': '```ai-orch-triage\\n{not valid json}\\n```'}\n"
+        "sys.stdout.write(json.dumps(evt) + '\\n')\n"
+        "sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    res_start2 = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--note",
+            note_id,
+            "--tool",
+            "kilo",
+            "--force",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id2 = json.loads(res_start2.stdout)["run_id"]
+    rec2 = wait_for_terminal(sample_workspace, run_id2)
+    assert rec2["status"] == "succeeded"
+    assert rec2["proposal_status"] == "invalid"
+    assert "Invalid JSON in ai-orch-triage block" in rec2["proposal_error"]
+
+
+
