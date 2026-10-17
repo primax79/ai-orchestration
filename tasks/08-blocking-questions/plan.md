@@ -75,7 +75,7 @@
 
 ### 08.6 - "Answer and resume run"
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, ai-orchestration-ui worktree task/08.6-answer-resume) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 08.4, 07.7 · **Repo:** `ai-orchestration-ui/` (+ `ai-orchestration/` if the supervisor's question-block filing from 07.3 needs a follow-up)
+- **Status:** `delivered` (2026-10-18; claude; merged; review fix: origin-run validated with RUN_ID_RE before path use; 50 backend tests; live resume with a real agent pending) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 08.4, 07.7 · **Repo:** `ai-orchestration-ui/` (+ `ai-orchestration/` if the supervisor's question-block filing from 07.3 needs a follow-up)
 - **Focus files:** `frontend/src/**`, `backend/server.py`
 - **Goal:**
   - spec §5 "Answer and resume run";
