@@ -15,7 +15,7 @@
 
 ### 12.11 - Core: event store (outbox, counter, chunk manifest, reconciliation, `events tail`)
 
-- **Status:** `open` · **Size:** L · **Depends on:** 10.4 (`tasks_engine.py` lane end) · **Repo:** `ai-orchestration/` (new module `scripts/orchestration_events.py`)
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.11-event-store) · **Size:** L · **Depends on:** 10.4 (`tasks_engine.py` lane end) · **Repo:** `ai-orchestration/` (new module `scripts/orchestration_events.py`)
 - **Goal:** E1, E13 and §1 reading.
 
 ### 12.12 - Emit events from `tasks_engine.py`

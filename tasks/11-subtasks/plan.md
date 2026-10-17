@@ -39,7 +39,7 @@
 
 ### 11.3 - UI: collapsible tree at any depth, node detail with inheritance, add child, expand, move, breadcrumbs
 
-- **Status:** `open` · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 11.1, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `in progress` (2026-10-18; claude; kilo, ai-orchestration-ui worktree task/11.3-tree-ui) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 11.1, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `frontend/src/**`
 - **Goal:** Spec §4.
 - **Verification:** Live with Playwright on a scratch copy of this repo's `tasks/`: the tree shows 06–11 with progress bars; transitioning a child updates its block and the roll-up; "Add subtask" on a folder task creates `T###.1`.
@@ -70,7 +70,7 @@
 
 ### 11.6 - 11.1 review follow-ups: S10 enforcement, full `reopen`, children of `T###`, CLI tests
 
-- **Status:** `open` · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/11.6-tree-followups) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 · **Repo:** `ai-orchestration/`
 - **Origin:** review of 11.1 (2026-10-17), items the merged engine does not cover yet.
 - **Goal:**
   - S10: `--expect-plan-hash` required on apply for `child add`, `expand`, `collapse`, `reopen` (today optional);

@@ -37,7 +37,7 @@
 
 ### 10.3 - VS Code: Timeline in the webview
 
-- **Status:** `open` · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 10.2, 06.9 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-18; claude; extension 0.3.2: Timeline view synced into the webview, getGraph/set-priority/size/deps handlers, parity test green; owner live check pending) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 10.2, 06.9 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/views/dashboard-panel.ts`, `src/cli-client.ts`, `dist-webview/**`
 - **Goal:** Spec §3 "VS Code".
 - **Verification:** Live in an Extension Development Host.
