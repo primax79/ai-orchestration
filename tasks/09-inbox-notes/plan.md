@@ -52,7 +52,7 @@
 
 ### 09.5 - Frontend: "Process with…" and proposal review
 
-- **Status:** `in progress` (2026-10-17; claude; kilo, ai-orchestration-ui worktree task/09.5-triage-ui) · **Profile:** `bulk-execution` · **Depends on:** 09.3, 09.4, 07.7 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `delivered` (2026-10-17; claude; merged (rebased, test conflict resolved keeping both); note ids validated, proposal path from RUN_ID_RE only; live run with a real tool pending) · **Profile:** `bulk-execution` · **Depends on:** 09.3, 09.4, 07.7 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `backend/server.py` (accept endpoint), `frontend/dist/**`
 - **Goal:** Spec §4 review flow in the UI.
 - **Verification:** Live: process a note with the stub agent, edit one proposed task, reject another, accept → only the accepted one exists.
