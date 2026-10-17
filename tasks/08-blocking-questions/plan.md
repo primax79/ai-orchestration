@@ -92,3 +92,19 @@ The spec now opens with §0 "Amendments after review 2" (Q1–Q10). These change
 - **08.6** no longer owns supervisor filing; that moved to **07.10**. 08.6 is UI only: "Answer and resume run", after 07.7, 07.10 and 08.4.
 
 > **2026-10-17:** 08.6 "Answer and resume run" is superseded by initiative 12 (trigger rule `resume-origin` on `question.answered`, task 12.4). It is no longer worked on here.
+
+### 08.7 - VS Code: toast for new questions and a status-bar badge
+
+- **Status:** `open` · **Size:** S · **Depends on:** 08.5 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
+- **Origin:** owner request (2026-10-17).
+- **Goal:**
+  - A new open question (an id not seen before) shows a VS Code notification (`showInformationMessage`) with its short text and the actions "Open" (reveals the dashboard on the Decisions tab and that question, or at least the tab) and "Later".
+  - A status-bar item shows the open-question count (`$(question) N`), with warning background when N > 0 and hidden or neutral when N = 0. Clicking it opens Decisions.
+  - No toasts at startup for questions that already exist; only the badge.
+  - Notified ids are remembered in `workspaceState`, so a reload never re-notifies.
+  - Answered or withdrawn questions update the badge immediately.
+  - A setting `aiOrchestration.notifyNewQuestions` (default true).
+- **Verification:**
+  - `npm run compile` is clean.
+  - A test drives the diffing logic (open set before and after, notified-ids store): a new id → one notification; startup with existing ids → none; an answered question → the count decreases.
+  - Live in an Extension Development Host with the owner.
