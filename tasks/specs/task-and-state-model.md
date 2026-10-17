@@ -1,6 +1,6 @@
 # Spec: Formal Task Definition, Unified State Machine & Cross-Agent Verification
 
-> **Drives initiatives:** [02](../02-task-and-config-spec/plan.md), [03](../03-skill-and-script-engine/plan.md), [05](../05-cli-and-ui-handoff/plan.md)
+> **Drives initiatives:** [02](../done/02-task-and-config-spec/plan.md), [03](../done/03-skill-and-script-engine/plan.md), [05](../done/05-cli-and-ui-handoff/plan.md)
 > **Sources:** `macroplan-authoring` (v0.2.1), `orchestration-methodology` (v0.2.1), `task-spec-authoring`, `docs/03-task-model-and-ui-architecture.md`
 
 ---

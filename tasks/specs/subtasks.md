@@ -107,3 +107,27 @@ A block is a heading followed by bullets, as already used in `plan.md`:
 - Existing `plan.md` files are already depth-1 blocks under initiatives. Their `Status` bullets become authoritative.
 - The first `sync-index` regenerates the Initiatives status cells; the preview shows the diff before apply.
 - Existing folder tasks with `## Steps` stay as they are. Steps are not nodes; they become nodes only when the owner converts them with `tasks child add`.
+
+## 6. Closed work lives apart from open work (owner rule, 2026-10-17)
+
+At every level, closed items (`done`, `done with a caveat`, `dropped`) are physically separated from open ones, so the active tree only shows pending work.
+
+| Item | When it closes | Where it goes |
+| --- | --- | --- |
+| Emergent root `T###` | on the transition | `tasks/done/<category>/` (existing behaviour) |
+| Initiative `NN` | when its derived state becomes closed | `tasks ship NN`: writes `summary.md` (a generated skeleton the closer completes: outcome, deviations, follow-ups) and moves the folder to `tasks/done/NN-<slug>/` |
+| Child block (`### id - …`) | on the transition, or on derivation for containers | Moved to a `## Closed` section at the end of the same file. Open blocks stay at the top, and the id and its anchor stay stable. |
+| Folder child (`<id>-<slug>/`) | same | `<parent folder>/done/<id>-<slug>/` |
+| Question `Q###` | answered or withdrawn | `tasks/questions/closed/` |
+| Inbox note | processed or discarded | `tasks/_inbox/analyzed/` (existing behaviour) |
+
+**Rules:**
+
+- **Moves are atomic, under the task-write lock.** Every link that points into a moved path is rewritten in the same operation (`depends-on` stays id-based and needs nothing): Markdown links in `tasks/**`, `sources` headers, `produced` lists, and the index. The result reports the rewritten files. This generalizes the 09.1 follow-up mechanism.
+- **Reopening** (`bounced`, or `reopen` for questions and notes) moves the item back to the open location.
+- `sync-index` lists closed initiatives in the Initiatives table under a "Closed" sub-table, linking to `done/…`.
+- **Validation:**
+  - a closed item in an open location → warning, with the exact `tasks archive` command;
+  - an open item under `done/` → error.
+- `tasks archive [--dry-run]` applies the rule to an existing tree in one go: diff preview, then apply with the hash.
+- On 2026-10-17 initiatives 01, 02, 03 and 05 were shipped by hand: retroactive `summary.md`, `git mv` into `done/`, links fixed.

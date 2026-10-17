@@ -1,6 +1,6 @@
 # 02 - Formal Task Model, State Machine & `orchestration.toml` Specification
 
-> **Derived from specs:** [`../specs/task-and-state-model.md`](../specs/task-and-state-model.md), [`../specs/orchestration-config-and-agents-md.md`](../specs/orchestration-config-and-agents-md.md)
+> **Derived from specs:** [`../specs/task-and-state-model.md`](../../specs/task-and-state-model.md), [`../specs/orchestration-config-and-agents-md.md`](../../specs/orchestration-config-and-agents-md.md)
 
 ## Tasks
 

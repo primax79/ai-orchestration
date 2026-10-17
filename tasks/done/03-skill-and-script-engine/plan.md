@@ -1,6 +1,6 @@
 # 03 - Configuration & Task Management Skill + Python Scripts
 
-> **Derived from specs:** [`../specs/orchestration-config-and-agents-md.md`](../specs/orchestration-config-and-agents-md.md), [`../specs/task-and-state-model.md`](../specs/task-and-state-model.md)
+> **Derived from specs:** [`../specs/orchestration-config-and-agents-md.md`](../../specs/orchestration-config-and-agents-md.md), [`../specs/task-and-state-model.md`](../../specs/task-and-state-model.md)
 
 ## Tasks
 

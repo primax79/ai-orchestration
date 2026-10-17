@@ -1,6 +1,6 @@
 # Spec: AI Orchestration Extension & Backlog Manager (4 Macro-Responsibilities)
 
-> **Drives initiative:** [05](../05-cli-and-ui-handoff/plan.md)
+> **Drives initiative:** [05](../done/05-cli-and-ui-handoff/plan.md)
 > **Status:** Active Specification (2026-10-15)
 
 ---

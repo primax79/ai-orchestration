@@ -1,6 +1,6 @@
 # Spec: Unified Orchestration Configuration (`orchestration.toml`) & `AGENTS.md` Renderer
 
-> **Drives initiative:** [01](../01-task-model-spec/plan.md) (`01.5`), [02](../02-python-core-and-cli/plan.md) (`02.4`)
+> **Drives initiative:** [02](../done/02-task-and-config-spec/plan.md), [03](../done/03-skill-and-script-engine/plan.md)
 > **Status:** Active implementation (Phase 1: Skill + Companion Python Scripts → CLI / VS Code Extension)
 
 ---

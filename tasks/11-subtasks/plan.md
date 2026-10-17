@@ -43,3 +43,18 @@
 - **Focus files:** `backend/server.py`, `frontend/src/**`
 - **Goal:** Spec §4.
 - **Verification:** Live with Playwright on a scratch copy of this repo's `tasks/`: the tree shows 06–11 with progress bars; transitioning a child updates its block and the roll-up; "Add subtask" on a folder task creates `T###.1`.
+
+### 11.4 - Engine: closed-apart placement at every level (`tasks ship`, `## Closed` section for blocks, `questions/closed/`, link rewriting, `tasks archive`)
+
+- **Status:** `open` · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (same file) · **Repo:** `ai-orchestration/`
+- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `plugins/architect-side/skills/task-pipeline/SKILL.md` ("Ship" step), `tasks/specs/blocking-questions.md` (closed questions location)
+- **Goal:** Spec §6.
+- **Verification:**
+  - Tests:
+    - a leaf block closing moves to `## Closed`, and its reopening moves back;
+    - a folder child closing moves to `done/` under its parent;
+    - an initiative whose last leaf closes is shipped with `tasks ship`, and the links in specs and index are rewritten;
+    - a closed question moves to `questions/closed/`, and the decider links keep resolving;
+    - `tasks archive --dry-run` on a fixture with misplaced items shows the plan and writes nothing;
+    - every relative Markdown link in `tasks/**` still resolves after each operation (a link checker is part of the test).
+  - Live: `tasks archive --dry-run` on this repo reports nothing to do.
