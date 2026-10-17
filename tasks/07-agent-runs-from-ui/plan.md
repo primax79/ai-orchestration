@@ -83,7 +83,7 @@
 
 ### 07.6 - UI backend: run and config endpoints
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 07.4, 06.7 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 07.4, 06.7 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Spec §6.
 - **Verification:**
@@ -150,7 +150,7 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
 
 ### 07.10 - Core: run supervisor files blocking questions (R14, spec 08 Q8)
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 08.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 08.1 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:**
   - At the end of a run, parse ` ```ai-orch-question ` blocks from the **final** assistant message.
