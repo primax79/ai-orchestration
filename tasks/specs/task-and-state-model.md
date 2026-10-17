@@ -57,14 +57,28 @@ Permitted by `task-pipeline` ("A project that needs extra fields lists them in `
 - `verification-mode`: `self` \| `independent-session` \| `cross-agent` \| `panel` \| `owner` (overrides `[verification].default_mode` in `orchestration.toml`: `independent-session` uses a fresh context-blind subagent/worktree in the *same* framework; `cross-agent` uses a *different* framework/engine; `panel` runs multiple reviewers; `owner` requires human approval).
 - `verifier`: `-` \| `<tool>:<profile>` \| `blind-subagent:<profile>` \| `owner` \| `panel(<tool>:<profile>, ...)` (records who is assigned or performed the independent verification).
 - `size`: `XS` \| `S` \| `M` \| `L` \| `XL` (relative task weight for scheduling/timeline: XS=1, S=2, M=3, L=5, XL=8; defaults to M for standard tasks, XS for microtasks).
+- `kind`: `feature` \| `bug` \| `fix` \| `chore` \| `docs` \| `investigation` (classification kind; required for microtasks, optional for full tasks).
+- `labels`: comma-separated tags matching `[a-z0-9][a-z0-9-]*` (at most 24 characters each, e.g. `ui, security, regression`).
 - `branch`: Git branch name of the isolated worktree assigned to this task (e.g. `feat/08-t1-app-shell` or `kilo/t012-scraper`).
 - `worktree`: Relative or absolute physical filesystem path to the active worktree checkout (e.g. `.kilo/worktrees/08-t1-app-shell`).
 - `run-id`: Unique identifier of the executing run or background MCP task handle (e.g. `ctask_123` or `ses_abc`).
 
-### 2.3 Required Body Sections
+### 2.3 Required Body Sections (Full Tasks)
 1. `## Goal`
 2. `## Steps`
 3. `## Verification` (concrete, runnable commands and expected outputs; mandatory full regression suite if the task rests on a negative claim).
+
+### 2.4 Microtask Form (`tasks/micro/T###-<slug>.md`)
+
+A lightweight emergent task for very small work (bug, fix, chore, docs touch-up) that shares the same ID space (`T###`), state machine, and dependency semantics as full tasks:
+- **Location:** `tasks/micro/T###-<slug>.md` (or `tasks/done/micro/` when terminal).
+- **Header:** closed set in exact canonical order: `id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`.
+  - Mandatory fields: `id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`.
+  - Optional extensions: `size` (defaults to `XS`), `labels`.
+- **Body:** one required section, `## What`. No `Goal`/`Steps`/`Verification` skeleton needed.
+- **Commands:**
+  - `ai-orch tasks micro --title <title> [--kind <kind>] [--priority <P0-P3>] [--label <label>...] [--paths <paths>]`: creates a microtask under task-write lock.
+  - `ai-orch tasks promote <id> [--category <cat>]`: promotes a microtask into a full emergent task in the target category, adding the missing 13 core headers and `## Goal`/`## Steps`/`## Verification` skeleton while keeping the ID and dependency links intact.
 
 ---
 

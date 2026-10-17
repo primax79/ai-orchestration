@@ -162,7 +162,7 @@ CLI_DESCRIPTION: dict[str, Any] = {
             "usage": "ai-orch tasks <subcommand> [options] [--json]",
             "subcommands": {
                 "list": {
-                    "usage": "ai-orch tasks list [--tasks-dir <dir>] [--json]",
+                    "usage": "ai-orch tasks list [--kind <kind>...] [--label <label>...] [--tasks-dir <dir>] [--json]",
                     "description": "Parse all emergent tasks (active + done/) and initiatives into structured JSON.",
                 },
                 "validate": {
@@ -188,6 +188,14 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks new --from-note <id> --category <cat> --title <title> [--priority <P0-P3>] [--priority-reason <reason>] [--tasks-dir <dir>] [--json]",
                     "description": "Create a new emergent task from an inbox note under the task-write lock.",
                 },
+                "micro": {
+                    "usage": "ai-orch tasks micro --title <title> [--kind <kind>] [--priority <P0-P3>] [--paths <paths>] [--depends-on <ids>] [--label <label>...] [--size <size>] [--executor <exec>] [--what <text>] [--tasks-dir <dir>] [--json]",
+                    "description": "Create a lightweight microtask under tasks/micro/ under the task-write lock.",
+                },
+                "promote": {
+                    "usage": "ai-orch tasks promote <task_id> [--category <cat>] [--tasks-dir <dir>] [--json]",
+                    "description": "Promote a microtask into a full emergent task in a chosen category.",
+                },
                 "child": {
                     "usage": "ai-orch tasks child add <parent> --title <title> [--kind <kind>] [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
                     "description": "Add a child task under a container or convert an open leaf to a container.",
@@ -205,7 +213,7 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "Reopen a terminal leaf task back to open.",
                 },
                 "graph": {
-                    "usage": "ai-orch tasks graph [--tasks-dir <dir>] [--mermaid] [--json]",
+                    "usage": "ai-orch tasks graph [--kind <kind>...] [--label <label>...] [--tasks-dir <dir>] [--mermaid] [--all] [--json]",
                     "description": "Compute abstract timeline dependency graph with columns, ready queue, heaviest chain, and Mermaid flowchart.",
                 },
                 "set-priority": {
@@ -220,9 +228,17 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks set-deps <id> [deps...] [--add <id>...] [--remove <id>...] [--to <ids>] [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
                     "description": "Set dependencies for a task while preserving trailing free text (cycle and unknown ID checks).",
                 },
+                "set-kind": {
+                    "usage": "ai-orch tasks set-kind <id> <feature|bug|fix|chore|docs|investigation> [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Set kind for a task (rewrites header on T###, updates/creates bullet on NN.T).",
+                },
                 "set-labels": {
-                    "usage": "ai-orch tasks set-labels <id> [--add <label>...] [--remove <label>...] [--to <labels>] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "usage": "ai-orch tasks set-labels <id> [--add <label>...] [--remove <label>...] [--to <labels>] [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
                     "description": "Set labels for a task (removing inherited labels is refused).",
+                },
+                "labels": {
+                    "usage": "ai-orch tasks labels [--tasks-dir <dir>] [--json]",
+                    "description": "List all labels currently in use with their occurrence counts.",
                 },
             },
         },

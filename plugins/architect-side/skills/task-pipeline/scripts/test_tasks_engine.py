@@ -4861,3 +4861,320 @@ def test_graph_ready_queue_holds_only_startable_leaves(tmp_path: pathlib.Path) -
     res = run_cli("graph", "--tasks-dir", str(tasks_dir), "--json")
     assert res.returncode == 0, res.stderr
     assert json.loads(res.stdout)["ready_queue"] == ["05.1"]
+
+
+def test_microtask_creation_reduced_schema_and_graph(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # 1. Create microtask via CLI
+    res = run_cli(
+        "micro",
+        "--title", "Fix navbar alignment",
+        "--kind", "bug",
+        "--priority", "P1",
+        "--label", "ui",
+        "--label", "css",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res.returncode == 0, res.stderr
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    assert data["id"] == "T001"
+    assert data["kind"] == "bug"
+    assert data["priority"] == "P1"
+    assert data["size"] == "XS"
+    assert data["labels"] == ["ui", "css"]
+
+    mf = tasks_dir / "micro" / "T001-fix-navbar-alignment.md"
+    assert mf.is_file()
+    content = mf.read_text(encoding="utf-8")
+    assert "- id: T001" in content
+    assert "- title: Fix navbar alignment" in content
+    assert "- kind: bug" in content
+    assert "- priority: P1" in content
+    assert "- state: open" in content
+    assert "- executor: kilo" in content
+    assert "- paths: -" in content
+    assert "- depends-on: -" in content
+    assert "- labels: ui, css" in content
+    assert "## What" in content
+    assert "## Goal" not in content
+
+    # 2. Validate tree
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+    val_data = json.loads(res_val.stdout)
+    assert val_data["ok"] is True
+    assert len(val_data["errors"]) == 0
+
+    # 3. Check tasks graph exposes node_type=microtask and size=XS
+    res_graph = run_cli("graph", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_graph.returncode == 0
+    g_data = json.loads(res_graph.stdout)
+    node = g_data["nodes_by_id"]["T001"]
+    assert node["node_type"] == "microtask"
+    assert node["size"] == "XS"
+    assert node["size_source"] == "default"
+    assert node["kind"] == "bug"
+    assert set(node["labels"]) == {"ui", "css"}
+    assert g_data["totals"]["by_size"]["XS"] == 1
+
+
+def test_microtask_concurrent_creation(tmp_path: pathlib.Path) -> None:
+    import concurrent.futures
+
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    def _create(idx: int):
+        return run_cli(
+            "micro",
+            "--title", f"Concurrent task {idx}",
+            "--kind", "chore",
+            "--tasks-dir", str(tasks_dir),
+            "--json",
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(_create, i) for i in range(12)]
+        results = [f.result() for f in futures]
+
+    for r in results:
+        assert r.returncode == 0, r.stderr
+
+    created_ids = [json.loads(r.stdout)["id"] for r in results]
+    assert len(set(created_ids)) == 12
+    assert sorted(created_ids) == [f"T{i:03d}" for i in range(1, 13)]
+
+    # Validate all 12 pass validation
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+    val_data = json.loads(res_val.stdout)
+    assert val_data["ok"] is True
+    assert len(val_data["errors"]) == 0
+
+
+def test_microtask_promotion_and_dependency_resolution(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # Create microtask
+    res_m = run_cli(
+        "micro",
+        "--title", "Quick spelling fix",
+        "--kind", "docs",
+        "--priority", "P3",
+        "--label", "docs",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_m.returncode == 0
+    assert json.loads(res_m.stdout)["id"] == "T001"
+
+    # Create plan task that depends on T001
+    (tasks_dir / "01-test").mkdir(parents=True)
+    plan = tasks_dir / "01-test" / "plan.md"
+    plan.write_text(
+        "# 01 - Test\n\n## Tasks\n\n### 01.1 - Child\n- **Status:** `open` · **Depends on:** T001\n- **Goal:** G\n",
+        encoding="utf-8",
+    )
+
+    # Verify dependency in graph
+    res_g1 = run_cli("graph", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_g1.returncode == 0
+    g1 = json.loads(res_g1.stdout)
+    assert g1["nodes_by_id"]["01.1"]["column"] == 1
+    assert "T001" in g1["nodes_by_id"]["01.1"]["blocked_by"]
+
+    # Promote T001 to category maintenance
+    res_prom = run_cli(
+        "promote",
+        "T001",
+        "--category", "maintenance",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_prom.returncode == 0, res_prom.stderr
+    p_data = json.loads(res_prom.stdout)
+    assert p_data["ok"] is True
+    assert p_data["category"] == "maintenance"
+
+    # Old file gone, new file created
+    assert not (tasks_dir / "micro" / "T001-quick-spelling-fix.md").exists()
+    prom_file = tasks_dir / "maintenance" / "T001-quick-spelling-fix.md"
+    assert prom_file.is_file()
+
+    text = prom_file.read_text(encoding="utf-8")
+    assert "- id: T001" in text
+    assert "- category: maintenance" in text
+    assert "- priority-reason: Promoted from microtask T001" in text
+    assert "- handoff: Read tasks/maintenance/T001-quick-spelling-fix.md" in text
+    assert "- kind: docs" in text
+    assert "- labels: docs" in text
+    assert "## Goal" in text
+    assert "## Steps" in text
+    assert "## Verification" in text
+
+    # Validation succeeds
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+    assert len(json.loads(res_val.stdout)["errors"]) == 0
+
+    # Dependencies still resolve to T001 in graph
+    res_g2 = run_cli("graph", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_g2.returncode == 0
+    g2 = json.loads(res_g2.stdout)
+    assert g2["nodes_by_id"]["01.1"]["column"] == 1
+    assert "T001" in g2["nodes_by_id"]["01.1"]["blocked_by"]
+    assert g2["nodes_by_id"]["T001"]["node_type"] == "leaf"
+
+
+def test_set_kind_and_set_labels_with_dry_run_and_validation(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "02-x").mkdir(parents=True)
+    plan = tasks_dir / "02-x" / "plan.md"
+    plan.write_text(
+        "# 02 - X\n\n## Tasks\n\n### 02.1 - Task\n- **Status:** `open`\n- **Goal:** G\n",
+        encoding="utf-8",
+    )
+
+    # 1. set-kind on block with --dry-run
+    res_sk_dry = run_cli("set-kind", "02.1", "feature", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sk_dry.returncode == 0
+    sk_dry = json.loads(res_sk_dry.stdout)
+    assert sk_dry["ok"] is True
+    assert sk_dry["dry_run"] is True
+    assert "diff" in sk_dry and "+- **Status:** `open` · **Kind:** feature" in sk_dry["diff"]
+    assert "**Kind:**" not in plan.read_text(encoding="utf-8")
+
+    # 2. set-kind real apply
+    res_sk = run_cli("set-kind", "02.1", "feature", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sk.returncode == 0
+    assert "- **Status:** `open` · **Kind:** feature\n" in plan.read_text(encoding="utf-8")
+
+    # 3. set-labels on block
+    res_sl = run_cli("set-labels", "02.1", "--add", "ui,perf", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sl.returncode == 0
+    assert "- **Status:** `open` · **Kind:** feature · **Labels:** ui, perf\n" in plan.read_text(encoding="utf-8")
+
+    # 4. set-labels remove
+    res_sl_rem = run_cli("set-labels", "02.1", "--remove", "ui", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sl_rem.returncode == 0
+    assert "- **Status:** `open` · **Kind:** feature · **Labels:** perf\n" in plan.read_text(encoding="utf-8")
+
+    # 5. set-kind and set-labels on emergent task
+    res_m = run_cli("micro", "--title", "Emergent", "--kind", "chore", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_m.returncode == 0
+    t_id = json.loads(res_m.stdout)["id"]
+
+    res_sk_m = run_cli("set-kind", t_id, "investigation", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sk_m.returncode == 0
+    assert "- kind: investigation" in (tasks_dir / "micro" / f"{t_id}-emergent.md").read_text(encoding="utf-8")
+
+    res_sl_m = run_cli("set-labels", t_id, "--add", "kilo-mcp", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sl_m.returncode == 0
+    assert "- labels: kilo-mcp" in (tasks_dir / "micro" / f"{t_id}-emergent.md").read_text(encoding="utf-8")
+
+    # 6. Invalid kind refused
+    res_bad_k = run_cli("set-kind", t_id, "unknown_kind", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_bad_k.returncode != 0
+    assert "Invalid kind" in json.loads(res_bad_k.stdout)["error"]
+
+    # 7. Invalid label refused
+    res_bad_l = run_cli("set-labels", t_id, "--add", "INVALID_LABEL!", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_bad_l.returncode != 0
+    assert "Invalid label" in json.loads(res_bad_l.stdout)["error"]
+
+
+def test_labels_command_and_list_graph_filtering(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # Create task 1: bug, labels=[ui, frontend]
+    run_cli("micro", "--title", "Bug 1", "--kind", "bug", "--label", "ui,frontend", "--tasks-dir", str(tasks_dir), "--json")
+    # Create task 2: bug, labels=[backend]
+    run_cli("micro", "--title", "Bug 2", "--kind", "bug", "--label", "backend", "--tasks-dir", str(tasks_dir), "--json")
+    # Create task 3: feature, labels=[ui]
+    run_cli("micro", "--title", "Feature 1", "--kind", "feature", "--label", "ui", "--tasks-dir", str(tasks_dir), "--json")
+    # Create task 4: chore, no labels
+    run_cli("micro", "--title", "Chore 1", "--kind", "chore", "--tasks-dir", str(tasks_dir), "--json")
+
+    # 1. tasks labels command
+    res_lbls = run_cli("labels", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_lbls.returncode == 0
+    lbl_data = json.loads(res_lbls.stdout)
+    assert lbl_data["counts"]["ui"] == 2
+    assert lbl_data["counts"]["frontend"] == 1
+    assert lbl_data["counts"]["backend"] == 1
+
+    # 2. tasks list --kind bug
+    res_l_kind = run_cli("list", "--kind", "bug", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_l_kind.returncode == 0
+    l_kind = json.loads(res_l_kind.stdout)
+    assert len(l_kind["all_tasks"]) == 2
+    assert {t["title"] for t in l_kind["all_tasks"]} == {"Bug 1", "Bug 2"}
+
+    # 3. tasks list --label ui
+    res_l_lbl = run_cli("list", "--label", "ui", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_l_lbl.returncode == 0
+    l_lbl = json.loads(res_l_lbl.stdout)
+    assert len(l_lbl["all_tasks"]) == 2
+    assert {t["title"] for t in l_lbl["all_tasks"]} == {"Bug 1", "Feature 1"}
+
+    # 4. tasks list --kind bug --label ui (AND across fields)
+    res_l_both = run_cli("list", "--kind", "bug", "--label", "ui", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_l_both.returncode == 0
+    l_both = json.loads(res_l_both.stdout)
+    assert len(l_both["all_tasks"]) == 1
+    assert l_both["all_tasks"][0]["title"] == "Bug 1"
+
+    # 5. tasks list --kind bug --kind feature (OR within field)
+    res_l_or = run_cli("list", "--kind", "bug", "--kind", "feature", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_l_or.returncode == 0
+    l_or = json.loads(res_l_or.stdout)
+    assert len(l_or["all_tasks"]) == 3
+
+    # 6. tasks graph --kind bug
+    res_g_kind = run_cli("graph", "--kind", "bug", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_g_kind.returncode == 0
+    g_kind = json.loads(res_g_kind.stdout)
+    assert len(g_kind["nodes"]) == 2
+    assert all(n["kind"] == "bug" for n in g_kind["nodes"])
+
+
+def test_validator_detects_unknown_kind_and_malformed_label(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "03-test").mkdir(parents=True)
+    plan = tasks_dir / "03-test" / "plan.md"
+    plan.write_text(
+        "# 03 - Test\n\n## Tasks\n\n"
+        "### 03.1 - Bad kind\n- **Status:** `open` · **Kind:** bogus_kind\n- **Goal:** G\n\n"
+        "### 03.2 - Bad label\n- **Status:** `open` · **Labels:** bad_label_with_UPPERCASE\n- **Goal:** G\n",
+        encoding="utf-8",
+    )
+    (tasks_dir / "micro").mkdir()
+    (tasks_dir / "micro" / "T099-bad.md").write_text(
+        "# T099 Bad microtask\n\n"
+        "- id: T099\n"
+        "- title: Bad microtask\n"
+        "- kind: not_a_kind\n"
+        "- priority: P2\n"
+        "- state: open\n"
+        "- executor: kilo\n"
+        "- paths: -\n"
+        "- depends-on: -\n"
+        "- labels: this-label-is-far-too-long-exceeding-twenty-four-chars\n\n"
+        "## What\n\nSomething\n",
+        encoding="utf-8",
+    )
+
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 1
+    val = json.loads(res_val.stdout)
+    errors = " ".join(val["errors"])
+    assert "invalid kind 'bogus_kind' on node 03.1" in errors
+    assert "invalid label 'bad_label_with_UPPERCASE' on node 03.2" in errors
+    assert "invalid kind 'not_a_kind'" in errors
+    assert "invalid label 'this-label-is-far-too-long-exceeding-twenty-four-chars'" in errors

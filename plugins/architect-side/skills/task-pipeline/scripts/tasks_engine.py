@@ -55,11 +55,40 @@ OPTIONAL_EXTENSION_FIELDS: tuple[str, ...] = (
     "verification-mode",
     "verifier",
     "size",
+    "kind",
+    "labels",
     "branch",
     "worktree",
     "run-id",
     "use-cases",
     "use_cases",
+)
+
+VALID_KINDS: set[str] = {"feature", "bug", "fix", "chore", "docs", "investigation"}
+LABEL_RE: re.Pattern = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
+
+MICRO_HEADER_FIELDS: tuple[str, ...] = (
+    "id",
+    "title",
+    "kind",
+    "priority",
+    "state",
+    "executor",
+    "paths",
+    "depends-on",
+    "size",
+    "labels",
+)
+
+MICRO_MANDATORY_HEADER_FIELDS: tuple[str, ...] = (
+    "id",
+    "title",
+    "kind",
+    "priority",
+    "state",
+    "executor",
+    "paths",
+    "depends-on",
 )
 
 VALID_SIZES: set[str] = {"XS", "S", "M", "L", "XL"}
@@ -173,7 +202,8 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
 - **Ids:** `T###`, unique across `done/` too; reserve the id by creating the file immediately.
 - **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
-- **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`, `size`, `branch`, `worktree`, `run-id`.
+- **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`.
+- **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`); size defaults to `XS`; body section `## What` only.
 - **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
 - **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
@@ -896,6 +926,7 @@ class TaskNode:
     priority_reason: str = ""
     size: str = "M"
     size_source: str = "default"
+    kind: str | None = None
     executor: str = "kilo"
     handoff: str = ""
     category: str = ""
@@ -903,7 +934,7 @@ class TaskNode:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "kind": "initiative_task" if "." in self.id and not self.id.startswith("T") else ("emergent" if self.id.startswith("T") else "initiative"),
+            "kind": self.kind or ("initiative_task" if "." in self.id and not self.id.startswith("T") else ("emergent" if self.id.startswith("T") else "initiative")),
             "id": self.id,
             "title": self.title,
             "parent": self.parent,
@@ -949,6 +980,7 @@ def rewrite_block_in_file(
     new_labels: list[str] | None = None,
     new_priority: str | None = None,
     new_size: str | None = None,
+    new_kind: str | None = None,
     expect_task_hash: str | None = None,
     status_note: str | None = None,
     dry_run: bool = False,
@@ -993,6 +1025,8 @@ def rewrite_block_in_file(
     lines = old_block_text.splitlines(keepends=True)
     priority_updated = False
     size_updated = False
+    kind_updated = False
+    labels_updated = False
     deps_updated = False
     status_line_idx: int | None = None
 
@@ -1032,6 +1066,7 @@ def rewrite_block_in_file(
                     if seg.key in ("labels", "label"):
                         seg.raw_value = ", ".join(new_labels) if new_labels else "-"
                         seg.clean_value = seg.raw_value
+                        labels_updated = True
 
             if new_priority is not None:
                 for seg in segments:
@@ -1047,11 +1082,18 @@ def rewrite_block_in_file(
                         seg.clean_value = new_size
                         size_updated = True
 
+            if new_kind is not None:
+                for seg in segments:
+                    if seg.key in ("kind",):
+                        seg.raw_value = new_kind
+                        seg.clean_value = new_kind
+                        kind_updated = True
+
             parsed_lines.append((prefix, segments, line_ending, True, line))
         else:
             parsed_lines.append(("", [], line, False, line))
 
-    # If priority, size, or deps were not present in existing segments, insert them into the Status bullet
+    # If priority, size, kind, labels, or deps were not present in existing segments, insert them into the Status bullet
     if status_line_idx is None:
         for idx, (pfx, segs, le, is_b, orig) in enumerate(parsed_lines):
             if is_b:
@@ -1080,11 +1122,23 @@ def rewrite_block_in_file(
             insert_idx += 1
             priority_updated = True
 
+        if new_kind is not None and not kind_updated:
+            new_seg = BulletSegment(raw_key="Kind", key="kind", raw_value=new_kind, clean_value=new_kind)
+            segments.insert(insert_idx, new_seg)
+            insert_idx += 1
+            kind_updated = True
+
         if new_deps is not None and not deps_updated:
             deps_val = update_depends_on_field("", new_deps)
             new_seg = BulletSegment(raw_key="Depends on", key="depends_on", raw_value=deps_val, clean_value=deps_val)
             segments.append(new_seg)
             deps_updated = True
+
+        if new_labels is not None and not labels_updated:
+            lbl_val = ", ".join(new_labels) if new_labels else "-"
+            new_seg = BulletSegment(raw_key="Labels", key="labels", raw_value=lbl_val, clean_value=lbl_val)
+            segments.append(new_seg)
+            labels_updated = True
 
         parsed_lines[status_line_idx] = (prefix, segments, line_ending, is_b, orig)
 
@@ -1236,6 +1290,8 @@ def parse_child_blocks(
                     c_node.priority = sub_own_fields["priority"]
                 if "executor" in sub_own_fields:
                     c_node.executor = sub_own_fields["executor"]
+                if "kind" in sub_own_fields:
+                    c_node.kind = sub_own_fields["kind"]
 
                 sub_children = parse_child_blocks(
                     target_readme,
@@ -1309,6 +1365,7 @@ def parse_child_blocks(
                 priority_reason=own_fields.get("priority_reason", f"Task {cid}"),
                 size=leaf_size,
                 size_source=leaf_size_source,
+                kind=own_fields.get("kind"),
                 executor=own_fields.get("executor", "kilo"),
                 handoff=own_fields.get("handoff", f"Work on task {cid} in {file_path.relative_to(tasks_dir).as_posix()}"),
                 category=parent_category,
@@ -1626,13 +1683,14 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
 
         is_container = len(sub_nodes) > 0
         is_leaf = not is_container
+        is_micro = et.get("category") == "micro" or et.get("folder_category") == "micro"
 
         et_size = et.get("headers", {}).get("size")
         if et_size and et_size.strip().upper() in VALID_SIZES:
             node_size = et_size.strip().upper()
             node_size_source = "own"
         else:
-            node_size = "M"
+            node_size = "XS" if is_micro else "M"
             node_size_source = "default"
 
         node = TaskNode(
@@ -1640,13 +1698,13 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             title=et["title"],
             parent=None,
             depth=0,
-            node_type="container" if is_container else "leaf",
+            node_type="container" if is_container else ("microtask" if is_micro else "leaf"),
             is_leaf=is_leaf,
             is_container=is_container,
             children=[],
             own_fields=dict(et["headers"]),
             fields={},
-            labels=[l.strip() for l in et.get("headers", {}).get("labels", "").split(",") if l.strip()],
+            labels=[l.strip() for l in et.get("headers", {}).get("labels", "").split(",") if l.strip() and l.strip() != "-"],
             label_sources={},
             depends_on=list(et.get("depends_on", [])),
             expanded_depends_on=list(et.get("depends_on", [])),
@@ -1668,9 +1726,10 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             priority_reason=et.get("priority_reason", ""),
             size=node_size,
             size_source=node_size_source,
+            kind=et.get("headers", {}).get("kind"),
             executor=et.get("executor", "kilo"),
             handoff=et.get("handoff", ""),
-            category=et.get("category", ""),
+            category=et.get("category", "") or ("micro" if is_micro else ""),
             slug=slugify(et["title"]),
         )
         tree[tid] = node
@@ -1678,46 +1737,64 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             tree[sn.id] = sn
 
     # 3. Microtasks
-    micro_dir = tasks_dir / "micro"
-    if micro_dir.is_dir():
-        for mf in sorted(micro_dir.glob("*.md")):
-            if mf.name == "README.md":
-                continue
-            m = re.match(r"^([A-Za-z0-9]+)-(.*)\.md$", mf.name)
-            if m:
-                mid, mslug = m.group(1), m.group(2)
-                if mid not in tree:
-                    tree[mid] = TaskNode(
-                        id=mid,
-                        title=mslug,
-                        parent=None,
-                        depth=0,
-                        node_type="microtask",
-                        is_leaf=True,
-                        is_container=False,
-                        children=[],
-                        own_fields={},
-                        fields={},
-                        labels=[],
-                        label_sources={},
-                        depends_on=[],
-                        expanded_depends_on=[],
-                        own_depends_on=[],
-                        depends_on_free_text="",
-                        state="open",
-                        canonical_state="open",
-                        derived_state=None,
-                        leaves_done=0,
-                        leaves_total=1,
-                        file_path=str(mf),
-                        rel_path=mf.relative_to(tasks_dir).as_posix(),
-                        is_folder=False,
-                        in_done=False,
-                        in_closed_section=False,
-                        task_hash=_file_sha256(mf),
-                        size="XS",
-                        size_source="default",
-                    )
+    micro_dirs = [tasks_dir / "micro", tasks_dir / "done" / "micro"]
+    for m_dir in micro_dirs:
+        if m_dir.is_dir():
+            in_done_dir = m_dir.parent.name == "done"
+            for mf in sorted(m_dir.glob("*.md")):
+                if mf.name == "README.md":
+                    continue
+                m = re.match(r"^([A-Za-z0-9]+)-(.*)\.md$", mf.name)
+                if m:
+                    mid = m.group(1)
+                    if mid not in tree:
+                        et_parsed = parse_emergent_task_file(mf, tasks_dir, in_done=in_done_dir)
+                        et_size = et_parsed.get("headers", {}).get("size")
+                        if et_size and et_size.strip().upper() in VALID_SIZES:
+                            node_size = et_size.strip().upper()
+                            node_size_source = "own"
+                        else:
+                            node_size = "XS"
+                            node_size_source = "default"
+                        tree[mid] = TaskNode(
+                            id=mid,
+                            title=et_parsed["title"],
+                            parent=None,
+                            depth=0,
+                            node_type="microtask",
+                            is_leaf=True,
+                            is_container=False,
+                            children=[],
+                            own_fields=dict(et_parsed["headers"]),
+                            fields={},
+                            labels=[l.strip() for l in et_parsed.get("headers", {}).get("labels", "").split(",") if l.strip() and l.strip() != "-"],
+                            label_sources={},
+                            depends_on=list(et_parsed.get("depends_on", [])),
+                            expanded_depends_on=list(et_parsed.get("depends_on", [])),
+                            own_depends_on=list(et_parsed.get("depends_on", [])),
+                            depends_on_free_text="",
+                            state=et_parsed["state"],
+                            canonical_state=et_parsed["canonical_state"],
+                            derived_state=None,
+                            leaves_done=1 if et_parsed["canonical_state"] in ("done", "done with a caveat") else 0,
+                            leaves_total=1,
+                            file_path=str(mf),
+                            rel_path=et_parsed["rel_path"],
+                            is_folder=False,
+                            in_done=in_done_dir,
+                            in_closed_section=False,
+                            task_hash=et_parsed["bundle_sha256"],
+                            priority=et_parsed.get("priority", "P2"),
+                            priority_source="own" if et_parsed.get("headers", {}).get("priority") else "default",
+                            priority_reason=et_parsed.get("priority_reason", ""),
+                            size=node_size,
+                            size_source=node_size_source,
+                            kind=et_parsed.get("headers", {}).get("kind"),
+                            executor=et_parsed.get("executor", "kilo"),
+                            handoff=et_parsed.get("handoff", ""),
+                            category="micro",
+                            slug=slugify(et_parsed["title"]),
+                        )
 
     # 4. Connect children
     for nid, node in tree.items():
@@ -2396,28 +2473,142 @@ def set_deps(
             }
 
 
-def set_labels(
+def set_kind(
     tasks_dir: pathlib.Path,
     node_id: str,
-    add_labels: list[str] | None = None,
-    remove_labels: list[str] | None = None,
-    to_labels: list[str] | None = None,
+    kind: str,
+    dry_run: bool = False,
     expect_task_hash: str | None = None,
 ) -> dict[str, Any]:
+    kind = kind.strip().lower()
+    if kind not in VALID_KINDS:
+        return {"ok": False, "error": f"Invalid kind '{kind}' (expected one of {', '.join(sorted(VALID_KINDS))})."}
+
     with task_write_lock(tasks_dir):
         tree = discover_task_tree(tasks_dir)
         if node_id not in tree:
             return {"ok": False, "error": f"Task '{node_id}' not found."}
         node = tree[node_id]
 
-        if expect_task_hash and expect_task_hash.lower() != node.task_hash.lower():
+        if expect_task_hash and expect_task_hash.strip().lower() != node.task_hash.strip().lower():
             return {
                 "ok": False,
                 "error": f"Task hash mismatch: expected {expect_task_hash}, actual {node.task_hash}",
             }
 
-        if remove_labels:
-            for rl in remove_labels:
+        file_path = pathlib.Path(node.file_path)
+        if node.block_text is not None:
+            _, new_block_hash, diff_str = rewrite_block_in_file(
+                file_path,
+                node_id,
+                new_kind=kind,
+                expect_task_hash=expect_task_hash,
+                dry_run=dry_run,
+                return_diff=True,
+            )
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "kind": kind,
+                "task_hash": new_block_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+        else:
+            old_text = file_path.read_text(encoding="utf-8")
+            if re.search(r"^-\s+kind:\s*.*$", old_text, flags=re.MULTILINE):
+                new_text = re.sub(r"^-\s+kind:\s*.*$", f"- kind: {kind}", old_text, flags=re.MULTILINE)
+            else:
+                if node.node_type == "microtask" or node.category == "micro":
+                    m = re.search(r"^-\s+title:\s*.*$", old_text, flags=re.MULTILINE)
+                    if m:
+                        ins = m.end()
+                        new_text = old_text[:ins] + f"\n- kind: {kind}" + old_text[ins:]
+                    else:
+                        new_text = old_text.replace("\n\n", f"\n- kind: {kind}\n\n", 1)
+                else:
+                    for anchor in (
+                        r"^-\s+size:\s*.*$",
+                        r"^-\s+verifier:\s*.*$",
+                        r"^-\s+verification-mode:\s*.*$",
+                        r"^-\s+profile:\s*.*$",
+                        r"^-\s+handoff:\s*.*$",
+                    ):
+                        m = re.search(anchor, old_text, flags=re.MULTILINE)
+                        if m:
+                            ins = m.end()
+                            new_text = old_text[:ins] + f"\n- kind: {kind}" + old_text[ins:]
+                            break
+                    else:
+                        new_text = old_text.replace("\n\n", f"\n- kind: {kind}\n\n", 1)
+            diff_lines = list(difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=str(file_path),
+                tofile=str(file_path) if not dry_run else f"{file_path} (dry-run)",
+            ))
+            diff_str = "".join(diff_lines)
+            if not dry_run:
+                _atomic_write_text(file_path, new_text, encoding="utf-8")
+                new_hash = _file_sha256(file_path)
+            else:
+                new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "kind": kind,
+                "task_hash": new_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+
+
+def _clean_labels_arg(raw: list[str] | str | None) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    res: list[str] = []
+    for item in raw:
+        for piece in str(item).split(","):
+            p = piece.strip()
+            if p and p != "-":
+                res.append(p)
+    return res
+
+
+def set_labels(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    add_labels: list[str] | str | None = None,
+    remove_labels: list[str] | str | None = None,
+    to_labels: list[str] | str | None = None,
+    expect_task_hash: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    clean_add = _clean_labels_arg(add_labels)
+    clean_rem = _clean_labels_arg(remove_labels)
+    clean_to = _clean_labels_arg(to_labels) if to_labels is not None else None
+
+    labels_to_validate = clean_to if clean_to is not None else clean_add
+    for lbl in labels_to_validate:
+        if not LABEL_RE.match(lbl):
+            return {"ok": False, "error": f"Invalid label {lbl!r} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$')."}
+
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "error": f"Task '{node_id}' not found."}
+        node = tree[node_id]
+
+        if expect_task_hash and expect_task_hash.strip().lower() != node.task_hash.strip().lower():
+            return {
+                "ok": False,
+                "error": f"Task hash mismatch: expected {expect_task_hash}, actual {node.task_hash}",
+            }
+
+        if clean_rem:
+            for rl in clean_rem:
                 if rl in node.label_sources and node.label_sources[rl].startswith("inherited:"):
                     ancestor = node.label_sources[rl].split(":", 1)[1]
                     return {
@@ -2430,24 +2621,86 @@ def set_labels(
             # Block bullets give the raw string ("runs, ui"); never split it into characters.
             raw_own = [l.strip() for l in raw_own.split(",") if l.strip() and l.strip() != "-"]
         curr_own = list(raw_own)
-        if to_labels is not None:
-            new_own = list(to_labels)
+        if clean_to is not None:
+            new_own = list(dict.fromkeys(clean_to))
         else:
             new_own = list(curr_own)
-            if add_labels:
-                for al in add_labels:
+            if clean_add:
+                for al in clean_add:
                     if al not in new_own:
                         new_own.append(al)
-            if remove_labels:
-                new_own = [l for l in new_own if l not in remove_labels]
+            if clean_rem:
+                new_own = [l for l in new_own if l not in clean_rem]
 
         file_path = pathlib.Path(node.file_path)
         if node.block_text is not None:
-            if "labels" not in node.own_fields and "label" not in node.own_fields:
-                return {"ok": False, "error": f"Block {node_id!r} has no '**Labels:**' segment to rewrite (add one first)."}
-            _, new_block_hash = rewrite_block_in_file(file_path, node_id, new_labels=new_own)
-            return {"ok": True, "task_id": node_id, "labels": new_own, "task_hash": new_block_hash}
-        return {"ok": False, "error": f"set-labels on file/folder node {node_id!r} is not implemented yet (blocks only)."}
+            _, new_block_hash, diff_str = rewrite_block_in_file(
+                file_path,
+                node_id,
+                new_labels=new_own,
+                expect_task_hash=expect_task_hash,
+                dry_run=dry_run,
+                return_diff=True,
+            )
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "labels": new_own,
+                "task_hash": new_block_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+        else:
+            old_text = file_path.read_text(encoding="utf-8")
+            labels_val = ", ".join(new_own) if new_own else "-"
+            if re.search(r"^-\s+labels:\s*.*$", old_text, flags=re.MULTILINE):
+                new_text = re.sub(r"^-\s+labels:\s*.*$", f"- labels: {labels_val}", old_text, flags=re.MULTILINE)
+            else:
+                if node.node_type == "microtask" or node.category == "micro":
+                    for anchor in (r"^-\s+size:\s*.*$", r"^-\s+depends-on:\s*.*$"):
+                        m = re.search(anchor, old_text, flags=re.MULTILINE)
+                        if m:
+                            ins = m.end()
+                            new_text = old_text[:ins] + f"\n- labels: {labels_val}" + old_text[ins:]
+                            break
+                    else:
+                        new_text = old_text.replace("\n\n", f"\n- labels: {labels_val}\n\n", 1)
+                else:
+                    for anchor in (
+                        r"^-\s+kind:\s*.*$",
+                        r"^-\s+size:\s*.*$",
+                        r"^-\s+verifier:\s*.*$",
+                        r"^-\s+verification-mode:\s*.*$",
+                        r"^-\s+profile:\s*.*$",
+                        r"^-\s+handoff:\s*.*$",
+                    ):
+                        m = re.search(anchor, old_text, flags=re.MULTILINE)
+                        if m:
+                            ins = m.end()
+                            new_text = old_text[:ins] + f"\n- labels: {labels_val}" + old_text[ins:]
+                            break
+                    else:
+                        new_text = old_text.replace("\n\n", f"\n- labels: {labels_val}\n\n", 1)
+            diff_lines = list(difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=str(file_path),
+                tofile=str(file_path) if not dry_run else f"{file_path} (dry-run)",
+            ))
+            diff_str = "".join(diff_lines)
+            if not dry_run:
+                _atomic_write_text(file_path, new_text, encoding="utf-8")
+                new_hash = _file_sha256(file_path)
+            else:
+                new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "labels": new_own,
+                "task_hash": new_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -2524,10 +2777,19 @@ def parse_emergent_task_file(
         # <category>/T###-...
         folder_category = parts[0] if len(parts) >= 2 else ""
 
+    is_micro = (folder_category == "micro") or (headers.get("category") == "micro")
+
     raw_depends = headers.get("depends-on", "-")
     depends_list = (
         [d.strip() for d in raw_depends.split(",") if d.strip() and d.strip() != "-"]
         if raw_depends and raw_depends != "-"
+        else []
+    )
+
+    raw_labels = headers.get("labels", "")
+    labels_list = (
+        [l.strip() for l in raw_labels.split(",") if l.strip() and l.strip() != "-"]
+        if raw_labels and raw_labels != "-"
         else []
     )
 
@@ -2546,24 +2808,27 @@ def parse_emergent_task_file(
                     })
 
     task_dict = {
-        "kind": "emergent",
+        "kind": headers.get("kind") or "emergent",
         "id": headers.get("id", ""),
-        "title": headers.get("title", ""),
+        "title": headers.get("title", "") or h1_text,
         "h1": h1_text,
-        "category": headers.get("category", ""),
+        "category": headers.get("category", "") or ("micro" if is_micro else folder_category),
         "folder_category": folder_category,
-        "priority": headers.get("priority", ""),
+        "priority": headers.get("priority", "P2" if is_micro else ""),
         "priority_reason": headers.get("priority-reason", ""),
-        "next_up": headers.get("next-up", ""),
-        "state": raw_state,
-        "canonical_state": normalize_state(raw_state),
-        "executor": headers.get("executor", ""),
+        "next_up": headers.get("next-up", "no" if is_micro else ""),
+        "state": raw_state or ("open" if is_micro else ""),
+        "canonical_state": normalize_state(raw_state or ("open" if is_micro else "")),
+        "executor": headers.get("executor", "kilo" if is_micro else ""),
         "depends_on": depends_list,
         "depends_on_raw": raw_depends,
         "decider": headers.get("decider", "-"),
         "sources": headers.get("sources", "-"),
         "paths": headers.get("paths", "-"),
-        "handoff": headers.get("handoff", ""),
+        "handoff": headers.get("handoff", f"Read {rel_path} and fix it." if is_micro else ""),
+        "labels": labels_list,
+        "node_type": "microtask" if is_micro else "leaf",
+        "size": headers.get("size", "XS" if is_micro else "M"),
         "profile": headers.get("profile"),
         "verification_mode": headers.get("verification-mode"),
         "verifier": headers.get("verifier"),
@@ -2571,6 +2836,8 @@ def parse_emergent_task_file(
         "header_keys": header_keys,
         "headers": headers,
         "sections_present": sections_present,
+        "found_headings": list(found_headings),
+        "what_body": next((sec.body for sec in sections if sec.heading == "What"), "").strip(),
         "is_folder": is_folder,
         "in_done": in_done,
         "file_path": str(file_path),
@@ -3551,6 +3818,15 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 s_val = str(node.own_fields["size"]).strip().upper()
                 if s_val not in VALID_SIZES:
                     warnings.append(f"{rel}: non-canonical size {node.own_fields['size']!r} on node {nid} (expected one of {sorted(VALID_SIZES)}).")
+            if "kind" in node.own_fields and node.own_fields["kind"] and node.own_fields["kind"] != "-":
+                k_val = str(node.own_fields["kind"]).strip().lower()
+                if k_val not in VALID_KINDS:
+                    errors.append(f"{rel}: invalid kind {node.own_fields['kind']!r} on node {nid} (expected one of {sorted(VALID_KINDS)}).")
+            if "labels" in node.own_fields and node.own_fields["labels"] and node.own_fields["labels"] != "-":
+                raw_l = str(node.own_fields["labels"]).strip()
+                for lbl in [l.strip() for l in raw_l.split(",") if l.strip()]:
+                    if not LABEL_RE.match(lbl):
+                        errors.append(f"{rel}: invalid label {lbl!r} on node {nid} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$').")
 
     for ce in check_dependency_cycles(tree):
         errors.append(ce)
@@ -3571,93 +3847,174 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
 
         # Validate header fields & order
         keys = task["header_keys"]
-        missing_core = [k for k in CORE_HEADER_FIELDS if k not in keys]
-        if missing_core:
-            errors.append(f"{rel}: missing mandatory header field(s): {', '.join(missing_core)}.")
+        is_micro = (task.get("folder_category") == "micro") or (task.get("category") == "micro")
+        is_full_format = ("handoff" in keys and "category" in keys and ("## Goal" in task.get("found_headings", []) or "## Goal" in task.get("sections_present", [])))
 
-        unknown_keys = [k for k in keys if k not in ALL_ALLOWED_HEADER_FIELDS]
-        if unknown_keys:
-            errors.append(f"{rel}: unknown header field(s): {', '.join(unknown_keys)}.")
+        if is_micro and not is_full_format:
+            missing_micro = [k for k in MICRO_MANDATORY_HEADER_FIELDS if k not in keys]
+            if missing_micro:
+                errors.append(f"{rel}: missing mandatory microtask header field(s): {', '.join(missing_micro)}.")
 
-        # Check exact ordering of CORE_HEADER_FIELDS and optional extension fields after handoff
-        present_core = [k for k in keys if k in CORE_HEADER_FIELDS]
-        expected_core = [k for k in CORE_HEADER_FIELDS if k in present_core]
-        if present_core != expected_core:
-            errors.append(
-                f"{rel}: core header fields out of order: got {present_core}, expected {list(CORE_HEADER_FIELDS)}."
-            )
+            unknown_keys = [k for k in keys if k not in MICRO_HEADER_FIELDS]
+            if unknown_keys:
+                errors.append(f"{rel}: unknown microtask header field(s): {', '.join(unknown_keys)}.")
 
-        if "handoff" in keys:
-            handoff_pos = keys.index("handoff")
-            for ext_k in keys:
-                if ext_k in OPTIONAL_EXTENSION_FIELDS and keys.index(ext_k) < handoff_pos:
-                    errors.append(f"{rel}: optional field '{ext_k}' must appear after 'handoff'.")
-
-        # Check empty values
-        for k in CORE_HEADER_FIELDS:
-            if k in task["headers"] and task["headers"][k] == "":
-                errors.append(f"{rel}: header field '{k}' cannot be empty (use '-' when empty).")
-
-        # Category match
-        if task["category"] and task["folder_category"] and task["category"] != task["folder_category"]:
-            errors.append(
-                f"{rel}: header category {task['category']!r} does not match folder {task['folder_category']!r}."
-            )
-
-        # Priority
-        if task["priority"] and task["priority"] not in PRIORITIES:
-            errors.append(f"{rel}: invalid priority {task['priority']!r} (expected one of {sorted(PRIORITIES)}).")
-
-        if not task["priority_reason"] or task["priority_reason"] == "-":
-            errors.append(f"{rel}: 'priority-reason' must be a non-empty explanation.")
-
-        # next-up
-        if task["next_up"] not in NEXT_UP_VALUES:
-            errors.append(f"{rel}: invalid next-up {task['next_up']!r} (expected 'yes' or 'no').")
-
-        # State
-        if not task["state"] or not is_valid_state(task["state"]):
-            errors.append(
-                f"{rel}: invalid state {task['state']!r} (expected one of {sorted(CANONICAL_STATES)})."
-            )
-
-        # Done placement consistency
-        cstate = task["canonical_state"]
-        if task["in_done"] and cstate not in TERMINAL_STATES:
-            errors.append(f"{rel}: task is under done/ but state is {task['state']!r} (not terminal).")
-        if not task["in_done"] and cstate in TERMINAL_STATES:
-            warnings.append(f"{rel}: task has terminal state {task['state']!r} but has not been moved to done/.")
-
-        # Optional extension fields
-        if task["profile"] and task["profile"] != "-" and task["profile"] not in PROFILES:
-            errors.append(f"{rel}: invalid profile {task['profile']!r} (expected one of {sorted(PROFILES)}).")
-        if (
-            task["verification_mode"]
-            and task["verification_mode"] != "-"
-            and task["verification_mode"] not in VERIFICATION_MODES
-        ):
-            errors.append(
-                f"{rel}: invalid verification-mode {task['verification_mode']!r} "
-                f"(expected one of {sorted(VERIFICATION_MODES)})."
-            )
-        if "size" in task.get("headers", {}) and task["headers"]["size"] and task["headers"]["size"] != "-":
-            s_val = task["headers"]["size"].strip().upper()
-            if s_val not in VALID_SIZES:
-                errors.append(f"{rel}: invalid size {task['headers']['size']!r} (expected one of {sorted(VALID_SIZES)}).")
-
-        # Legacy decider warning
-        raw_dec = task.get("decider", "").strip()
-        if raw_dec and raw_dec != "-":
-            if not re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", raw_dec):
-                warnings.append(
-                    f"{rel}: legacy free-text decider {raw_dec!r}; "
-                    f"consider converting with 'questions ask --from-task {tid}'."
+            present_micro = [k for k in keys if k in MICRO_HEADER_FIELDS]
+            expected_micro = [k for k in MICRO_HEADER_FIELDS if k in present_micro]
+            if present_micro != expected_micro:
+                errors.append(
+                    f"{rel}: microtask header fields out of order: got {present_micro}, expected {expected_micro}."
                 )
 
-        # Required sections
-        missing_sections = [s for s in REQUIRED_SECTIONS if s not in task["sections_present"]]
-        if missing_sections:
-            errors.append(f"{rel}: missing required Markdown section(s): {', '.join(missing_sections)}.")
+            # Check empty values
+            for k in MICRO_MANDATORY_HEADER_FIELDS:
+                if k in task["headers"] and task["headers"][k] == "":
+                    errors.append(f"{rel}: header field '{k}' cannot be empty (use '-' when empty).")
+
+            # Check kind
+            k_val = task["headers"].get("kind", "").strip().lower()
+            if not k_val or k_val == "-":
+                errors.append(f"{rel}: microtask missing required 'kind' header field.")
+            elif k_val not in VALID_KINDS:
+                errors.append(f"{rel}: invalid kind {task['headers']['kind']!r} (expected one of {sorted(VALID_KINDS)}).")
+
+            # Priority
+            if task["priority"] and task["priority"] not in PRIORITIES:
+                errors.append(f"{rel}: invalid priority {task['priority']!r} (expected one of {sorted(PRIORITIES)}).")
+
+            # State
+            if not task["state"] or not is_valid_state(task["state"]):
+                errors.append(
+                    f"{rel}: invalid state {task['state']!r} (expected one of {sorted(CANONICAL_STATES)})."
+                )
+
+            # Done placement consistency
+            cstate = task["canonical_state"]
+            if task["in_done"] and cstate not in TERMINAL_STATES:
+                errors.append(f"{rel}: task is under done/ but state is {task['state']!r} (not terminal).")
+            if not task["in_done"] and cstate in TERMINAL_STATES:
+                warnings.append(f"{rel}: task has terminal state {task['state']!r} but has not been moved to done/.")
+
+            # Size (optional)
+            if "size" in task.get("headers", {}) and task["headers"]["size"] and task["headers"]["size"] != "-":
+                s_val = task["headers"]["size"].strip().upper()
+                if s_val not in VALID_SIZES:
+                    errors.append(f"{rel}: invalid size {task['headers']['size']!r} (expected one of {sorted(VALID_SIZES)}).")
+
+            # Labels (optional)
+            raw_labels = task["headers"].get("labels", "").strip()
+            if raw_labels and raw_labels != "-":
+                for lbl in [l.strip() for l in raw_labels.split(",") if l.strip()]:
+                    if not LABEL_RE.match(lbl):
+                        errors.append(f"{rel}: invalid label {lbl!r} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$').")
+
+            # Required section: ## What
+            if "## What" not in task.get("found_headings", []):
+                errors.append(f"{rel}: missing required Markdown section '## What'.")
+
+        else:
+            missing_core = [k for k in CORE_HEADER_FIELDS if k not in keys]
+            if missing_core:
+                errors.append(f"{rel}: missing mandatory header field(s): {', '.join(missing_core)}.")
+
+            unknown_keys = [k for k in keys if k not in ALL_ALLOWED_HEADER_FIELDS]
+            if unknown_keys:
+                errors.append(f"{rel}: unknown header field(s): {', '.join(unknown_keys)}.")
+
+            # Check exact ordering of CORE_HEADER_FIELDS and optional extension fields after handoff
+            present_core = [k for k in keys if k in CORE_HEADER_FIELDS]
+            expected_core = [k for k in CORE_HEADER_FIELDS if k in present_core]
+            if present_core != expected_core:
+                errors.append(
+                    f"{rel}: core header fields out of order: got {present_core}, expected {list(CORE_HEADER_FIELDS)}."
+                )
+
+            if "handoff" in keys:
+                handoff_pos = keys.index("handoff")
+                for ext_k in keys:
+                    if ext_k in OPTIONAL_EXTENSION_FIELDS and keys.index(ext_k) < handoff_pos:
+                        errors.append(f"{rel}: optional field '{ext_k}' must appear after 'handoff'.")
+                present_ext = [k for k in keys if k in OPTIONAL_EXTENSION_FIELDS and keys.index(k) > handoff_pos]
+                expected_ext = [k for k in OPTIONAL_EXTENSION_FIELDS if k in present_ext]
+                if present_ext != expected_ext:
+                    errors.append(f"{rel}: optional header fields out of order: got {present_ext}, expected {expected_ext}.")
+
+            # Check empty values
+            for k in CORE_HEADER_FIELDS:
+                if k in task["headers"] and task["headers"][k] == "":
+                    errors.append(f"{rel}: header field '{k}' cannot be empty (use '-' when empty).")
+
+            # Category match
+            if task["category"] and task["folder_category"] and task["category"] != task["folder_category"]:
+                errors.append(
+                    f"{rel}: header category {task['category']!r} does not match folder {task['folder_category']!r}."
+                )
+
+            # Priority
+            if task["priority"] and task["priority"] not in PRIORITIES:
+                errors.append(f"{rel}: invalid priority {task['priority']!r} (expected one of {sorted(PRIORITIES)}).")
+
+            if not task["priority_reason"] or task["priority_reason"] == "-":
+                errors.append(f"{rel}: 'priority-reason' must be a non-empty explanation.")
+
+            # next-up
+            if task["next_up"] not in NEXT_UP_VALUES:
+                errors.append(f"{rel}: invalid next-up {task['next_up']!r} (expected 'yes' or 'no').")
+
+            # State
+            if not task["state"] or not is_valid_state(task["state"]):
+                errors.append(
+                    f"{rel}: invalid state {task['state']!r} (expected one of {sorted(CANONICAL_STATES)})."
+                )
+
+            # Done placement consistency
+            cstate = task["canonical_state"]
+            if task["in_done"] and cstate not in TERMINAL_STATES:
+                errors.append(f"{rel}: task is under done/ but state is {task['state']!r} (not terminal).")
+            if not task["in_done"] and cstate in TERMINAL_STATES:
+                warnings.append(f"{rel}: task has terminal state {task['state']!r} but has not been moved to done/.")
+
+            # Optional extension fields
+            if task["profile"] and task["profile"] != "-" and task["profile"] not in PROFILES:
+                errors.append(f"{rel}: invalid profile {task['profile']!r} (expected one of {sorted(PROFILES)}).")
+            if (
+                task["verification_mode"]
+                and task["verification_mode"] != "-"
+                and task["verification_mode"] not in VERIFICATION_MODES
+            ):
+                errors.append(
+                    f"{rel}: invalid verification-mode {task['verification_mode']!r} "
+                    f"(expected one of {sorted(VERIFICATION_MODES)})."
+                )
+            if "size" in task.get("headers", {}) and task["headers"]["size"] and task["headers"]["size"] != "-":
+                s_val = task["headers"]["size"].strip().upper()
+                if s_val not in VALID_SIZES:
+                    errors.append(f"{rel}: invalid size {task['headers']['size']!r} (expected one of {sorted(VALID_SIZES)}).")
+
+            if "kind" in task.get("headers", {}) and task["headers"]["kind"] and task["headers"]["kind"] != "-":
+                k_val = task["headers"]["kind"].strip().lower()
+                if k_val not in VALID_KINDS:
+                    errors.append(f"{rel}: invalid kind {task['headers']['kind']!r} (expected one of {sorted(VALID_KINDS)}).")
+
+            raw_labels = task["headers"].get("labels", "").strip()
+            if raw_labels and raw_labels != "-":
+                for lbl in [l.strip() for l in raw_labels.split(",") if l.strip()]:
+                    if not LABEL_RE.match(lbl):
+                        errors.append(f"{rel}: invalid label {lbl!r} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$').")
+
+            # Legacy decider warning
+            raw_dec = task.get("decider", "").strip()
+            if raw_dec and raw_dec != "-":
+                if not re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", raw_dec):
+                    warnings.append(
+                        f"{rel}: legacy free-text decider {raw_dec!r}; "
+                        f"consider converting with 'questions ask --from-task {tid}'."
+                    )
+
+            # Required sections
+            missing_sections = [s for s in REQUIRED_SECTIONS if s not in task["sections_present"]]
+            if missing_sections:
+                errors.append(f"{rel}: missing required Markdown section(s): {', '.join(missing_sections)}.")
 
     # Validate dependency DAG acyclicity & valid dependency references
     adj: dict[str, list[str]] = {}
@@ -5207,16 +5564,36 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 # Timeline / Dependency Graph (Spec 10)
 # ---------------------------------------------------------------------------
 
-def compute_tasks_graph(tasks_dir: pathlib.Path) -> dict[str, Any]:
+def compute_tasks_graph(
+    tasks_dir: pathlib.Path,
+    kind_filter: list[str] | set[str] | None = None,
+    label_filter: list[str] | set[str] | None = None,
+) -> dict[str, Any]:
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     tree = discover_task_tree(tasks_dir)
 
+    def _clean_filter_set(raw: Any) -> set[str] | None:
+        if not raw:
+            return None
+        if isinstance(raw, str):
+            raw = [raw]
+        res = set()
+        for item in raw:
+            for piece in str(item).split(","):
+                p = piece.strip().lower()
+                if p and p != "-":
+                    res.add(p)
+        return res if res else None
+
+    kind_set = _clean_filter_set(kind_filter)
+    label_set = _clean_filter_set(label_filter)
+
     # 1. Identify leaf/microtask nodes
-    leaf_nodes: list[TaskNode] = []
+    all_leaf_nodes: list[TaskNode] = []
     for nid in sorted(tree.keys(), key=_natural_sort_key):
         n = tree[nid]
         if n.is_leaf or n.node_type == "microtask":
-            leaf_nodes.append(n)
+            all_leaf_nodes.append(n)
 
     # 2. Map groups: initiative or category
     def _get_group(node: TaskNode) -> str:
@@ -5234,13 +5611,13 @@ def compute_tasks_graph(tasks_dir: pathlib.Path) -> dict[str, Any]:
             return node.id.split(".")[0]
         return "emergent"
 
-    # 3. Columns calculation for open leaves
-    open_leaves = [n for n in leaf_nodes if n.canonical_state not in TERMINAL_STATES]
-    open_set = {n.id for n in open_leaves}
+    # 3. Columns calculation across all open leaves
+    open_leaves_all = [n for n in all_leaf_nodes if n.canonical_state not in TERMINAL_STATES]
+    open_set_all = {n.id for n in open_leaves_all}
 
     blocked_by_map: dict[str, list[str]] = {}
-    for n in leaf_nodes:
-        if n.id in open_set:
+    for n in all_leaf_nodes:
+        if n.id in open_set_all:
             blocked = [
                 d for d in n.expanded_depends_on
                 if d in tree and tree[d].canonical_state not in TERMINAL_STATES
@@ -5262,21 +5639,40 @@ def compute_tasks_graph(tasks_dir: pathlib.Path) -> dict[str, Any]:
         if not deps:
             c = 0
         else:
-            c = 1 + max(_col_for(d) for d in deps if d in open_set)
+            c = 1 + max(_col_for(d) for d in deps if d in open_set_all)
         visiting.remove(nid)
         col_memo[nid] = c
         return c
 
-    columns: dict[str, int] = {}
-    for n in open_leaves:
-        columns[n.id] = _col_for(n.id)
+    columns_all: dict[str, int] = {}
+    for n in open_leaves_all:
+        columns_all[n.id] = _col_for(n.id)
+
+    # Filter leaf nodes if filters active
+    def _matches_filters(node: TaskNode) -> bool:
+        k = (node.kind or node.own_fields.get("kind") or "").strip().lower()
+        if kind_set is not None:
+            if not k or k not in kind_set:
+                return False
+        if label_set is not None:
+            node_labels = {l.strip().lower() for l in node.labels}
+            if not any(l in node_labels for l in label_set):
+                return False
+        return True
+
+    if kind_set is not None or label_set is not None:
+        leaf_nodes = [n for n in all_leaf_nodes if _matches_filters(n)]
+    else:
+        leaf_nodes = all_leaf_nodes
+
+    open_leaves = [n for n in leaf_nodes if n.canonical_state not in TERMINAL_STATES]
+    open_set = {n.id for n in open_leaves}
+    columns = {nid: columns_all[nid] for nid in open_set if nid in columns_all}
 
     # 4. Ready queue: column-0 tasks sorted by priority, then next-up: yes first, then id
-    # Only work that can be started: not-yet-started (or bounced back) leaves, not ones
-    # already in progress or delivered/verified awaiting a check.
     col0_nodes = [
         n for n in open_leaves
-        if columns.get(n.id) == 0 and n.canonical_state in ("open", "bounced")
+        if columns_all.get(n.id) == 0 and n.canonical_state in ("open", "bounced")
     ]
 
     def _ready_sort_key(n: TaskNode):
@@ -5292,7 +5688,7 @@ def compute_tasks_graph(tasks_dir: pathlib.Path) -> dict[str, Any]:
     dp_weight: dict[str, int] = {}
     dp_path: dict[str, list[str]] = {}
 
-    topo_order = sorted(open_leaves, key=lambda n: (columns[n.id], _natural_sort_key(n.id)))
+    topo_order = sorted(open_leaves, key=lambda n: (columns_all.get(n.id, 0), _natural_sort_key(n.id)))
 
     for n in topo_order:
         w = SIZE_WEIGHTS.get(n.size.upper(), 3)
@@ -5319,7 +5715,7 @@ def compute_tasks_graph(tasks_dir: pathlib.Path) -> dict[str, Any]:
             topo_order,
             key=lambda n: (
                 dp_weight.get(n.id, 0),
-                columns[n.id],
+                columns_all.get(n.id, 0),
                 -PRIORITY_SORT_KEY.get(n.priority, 2),
                 _natural_sort_key(n.id),
             ),
@@ -5328,11 +5724,12 @@ def compute_tasks_graph(tasks_dir: pathlib.Path) -> dict[str, Any]:
         heaviest_chain_weight = dp_weight.get(best_end.id, 0)
 
     # 6. Edges: dependencies between leaf nodes
+    leaf_ids = {n.id for n in leaf_nodes}
     edges: list[dict[str, str]] = []
     seen_edges: set[tuple[str, str]] = set()
     for n in leaf_nodes:
         for dep in n.expanded_depends_on:
-            if dep in tree and tree[dep].is_leaf:
+            if dep in tree and tree[dep].is_leaf and dep in leaf_ids:
                 edge_pair = (dep, n.id)
                 if edge_pair not in seen_edges:
                     seen_edges.add(edge_pair)
@@ -5390,11 +5787,12 @@ def compute_tasks_graph(tasks_dir: pathlib.Path) -> dict[str, Any]:
     nodes_list: list[dict[str, Any]] = []
     for n in leaf_nodes:
         is_open = n.id in open_set
-        col = columns.get(n.id) if is_open else None
+        col = columns_all.get(n.id) if is_open else None
         nodes_list.append({
             "id": n.id,
             "node_type": n.node_type,
-            "kind": n.own_fields.get("kind") or ("initiative_task" if "." in n.id and not n.id.startswith("T") else ("emergent" if n.id.startswith("T") else "initiative")),
+            "kind": n.kind or n.own_fields.get("kind") or ("initiative_task" if "." in n.id and not n.id.startswith("T") else ("emergent" if n.id.startswith("T") else "initiative")),
+            "labels": list(n.labels),
             "title": n.title,
             "group": _get_group(n),
             "state": n.state,
@@ -5524,7 +5922,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         node = tree[td["id"]]
         item = dict(td)
         item.update({
-            "kind": "initiative_task" if not td["id"].startswith("T") else "emergent_child",
+            "kind": node.kind or ("initiative_task" if not td["id"].startswith("T") else "emergent_child"),
             "category": category,
             "next_up": next_up,
             "depends_on": _format_depends_on(node.depends_on),
@@ -5590,6 +5988,61 @@ def cmd_list(args: argparse.Namespace) -> int:
             continue
         cat = tree[root].category if root in tree else ""
         all_tasks.append(_child_item(td, cat, "no", f"Work on task {nid} in {td['rel_path']}"))
+
+    # Apply --kind and --label filters
+    kind_arg = getattr(args, "kind", None)
+    label_arg = getattr(args, "label", None)
+    kind_set: set[str] | None = None
+    if kind_arg:
+        kind_set = set()
+        for k in kind_arg:
+            for piece in str(k).split(","):
+                p = piece.strip().lower()
+                if p and p != "-":
+                    kind_set.add(p)
+        if not kind_set:
+            kind_set = None
+
+    label_set: set[str] | None = None
+    if label_arg:
+        label_set = set()
+        for l in label_arg:
+            for piece in str(l).split(","):
+                p = piece.strip().lower()
+                if p and p != "-":
+                    label_set.add(p)
+        if not label_set:
+            label_set = None
+
+    def _task_matches(t: dict[str, Any]) -> bool:
+        node = tree.get(t.get("id", ""))
+        tk = (node.kind if node and node.kind else (t.get("headers", {}).get("kind") or t.get("kind") or "")).strip().lower()
+        if tk in ("emergent", "initiative", "initiative_task", "emergent_child"):
+            tk = (t.get("headers", {}).get("kind") or "").strip().lower()
+        if kind_set is not None:
+            if not tk or tk not in kind_set:
+                return False
+        if label_set is not None:
+            t_labels = list(node.labels) if node else t.get("labels", [])
+            if isinstance(t_labels, str):
+                t_labels = [x.strip().lower() for x in t_labels.split(",") if x.strip()]
+            else:
+                t_labels = [str(x).strip().lower() for x in t_labels if str(x).strip()]
+            if not any(x in label_set for x in t_labels):
+                return False
+        return True
+
+    if kind_set is not None or label_set is not None:
+        all_tasks = [t for t in all_tasks if _task_matches(t)]
+        emergent = [t for t in emergent if _task_matches(t)]
+        filtered_inits = []
+        for init in initiatives:
+            init_copy = dict(init)
+            matching_subtasks = [st for st in init.get("tasks", []) if _task_matches(st)]
+            if matching_subtasks or _task_matches(init):
+                init_copy["tasks"] = matching_subtasks
+                filtered_inits.append(init_copy)
+        initiatives = filtered_inits
 
     payload = {
         "ok": True,
@@ -5757,7 +6210,11 @@ def cmd_reopen(args: argparse.Namespace) -> int:
 
 def cmd_graph(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
-    graph_data = compute_tasks_graph(tasks_dir)
+    graph_data = compute_tasks_graph(
+        tasks_dir,
+        kind_filter=getattr(args, "kind", None),
+        label_filter=getattr(args, "label", None),
+    )
     if getattr(args, "mermaid", False):
         print(render_mermaid_graph(graph_data, tasks_dir=tasks_dir, include_closed=getattr(args, "all", False)), end="")
     elif getattr(args, "json", False):
@@ -5893,6 +6350,7 @@ def cmd_set_deps(args: argparse.Namespace) -> int:
 def cmd_set_labels(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     expect_task_hash = getattr(args, "expect_task_hash", None)
+    dry_run = getattr(args, "dry_run", False)
     res = set_labels(
         tasks_dir=tasks_dir,
         node_id=args.id,
@@ -5900,12 +6358,18 @@ def cmd_set_labels(args: argparse.Namespace) -> int:
         remove_labels=getattr(args, "remove", None),
         to_labels=getattr(args, "to", None),
         expect_task_hash=expect_task_hash,
+        dry_run=dry_run,
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
         if res.get("ok"):
-            print(f"[ok] updated labels for {args.id}: {res.get('labels')}")
+            if res.get("dry_run"):
+                print(f"[ok] dry-run: labels for {args.id} would become: {res.get('labels')}")
+                if res.get("diff"):
+                    print(res.get("diff"), end="")
+            else:
+                print(f"[ok] updated labels for {args.id}: {res.get('labels')}")
         else:
             print(f"[FAIL] {res.get('error', 'set-labels failed')}", file=sys.stderr)
     return 0 if res.get("ok") else 1
@@ -8593,6 +9057,244 @@ def tasks_new_from_note(
         return False, {"ok": False, "error": str(e)}
 
 
+def tasks_micro(
+    tasks_dir: pathlib.Path,
+    title: str,
+    kind: str = "chore",
+    priority: str = "P2",
+    paths: str = "-",
+    depends_on: str = "-",
+    labels: list[str] | str | None = None,
+    size: str | None = None,
+    executor: str = "kilo",
+    what: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if not title or not title.strip():
+        return False, {"ok": False, "error": "Title must be a non-empty string."}
+
+    kind_clean = (kind or "chore").strip().lower()
+    if kind_clean not in VALID_KINDS:
+        return False, {
+            "ok": False,
+            "error": f"Invalid kind {kind!r} (expected one of {sorted(VALID_KINDS)}).",
+        }
+
+    prio_clean = (priority or "P2").strip()
+    if prio_clean not in PRIORITIES:
+        return False, {
+            "ok": False,
+            "error": f"Invalid priority {priority!r} (expected one of {sorted(PRIORITIES)}).",
+        }
+
+    size_clean = (size.strip().upper() if size and size.strip() and size.strip() != "-" else None)
+    if size_clean is not None and size_clean not in VALID_SIZES:
+        return False, {
+            "ok": False,
+            "error": f"Invalid size {size!r} (expected one of {sorted(VALID_SIZES)}).",
+        }
+
+    clean_labels = _clean_labels_arg(labels)
+    for lbl in clean_labels:
+        if not LABEL_RE.match(lbl):
+            return False, {
+                "ok": False,
+                "error": f"Invalid label {lbl!r} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$').",
+            }
+
+    try:
+        with task_write_lock(tasks_dir):
+            micro_dir = tasks_dir / "micro"
+            micro_dir.mkdir(parents=True, exist_ok=True)
+            readme_path = micro_dir / "README.md"
+            if not readme_path.exists():
+                _atomic_write_text(readme_path, "# micro\n\nMicrotasks: small bugs, fixes, chores and docs touch-ups.\n")
+
+            tree = discover_task_tree(tasks_dir)
+            emergent = discover_emergent_tasks(tasks_dir)
+            all_tids: set[str] = set(tree.keys()) | {t["id"] for t in emergent}
+
+            existing_nums: list[int] = []
+            for tid in all_tids:
+                if tid.startswith("T"):
+                    m_num = re.match(r"^T(\d+)", tid)
+                    if m_num:
+                        existing_nums.append(int(m_num.group(1)))
+
+            next_num = max(existing_nums, default=0) + 1
+            slug = slugify(title.strip())
+
+            while True:
+                t_id = f"T{next_num:03d}"
+                filename = f"{t_id}-{slug}.md"
+                task_file_path = micro_dir / filename
+                try:
+                    fd = os.open(str(task_file_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                    break
+                except FileExistsError:
+                    next_num += 1
+
+            # Build microtask header in exact closed order:
+            # id, title, kind, priority, state, executor, paths, depends-on, size, labels
+            hdr_lines = [
+                f"# {t_id} {title.strip()}",
+                "",
+                f"- id: {t_id}",
+                f"- title: {title.strip()}",
+                f"- kind: {kind_clean}",
+                f"- priority: {prio_clean}",
+                f"- state: open",
+                f"- executor: {executor.strip() or 'kilo'}",
+                f"- paths: {paths.strip() or '-'}",
+                f"- depends-on: {depends_on.strip() or '-'}",
+            ]
+            if size_clean is not None:
+                hdr_lines.append(f"- size: {size_clean}")
+            if clean_labels:
+                hdr_lines.append(f"- labels: {', '.join(clean_labels)}")
+
+            what_body = (what.strip() if what and what.strip() else f"What to change for {title.strip()}.")
+            content = "\n".join(hdr_lines) + f"\n\n## What\n\n{what_body}\n"
+
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except BaseException:
+                if task_file_path.exists():
+                    task_file_path.unlink()
+                raise
+
+            rel_task = task_file_path.relative_to(tasks_dir).as_posix()
+            errors, warnings, _, _ = validate_tasks_tree(tasks_dir)
+            task_errors = [e for e in errors if rel_task in e]
+            if task_errors:
+                try:
+                    task_file_path.unlink()
+                except OSError:
+                    pass
+                return False, {"ok": False, "error": f"Created microtask failed validation: {'; '.join(task_errors)}"}
+
+            return True, {
+                "ok": True,
+                "id": t_id,
+                "title": title.strip(),
+                "kind": kind_clean,
+                "priority": prio_clean,
+                "size": size_clean or "XS",
+                "labels": clean_labels,
+                "rel_path": rel_task,
+                "file_path": str(task_file_path),
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def tasks_promote(
+    tasks_dir: pathlib.Path,
+    task_id: str,
+    category: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    target_category = (category.strip() if category and category.strip() else "maintenance")
+    if target_category in RESERVED_DIRS or target_category.startswith(".") or target_category.startswith("_") or target_category == "micro" or INITIATIVE_DIR_RE.match(target_category):
+        return False, {"ok": False, "error": f"Invalid target category {target_category!r}."}
+
+    try:
+        with task_write_lock(tasks_dir):
+            target_file: pathlib.Path | None = None
+            in_done = False
+            for parent_dir, is_d in ((tasks_dir / "micro", False), (tasks_dir / "done" / "micro", True)):
+                if parent_dir.is_dir():
+                    for f in parent_dir.glob("*.md"):
+                        if f.name.startswith(f"{task_id}-") and f.name != "README.md":
+                            target_file = f
+                            in_done = is_d
+                            break
+                if target_file:
+                    break
+
+            if not target_file:
+                return False, {"ok": False, "error": f"Microtask {task_id!r} not found in tasks/micro/."}
+
+            parsed = parse_emergent_task_file(target_file, tasks_dir, in_done=in_done)
+            headers = dict(parsed.get("headers", {}))
+            title = parsed["title"]
+            slug = slugify(title)
+
+            dest_dir = (tasks_dir / "done" / target_category) if in_done else (tasks_dir / target_category)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            readme_path = dest_dir / "README.md"
+            if not readme_path.exists():
+                _atomic_write_text(readme_path, f"# {target_category}\n\nTasks in category {target_category}.\n")
+
+            new_filename = f"{task_id}-{slug}.md"
+            dest_file = dest_dir / new_filename
+            handoff = f"Read tasks/{target_category}/{new_filename}, do the open steps, run the Verification, update the task and the registry."
+
+            hdr_lines = [
+                f"# {task_id} {title}",
+                "",
+                f"- id: {task_id}",
+                f"- title: {title}",
+                f"- category: {target_category}",
+                f"- priority: {headers.get('priority', 'P2')}",
+                f"- priority-reason: {headers.get('priority-reason') or f'Promoted from microtask {task_id}'}",
+                f"- next-up: {headers.get('next-up', 'no')}",
+                f"- state: {parsed['state'] or 'open'}",
+                f"- executor: {headers.get('executor', 'kilo')}",
+                f"- depends-on: {headers.get('depends-on', '-')}",
+                f"- decider: {headers.get('decider', '-')}",
+                f"- sources: {headers.get('sources') or f'Promoted from microtask {task_id}'}",
+                f"- paths: {headers.get('paths', '-')}",
+                f"- handoff: {handoff}",
+            ]
+            if "size" in headers and headers["size"] and headers["size"] != "-":
+                hdr_lines.append(f"- size: {headers['size']}")
+            if "kind" in headers and headers["kind"] and headers["kind"] != "-":
+                hdr_lines.append(f"- kind: {headers['kind']}")
+            if "labels" in headers and headers["labels"] and headers["labels"] != "-":
+                hdr_lines.append(f"- labels: {headers['labels']}")
+
+            body_content = parsed.get("what_body") or f"Goal for {title}."
+            full_content = "\n".join(hdr_lines) + f"\n\n## Goal\n\n{body_content}\n\n## Steps\n\n- [ ] Implement task steps.\n\n## Verification\n\n- [ ] Verify task implementation.\n"
+
+            _atomic_write_text(dest_file, full_content, encoding="utf-8")
+            old_rel = target_file.relative_to(tasks_dir).as_posix()
+            new_rel = dest_file.relative_to(tasks_dir).as_posix()
+            target_file.unlink()
+
+            errors, warnings, _, _ = validate_tasks_tree(tasks_dir)
+            task_errors = [e for e in errors if new_rel in e]
+            if task_errors:
+                dest_file.unlink()
+                return False, {"ok": False, "error": f"Promoted task failed validation: {'; '.join(task_errors)}"}
+
+            return True, {
+                "ok": True,
+                "id": task_id,
+                "category": target_category,
+                "old_rel_path": old_rel,
+                "rel_path": new_rel,
+                "file_path": str(dest_file),
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
 def tasks_attach(
     tasks_dir: pathlib.Path,
     target: str,
@@ -9071,6 +9773,99 @@ def cmd_tasks_new(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_tasks_micro(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = tasks_micro(
+        tasks_dir=tasks_dir,
+        title=args.title,
+        kind=getattr(args, "kind", "chore"),
+        priority=getattr(args, "priority", "P2"),
+        paths=getattr(args, "paths", "-"),
+        depends_on=getattr(args, "depends_on", "-"),
+        labels=getattr(args, "label", None),
+        size=getattr(args, "size", None),
+        executor=getattr(args, "executor", "kilo"),
+        what=getattr(args, "what", None),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Created microtask {res['id']}: {res['rel_path']}")
+        else:
+            print(f"[FAIL] {res.get('error', 'tasks micro failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_tasks_promote(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = tasks_promote(
+        tasks_dir=tasks_dir,
+        task_id=args.task_id,
+        category=getattr(args, "category", None),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Promoted {res['id']} to category '{res['category']}': {res['rel_path']}")
+        else:
+            print(f"[FAIL] {res.get('error', 'tasks promote failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_set_kind(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    expect_task_hash = getattr(args, "expect_task_hash", None)
+    dry_run = getattr(args, "dry_run", False)
+    res = set_kind(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        kind=args.kind,
+        dry_run=dry_run,
+        expect_task_hash=expect_task_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            if res.get("dry_run"):
+                print(f"[ok] dry-run: kind for {args.id} would become: {res.get('kind')}")
+                if res.get("diff"):
+                    print(res.get("diff"), end="")
+            else:
+                print(f"[ok] updated kind for {args.id}: {res.get('kind')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'set-kind failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_labels(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    tree = discover_task_tree(tasks_dir)
+    counts: dict[str, int] = {}
+    for node in tree.values():
+        for lbl in node.labels:
+            counts[lbl] = counts.get(lbl, 0) + 1
+    sorted_labels = [{"label": k, "count": v} for k, v in sorted(counts.items(), key=lambda x: (-x[1], x[0]))]
+    payload = {
+        "ok": True,
+        "tasks_dir": str(tasks_dir),
+        "labels": sorted_labels,
+        "counts": counts,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        if not counts:
+            print("No labels in use.")
+        else:
+            print(f"Labels in use: {len(counts)}")
+            for item in sorted_labels:
+                print(f"  {item['label']} ({item['count']})")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", action="store_true", help="Output structured JSON on stdout")
@@ -9078,6 +9873,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p_list = sub.add_parser("list", help="List all emergent tasks and initiatives in tasks/")
+    p_list.add_argument("--kind", action="append", default=None, help="Filter by kind (repeatable, OR within field)")
+    p_list.add_argument("--label", action="append", default=None, help="Filter by label (repeatable, OR within field)")
     p_list.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_list.set_defaults(func=cmd_list)
@@ -9342,6 +10139,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # tasks graph
     p_graph = sub.add_parser("graph", help="Compute abstract timeline dependency graph")
+    p_graph.add_argument("--kind", action="append", default=None, help="Filter by kind (repeatable, OR within field)")
+    p_graph.add_argument("--label", action="append", default=None, help="Filter by label (repeatable, OR within field)")
     p_graph.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_graph.add_argument("--mermaid", action="store_true", default=False, help="Output Mermaid flowchart")
     p_graph.add_argument("--all", action="store_true", default=False, help="Mermaid: include closed tasks too")
@@ -9382,16 +10181,56 @@ def build_parser() -> argparse.ArgumentParser:
     p_sd.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_sd.set_defaults(func=cmd_set_deps)
 
+    # tasks set-kind
+    p_sk = sub.add_parser("set-kind", help="Set kind for a task")
+    p_sk.add_argument("id", help="Node ID")
+    p_sk.add_argument("kind", help="Kind value (feature, bug, fix, chore, docs, investigation)")
+    p_sk.add_argument("--dry-run", action="store_true", help="Print diff without writing")
+    p_sk.add_argument("--expect-task-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task block/file hash")
+    p_sk.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_sk.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_sk.set_defaults(func=cmd_set_kind)
+
     # tasks set-labels
     p_sl = sub.add_parser("set-labels", help="Set labels for a task")
     p_sl.add_argument("id", help="Node ID")
     p_sl.add_argument("--add", nargs="*", default=None, help="Add labels")
     p_sl.add_argument("--remove", nargs="*", default=None, help="Remove labels")
     p_sl.add_argument("--to", nargs="*", default=None, help="Set exact labels")
-    p_sl.add_argument("--expect-task-hash", default=None, help="Expected task block hash")
+    p_sl.add_argument("--dry-run", action="store_true", help="Print diff without writing")
+    p_sl.add_argument("--expect-task-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task block/file hash")
     p_sl.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_sl.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_sl.set_defaults(func=cmd_set_labels)
+
+    # tasks labels
+    p_lbls = sub.add_parser("labels", help="List all labels in use with their counts")
+    p_lbls.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_lbls.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_lbls.set_defaults(func=cmd_labels)
+
+    # tasks micro
+    p_micro = sub.add_parser("micro", help="Create a lightweight microtask under tasks/micro/")
+    p_micro.add_argument("--title", required=True, help="Microtask title")
+    p_micro.add_argument("--kind", choices=sorted(VALID_KINDS), default="chore", help="Classification kind (default: chore)")
+    p_micro.add_argument("--priority", choices=sorted(PRIORITIES), default="P2", help="Priority (default: P2)")
+    p_micro.add_argument("--paths", default="-", help="Paths header value (default: -)")
+    p_micro.add_argument("--depends-on", default="-", help="Dependencies (default: -)")
+    p_micro.add_argument("--label", action="append", default=None, help="Label (repeatable or comma-separated)")
+    p_micro.add_argument("--size", choices=sorted(VALID_SIZES), default=None, help="Size (default: XS)")
+    p_micro.add_argument("--executor", default="kilo", help="Assigned executor (default: kilo)")
+    p_micro.add_argument("--what", default=None, help="What section body")
+    p_micro.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_micro.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_micro.set_defaults(func=cmd_tasks_micro)
+
+    # tasks promote
+    p_prom = sub.add_parser("promote", help="Promote a microtask into a full emergent task in a chosen category")
+    p_prom.add_argument("task_id", help="Microtask ID (e.g. T015)")
+    p_prom.add_argument("--category", default=None, help="Target category (default: maintenance)")
+    p_prom.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_prom.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_prom.set_defaults(func=cmd_tasks_promote)
 
     # use-cases (Spec 15)
     p_uc = sub.add_parser("use-cases", help="Manage use cases and recorded AI validations (Spec 15)")

@@ -193,8 +193,8 @@ path. A "next steps" paragraph in the chat is not a substitute.
     a folder task) and say "the registry" instead of hard-coding the index
     path, so it survives a move of the index.
 
-  **Optional Orchestration Extension Fields (placed immediately after `handoff`):**
-  A project using `ai-orchestration` may include these three optional fields
+  **Optional Orchestration Extension Fields (placed immediately after `handoff` in canonical order):**
+  A project using `ai-orchestration` may include these optional fields
   immediately after `handoff`:
   - `profile`: `deep-reasoning` | `orchestration` | `bulk-execution` | `exploration`
     (selects the model/variant from `orchestration.toml` for the chosen `executor`,
@@ -205,7 +205,18 @@ path. A "next steps" paragraph in the chat is not a substitute.
     framework; `cross-agent` uses a different framework/engine; `panel` runs
     multiple reviewers; `owner` requires human approval);
   - `verifier`: `-` | `<tool>:<profile>` | `blind-subagent:<profile>` | `owner` | `panel(...)`
-    (records who is assigned or performed the independent verification).
+    (records who is assigned or performed the independent verification);
+  - `size`: `XS` | `S` | `M` | `L` | `XL` (relative weight; defaults to M for full tasks, XS for microtasks);
+  - `kind`: `feature` | `bug` | `fix` | `chore` | `docs` | `investigation` (classification kind; required for microtasks, optional for full tasks);
+  - `labels`: free tags matching `[a-z0-9][a-z0-9-]*` (max 24 chars each, comma-separated, e.g. `ui, security`);
+  - `branch`, `worktree`, `run-id`, `use-cases`.
+
+  **Microtask Form (`tasks/micro/T###-<slug>.md`):**
+  A lightweight emergent task for very small work (bug, fix, chore, docs touch-up) that shares the same ID space (`T###`), state machine, and dependency semantics:
+  - **Header (closed set, exact order):** `id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`.
+  - **Body:** one required section, `## What`. No `Goal`/`Steps`/`Verification` skeleton needed.
+  - **Size:** defaults to `XS`.
+  - **Commands:** `ai-orch tasks micro --title ... [--kind ...] [--priority ...] [--label ...]` creates a microtask under the task-write lock; `ai-orch tasks promote <id> [--category <cat>]` promotes it to a full task in a chosen category.
 
   Other extra fields are not allowed in the header: put the information in the
   body. Then the required sections `## Goal`, `## Steps` and `## Verification`.
