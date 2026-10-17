@@ -66,7 +66,7 @@
 
 ### 09.7 - Engine: general attachments (text, PDF), `feature` kind, task attachments, convert copies attachments
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 09.1 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-17; claude; kilo, worktree task/09.7-attachments) · **Profile:** `deep-reasoning` · **Depends on:** 09.1 · **Repo:** `ai-orchestration/`
 - **Origin:** owner request (2026-10-17): "come faccio a aprire una nuova feature/bug … servirebbe gestione allegati".
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py`, the task-pipeline `SKILL.md` (document the attachments).
 - **Goal:** Spec §7, engine side: the type classes and checks, `inbox attach` accepting them, `kind: feature`, `tasks attach|detach`, `tasks new --from-note` copying attachments with rewritten references, `tasks list`/`show` JSON exposing `attachments: [{name, class, size}]` for tasks and notes.
