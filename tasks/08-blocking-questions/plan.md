@@ -34,7 +34,7 @@
 
 ### 08.2 - Skills: agents file blocking questions in the format
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 08.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 08.1 · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/SKILL.md`, `.../task-pipeline/references/template.md`, `plugins/architect-side/skills/orchestration-workflow/SKILL.template.md`, `plugins/executor-side/skills/executor-contract/SKILL.template.md`, the generated `SKILL.md` files (regenerate, never hand-edit), `index.json` files
 - **Goal:** Spec §4. Keep the skills protocol-agnostic: name `ai-orch questions ask` as the CLI of this kit (allowed), never a concrete MCP tool. Regenerate the generic skills.
 - **Verification:**
