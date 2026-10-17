@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Iterator
 
 try:
@@ -334,6 +335,232 @@ def _atomic_write_text(path: pathlib.Path, content: str, encoding: str = "utf-8"
 
 
 # ---------------------------------------------------------------------------
+# CommonMark Fence-Aware Markdown Scanner
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScannedLine:
+    line_number: int  # 1-indexed
+    text: str         # exact line content without trailing newline
+    is_fenced: bool   # True if inside code block OR on opening/closing fence line
+    fence_char: str = ""   # '`' or '~' or ""
+    is_fence_open: bool = False
+    is_fence_close: bool = False
+
+
+@dataclass
+class FencedCodeBlock:
+    fence_char: str       # '`' or '~'
+    fence_len: int        # >= 3
+    info: str             # info string (e.g. "text", "bash")
+    content: str          # interior lines joined with \n
+    lines: list[str]      # interior lines
+    start_line: int       # 1-indexed line number of opening fence
+    end_line: int | None  # 1-indexed line number of closing fence (None if unclosed at EOF)
+    closed: bool          # True if closed by closing fence, False if unclosed at EOF
+
+
+@dataclass
+class MarkdownSection:
+    heading: str          # e.g. "## Context", or "" for preamble
+    title: str            # e.g. "Context", or ""
+    level: int            # heading level (e.g. 2, or 0 for preamble)
+    lines: list[ScannedLine] # all lines belonging to this section
+    body: str             # text of section body (excluding the heading line itself)
+    code_blocks: list[FencedCodeBlock]
+
+
+_OPEN_FENCE_TICK_RE = re.compile(r"^[ ]{0,3}(`{3,})([^`]*)$")
+_OPEN_FENCE_TILDE_RE = re.compile(r"^[ ]{0,3}(~{3,})([^~]*)$")
+
+
+def scan_markdown_blocks(text: str) -> tuple[list[ScannedLine], list[FencedCodeBlock]]:
+    """Scan markdown text into ScannedLines and FencedCodeBlocks according to CommonMark rules:
+    - Opening fence: 0-3 leading spaces, N >= 3 backticks or tildes, optional info string.
+      Info string for backtick fence cannot contain backticks; for tilde fence cannot contain tildes.
+    - While inside a fence, code fences do not nest.
+    - Closing fence: 0-3 leading spaces, >= N of the SAME fence char, followed only by whitespace.
+    - Unclosed fence runs to EOF.
+    All lines inside code fences (and the fence boundaries themselves) have is_fenced=True.
+    """
+    raw_lines = text.splitlines()
+    scanned_lines: list[ScannedLine] = []
+    code_blocks: list[FencedCodeBlock] = []
+
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    current_block_info = ""
+    current_block_start = 0
+    current_block_lines: list[str] = []
+
+    for i, line in enumerate(raw_lines):
+        line_num = i + 1
+        if not in_fence:
+            m_tick = _OPEN_FENCE_TICK_RE.match(line)
+            m_tilde = _OPEN_FENCE_TILDE_RE.match(line)
+            if m_tick:
+                in_fence = True
+                fence_char = "`"
+                fence_len = len(m_tick.group(1))
+                current_block_info = m_tick.group(2).strip()
+                current_block_start = line_num
+                current_block_lines = []
+                scanned_lines.append(
+                    ScannedLine(
+                        line_number=line_num,
+                        text=line,
+                        is_fenced=True,
+                        fence_char="`",
+                        is_fence_open=True,
+                    )
+                )
+            elif m_tilde:
+                in_fence = True
+                fence_char = "~"
+                fence_len = len(m_tilde.group(1))
+                current_block_info = m_tilde.group(2).strip()
+                current_block_start = line_num
+                current_block_lines = []
+                scanned_lines.append(
+                    ScannedLine(
+                        line_number=line_num,
+                        text=line,
+                        is_fenced=True,
+                        fence_char="~",
+                        is_fence_open=True,
+                    )
+                )
+            else:
+                scanned_lines.append(
+                    ScannedLine(
+                        line_number=line_num,
+                        text=line,
+                        is_fenced=False,
+                    )
+                )
+        else:
+            is_close = False
+            close_pat = rf"^[ ]{{0,3}}{re.escape(fence_char)}{{{fence_len},}}[ \t]*$"
+            if re.match(close_pat, line):
+                is_close = True
+
+            if is_close:
+                in_fence = False
+                scanned_lines.append(
+                    ScannedLine(
+                        line_number=line_num,
+                        text=line,
+                        is_fenced=True,
+                        fence_char=fence_char,
+                        is_fence_close=True,
+                    )
+                )
+                code_blocks.append(
+                    FencedCodeBlock(
+                        fence_char=fence_char,
+                        fence_len=fence_len,
+                        info=current_block_info,
+                        content="\n".join(current_block_lines),
+                        lines=list(current_block_lines),
+                        start_line=current_block_start,
+                        end_line=line_num,
+                        closed=True,
+                    )
+                )
+                fence_char = ""
+                fence_len = 0
+                current_block_info = ""
+                current_block_lines = []
+            else:
+                scanned_lines.append(
+                    ScannedLine(
+                        line_number=line_num,
+                        text=line,
+                        is_fenced=True,
+                        fence_char=fence_char,
+                    )
+                )
+                current_block_lines.append(line)
+
+    if in_fence:
+        code_blocks.append(
+            FencedCodeBlock(
+                fence_char=fence_char,
+                fence_len=fence_len,
+                info=current_block_info,
+                content="\n".join(current_block_lines),
+                lines=list(current_block_lines),
+                start_line=current_block_start,
+                end_line=None,
+                closed=False,
+            )
+        )
+
+    return scanned_lines, code_blocks
+
+
+def parse_markdown_sections(text: str, heading_prefix: str = "## ") -> list[MarkdownSection]:
+    """Split markdown text into sections demarcated by headings matching heading_prefix outside code fences."""
+    scanned_lines, code_blocks = scan_markdown_blocks(text)
+    sections: list[MarkdownSection] = []
+
+    current_heading = ""
+    current_title = ""
+    current_lines: list[ScannedLine] = []
+
+    hashes = len(heading_prefix.strip())
+    prefix_clean = heading_prefix.strip()
+    heading_re = re.compile(rf"^{re.escape(prefix_clean)}\s+(.+?)\s*$")
+
+    def _flush_section() -> None:
+        if not current_lines and not current_heading:
+            return
+        if current_heading:
+            body_lines = [sl.text for sl in current_lines[1:]]
+        else:
+            body_lines = [sl.text for sl in current_lines]
+        body_text = "\n".join(body_lines)
+        if current_lines:
+            s_start = current_lines[0].line_number
+            s_end = current_lines[-1].line_number
+            sec_blocks = [cb for cb in code_blocks if s_start <= cb.start_line <= s_end]
+        else:
+            sec_blocks = []
+        sections.append(
+            MarkdownSection(
+                heading=current_heading,
+                title=current_title,
+                level=hashes if current_heading else 0,
+                lines=list(current_lines),
+                body=body_text,
+                code_blocks=sec_blocks,
+            )
+        )
+
+    for sline in scanned_lines:
+        m = heading_re.match(sline.text) if heading_re else None
+        if not sline.is_fenced and m:
+            _flush_section()
+            prefix_hashes = "#" * hashes
+            current_heading = f"{prefix_hashes} {m.group(1).strip()}"
+            current_title = m.group(1).strip()
+            current_lines = [sline]
+        else:
+            current_lines.append(sline)
+
+    _flush_section()
+    return sections
+
+
+def find_markdown_section(text: str, title: str, heading_prefix: str = "## ") -> MarkdownSection | None:
+    for sec in parse_markdown_sections(text, heading_prefix=heading_prefix):
+        if sec.title == title or sec.title.startswith(title):
+            return sec
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
 
@@ -343,19 +570,19 @@ def parse_emergent_task_file(
     in_done: bool = False,
 ) -> dict[str, Any]:
     text = file_path.read_text(encoding="utf-8")
-    lines = text.splitlines()
+    scanned_lines, _ = scan_markdown_blocks(text)
 
     rel_path = file_path.relative_to(tasks_dir).as_posix()
     is_folder = file_path.name == "README.md"
     task_root = file_path.parent if is_folder else file_path
 
-    # Locate H1
+    # Locate H1 outside fences
     h1_idx: int | None = None
     h1_text = ""
-    for i, line in enumerate(lines):
-        if line.startswith("# "):
-            h1_idx = i
-            h1_text = line[2:].strip()
+    for idx, sline in enumerate(scanned_lines):
+        if not sline.is_fenced and sline.text.startswith("# "):
+            h1_idx = idx
+            h1_text = sline.text[2:].strip()
             break
 
     header_keys: list[str] = []
@@ -365,11 +592,14 @@ def parse_emergent_task_file(
 
     if h1_idx is not None:
         idx = h1_idx + 1
-        while idx < len(lines) and not lines[idx].strip():
+        while idx < len(scanned_lines) and not scanned_lines[idx].text.strip():
             idx += 1
         header_start = idx
-        while idx < len(lines):
-            m = HEADER_LINE_RE.match(lines[idx])
+        while idx < len(scanned_lines):
+            sline = scanned_lines[idx]
+            if sline.is_fenced:
+                break
+            m = HEADER_LINE_RE.match(sline.text)
             if not m:
                 break
             k, v = m.group(1), m.group(2).strip()
@@ -382,12 +612,18 @@ def parse_emergent_task_file(
     verification_pending: str | None = None
     if header_end is not None:
         scan_idx = header_end
-        while scan_idx < len(lines) and not lines[scan_idx].strip():
+        while scan_idx < len(scanned_lines) and not scanned_lines[scan_idx].text.strip():
             scan_idx += 1
-        if scan_idx < len(lines) and lines[scan_idx].strip().lower().startswith("verification pending:"):
-            verification_pending = lines[scan_idx].strip().split(":", 1)[1].strip()
+        if (
+            scan_idx < len(scanned_lines)
+            and not scanned_lines[scan_idx].is_fenced
+            and scanned_lines[scan_idx].text.strip().lower().startswith("verification pending:")
+        ):
+            verification_pending = scanned_lines[scan_idx].text.strip().split(":", 1)[1].strip()
 
-    sections_present = [sec for sec in REQUIRED_SECTIONS if re.search(rf"^{re.escape(sec)}\b", text, re.MULTILINE)]
+    sections = parse_markdown_sections(text, heading_prefix="## ")
+    found_headings = {sec.heading for sec in sections if sec.heading}
+    sections_present = [sec for sec in REQUIRED_SECTIONS if sec in found_headings]
 
     # Determine expected category from directory layout
     parts = file_path.relative_to(tasks_dir).parts
@@ -462,12 +698,26 @@ def parse_blocks_header(raw_blocks: str) -> list[tuple[str, str | None]]:
     return items
 
 
+def normalize_fenced_text(text: str) -> str:
+    """Normalize text for storing inside a fenced code block per spec:
+    The stored text is the given text with at most a single trailing newline
+    (\\r\\n or \\n) normalized away. All other characters (leading spaces,
+    internal newlines, trailing spaces on lines) are preserved byte-identical.
+    """
+    if text.endswith("\r\n"):
+        return text[:-2]
+    if text.endswith("\n"):
+        return text[:-1]
+    return text
+
+
 def _format_fenced_text(text: str) -> str:
-    runs = re.findall(r"`+", text)
+    norm_text = normalize_fenced_text(text)
+    runs = re.findall(r"`+", norm_text)
     max_len = max((len(r) for r in runs), default=0)
     fence_len = max(3, max_len + 1)
     fence = "`" * fence_len
-    return f"{fence}text\n{text}\n{fence}"
+    return f"{fence}text\n{norm_text}\n{fence}"
 
 
 def format_question_content(
@@ -489,6 +739,7 @@ def format_question_content(
     answered: str = "-",
     text: str | None = None,
 ) -> str:
+    norm_context = normalize_fenced_text(context.rstrip("\r\n"))
     lines = [
         f"# {id} {title}",
         "",
@@ -505,7 +756,7 @@ def format_question_content(
         "",
         "## Context",
         "",
-        context.strip(),
+        norm_context,
         "",
         "## Options",
         "",
@@ -525,10 +776,10 @@ def format_question_content(
         f"- answered-by: {answered_by}",
         f"- answered: {answered}",
     ])
-    if text and text.strip():
+    if text is not None and text != "":
         lines.extend([
             "",
-            _format_fenced_text(text.strip()),
+            _format_fenced_text(text),
         ])
     lines.append("")
     return "\n".join(lines)
@@ -539,16 +790,16 @@ def parse_question_file(
     tasks_dir: pathlib.Path,
 ) -> dict[str, Any]:
     text = file_path.read_text(encoding="utf-8")
-    lines = text.splitlines()
+    scanned_lines, _ = scan_markdown_blocks(text)
 
     rel_path = file_path.relative_to(tasks_dir).as_posix()
 
     h1_idx: int | None = None
     h1_text = ""
-    for i, line in enumerate(lines):
-        if line.startswith("# "):
-            h1_idx = i
-            h1_text = line[2:].strip()
+    for idx, sline in enumerate(scanned_lines):
+        if not sline.is_fenced and sline.text.startswith("# "):
+            h1_idx = idx
+            h1_text = sline.text[2:].strip()
             break
 
     title = h1_text
@@ -563,10 +814,13 @@ def parse_question_file(
 
     if h1_idx is not None:
         idx = h1_idx + 1
-        while idx < len(lines) and not lines[idx].strip():
+        while idx < len(scanned_lines) and not scanned_lines[idx].text.strip():
             idx += 1
-        while idx < len(lines):
-            m = HEADER_LINE_RE.match(lines[idx])
+        while idx < len(scanned_lines):
+            sline = scanned_lines[idx]
+            if sline.is_fenced:
+                break
+            m = HEADER_LINE_RE.match(sline.text)
             if not m:
                 break
             k, v = m.group(1), m.group(2).strip()
@@ -575,58 +829,51 @@ def parse_question_file(
             idx += 1
         header_end = idx
 
-    sections_present: list[str] = []
-    for m in re.finditer(r"^##\s+(.+?)\s*$", text, re.MULTILINE):
-        sec_name = f"## {m.group(1).strip()}"
-        sections_present.append(sec_name)
+    sections = parse_markdown_sections(text, heading_prefix="## ")
+    sections_present = [sec.heading for sec in sections if sec.heading]
+    sec_map = {sec.heading: sec for sec in sections if sec.heading}
 
-    context_text = ""
-    options_text = ""
-    answer_text = ""
-
-    def _extract_section_body(name: str) -> str:
-        pattern = re.compile(rf"^##\s+{re.escape(name)}\s*\n(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
-        sm = pattern.search(text)
-        return sm.group(1).strip() if sm else ""
-
-    if "## Context" in sections_present:
-        context_text = _extract_section_body("Context")
-    if "## Options" in sections_present:
-        options_text = _extract_section_body("Options")
-    if "## Answer" in sections_present:
-        answer_text = _extract_section_body("Answer")
+    context_text = sec_map["## Context"].body.strip() if "## Context" in sec_map else ""
+    options_text = sec_map["## Options"].body.strip() if "## Options" in sec_map else ""
+    answer_text = sec_map["## Answer"].body.strip() if "## Answer" in sec_map else ""
 
     options: list[dict[str, str | None]] = []
-    for line in options_text.splitlines():
-        line_s = line.strip()
-        if not line_s.startswith("-"):
-            continue
-        om = OPTION_LINE_RE.match(line_s)
-        if om:
-            lbl = om.group(1).strip()
-            opt_title = om.group(2).strip()
-            conseq = om.group(3).strip() if om.group(3) else None
-            options.append({"label": lbl, "title": opt_title, "consequence": conseq, "raw": line_s})
-        else:
-            options.append({"label": "", "title": line_s, "consequence": None, "raw": line_s})
+    if "## Options" in sec_map:
+        for sline in sec_map["## Options"].lines[1:]:
+            if sline.is_fenced:
+                continue
+            line_s = sline.text.strip()
+            if not line_s.startswith("-"):
+                continue
+            om = OPTION_LINE_RE.match(line_s)
+            if om:
+                lbl = om.group(1).strip()
+                opt_title = om.group(2).strip()
+                conseq = om.group(3).strip() if om.group(3) else None
+                options.append({"label": lbl, "title": opt_title, "consequence": conseq, "raw": line_s})
+            else:
+                options.append({"label": "", "title": line_s, "consequence": None, "raw": line_s})
 
     choice = "-"
     answered_by = "-"
     answered = "-"
     fenced_text: str | None = None
 
-    for line in answer_text.splitlines():
-        line_s = line.strip()
-        if line_s.startswith("- choice:"):
-            choice = line_s.split(":", 1)[1].strip()
-        elif line_s.startswith("- answered-by:"):
-            answered_by = line_s.split(":", 1)[1].strip()
-        elif line_s.startswith("- answered:"):
-            answered = line_s.split(":", 1)[1].strip()
+    if "## Answer" in sec_map:
+        ans_sec = sec_map["## Answer"]
+        for sline in ans_sec.lines[1:]:
+            if sline.is_fenced:
+                continue
+            line_s = sline.text.strip()
+            if line_s.startswith("- choice:"):
+                choice = line_s.split(":", 1)[1].strip()
+            elif line_s.startswith("- answered-by:"):
+                answered_by = line_s.split(":", 1)[1].strip()
+            elif line_s.startswith("- answered:"):
+                answered = line_s.split(":", 1)[1].strip()
 
-    fence_m = re.search(r"(?ms)^(`{3,})text\r?\n(.*?)\r?\n\1[ \t]*$", answer_text)
-    if fence_m:
-        fenced_text = fence_m.group(2)
+        if ans_sec.code_blocks:
+            fenced_text = ans_sec.code_blocks[0].content
 
     blocks_raw = headers.get("blocks", "")
     blocks_parsed = parse_blocks_header(blocks_raw)
@@ -801,8 +1048,9 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
             if not plan_path.is_file():
                 continue
             text = plan_path.read_text(encoding="utf-8")
-            h1_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
-            title = h1_match.group(1).strip() if h1_match else entry.name
+            scanned_lines, _ = scan_markdown_blocks(text)
+            h1_match = next((sline.text[2:].strip() for sline in scanned_lines if not sline.is_fenced and sline.text.startswith("# ")), None)
+            title = h1_match if h1_match else entry.name
 
             # Determine initiative status
             if location in ("merged", "done") or (entry / "summary.md").is_file():
@@ -810,9 +1058,13 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
             elif num in index_statuses:
                 init_status = index_statuses[num]
             else:
-                status_m = re.search(
-                    r"^\s*>\s*\*\*Status:\*\*\s*([^\n·]+)", text, re.MULTILINE | re.IGNORECASE
-                )
+                status_m = None
+                for sline in scanned_lines:
+                    if not sline.is_fenced:
+                        sm = re.search(r"^\s*>\s*\*\*Status:\*\*\s*([^\n·]+)", sline.text, re.IGNORECASE)
+                        if sm:
+                            status_m = sm
+                            break
                 if status_m:
                     st_raw = status_m.group(1).lower()
                     if "not merged" in st_raw or "in progress" in st_raw or "progress" in st_raw:
@@ -824,35 +1076,38 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
                 else:
                     init_status = "open"
 
-            inline_tasks = [
-                {"id": tm.group(1), "title": tm.group(2).strip(), "state": init_status}
-                for tm in INLINE_TASK_HEADING_RE.finditer(text)
-            ]
+            inline_tasks = []
+            for sline in scanned_lines:
+                if not sline.is_fenced:
+                    tm = INLINE_TASK_HEADING_RE.match(sline.text)
+                    if tm:
+                        inline_tasks.append({"id": tm.group(1), "title": tm.group(2).strip(), "state": init_status})
 
             # Also check table tasks in plan.md (e.g. | **T1** | **Title**: desc |)
             table_tasks = []
-            for line in text.splitlines():
-                tm = re.match(r"^\|\s*\*\*(T\w+|\d+\.\d+)\*\*\s*\|\s*(.+?)\s*\|", line)
-                if tm:
-                    sub_id, raw_content = tm.groups()
-                    title_m = re.match(r"^\*\*([^*]+)\*\*[:\s]*(.*)$", raw_content.strip())
-                    sub_title = title_m.group(1).strip() if title_m else raw_content.strip()
-                    # Check if log mentions this task as verified
-                    sub_state = init_status
-                    if init_status == "in progress":
-                        if re.search(rf"\b{re.escape(sub_id)}\b.*?\bverified\b", text, re.IGNORECASE):
-                            sub_state = "verified"
-                        elif re.search(rf"\b{re.escape(sub_id)}\b.*?\bdelivered\b", text, re.IGNORECASE):
-                            sub_state = "delivered"
-                        elif re.search(rf"\b{re.escape(sub_id)}\b.*?\bqueued\b", text, re.IGNORECASE):
-                            sub_state = "open"
-                    table_tasks.append(
-                        {
-                            "id": sub_id,
-                            "title": sub_title,
-                            "state": sub_state,
-                        }
-                    )
+            for sline in scanned_lines:
+                if not sline.is_fenced:
+                    tm = re.match(r"^\|\s*\*\*(T\w+|\d+\.\d+)\*\*\s*\|\s*(.+?)\s*\|", sline.text)
+                    if tm:
+                        sub_id, raw_content = tm.groups()
+                        title_m = re.match(r"^\*\*([^*]+)\*\*[:\s]*(.*)$", raw_content.strip())
+                        sub_title = title_m.group(1).strip() if title_m else raw_content.strip()
+                        # Check if log mentions this task as verified
+                        sub_state = init_status
+                        if init_status == "in progress":
+                            if re.search(rf"\b{re.escape(sub_id)}\b.*?\bverified\b", text, re.IGNORECASE):
+                                sub_state = "verified"
+                            elif re.search(rf"\b{re.escape(sub_id)}\b.*?\bdelivered\b", text, re.IGNORECASE):
+                                sub_state = "delivered"
+                            elif re.search(rf"\b{re.escape(sub_id)}\b.*?\bqueued\b", text, re.IGNORECASE):
+                                sub_state = "open"
+                        table_tasks.append(
+                            {
+                                "id": sub_id,
+                                "title": sub_title,
+                                "state": sub_state,
+                            }
+                        )
 
             # Also check expanded NN.T-*.md files
             expanded_tasks = []
@@ -1381,12 +1636,21 @@ def _append_progress_log(
 
     if progress_path and progress_path.exists():
         content = progress_path.read_text(encoding="utf-8")
-        if "## Log" in content:
-            parts = content.split("## Log", 1)
-            after_heading = parts[1].splitlines()
-            heading_suffix = after_heading[0] if after_heading else ""
-            rest = "\n".join(after_heading[1:]).lstrip("\n")
-            new_content = f"{parts[0]}## Log{heading_suffix}\n\n{entry_line}\n"
+        scanned_lines, _ = scan_markdown_blocks(content)
+        log_line_idx: int | None = None
+        for idx, sline in enumerate(scanned_lines):
+            if not sline.is_fenced and sline.text.startswith("## Log"):
+                log_line_idx = idx
+                break
+        if log_line_idx is not None:
+            all_lines = content.splitlines()
+            log_line = all_lines[log_line_idx]
+            heading_suffix = log_line[6:]
+            before_lines = all_lines[:log_line_idx]
+            after_lines = all_lines[log_line_idx + 1:]
+            rest = "\n".join(after_lines).lstrip("\n")
+            prefix = ("\n".join(before_lines) + "\n") if before_lines else ""
+            new_content = f"{prefix}## Log{heading_suffix}\n\n{entry_line}\n"
             if rest:
                 new_content += f"{rest.rstrip()}\n"
             _atomic_write_text(progress_path, new_content, encoding="utf-8")
@@ -1813,34 +2077,39 @@ def _read_category_blurb(tasks_dir: pathlib.Path, category: str, existing_index:
         om = re.search(r"^owner-session:\s*(.+)$", rtext, re.MULTILINE)
         if om:
             owner = om.group(1).strip()
-        gm = re.search(r"^##\s+Goal and scope\s*\n+([^\n]+)", rtext, re.MULTILINE)
-        if gm:
-            first_sentence = gm.group(1).strip().split(". ")[0].rstrip(".")
+        sec = find_markdown_section(rtext, "Goal and scope")
+        if sec and sec.body.strip():
+            first_line = sec.body.strip().splitlines()[0]
+            first_sentence = first_line.strip().split(". ")[0].rstrip(".")
             goal_line = f"{first_sentence}."
     return f"{goal_line} Owner session: {owner} ([README]({category}/README.md))."
 
 
 def _extract_existing_category_order(existing_index: str) -> list[str]:
     cats: list[str] = []
-    sec_text = existing_index
-    m = re.search(r"^##\s+Tasks by category\b(.*?)(?=^## |\Z)", existing_index, re.MULTILINE | re.DOTALL)
-    if m:
-        sec_text = m.group(1)
-    for cm in re.finditer(r"^###\s+([A-Za-z0-9_-]+)\s*$", sec_text, re.MULTILINE):
-        cname = cm.group(1)
-        if cname not in cats:
-            cats.append(cname)
+    sec = find_markdown_section(existing_index, "Tasks by category")
+    if sec:
+        for sline in sec.lines[1:]:
+            if sline.is_fenced:
+                continue
+            cm = re.match(r"^###\s+([A-Za-z0-9_-]+)\s*$", sline.text)
+            if cm:
+                cname = cm.group(1)
+                if cname not in cats:
+                    cats.append(cname)
     return cats
 
 
 def _extract_existing_initiative_next_up_rows(existing_index: str) -> list[str]:
     """Preserve initiative task rows (e.g. `01.1`, `03.1`) already listed in `## Next up`."""
     rows: list[str] = []
-    m = re.search(r"^## Next up\b(.*?)(?=^## |\Z)", existing_index, re.MULTILINE | re.DOTALL)
-    if not m:
+    sec = find_markdown_section(existing_index, "Next up")
+    if not sec:
         return rows
-    for line in m.group(1).splitlines():
-        line_s = line.strip()
+    for sline in sec.lines[1:]:
+        if sline.is_fenced:
+            continue
+        line_s = sline.text.strip()
         if not line_s.startswith("|"):
             continue
         cells = [c.strip() for c in line_s.strip("|").split("|")]
@@ -3078,7 +3347,7 @@ def answer_question(
                     choice=choice,
                     answered_by=by or "owner",
                     answered=today,
-                    text=text.strip() if text else None,
+                    text=text if (text is not None and text != "") else None,
                 )
                 _atomic_write_text(q_file, new_q_content)
 
@@ -3155,7 +3424,7 @@ def _withdraw_question_file_only(
         choice="withdrawn",
         answered_by=by or "owner",
         answered=today,
-        text=reason.strip(),
+        text=reason if (reason is not None and reason != "") else None,
     )
     _atomic_write_text(q_file, new_q_content)
 

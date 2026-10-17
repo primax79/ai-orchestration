@@ -1877,3 +1877,518 @@ def test_decisions_region_sync_index(tmp_path: pathlib.Path) -> None:
     # Check sync-index --check passes
     res_chk = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--check", "--json")
     assert res_chk.returncode == 0
+
+
+def test_architect_live_test_case_cli(tmp_path: pathlib.Path) -> None:
+    """Architect live test on a disposable tree:
+    questions answer Q002 --choice A --text $'Use A.\nBut: keep | pipes and ```backticks``` intact.\n## not a heading'
+    1. tasks validate then PASSES (fenced code blocks are opaque, not parsed as sections).
+    2. questions show Q002 --json returns the exact original text (round-trip true).
+    3. trailing newline semantics: stored text is the given text with a single trailing newline normalized away.
+    """
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T000-dummy.md",
+        task_id="T000",
+        category="features",
+        state="waiting",
+        decider="Q001",
+    )
+    _write_sample_question(
+        tasks_dir / "questions" / "Q001-dummy.md",
+        qid="Q001",
+        blocks="T000 (waiting)",
+    )
+
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+
+    # Ask Q002
+    ok_ask, res_ask = te.ask_question(
+        tasks_dir,
+        question="Which approach should we use?",
+        context="Context for Q002.",
+        options=[("A", "Approach A", "Fast"), ("B", "Approach B", "Safe")],
+        blocks="T001",
+    )
+    assert ok_ask is True
+    assert res_ask["id"] == "Q002"
+
+    raw_architect_input = (
+        "Use A.\n"
+        "But: keep | pipes and ```backticks``` intact.\n"
+        "## not a heading"
+    )
+
+    # 1. Answer via CLI
+    res_ans = run_cli(
+        "questions", "answer", "Q002",
+        "--choice", "A",
+        "--text", raw_architect_input,
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_ans.returncode == 0
+    ans_payload = json.loads(res_ans.stdout)
+    assert ans_payload["ok"] is True
+
+    # 2. tasks validate passes with 0 errors
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+    val_payload = json.loads(res_val.stdout)
+    assert val_payload["ok"] is True
+    assert val_payload["errors"] == []
+
+    # 3. questions show Q002 --json returns exact original text
+    res_show = run_cli(
+        "questions", "show", "Q002",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_show.returncode == 0
+    show_payload = json.loads(res_show.stdout)
+    assert show_payload["ok"] is True
+    returned_text = show_payload["question"]["answer"]["text"]
+    assert returned_text == raw_architect_input
+
+    # 4. Trailing newline semantics: single trailing newline normalized away
+    _write_sample_task(
+        tasks_dir / "features" / "T002-task.md",
+        task_id="T002",
+        category="features",
+        state="in progress",
+    )
+    ok_ask3, res_ask3 = te.ask_question(
+        tasks_dir,
+        question="Question with trailing newline?",
+        context="Context for Q003.",
+        options=[("A", "Option A", "Desc A"), ("B", "Option B", "Desc B")],
+        blocks="T002",
+    )
+    assert ok_ask3 is True
+    qid3 = res_ask3["id"]
+
+    input_with_trailing_nl = "Answer text with single trailing newline.\n"
+    res_ans3 = run_cli(
+        "questions", "answer", qid3,
+        "--choice", "A",
+        "--text", input_with_trailing_nl,
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_ans3.returncode == 0
+
+    res_val3 = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val3.returncode == 0
+
+    res_show3 = run_cli(
+        "questions", "show", qid3,
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_show3.returncode == 0
+    show_payload3 = json.loads(res_show3.stdout)
+    # Stored text is the given text with a single trailing newline normalized away
+    assert show_payload3["question"]["answer"]["text"] == te.normalize_fenced_text(input_with_trailing_nl)
+    assert show_payload3["question"]["answer"]["text"] == "Answer text with single trailing newline."
+
+
+def test_task_readme_with_fenced_code_containing_heading_validates(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    folder_task_dir = tasks_dir / "features" / "T001-deploy"
+    folder_task_dir.mkdir(parents=True)
+    readme_path = folder_task_dir / "README.md"
+    readme_content = """# T001 Deploy step
+
+- id: T001
+- title: Deploy step
+- category: features
+- priority: P1
+- priority-reason: core feature
+- next-up: no
+- state: open
+- executor: kilo
+- depends-on: -
+- decider: -
+- sources: -
+- paths: -
+- handoff: test
+
+## Goal
+
+Deploy correctly.
+
+## Steps
+
+Run:
+```bash
+## not a section
+echo "deploying"
+```
+
+## Verification
+
+Test output.
+"""
+    readme_path.write_text(readme_content, encoding="utf-8")
+
+    t = te.parse_emergent_task_file(readme_path, tasks_dir)
+    assert t["sections_present"] == ["## Goal", "## Steps", "## Verification"]
+
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+    val_payload = json.loads(res_val.stdout)
+    assert val_payload["ok"] is True
+    assert val_payload["errors"] == []
+
+    # If ## Verification is missing outside the code block (only inside ```bash), validation must fail
+    broken_readme = """# T001 Deploy step
+
+- id: T001
+- title: Deploy step
+- category: features
+- priority: P1
+- priority-reason: core feature
+- next-up: no
+- state: open
+- executor: kilo
+- depends-on: -
+- decider: -
+- sources: -
+- paths: -
+- handoff: test
+
+## Goal
+
+Deploy correctly.
+
+## Steps
+
+Run:
+```bash
+## Verification
+echo "fake verification inside code block"
+```
+"""
+    readme_path.write_text(broken_readme, encoding="utf-8")
+    t_broken = te.parse_emergent_task_file(readme_path, tasks_dir)
+    assert t_broken["sections_present"] == ["## Goal", "## Steps"]
+
+    res_val2 = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val2.returncode == 1
+    val_payload2 = json.loads(res_val2.stdout)
+    assert val_payload2["ok"] is False
+    assert any("missing required Markdown section(s): ## Verification" in e for e in val_payload2["errors"])
+
+
+def test_tilde_fences_parsing_and_validation(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    folder_task_dir = tasks_dir / "features" / "T001-tilde"
+    folder_task_dir.mkdir(parents=True)
+    readme_path = folder_task_dir / "README.md"
+    readme_content = """# T001 Tilde task
+
+- id: T001
+- title: Tilde task
+- category: features
+- priority: P2
+- priority-reason: testing
+- next-up: no
+- state: waiting
+- executor: kilo
+- depends-on: -
+- decider: Q001
+- sources: -
+- paths: -
+- handoff: test
+
+## Goal
+
+Goal with tildes.
+
+## Steps
+
+~~~bash
+## not a section
+echo 1
+~~~
+
+## Verification
+
+Verified.
+"""
+    readme_path.write_text(readme_content, encoding="utf-8")
+
+    # Write a question with tilde fence in answer
+    q_file = tasks_dir / "questions" / "Q001-tilde-question.md"
+    q_file.parent.mkdir(parents=True, exist_ok=True)
+    q_content = """# Q001 Tilde question
+
+- id: Q001
+- question: Should we support tilde fences?
+- status: answered
+- blocks: T001 (waiting)
+- decider: owner
+- asked-by: kilo
+- asked: 2026-10-17
+- origin-run: -
+- open-answer: yes
+- recommended: -
+
+## Context
+
+Testing tilde fences.
+
+## Options
+
+- **A** — Yes: support tildes
+- **B** — No: only backticks
+
+## Answer
+
+- choice: A
+- answered-by: owner
+- answered: 2026-10-17
+
+~~~text
+Use A.
+Inside tildes: ```nested backticks```
+## not a heading
+~~~
+"""
+    q_file.write_text(q_content, encoding="utf-8")
+
+    q_data = te.parse_question_file(q_file, tasks_dir)
+    assert q_data["sections_present"] == ["## Context", "## Options", "## Answer"]
+    assert q_data["answer"]["choice"] == "A"
+    assert q_data["answer"]["text"] == "Use A.\nInside tildes: ```nested backticks```\n## not a heading"
+
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+    assert json.loads(res_val.stdout)["ok"] is True
+
+
+def test_nested_shorter_fence_inside_longer_one(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="waiting",
+        decider="Q001",
+    )
+
+    q_file = tasks_dir / "questions" / "Q001-nested-fence.md"
+    q_file.parent.mkdir(parents=True, exist_ok=True)
+    q_content = """# Q001 Nested fence
+
+- id: Q001
+- question: How to format nested code?
+- status: answered
+- blocks: T001 (waiting)
+- decider: owner
+- asked-by: kilo
+- asked: 2026-10-17
+- origin-run: -
+- open-answer: yes
+- recommended: -
+
+## Context
+
+Context text.
+
+## Options
+
+- **A** — Longer outer fence
+- **B** — Escaping
+
+## Answer
+
+- choice: A
+- answered-by: owner
+- answered: 2026-10-17
+
+````text
+Outer 4-backtick fence:
+```bash
+echo "inner 3-backtick fence"
+## not a heading inside inner
+```
+- not a bullet
+## not a heading outside inner but inside outer
+````
+"""
+    q_file.write_text(q_content, encoding="utf-8")
+
+    q_data = te.parse_question_file(q_file, tasks_dir)
+    assert q_data["sections_present"] == ["## Context", "## Options", "## Answer"]
+    expected_inner_text = (
+        "Outer 4-backtick fence:\n"
+        "```bash\n"
+        "echo \"inner 3-backtick fence\"\n"
+        "## not a heading inside inner\n"
+        "```\n"
+        "- not a bullet\n"
+        "## not a heading outside inner but inside outer"
+    )
+    assert q_data["answer"]["text"] == expected_inner_text
+
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+    assert json.loads(res_val.stdout)["ok"] is True
+
+
+def test_unclosed_fence_behavior(tmp_path: pathlib.Path) -> None:
+    # 1. Direct scanner test
+    text = "Line 1\n```text\nLine 2 inside unclosed\n## not a heading\nLine 3"
+    lines, blocks = te.scan_markdown_blocks(text)
+    assert len(blocks) == 1
+    assert blocks[0].closed is False
+    assert blocks[0].content == "Line 2 inside unclosed\n## not a heading\nLine 3"
+    assert lines[0].is_fenced is False
+    assert all(l.is_fenced for l in lines[1:])
+
+    # 2. In question file: unclosed fence in ## Answer runs to EOF
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="waiting",
+        decider="Q001",
+    )
+    q_file = tasks_dir / "questions" / "Q001-unclosed.md"
+    q_file.parent.mkdir(parents=True, exist_ok=True)
+    q_content = """# Q001 Unclosed fence
+
+- id: Q001
+- question: What happens if unclosed?
+- status: answered
+- blocks: T001 (waiting)
+- decider: owner
+- asked-by: kilo
+- asked: 2026-10-17
+- origin-run: -
+- open-answer: yes
+- recommended: -
+
+## Context
+
+Context.
+
+## Options
+
+- **A** — Choice A
+- **B** — Choice B
+
+## Answer
+
+- choice: A
+- answered-by: owner
+- answered: 2026-10-17
+
+```text
+Unclosed fence content
+Line 2
+## not a heading
+"""
+    q_file.write_text(q_content, encoding="utf-8")
+
+    q_data = te.parse_question_file(q_file, tasks_dir)
+    assert q_data["sections_present"] == ["## Context", "## Options", "## Answer"]
+    assert q_data["answer"]["text"] == "Unclosed fence content\nLine 2\n## not a heading"
+
+    # 3. In task file: unclosed fence in ## Steps swallows ## Verification, causing validation to fail
+    task_file = tasks_dir / "features" / "T002-unclosed.md"
+    task_content = """# T002 Task with unclosed fence
+
+- id: T002
+- title: Task with unclosed fence
+- category: features
+- priority: P2
+- priority-reason: test
+- next-up: no
+- state: open
+- executor: kilo
+- depends-on: -
+- decider: -
+- sources: -
+- paths: -
+- handoff: test
+
+## Goal
+
+Goal text.
+
+## Steps
+
+```bash
+echo "unclosed code block"
+## Verification
+echo "fake verification inside unclosed fence"
+"""
+    task_file.write_text(task_content, encoding="utf-8")
+    t2 = te.parse_emergent_task_file(task_file, tasks_dir)
+    assert t2["sections_present"] == ["## Goal", "## Steps"]
+
+
+def test_question_context_and_options_with_fenced_code(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="waiting",
+        decider="Q001",
+    )
+    q_file = tasks_dir / "questions" / "Q001-ctx-code.md"
+    q_file.parent.mkdir(parents=True, exist_ok=True)
+    q_content = """# Q001 Code in context and options
+
+- id: Q001
+- question: How to handle code in context?
+- status: open
+- blocks: T001 (waiting)
+- decider: owner
+- asked-by: kilo
+- asked: 2026-10-17
+- origin-run: -
+- open-answer: no
+- recommended: A
+
+## Context
+
+Here is the code block with a heading:
+```python
+## not a section
+def solve():
+    return 42
+```
+End of context.
+
+## Options
+
+- **A** — Option A: `use code` | pipeline
+- **B** — Option B: ignore
+
+## Answer
+
+- choice: -
+- answered-by: -
+- answered: -
+"""
+    q_file.write_text(q_content, encoding="utf-8")
+
+    q_data = te.parse_question_file(q_file, tasks_dir)
+    assert q_data["sections_present"] == ["## Context", "## Options", "## Answer"]
+    assert "## not a section" in q_data["context"]
+    assert len(q_data["options"]) == 2
+    assert q_data["options"][0]["label"] == "A"
+    assert q_data["options"][0]["consequence"] == "`use code` | pipeline"
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
