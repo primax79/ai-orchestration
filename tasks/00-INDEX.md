@@ -16,11 +16,11 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](06-control-plane-safety/plan.md) | in progress (done: 06.1–06.8, 06.10; to verify: 06.9) | 05 | L |
 | 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | in progress (done: 07.1–07.4, 07.6–07.8, 07.10, 07.12; to verify: 07.9) | 05, 06 | L |
 | 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1–08.4; to verify: 08.5, 08.7) | 06 | M |
-| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1–09.2; running: 09.4, 09.6–09.7; to verify: 09.3) | 06 (07 for agent triage) | M |
+| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1–09.2; running: 09.7; to verify: 09.3–09.4, 09.6) | 06 (07 for agent triage) | M |
 | 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | in progress (to verify: 10.6) | 06, 09.1 | S |
 | 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | in progress (done: 11.1; next: 11.2–11.6) | 06, 09.1 | M |
 | 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | open | 07, 08, 11 | L |
-| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (running: 13.1, 13.4) | 06 | M |
+| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (done: 13.4; to verify: 13.1) | 06 | M |
 
 ## Specs
 
@@ -69,7 +69,8 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T015 | P3 | [Navbar labels wrap on narrow widths](micro/T015-navbar-narrow-width.md) | in progress | kilo | - |
+| T015 | P3 | [Navbar labels wrap on narrow widths](micro/T015-navbar-narrow-width.md) | verified | kilo | - |
+| T020 | P2 | [Flaky run-engine tests under load](micro/T020-flaky-run-engine-tests-under-load.md) | in progress | kilo | - |
 
 ### env-doctor
 

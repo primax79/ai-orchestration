@@ -31,7 +31,7 @@
 
 ### 13.4 - P1-d: detect stale plugin copies
 
-- **Status:** `delivered` (2026-10-17; claude; Kilo e4a710b, 44 tests, live: finds third-party-skills@agentic-coding-kit 8 commits behind; merge waits for another session's uncommitted edit to orchestration_env.py) · **Size:** S/M
+- **Status:** `done` (2026-10-17; claude; merged into main) · **Size:** S/M
 - **Goal:** Report Claude plugin copies that are behind their source, with the commit distance and the unchanged version string.
 
 ### 13.5 - P2-a + P2-d: history-aware classification of legacy installs (`outdated-legacy` + "Update")

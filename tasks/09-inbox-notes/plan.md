@@ -39,7 +39,7 @@
 
 ### 09.4 - Agent triage: `triage` run mode, proposal review, accept
 
-- **Status:** `in progress` (2026-10-17; claude; kilo, ai-orchestration worktree task/09.4-triage) · **Profile:** `deep-reasoning` · **Depends on:** 09.1, 07.4, 07.10 (questions) · **Repo:** `ai-orchestration/` (+ UI in 09.5)
+- **Status:** `delivered` (2026-10-17; claude; merged (6be6be2): triage mode read-only (claude Read/Glob/Grep/git read; codex sandbox read-only), proposal parsing, accept-triage; kilo argv gets '--' (fix: -f is an array option); live check with a real tool pending) · **Profile:** `deep-reasoning` · **Depends on:** 09.1, 07.4, 07.10 (questions) · **Repo:** `ai-orchestration/` (+ UI in 09.5)
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:** Spec §4 "By an agent":
   - the `triage` mode, with its prompt and per-tool image passing;
