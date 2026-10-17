@@ -95,7 +95,7 @@
 
 ### 09.11 - VS Code: handlers for task attachments and triage (parity with 09.5, 09.8, 09.9)
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, vscode worktree task/09.11-vscode-parity) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 09.6, 09.8, 09.9 · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-18; claude; merged; parity test green; extension 0.3.1 installed) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 09.6, 09.8, 09.9 · **Repo:** `vscode-ai-orchestration/`
 - **Origin:** the bridge-parity test fails after 09.5/09.9: `uploadTaskAttachment`, `getTaskAttachment`, `deleteTaskAttachment`, `getTriageProposal`, `acceptTriage` have no handler (2026-10-18).
 - **Goal:** the five handlers, mirroring the web backend and the inbox handlers of 09.6 (validation, temp-file cleanup, realpath containment, per-class content type); `startRun`/`previewRun`/`getRunOptions` accept a `note` target.
 - **Verification:** parity test and the extension suite green; a handler test for each.
