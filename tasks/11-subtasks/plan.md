@@ -58,3 +58,15 @@
     - `tasks archive --dry-run` on a fixture with misplaced items shows the plan and writes nothing;
     - every relative Markdown link in `tasks/**` still resolves after each operation (a link checker is part of the test).
   - Live: `tasks archive --dry-run` on this repo reports nothing to do.
+
+### 11.5 - Legacy plan normalization: detection, `normalize` run mode, preview/apply
+
+- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 11.1, 07.4 · **Repo:** `ai-orchestration/` (+ `ai-orchestration-ui/` for the UI part, after 11.3)
+- **Origin:** owner, 2026-10-17, on `ricerca_auto`: all 11 initiative plans are free-form (`- **T1 — …**` bullets, `### 3.1 …` sections, `### 01.1 — …` with an em dash), so the engine parses no task blocks and shows each initiative as one synthetic `INIT-NN` card whose detail fails ("Task INIT-11 file not found"). "La nostra skill non dovrebbe normalizzare e sistemare i task?"
+- **Goal:**
+  - **Detection (engine, deterministic):** `tasks validate` warns, per plan, "no recognized task blocks; N candidate items found (bullets `T<n>`, headings `NN.n —`)", and `tasks list` marks the synthetic card `needs_normalization: true`. Accept `—`/`–` as the title separator in `### NN.T` headings (a pure parser tolerance, no rewrite).
+  - **Normalization (agent, judgment):** a run mode `normalize` (like `triage`): the agent reads a plan with the task-pipeline skill and emits an ` ```ai-orch-normalize ` block with the rewritten task section (canonical `### NN.T - title` blocks with Status/Profile/Depends on/Repo/Goal/Verification, statuses inferred from the plan's log, unknowns as blocking questions). It writes nothing; the engine validates the proposal (parses, ids unique, no text outside the task section changed) and produces a diff.
+  - **Preview/apply:** `tasks normalize-apply NN --proposal FILE --expect-hash H` under the task-write lock; the UI shows the diff in the confirmation dialog.
+  - **`tasks upgrade`** gains `--dry-run` and reports plans needing normalization (it does not rewrite plans itself).
+  - **UI:** the `INIT-NN` card detail shows the plan (rendered, escaped) instead of an error, with "Normalize with…" (Run dialog in `normalize` mode).
+- **Verification:** the `ricerca_auto` plans 09–11 as read-only fixtures (copied): detection counts, a recorded proposal applies cleanly and `tasks list` then shows their `NN.T` tasks; a proposal that changes text outside the task section is refused.
