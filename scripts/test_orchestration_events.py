@@ -228,21 +228,25 @@ def test_reader_across_chunks_and_since_boundaries(ws: pathlib.Path):
     all_evs = read_events(ws)
     assert len(all_evs) == 20
 
-    # 2. --since 1
+    # 2. --since is an exclusive cursor: events after SEQ (0 = from the start)
+    since0 = read_events(ws, since=0)
+    assert len(since0) == 20
+    assert since0[0]["seq"] == 1
     since1 = read_events(ws, since=1)
-    assert len(since1) == 20
-    assert since1[0]["seq"] == 1
+    assert len(since1) == 19
+    assert since1[0]["seq"] == 2
 
     # 3. --since middle
     since8 = read_events(ws, since=8)
-    assert len(since8) == 13
-    assert since8[0]["seq"] == 8
+    assert len(since8) == 12
+    assert since8[0]["seq"] == 9
     assert since8[-1]["seq"] == 20
 
     # 4. --since last
-    since20 = read_events(ws, since=20)
-    assert len(since20) == 1
-    assert since20[0]["seq"] == 20
+    since19 = read_events(ws, since=19)
+    assert len(since19) == 1
+    assert since19[0]["seq"] == 20
+    assert read_events(ws, since=20) == []
 
     # 5. --since beyond last
     since25 = read_events(ws, since=25)
@@ -251,7 +255,7 @@ def test_reader_across_chunks_and_since_boundaries(ws: pathlib.Path):
     # 6. --limit with --since
     since5_lim3 = read_events(ws, since=5, limit=3)
     assert len(since5_lim3) == 3
-    assert [e["seq"] for e in since5_lim3] == [5, 6, 7]
+    assert [e["seq"] for e in since5_lim3] == [6, 7, 8]
 
     # 7. --limit without --since (tail behavior: last N)
     last5 = read_events(ws, limit=5)
@@ -483,7 +487,7 @@ def test_cli_emit_and_tail(ws: pathlib.Path):
         "events",
         "tail",
         "--since",
-        "1",
+        "0",
         "--workspace",
         str(ws),
         "--json",

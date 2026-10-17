@@ -756,7 +756,7 @@ def read_events(
 
     for chunk_info in manifest:
         # Optimization: skip chunk if last_seq is known and < since
-        if since is not None and "last_seq" in chunk_info and chunk_info["last_seq"] < since:
+        if since is not None and "last_seq" in chunk_info and chunk_info["last_seq"] <= since:
             continue
 
         chunk_path = events_dir / chunk_info["file"]
@@ -787,7 +787,7 @@ def read_events(
                 continue
 
             seq = ev["seq"]
-            if since is not None and seq < since:
+            if since is not None and seq <= since:
                 continue
             if types_set and ev.get("type") not in types_set:
                 continue
@@ -843,7 +843,7 @@ def tail_events(
         yield ev
 
     if last_emitted_seq == 0 and since is not None:
-        last_emitted_seq = since - 1
+        last_emitted_seq = since
 
     if not follow:
         return
@@ -1290,7 +1290,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # tail
     p_tail = sub.add_parser("tail", help="Tail the event log through the chunk manifest")
-    p_tail.add_argument("--since", type=int, help="Starting sequence number (inclusive)", default=None)
+    p_tail.add_argument("--since", type=int, help="Cursor: return events with seq > SEQ (exclusive; 0 = from the start)", default=None)
     p_tail.add_argument("--limit", type=int, help="Maximum events to return", default=None)
     p_tail.add_argument("--type", action="append", help="Filter by event type (can be repeated or comma-separated)", default=None)
     p_tail.add_argument("--session", help="Filter by origin_session", default=None)
