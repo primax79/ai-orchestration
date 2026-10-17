@@ -63,3 +63,25 @@
 - **Focus files:** `src/views/dashboard-panel.ts`, `src/cli-client.ts`, `dist-webview/**`
 - **Goal:** Spec §5 "VS Code".
 - **Verification:** Live in an Extension Development Host: paste a screenshot into a note; the file appears in `attachments/`.
+
+### 09.7 - Engine: general attachments (text, PDF), `feature` kind, task attachments, convert copies attachments
+
+- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 09.1 · **Repo:** `ai-orchestration/`
+- **Origin:** owner request (2026-10-17): "come faccio a aprire una nuova feature/bug … servirebbe gestione allegati".
+- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py`, the task-pipeline `SKILL.md` (document the attachments).
+- **Goal:** Spec §7, engine side: the type classes and checks, `inbox attach` accepting them, `kind: feature`, `tasks attach|detach`, `tasks new --from-note` copying attachments with rewritten references, `tasks list`/`show` JSON exposing `attachments: [{name, class, size}]` for tasks and notes.
+- **Verification:** tests for each class (accepted and refused: a `.png` that is really text, a `.log` with a NUL byte, a fake PDF), the 30-file limit, traversal names, task bundle hash changes on attach, convert copies attachments and rewrites links; full engine suite green.
+
+### 09.8 - UI backend: task attachment endpoints and per-class serving
+
+- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 09.7, 09.2 · **Repo:** `ai-orchestration-ui/`
+- **Focus files:** `backend/server.py`, `backend/test_server.py`
+- **Goal:** Spec §7: `POST/GET/DELETE /api/tasks/{id}/attachments[/{name}]` mirroring the inbox ones; serving by class (inline image, `text/plain; charset=utf-8`, PDF as attachment), `nosniff` on all; inbox upload accepts the new classes (the engine decides).
+- **Verification:** tests for auth, each class's headers, traversal refusal, 409 on a stale hash.
+
+### 09.9 - Frontend: attachments by class in the note editor and the task detail
+
+- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 09.3, 09.8 · **Repo:** `ai-orchestration-ui/`
+- **Focus files:** `frontend/src/**`
+- **Goal:** Spec §7 UI: thumbnails, text viewer, PDF download chip; paste/drop/picker in the task detail too.
+- **Verification:** Playwright on a scratch workspace: attach a `.log` and a `.pdf` to a note and to a task, open the text viewer, convert the note and see the attachments on the new task.

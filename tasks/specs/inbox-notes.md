@@ -26,7 +26,7 @@ The owner writes quick notes and reports in the UI, with screenshots pasted or d
 | --- | --- |
 | `id` | `N###`: unique across `_inbox/`, allocated under the task-write lock (spec 06 A9) |
 | `title` | short title, free text |
-| `kind` | `note`, `bug`, `idea`, `request`, `question` |
+| `kind` | `note`, `bug`, `feature`, `idea`, `request`, `question` |
 | `status` | `draft`, `ready`, `processing`, `processed`, `discarded` |
 | `created` | ISO datetime |
 | `author` | `owner` or a session name |
@@ -93,5 +93,24 @@ In `tasks_engine.py` (stdlib only; every write under the task-write lock and ato
 ## 6. Out of scope
 
 - OCR or any automatic reading of images outside an agent run.
-- Non-image attachments (logs, PDFs). A follow-up can extend the allow-list.
+- Archives and executables as attachments (see §7 for the allowed types).
 - Sharing notes outside the project.
+
+## 7. Amendment (2026-10-17, owner request): general attachments, and attachments on tasks
+
+The owner opens bugs and features from the Inbox, and needs to attach more than screenshots (logs, PDFs, config excerpts), also on tasks. Decisions (orchestrator, minor):
+
+- **`kind` gains `feature`.** Conversion maps `bug` → category hint `bugfix`, `feature`/`request` → `feature`.
+- **Allowed attachment types** (checked by content, never by extension alone; anything else refused):
+
+| Class | Types | Check | Served as |
+| --- | --- | --- | --- |
+| image | png, jpeg, gif, webp | magic bytes (as today) | inline, sniffed `Content-Type` |
+| text | `.txt .log .md .json .yaml .yml .toml .csv .xml .diff .patch .html .js .ts .py .java .sh` and similar | valid UTF-8, no NUL byte in the first 64 KB | `text/plain; charset=utf-8`, inline (the UI shows it in a `<pre>` viewer, never as HTML) |
+| pdf | `.pdf` | starts with `%PDF-` | `application/pdf` with `Content-Disposition: attachment` |
+
+- **Limits:** 10 MB per file (unchanged), at most 30 attachments per note or task. Every response carries `X-Content-Type-Options: nosniff`; names are sanitized as today.
+- **Markdown references:** images as `![](attachments/NN-name.png)`, other files as `[NN-name.log](attachments/NN-name.log)`.
+- **Attachments on tasks.** An emergent task folder (`<category>/T###-<slug>/`) may hold `attachments/` with the same rules. Engine: `tasks attach T### --file PATH [--name N]` and `tasks detach T### --name N`, under the task-write lock, changing the task bundle hash. Initiative tasks (`NN.T` inside `plan.md`) have no folder and take no attachments; attach to the initiative's folder later if needed (out of scope here).
+- **Convert keeps the evidence.** `tasks new --from-note N###` copies the note's attachments into the new task's `attachments/` and rewrites the references in the copied body, so the task stays self-contained after the note moves to `analyzed/`.
+- **UI.** The note editor and the task detail show attachments by class: thumbnails for images, a chip that opens a text viewer for text, a download chip for PDFs. Paste, drop and picker accept all allowed types; refused types show the reason.
