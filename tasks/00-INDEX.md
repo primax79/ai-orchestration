@@ -17,6 +17,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | in progress (done: 07.1–07.3; next: 07.4) | 05, 06 | L |
 | 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1, 08.2; next: 08.3) | 06 | M |
 | 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | open | 06 (07 for agent triage) | M |
+| 10 | 10 | [Timeline (Gantt) view with dependencies](10-timeline-gantt/plan.md) | open | 06, 09.1 | S |
 
 ## Specs
 
@@ -29,6 +30,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [agent-runs-from-ui](specs/agent-runs-from-ui.md) | 07 |
 | [blocking-questions](specs/blocking-questions.md) | 08 |
 | [inbox-notes](specs/inbox-notes.md) | 09 |
+| [timeline-gantt](specs/timeline-gantt.md) | 10 |
 
 ## Next up
 
@@ -97,12 +99,14 @@ flowchart TB
     I07["07: Agent runs from the control plane (open)"]
     I08["08: Blocking questions (open)"]
     I09["09: Inbox notes and screenshots to tasks (open)"]
+    I10["10: Timeline (Gantt) view (open)"]
     MCP["T001, T002 (done) / T007, T008 (open): Standalone MCP Servers (kilo-mcp & claude-mcp)"]
 
     I01 --> I02 --> I03 --> I05 --> I06
     I06 --> I07
     I06 --> I08
     I06 --> I09
+    I06 --> I10
     I07 -.->|agent triage| I09
     I08 -.->|answer and resume| I07
     I01 --> I04
