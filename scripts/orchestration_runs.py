@@ -70,12 +70,23 @@ try:
         task_bundle_sha256,
         normalize_state,
         transition_task,
+        task_write_lock,
     )
 except ImportError:
     discover_emergent_tasks = None  # type: ignore
     task_bundle_sha256 = None  # type: ignore
     normalize_state = None  # type: ignore
     transition_task = None  # type: ignore
+    task_write_lock = None  # type: ignore
+
+
+@contextlib.contextmanager
+def safe_task_write_lock(tasks_dir: pathlib.Path):
+    if task_write_lock is not None and tasks_dir.is_dir():
+        with task_write_lock(tasks_dir):
+            yield
+    else:
+        yield
 
 try:
     from orchestration_config import (
@@ -363,6 +374,139 @@ def parse_log_events(data_bytes: bytes) -> list[dict[str, Any]]:
             pass
         events.append({"type": "text", "text": trimmed})
     return events
+
+
+def read_all_log_events(run_dir: pathlib.Path) -> list[dict[str, Any]]:
+    """Read all log events from events.*.jsonl chunks in order."""
+    chunks = sorted(run_dir.glob("events.*.jsonl"))
+    all_events: list[dict[str, Any]] = []
+    for chunk in chunks:
+        try:
+            data = chunk.read_bytes()
+            all_events.extend(parse_log_events(data))
+        except Exception:
+            pass
+    return all_events
+
+
+def extract_session_id_from_run(run_dir: pathlib.Path) -> str | None:
+    """Extract session_id from JSON events in run directory."""
+    events = read_all_log_events(run_dir)
+    for evt in reversed(events):
+        raw = evt.get("raw")
+        if isinstance(raw, dict):
+            if raw.get("session_id"):
+                return str(raw["session_id"])
+            if raw.get("sessionId"):
+                return str(raw["sessionId"])
+    return None
+
+
+def extract_final_report_from_run(run_dir: pathlib.Path) -> str | None:
+    """Extract ## Final Report section from run log events or raw output."""
+    chunks = sorted(run_dir.glob("events.*.jsonl"))
+    full_text = ""
+    for chunk in chunks:
+        try:
+            full_text += chunk.read_text(encoding="utf-8", errors="replace") + "\n"
+        except Exception:
+            pass
+
+    idx = full_text.find("## Final Report")
+    if idx != -1:
+        report = full_text[idx:].strip()
+        # If the report is inside JSON or has trailing characters, clean up
+        # Remove trailing JSON closing quotes/brackets if found
+        clean_lines = []
+        for line in report.splitlines():
+            # If line is part of JSON closing like '"}', stop or skip
+            if line.strip() in ('"}', '}', '"]'):
+                break
+            clean_lines.append(line)
+        cleaned = "\n".join(clean_lines).strip()
+        if cleaned:
+            return cleaned
+
+    # Fallback: check parsed event text fields
+    events = read_all_log_events(run_dir)
+    for evt in reversed(events):
+        text = evt.get("text", "")
+        if "## Final Report" in text:
+            sub_idx = text.find("## Final Report")
+            return text[sub_idx:].strip()
+
+    return None
+
+
+def extract_verdict_from_run(run_dir: pathlib.Path) -> dict[str, Any] | None:
+    """Parse verdict ONLY from the final assistant message's ```ai-orch-verdict block (Spec §5.6)."""
+    events = read_all_log_events(run_dir)
+    assistant_messages: list[str] = []
+    for evt in events:
+        raw = evt.get("raw")
+        if isinstance(raw, dict):
+            role = raw.get("role") or raw.get("type")
+            msg_obj = raw.get("message")
+            if isinstance(msg_obj, dict) and msg_obj.get("role") == "assistant":
+                role = "assistant"
+                content = msg_obj.get("content") or msg_obj.get("text")
+            else:
+                content = raw.get("content") or raw.get("text")
+
+            if role == "assistant":
+                if isinstance(content, list):
+                    text_parts = []
+                    for item in content:
+                        if isinstance(item, dict) and "text" in item:
+                            text_parts.append(str(item["text"]))
+                        elif isinstance(item, str):
+                            text_parts.append(item)
+                    assistant_messages.append("\n".join(text_parts))
+                elif content is not None:
+                    assistant_messages.append(str(content))
+
+    if not assistant_messages:
+        # Check raw JSON lines for assistant role
+        for chunk in sorted(run_dir.glob("events.*.jsonl")):
+            try:
+                for line in chunk.read_text(encoding="utf-8", errors="replace").splitlines():
+                    try:
+                        obj = json.loads(line.strip())
+                        if isinstance(obj, dict) and obj.get("role") == "assistant":
+                            cnt = obj.get("content") or obj.get("text") or ""
+                            assistant_messages.append(str(cnt))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    if not assistant_messages:
+        return None
+
+    # Verdict parsed ONLY from the final assistant message (earlier verdict blocks are ignored)
+    final_msg = assistant_messages[-1]
+    match = re.search(r"```ai-orch-verdict\s*(\{.*?\})\s*```", final_msg, re.DOTALL)
+    if not match:
+        return None
+
+    try:
+        verdict_data = json.loads(match.group(1))
+        if not isinstance(verdict_data, dict):
+            return None
+        verdict = verdict_data.get("verdict")
+        if verdict not in ("verified", "bounced"):
+            return None
+        findings = verdict_data.get("findings", [])
+        checks = verdict_data.get("checks", [])
+        if not isinstance(findings, list) or not isinstance(checks, list):
+            return None
+        return {
+            "verdict": verdict,
+            "findings": findings,
+            "checks": checks,
+        }
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1008,8 +1152,9 @@ def build_adapter_argv(
     effort: str | None = None,
     session_id: str | None = None,
     prompt_file: str | None = None,
+    is_resume: bool = False,
 ) -> list[str]:
-    """Build the adapter argv list for a given tool (Spec §5.7)."""
+    """Build the adapter argv list for a given tool (Spec §5.7, R3)."""
     headless = tool_cfg.get("headless", {})
     if not isinstance(headless, dict):
         headless = {}
@@ -1019,8 +1164,28 @@ def build_adapter_argv(
     session_id_val = session_id or "{session_id}"
     prompt_file_val = prompt_file or "{prompt_file}"
 
-    # If headless has an explicit argv override
-    if "argv" in headless and isinstance(headless["argv"], list):
+    # If headless has an explicit resume_argv / argv override
+    if is_resume and "resume_argv" in headless and isinstance(headless["resume_argv"], list):
+        template = headless["resume_argv"]
+        replacements = {
+            "cwd": cwd,
+            "model": model,
+            "variant": variant or "",
+            "effort": effort or "",
+            "session_id": session_id_val,
+            "permission_mode": permission_mode,
+            "sandbox": sandbox,
+            "prompt_file": prompt_file_val,
+        }
+        res: list[str] = []
+        for arg in template:
+            formatted = arg
+            for ph, val in replacements.items():
+                formatted = formatted.replace(f"{{{ph}}}", val)
+            res.append(formatted)
+        return res
+
+    if not is_resume and "argv" in headless and isinstance(headless["argv"], list):
         template = headless["argv"]
         replacements = {
             "cwd": cwd,
@@ -1040,7 +1205,71 @@ def build_adapter_argv(
             res.append(formatted)
         return res
 
-    # Built-in adapter defaults per tool
+    # Built-in adapter defaults per tool (resume vs start)
+    if is_resume:
+        if tool == "kilo":
+            argv = [
+                "kilo",
+                "run",
+                "--format",
+                "json",
+                "--dir",
+                cwd,
+                "-s",
+                session_id_val,
+                "-m",
+                model,
+            ]
+            if variant:
+                argv.extend(["--variant", variant])
+            argv.extend(["-f", prompt_file_val, "Continue."])
+            return argv
+
+        if tool == "claude":
+            argv = [
+                "claude",
+                "-p",
+                "--resume",
+                session_id_val,
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--model",
+                model,
+            ]
+            if effort:
+                argv.extend(["--effort", effort])
+            argv.extend([
+                "--permission-mode",
+                permission_mode,
+                "--permission-prompts",
+                "none",
+            ])
+            allowed_tools = headless.get("allowed_tools")
+            if allowed_tools and isinstance(allowed_tools, list):
+                argv.extend(["--allowedTools", ",".join(allowed_tools)])
+            return argv
+
+        if tool == "codex":
+            argv = [
+                "codex",
+                "exec",
+                "resume",
+                session_id_val,
+                "--json",
+                "-m",
+                model,
+                "-c",
+                f"sandbox_mode={sandbox}",
+            ]
+            if effort:
+                argv.extend(["-c", f"model_reasoning_effort={effort}"])
+            argv.append("-")
+            return argv
+
+        return [tool, "--dir", cwd, "-s", session_id_val, "-m", model]
+
+    # Built-in adapter defaults per tool (start)
     if tool == "kilo":
         argv = [
             "kilo",
@@ -1386,6 +1615,8 @@ def create_run_record(
     target_run: str | None = None,
     target_commit: str | None = None,
     continued_from: str | None = None,
+    panel_id: str | None = None,
+    verification_mode: str | None = None,
 ) -> dict[str, Any]:
     """Initialize a run.json record structure (Spec §5.1, R2, R3, R8)."""
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -1406,6 +1637,8 @@ def create_run_record(
         "branch": branch,
         "base_commit": base_commit,
         "final_commit": None,
+        "commits_after_base": None,
+        "invariant_error": None,
         "target_run": target_run,
         "target_commit": target_commit,
         "task_bundle_sha256": task_bundle_sha256,
@@ -1421,6 +1654,8 @@ def create_run_record(
         "continued_from": continued_from,
         "final_report": None,
         "verdict": None,
+        "panel_id": panel_id,
+        "verification_mode": verification_mode,
         "questions": [],
         "task_transition_error": None,
     }
@@ -1744,6 +1979,16 @@ def validate_run_request(
     if not target_repo:
         target_repo = ws
 
+    vmode = (task.get("verification-mode") or task.get("verification_mode") or "").strip().lower()
+    if not vmode or vmode == "-":
+        vmode = merged_cfg.get("verification", {}).get("default_mode", "cross-agent").lower()
+
+    if mode == "verify":
+        if vmode == "owner":
+            return False, ("verification-mode-owner", "Task has verification-mode 'owner': use Approve in the UI"), None
+        if vmode == "self":
+            return False, ("verification-mode-self", "Verification mode 'self' is not supported for agent runs; self-verification is performed by the executor or approved by owner"), None
+
     target_run_id: str | None = None
     target_run_tool: str | None = None
     target_commit: str | None = None
@@ -1775,6 +2020,20 @@ def validate_run_request(
                 )
             target_run_tool = matched_run.get("tool")
             target_commit = matched_run.get("final_commit")
+            if not target_commit:
+                return False, ("missing-final-commit", f"Target run '{target_run_id}' has no final_commit recorded"), None
+
+            # Verify target branch HEAD == final_commit
+            tr_branch = matched_run.get("branch") or f"run/{target_run_id}"
+            res_bh = subprocess.run(["git", "rev-parse", tr_branch], cwd=str(target_repo), capture_output=True, text=True, check=False)
+            if res_bh.returncode == 0:
+                branch_head = res_bh.stdout.strip()
+                if branch_head != target_commit:
+                    return False, ("target-branch-head-mismatch", f"Target run branch '{tr_branch}' HEAD ({branch_head}) does not match final_commit ({target_commit})"), None
+            elif matched_run.get("worktree_path") and pathlib.Path(matched_run["worktree_path"]).is_dir():
+                wt_head = get_repo_head(pathlib.Path(matched_run["worktree_path"]))
+                if wt_head and wt_head != target_commit:
+                    return False, ("target-branch-head-mismatch", f"Target run worktree HEAD ({wt_head}) does not match final_commit ({target_commit})"), None
 
         if target_run_id == "none" or not target_commit:
             target_commit = get_repo_head(target_repo)
@@ -1792,15 +2051,16 @@ def validate_run_request(
     if not tool:
         return False, ("tool-resolution-failed", "Could not resolve a suitable tool for this request"), None
 
-    indep_valid, indep_err = check_independence_guard(
-        mode=mode,
-        tool=tool,
-        task_executor=task.get("executor"),
-        target_run_tool=target_run_tool,
-        allow_same_tool=args.allow_same_tool,
-    )
-    if not indep_valid:
-        return False, ("independence-violation", indep_err or "Independence guard violation"), None
+    if mode == "verify" and vmode != "panel":
+        indep_valid, indep_err = check_independence_guard(
+            mode=mode,
+            tool=tool,
+            task_executor=task.get("executor"),
+            target_run_tool=target_run_tool,
+            allow_same_tool=args.allow_same_tool,
+        )
+        if not indep_valid:
+            return False, ("independence-violation", indep_err or "Independence guard violation"), None
 
     tool_cfg = merged_cfg.get("tools", {}).get(tool, {})
     avail, _, avail_err = check_tool_availability(tool, tool_cfg)
@@ -1870,6 +2130,10 @@ def validate_run_request(
     if mode == "execute" and isolation == "worktree":
         is_clean, dirty_files = check_repo_clean(target_repo)
         if not is_clean:
+            is_start_cmd = getattr(args, "cmd", None) == "start"
+            if is_start_cmd and not getattr(args, "allow_dirty_base", False):
+                dirty_list_str = ", ".join(dirty_files)
+                return False, ("dirty-repo", f"Target repository '{target_repo}' has uncommitted changes: {dirty_list_str}. Pass --allow-dirty-base to proceed from HEAD."), None
             warnings.append(
                 f"Target repository has uncommitted changes that will not be present in the worktree ({len(dirty_files)} dirty files)."
             )
@@ -1962,6 +2226,7 @@ def validate_run_request(
         "repo_head": repo_head,
         "plan_hash": plan_hash,
         "warnings": warnings,
+        "verification_mode": "independent-session" if (mode == "verify" and args.allow_same_tool and ((task.get("executor") and tool.lower() == task.get("executor", "").lower()) or (target_run_tool and tool.lower() == target_run_tool.lower()))) else (vmode if mode == "verify" else None),
     }
     return True, None, data
 
@@ -2008,7 +2273,154 @@ def cmd_start(args: argparse.Namespace) -> int:
         print_error(args.json, plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)")
         return 1
 
+    ws = pathlib.Path(args.workspace or ".").resolve()
     req_by = getattr(args, "requested_by", "cli") or "cli"
+
+    # --- Continue flow (Spec §5.5, R3) ---
+    if getattr(args, "continue_run_id", None):
+        locked_args = [
+            ("tool", getattr(args, "tool", None)),
+            ("mode", getattr(args, "mode", None)),
+            ("profile", getattr(args, "profile", None)),
+            ("model", getattr(args, "model", None)),
+            ("variant", getattr(args, "variant", None)),
+            ("effort", getattr(args, "effort", None)),
+            ("isolation", getattr(args, "isolation", None)),
+            ("target_run", getattr(args, "target_run", None)),
+        ]
+        if any(v is not None for _, v in locked_args) or getattr(args, "allow_same_tool", False) or getattr(args, "allow_dirty_base", False) or getattr(args, "force", False):
+            print_error(
+                args.json,
+                "continue-locked-fields",
+                "Only --instructions may be specified when using --continue; other fields are locked and inherited from source run.",
+            )
+            return 1
+
+        with run_lock(ws):
+            source_record = load_run_record(ws, args.continue_run_id)
+            if not source_record:
+                print_error(args.json, "run-not-found", f"Source run '{args.continue_run_id}' not found")
+                return 1
+
+            if source_record.get("status") not in TERMINAL_STATES:
+                print_error(
+                    args.json,
+                    "source-run-not-terminal",
+                    f"Source run '{args.continue_run_id}' is not terminal (status: {source_record.get('status')})",
+                )
+                return 1
+
+            session_id = source_record.get("session_id")
+            if not session_id:
+                print_error(
+                    args.json,
+                    "missing-session-id",
+                    f"Source run '{args.continue_run_id}' has no session_id; cannot continue without a session_id",
+                )
+                return 1
+
+            if source_record.get("mode") == "execute" and source_record.get("isolation") == "worktree":
+                wt_p = pathlib.Path(source_record.get("worktree_path") or source_record["cwd"])
+                if not wt_p.is_dir():
+                    print_error(
+                        args.json,
+                        "worktree-missing",
+                        f"Worktree '{wt_p}' for run '{args.continue_run_id}' does not exist",
+                    )
+                    return 1
+
+            task_id = source_record["task_id"]
+            tool = source_record["tool"]
+            run_id = generate_run_id(task_id, tool)
+            run_dir = ws / ".ai-orchestration" / "runs" / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(run_dir, 0o700)
+            except OSError:
+                pass
+
+            prompt_path = run_dir / "prompt.md"
+            instructions = args.instructions or "Continue."
+            prompt_path.write_text(instructions, encoding="utf-8")
+            try:
+                os.chmod(prompt_path, 0o600)
+            except OSError:
+                pass
+
+            gpath = getattr(args, "global_config", None)
+            merged_cfg, _ = resolve_config(gpath, ws)
+            tool_cfg = merged_cfg.get("tools", {}).get(tool, {})
+            resume_raw_argv = build_adapter_argv(
+                tool=tool,
+                tool_cfg=tool_cfg,
+                mode=source_record["mode"],
+                cwd=source_record["cwd"],
+                model=source_record["model"],
+                variant=source_record.get("variant"),
+                effort=source_record.get("effort"),
+                session_id=session_id,
+                prompt_file=str(prompt_path),
+                is_resume=True,
+            )
+            argv_display = redact_argv(resume_raw_argv)
+
+            record = create_run_record(
+                run_id=run_id,
+                task_id=task_id,
+                mode=source_record["mode"],
+                tool=tool,
+                profile=source_record.get("profile", "bulk-execution"),
+                model=source_record["model"],
+                variant=source_record.get("variant"),
+                effort=source_record.get("effort"),
+                requested_by=req_by,
+                workspace=str(ws),
+                cwd=source_record["cwd"],
+                isolation=source_record.get("isolation", "worktree"),
+                task_bundle_sha256=source_record.get("task_bundle_sha256", ""),
+                argv_display=argv_display,
+                plan_hash=source_record.get("plan_hash", ""),
+                worktree_path=source_record.get("worktree_path"),
+                branch=source_record.get("branch"),
+                base_commit=source_record.get("base_commit"),
+                target_run=source_record.get("target_run"),
+                target_commit=source_record.get("target_commit"),
+                continued_from=args.continue_run_id,
+                panel_id=source_record.get("panel_id"),
+                verification_mode=source_record.get("verification_mode"),
+            )
+            record["session_id"] = session_id
+            save_run_record(ws, record)
+
+            sup_cmd = [
+                sys.executable,
+                str(pathlib.Path(__file__).resolve()),
+                "_supervise",
+                str(run_dir),
+            ]
+            if gpath:
+                sup_cmd.extend(["--global-config", str(gpath)])
+
+            subprocess.Popen(
+                sup_cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+
+        if args.json:
+            print(json.dumps({"ok": True, "run_id": run_id, "status": "starting", "continued_from": args.continue_run_id}, indent=2))
+        else:
+            print(f"Run {run_id} started (continued from {args.continue_run_id}).")
+        return 0
+
+    # --- Normal launch flow ---
+    if not getattr(args, "task", None):
+        print_error(args.json, "missing-task", "--task is required for run start")
+        return 1
+
     if req_by in ("ui", "vscode") and not getattr(args, "expect_plan_hash", None):
         print_error(
             args.json,
@@ -2021,15 +2433,6 @@ def cmd_start(args: argparse.Namespace) -> int:
     if not ok:
         reason, err_msg = err_info  # type: ignore
         print_error(args.json, reason, err_msg)
-        return 1
-
-    # Worktree isolation check (07.3 scope: execute with worktree not implemented yet)
-    if data["mode"] == "execute" and data["isolation"] != "none":  # type: ignore
-        print_error(
-            args.json,
-            "not-implemented-yet",
-            "Worktree isolation is not implemented yet in 07.3; specify --isolation none",
-        )
         return 1
 
     # Claude allowed_tools check (R11)
@@ -2051,8 +2454,8 @@ def cmd_start(args: argparse.Namespace) -> int:
             )
             return 1
 
-    ws = data["ws"]  # type: ignore
     task_id = data["task_id"]  # type: ignore
+    target_repo = data["target_repo"]  # type: ignore
 
     with run_lock(ws):
         all_runs = list_run_records(ws, task_id=task_id)
@@ -2072,11 +2475,126 @@ def cmd_start(args: argparse.Namespace) -> int:
             )
             return 1
 
-        ex_ok, ex_err = ensure_git_exclude(data["target_repo"])  # type: ignore
+        ex_ok, ex_err = ensure_git_exclude(target_repo)
         if not ex_ok:
             print_error(args.json, "git-exclude-failed", ex_err or "Could not ensure .ai-orchestration/ is ignored")
             return 1
 
+        # Check for panel mode in verify
+        if data["mode"] == "verify" and data.get("verification_mode") == "panel":  # type: ignore
+            panel_reviewers = data["merged_cfg"].get("verification", {}).get("panel_reviewers", [])  # type: ignore
+            if not panel_reviewers:
+                print_error(args.json, "panel-reviewers-empty", "No panel reviewers configured under [verification.panel_reviewers]")
+                return 1
+
+            panel_id = f"panel-{task_id}-{uuid.uuid4().hex[:6]}"
+            target_commit = data["target_commit"]  # type: ignore
+            run_ids = []
+
+            for rev in panel_reviewers:
+                rev_tool, rev_profile = rev.split(":", 1) if ":" in rev else (rev, "deep-reasoning")
+                rev_model, rev_var, rev_eff = resolve_model_and_variants(
+                    rev_tool, rev_profile, None, None, None,
+                    data["merged_cfg"],  # type: ignore
+                )
+                r_id = generate_run_id(task_id, rev_tool)
+                r_dir = ws / ".ai-orchestration" / "runs" / r_id
+                r_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.chmod(r_dir, 0o700)
+                except OSError:
+                    pass
+
+                wt_dir = target_repo.parent / ".worktrees" / target_repo.name / r_id
+                wt_dir.parent.mkdir(parents=True, exist_ok=True)
+                res_wt = subprocess.run(
+                    ["git", "worktree", "add", "--detach", str(wt_dir), target_commit],
+                    cwd=str(target_repo),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res_wt.returncode != 0:
+                    print_error(args.json, "worktree-creation-failed", f"Failed to create verify worktree: {res_wt.stderr}")
+                    return 1
+
+                p_prompt = r_dir / "prompt.md"
+                p_prompt.write_text(data["prompt"], encoding="utf-8")  # type: ignore
+                try:
+                    os.chmod(p_prompt, 0o600)
+                except OSError:
+                    pass
+
+                rev_tool_cfg = data["merged_cfg"].get("tools", {}).get(rev_tool, {})  # type: ignore
+                rev_raw_argv = build_adapter_argv(
+                    tool=rev_tool,
+                    tool_cfg=rev_tool_cfg,
+                    mode="verify",
+                    cwd=str(wt_dir),
+                    model=rev_model or "default",
+                    variant=rev_var,
+                    effort=rev_eff,
+                    session_id="{session_id}",
+                    prompt_file="{prompt_file}",
+                )
+                rev_argv_display = redact_argv(rev_raw_argv)
+
+                session_id = str(uuid.uuid4()) if rev_tool == "claude" else None
+
+                rec = create_run_record(
+                    run_id=r_id,
+                    task_id=task_id,
+                    mode="verify",
+                    tool=rev_tool,
+                    profile=rev_profile,
+                    model=rev_model or "default",
+                    variant=rev_var,
+                    effort=rev_eff,
+                    requested_by=req_by,
+                    workspace=str(ws),
+                    cwd=str(wt_dir),
+                    isolation="worktree",
+                    task_bundle_sha256=data["bundle_hash"],  # type: ignore
+                    argv_display=rev_argv_display,
+                    plan_hash=data["plan_hash"],  # type: ignore
+                    worktree_path=str(wt_dir),
+                    branch=None,
+                    target_run=data["target_run_id"],  # type: ignore
+                    target_commit=target_commit,
+                    panel_id=panel_id,
+                    verification_mode="panel",
+                )
+                if session_id:
+                    rec["session_id"] = session_id
+                save_run_record(ws, rec)
+
+                sup_cmd = [
+                    sys.executable,
+                    str(pathlib.Path(__file__).resolve()),
+                    "_supervise",
+                    str(r_dir),
+                ]
+                gpath = getattr(args, "global_config", None)
+                if gpath:
+                    sup_cmd.extend(["--global-config", str(gpath)])
+
+                subprocess.Popen(
+                    sup_cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+                run_ids.append(r_id)
+
+            if args.json:
+                print(json.dumps({"ok": True, "panel_id": panel_id, "run_ids": run_ids, "status": "starting"}, indent=2))
+            else:
+                print(f"Panel {panel_id} started with {len(run_ids)} runs: {', '.join(run_ids)}.")
+            return 0
+
+        # Single run launch
         run_id = generate_run_id(task_id, data["tool"])  # type: ignore
         run_dir = ws / ".ai-orchestration" / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -2084,6 +2602,53 @@ def cmd_start(args: argparse.Namespace) -> int:
             os.chmod(run_dir, 0o700)
         except OSError:
             pass
+
+        actual_cwd = data["cwd"]  # type: ignore
+        worktree_path = None
+        branch_name = None
+        base_commit = None
+        target_commit = data.get("target_commit")  # type: ignore
+
+        if data["mode"] == "execute" and data["isolation"] == "worktree":  # type: ignore
+            worktree_dir = target_repo.parent / ".worktrees" / target_repo.name / run_id
+            worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+            branch_name = f"run/{run_id}"
+            base_commit = get_repo_head(target_repo)
+            res_wt = subprocess.run(
+                ["git", "worktree", "add", str(worktree_dir), "-b", branch_name, "HEAD"],
+                cwd=str(target_repo),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res_wt.returncode != 0:
+                print_error(args.json, "worktree-creation-failed", f"Failed to create git worktree: {res_wt.stderr}")
+                return 1
+            actual_cwd = str(worktree_dir)
+            worktree_path = str(worktree_dir)
+
+        elif data["mode"] == "verify":  # type: ignore
+            worktree_dir = target_repo.parent / ".worktrees" / target_repo.name / run_id
+            worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+            res_wt = subprocess.run(
+                ["git", "worktree", "add", "--detach", str(worktree_dir), target_commit],
+                cwd=str(target_repo),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res_wt.returncode != 0:
+                print_error(args.json, "worktree-creation-failed", f"Failed to create verify worktree: {res_wt.stderr}")
+                return 1
+            actual_cwd = str(worktree_dir)
+            worktree_path = str(worktree_dir)
+            branch_name = None
+
+        elif data["isolation"] == "none":  # type: ignore
+            base_commit = get_repo_head(target_repo)
+            actual_cwd = data["cwd"]  # type: ignore
+            worktree_path = None
+            branch_name = None
 
         prompt_path = run_dir / "prompt.md"
         prompt_path.write_text(data["prompt"], encoding="utf-8")  # type: ignore
@@ -2093,6 +2658,21 @@ def cmd_start(args: argparse.Namespace) -> int:
             pass
 
         session_id = str(uuid.uuid4()) if data["tool"] == "claude" else None  # type: ignore
+
+        # Re-build adapter argv with actual_cwd
+        tool_cfg = data["merged_cfg"].get("tools", {}).get(data["tool"], {})  # type: ignore
+        raw_argv = build_adapter_argv(
+            tool=data["tool"],  # type: ignore
+            tool_cfg=tool_cfg,
+            mode=data["mode"],  # type: ignore
+            cwd=actual_cwd,
+            model=data["model"],  # type: ignore
+            variant=data["variant"],  # type: ignore
+            effort=data["effort"],  # type: ignore
+            session_id="{session_id}",
+            prompt_file=str(prompt_path),
+        )
+        argv_display = redact_argv(raw_argv)
 
         record = create_run_record(
             run_id=run_id,
@@ -2105,15 +2685,17 @@ def cmd_start(args: argparse.Namespace) -> int:
             effort=data["effort"],  # type: ignore
             requested_by=req_by,
             workspace=str(ws),
-            cwd=data["cwd"],  # type: ignore
+            cwd=actual_cwd,
             isolation=data["isolation"],  # type: ignore
             task_bundle_sha256=data["bundle_hash"],  # type: ignore
-            argv_display=data["argv_display"],  # type: ignore
+            argv_display=argv_display,
             plan_hash=data["plan_hash"],  # type: ignore
-            worktree_path=data["planned_worktree"],  # type: ignore
-            branch=data["planned_branch"],  # type: ignore
+            worktree_path=worktree_path,
+            branch=branch_name,
+            base_commit=base_commit,
             target_run=data["target_run_id"],  # type: ignore
-            target_commit=data["target_commit"],  # type: ignore
+            target_commit=target_commit,
+            verification_mode=data.get("verification_mode"),
         )
         if session_id:
             record["session_id"] = session_id
@@ -2176,6 +2758,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         record["session_id"] = session_id
 
     prompt_path = run_dir / "prompt.md"
+    is_resume = bool(record.get("continued_from"))
     raw_argv = build_adapter_argv(
         tool=record["tool"],
         tool_cfg=tool_cfg,
@@ -2186,14 +2769,21 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         effort=record.get("effort"),
         session_id=session_id or "{session_id}",
         prompt_file=str(prompt_path),
+        is_resume=is_resume,
     )
 
     prompt_via = headless_cfg.get("prompt_via")
     if not prompt_via:
-        if record["tool"] == "kilo" or ("{prompt_file}" in headless_cfg.get("argv", [])):
-            prompt_via = "file"
+        if is_resume:
+            if record["tool"] == "kilo" or ("{prompt_file}" in headless_cfg.get("resume_argv", [])):
+                prompt_via = "file"
+            else:
+                prompt_via = "stdin"
         else:
-            prompt_via = "stdin"
+            if record["tool"] == "kilo" or ("{prompt_file}" in headless_cfg.get("argv", [])):
+                prompt_via = "file"
+            else:
+                prompt_via = "stdin"
 
     expanded_argv = expand_secret_env_vars(raw_argv)
     prompt_text = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else ""
@@ -2365,6 +2955,89 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     record["status"] = final_status
     record["exit_code"] = exit_code
     record["ended_at"] = now_iso
+
+    # Extract final report from logs
+    report_text = extract_final_report_from_run(run_dir)
+    if report_text:
+        record["final_report"] = report_text
+
+    # Extract session_id if missing
+    if not record.get("session_id"):
+        sid = extract_session_id_from_run(run_dir)
+        if sid:
+            record["session_id"] = sid
+
+    # Extract verdict if verify mode
+    if record.get("mode") == "verify":
+        record["verdict"] = extract_verdict_from_run(run_dir)
+
+    # Invariants check for execute mode (R7)
+    if record.get("mode") == "execute" and final_status == "succeeded":
+        worktree_path_str = record.get("worktree_path")
+        if worktree_path_str and record.get("isolation") == "worktree":
+            wt_path = pathlib.Path(worktree_path_str)
+            if not wt_path.is_dir():
+                record["status"] = "failed"
+                record["invariant_error"] = f"Worktree directory '{wt_path}' does not exist"
+            else:
+                expected_branch = record.get("branch") or f"run/{record['run_id']}"
+                res_b = subprocess.run(
+                    ["git", "symbolic-ref", "--short", "HEAD"],
+                    cwd=str(wt_path),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                actual_branch = res_b.stdout.strip() if res_b.returncode == 0 else ""
+                if actual_branch != expected_branch:
+                    record["status"] = "failed"
+                    record["invariant_error"] = f"Worktree is on branch '{actual_branch}', expected '{expected_branch}'"
+                else:
+                    is_clean, dirty_files = check_repo_clean(wt_path)
+                    if not is_clean:
+                        record["status"] = "failed"
+                        record["invariant_error"] = f"Worktree has uncommitted changes: {', '.join(dirty_files)}"
+                    else:
+                        base_commit = record.get("base_commit")
+                        if base_commit:
+                            res_anc = subprocess.run(
+                                ["git", "merge-base", "--is-ancestor", base_commit, "HEAD"],
+                                cwd=str(wt_path),
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                            )
+                            if res_anc.returncode != 0:
+                                record["status"] = "failed"
+                                record["invariant_error"] = f"Base commit '{base_commit}' is not an ancestor of worktree HEAD"
+                            else:
+                                record["final_commit"] = get_repo_head(wt_path)
+                                res_cnt = subprocess.run(
+                                    ["git", "rev-list", "--count", f"{base_commit}..HEAD"],
+                                    cwd=str(wt_path),
+                                    capture_output=True,
+                                    text=True,
+                                    check=False,
+                                )
+                                record["commits_after_base"] = int(res_cnt.stdout.strip()) if res_cnt.returncode == 0 else 0
+                        else:
+                            record["final_commit"] = get_repo_head(wt_path)
+                            record["commits_after_base"] = 0
+        elif record.get("isolation") == "none":
+            wt_path = pathlib.Path(record["cwd"])
+            record["final_commit"] = get_repo_head(wt_path)
+            base_commit = record.get("base_commit")
+            if base_commit:
+                res_cnt = subprocess.run(
+                    ["git", "rev-list", "--count", f"{base_commit}..HEAD"],
+                    cwd=str(wt_path),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                record["commits_after_base"] = int(res_cnt.stdout.strip()) if res_cnt.returncode == 0 else 0
+            else:
+                record["commits_after_base"] = 0
 
     save_run_record(workspace, record)
     return 0
@@ -2562,6 +3235,444 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mark_delivered(args: argparse.Namespace) -> int:
+    """Transition task to delivered after successful execute run (Spec R6)."""
+    plat_err = check_platform()
+    if plat_err:
+        print_error(args.json, plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)")
+        return 1
+
+    run_id = args.run_id
+    if not validate_run_id(run_id):
+        print_error(args.json, "invalid-run-id", f"Invalid run_id format '{run_id}'")
+        return 1
+
+    ws = pathlib.Path(args.workspace or ".").resolve()
+    record = load_run_record(ws, run_id)
+    if not record:
+        print_error(args.json, "run-not-found", f"Run '{run_id}' not found")
+        return 1
+
+    tasks_dir = ws / "tasks"
+    with safe_task_write_lock(tasks_dir):
+        # 1. run succeeded
+        if record.get("status") != "succeeded":
+            print_error(args.json, "run-not-succeeded", f"Run '{run_id}' status is '{record.get('status')}', expected 'succeeded'")
+            return 1
+
+        # 2. worktree on branch and clean
+        wt_path_str = record.get("worktree_path") or record.get("cwd")
+        if not wt_path_str or not pathlib.Path(wt_path_str).is_dir():
+            print_error(args.json, "worktree-missing", f"Worktree '{wt_path_str}' does not exist")
+            return 1
+        wt_path = pathlib.Path(wt_path_str)
+
+        expected_branch = record.get("branch") or f"run/{record['run_id']}"
+        res_b = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=str(wt_path), capture_output=True, text=True, check=False)
+        cur_branch = res_b.stdout.strip() if res_b.returncode == 0 else ""
+        if cur_branch != expected_branch:
+            print_error(args.json, "branch-mismatch", f"Worktree is on branch '{cur_branch}', expected '{expected_branch}'")
+            return 1
+
+        is_clean, dirty_files = check_repo_clean(wt_path)
+        if not is_clean:
+            print_error(args.json, "worktree-dirty", f"Worktree has uncommitted changes: {', '.join(dirty_files)}")
+            return 1
+
+        # 3. HEAD == final_commit
+        cur_head = get_repo_head(wt_path)
+        final_commit = record.get("final_commit")
+        if not final_commit or cur_head != final_commit:
+            print_error(args.json, "head-mismatch", f"Worktree HEAD '{cur_head}' does not match final_commit '{final_commit}'")
+            return 1
+
+        # 4. >= 1 commit after base
+        commits_after = record.get("commits_after_base")
+        if commits_after is None:
+            base_commit = record.get("base_commit")
+            if base_commit:
+                res_cnt = subprocess.run(["git", "rev-list", "--count", f"{base_commit}..HEAD"], cwd=str(wt_path), capture_output=True, text=True, check=False)
+                commits_after = int(res_cnt.stdout.strip()) if res_cnt.returncode == 0 else 0
+            else:
+                commits_after = 0
+        if commits_after < 1:
+            print_error(args.json, "no-commits-after-base", f"Run has {commits_after} commits after base_commit, expected at least 1")
+            return 1
+
+        # 5. final_report present
+        if not record.get("final_report"):
+            print_error(args.json, "missing-final-report", "Run has no final_report parsed from agent output")
+            return 1
+
+        # 6. Task transition
+        emergent = discover_emergent_tasks(tasks_dir) if discover_emergent_tasks else []
+        task = next((t for t in emergent if t["id"] == record["task_id"]), None)
+        if not task:
+            print_error(args.json, "task-not-found", f"Task '{record['task_id']}' not found in tasks/")
+            return 1
+        if task.get("canonical_state") != "in progress":
+            print_error(args.json, "invalid-task-state", f"Task '{record['task_id']}' is in state '{task.get('canonical_state')}', expected 'in progress'")
+            return 1
+
+        if not transition_task:
+            print_error(args.json, "internal-error", "tasks_engine.transition_task is unavailable")
+            return 1
+
+        ok, trans_res = transition_task(
+            tasks_dir=tasks_dir,
+            task_id=record["task_id"],
+            new_state="delivered",
+            actor=record.get("tool"),
+            expect_task_hash=getattr(args, "expect_task_hash", None),
+        )
+        if not ok:
+            err_msg = trans_res.get("error") or str(trans_res)
+            print_error(args.json, "transition-failed", f"Failed to transition task: {err_msg}")
+            return 1
+
+    if args.json:
+        print(json.dumps({"ok": True, "task_id": record["task_id"], "run_id": run_id, "state": "delivered"}, indent=2))
+    else:
+        print(f"Task {record['task_id']} transitioned to delivered (run {run_id}).")
+    return 0
+
+
+def cmd_apply_verdict(args: argparse.Namespace) -> int:
+    """Apply verdict from verify run(s) and transition task (Spec §5.6, R5)."""
+    plat_err = check_platform()
+    if plat_err:
+        print_error(args.json, plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)")
+        return 1
+
+    ws = pathlib.Path(args.workspace or ".").resolve()
+    tasks_dir = ws / "tasks"
+
+    run_id = getattr(args, "run_id", None)
+    panel_id = getattr(args, "panel", None)
+
+    if bool(run_id) == bool(panel_id):
+        print_error(args.json, "invalid-arguments", "Specify exactly one of RUN_ID or --panel PANEL_ID")
+        return 1
+
+    if run_id:
+        if not validate_run_id(run_id):
+            print_error(args.json, "invalid-run-id", f"Invalid run_id format '{run_id}'")
+            return 1
+
+        record = load_run_record(ws, run_id)
+        if not record:
+            print_error(args.json, "run-not-found", f"Run '{run_id}' not found")
+            return 1
+
+        if record.get("mode") != "verify":
+            print_error(args.json, "not-verify-run", f"Run '{run_id}' mode is '{record.get('mode')}', expected 'verify'")
+            return 1
+
+        if record.get("status") not in TERMINAL_STATES:
+            print_error(args.json, "run-not-terminal", f"Run '{run_id}' status is '{record.get('status')}', must be terminal")
+            return 1
+
+        verdict_obj = record.get("verdict")
+        if not verdict_obj or not isinstance(verdict_obj, dict) or not verdict_obj.get("verdict"):
+            print_error(args.json, "missing-verdict", f"Run '{run_id}' has no valid verdict")
+            return 1
+
+        verdict_val = verdict_obj.get("verdict")
+        if verdict_val not in ("verified", "bounced"):
+            print_error(args.json, "invalid-verdict", f"Verdict '{verdict_val}' must be 'verified' or 'bounced'")
+            return 1
+
+        emergent = discover_emergent_tasks(tasks_dir) if discover_emergent_tasks else []
+        task = next((t for t in emergent if t["id"] == record["task_id"]), None)
+        if not task:
+            print_error(args.json, "task-not-found", f"Task '{record['task_id']}' not found in tasks/")
+            return 1
+
+        current_hash = task_bundle_sha256(task) if task_bundle_sha256 else ""
+        rec_hash = record.get("task_bundle_sha256")
+        if rec_hash and current_hash.lower() != rec_hash.lower():
+            print_error(args.json, "task-bundle-hash-drift", f"Task bundle hash has changed since verify started: was {rec_hash}, now {current_hash}")
+            return 1
+
+        if getattr(args, "expect_task_hash", None) and current_hash.lower() != args.expect_task_hash.strip().lower():
+            print_error(args.json, "task-hash-mismatch", f"Task bundle hash mismatch: expected {args.expect_task_hash}, actual {current_hash}")
+            return 1
+
+        target_repo, _, _ = resolve_target_repo(ws, task.get("paths"))
+        if not target_repo:
+            target_repo = ws
+        target_commit = record.get("target_commit")
+        target_run_id = record.get("target_run")
+        if target_run_id and target_run_id != "none":
+            tr_rec = load_run_record(ws, target_run_id)
+            if tr_rec:
+                tr_branch = tr_rec.get("branch") or f"run/{target_run_id}"
+                res_bh = subprocess.run(["git", "rev-parse", tr_branch], cwd=str(target_repo), capture_output=True, text=True, check=False)
+                cur_target_head = res_bh.stdout.strip() if res_bh.returncode == 0 else ""
+                if not cur_target_head and tr_rec.get("worktree_path") and pathlib.Path(tr_rec["worktree_path"]).is_dir():
+                    cur_target_head = get_repo_head(pathlib.Path(tr_rec["worktree_path"]))
+                if cur_target_head and target_commit and cur_target_head != target_commit:
+                    print_error(args.json, "target-branch-head-drift", f"Target branch head has changed since verify started: was {target_commit}, now {cur_target_head}")
+                    return 1
+        else:
+            cur_repo_head = get_repo_head(target_repo)
+            if target_commit and cur_repo_head != target_commit:
+                print_error(args.json, "target-head-drift", f"Target repository HEAD has changed since verify started: was {target_commit}, now {cur_repo_head}")
+                return 1
+
+        with safe_task_write_lock(tasks_dir):
+            if verdict_val == "verified":
+                verifier = f"{record['tool']}:{record.get('profile', 'deep-reasoning')}"
+                ok, trans_res = transition_task(
+                    tasks_dir=tasks_dir,
+                    task_id=record["task_id"],
+                    new_state="verified",
+                    verifier=verifier,
+                    expect_task_hash=getattr(args, "expect_task_hash", None),
+                )
+            else:
+                findings = verdict_obj.get("findings", [])
+                findings_str = "; ".join(f"{f.get('id', '')}: {f.get('text', '')}" for f in findings) or "Verification bounced"
+                ok, trans_res = transition_task(
+                    tasks_dir=tasks_dir,
+                    task_id=record["task_id"],
+                    new_state="bounced",
+                    reason=findings_str,
+                    expect_task_hash=getattr(args, "expect_task_hash", None),
+                )
+            if not ok:
+                err_msg = trans_res.get("error") or str(trans_res)
+                print_error(args.json, "transition-failed", f"Failed to transition task: {err_msg}")
+                return 1
+
+        if args.json:
+            print(json.dumps({"ok": True, "task_id": record["task_id"], "state": verdict_val, "run_id": run_id}, indent=2))
+        else:
+            print(f"Verdict applied: Task {record['task_id']} transitioned to {verdict_val} (run {run_id}).")
+        return 0
+
+    else:
+        # Panel verdict
+        all_runs = list_run_records(ws)
+        panel_runs = [r for r in all_runs if r.get("panel_id") == panel_id]
+        if not panel_runs:
+            print_error(args.json, "panel-not-found", f"No runs found for panel ID '{panel_id}'")
+            return 1
+
+        non_terminal = [r["run_id"] for r in panel_runs if r.get("status") not in TERMINAL_STATES]
+        if non_terminal:
+            print_error(args.json, "panel-runs-not-terminal", f"Panel runs are not all terminal: {', '.join(non_terminal)}")
+            return 1
+
+        missing_verdicts = [r["run_id"] for r in panel_runs if not r.get("verdict") or not isinstance(r.get("verdict"), dict) or not r["verdict"].get("verdict")]
+        if missing_verdicts:
+            print_error(args.json, "panel-runs-missing-verdicts", f"Panel runs missing valid verdicts: {', '.join(missing_verdicts)}")
+            return 1
+
+        task_id = panel_runs[0]["task_id"]
+        emergent = discover_emergent_tasks(tasks_dir) if discover_emergent_tasks else []
+        task = next((t for t in emergent if t["id"] == task_id), None)
+        if not task:
+            print_error(args.json, "task-not-found", f"Task '{task_id}' not found")
+            return 1
+
+        current_hash = task_bundle_sha256(task) if task_bundle_sha256 else ""
+        for r in panel_runs:
+            rec_hash = r.get("task_bundle_sha256")
+            if rec_hash and current_hash.lower() != rec_hash.lower():
+                print_error(args.json, "task-bundle-hash-drift", f"Task bundle hash has changed since panel started: was {rec_hash}, now {current_hash}")
+                return 1
+
+        if getattr(args, "expect_task_hash", None) and current_hash.lower() != args.expect_task_hash.strip().lower():
+            print_error(args.json, "task-hash-mismatch", f"Task bundle hash mismatch: expected {args.expect_task_hash}, actual {current_hash}")
+            return 1
+
+        target_repo, _, _ = resolve_target_repo(ws, task.get("paths"))
+        if not target_repo:
+            target_repo = ws
+        target_commit = panel_runs[0].get("target_commit")
+        target_run_id = panel_runs[0].get("target_run")
+        if target_run_id and target_run_id != "none":
+            tr_rec = load_run_record(ws, target_run_id)
+            if tr_rec:
+                tr_branch = tr_rec.get("branch") or f"run/{target_run_id}"
+                res_bh = subprocess.run(["git", "rev-parse", tr_branch], cwd=str(target_repo), capture_output=True, text=True, check=False)
+                cur_target_head = res_bh.stdout.strip() if res_bh.returncode == 0 else ""
+                if not cur_target_head and tr_rec.get("worktree_path") and pathlib.Path(tr_rec["worktree_path"]).is_dir():
+                    cur_target_head = get_repo_head(pathlib.Path(tr_rec["worktree_path"]))
+                if cur_target_head and target_commit and cur_target_head != target_commit:
+                    print_error(args.json, "target-branch-head-drift", f"Target branch head has changed since verify started: was {target_commit}, now {cur_target_head}")
+                    return 1
+        else:
+            cur_repo_head = get_repo_head(target_repo)
+            if target_commit and cur_repo_head != target_commit:
+                print_error(args.json, "target-head-drift", f"Target repository HEAD has changed since verify started: was {target_commit}, now {cur_repo_head}")
+                return 1
+
+        all_verdicts = [r["verdict"]["verdict"] for r in panel_runs]
+        with safe_task_write_lock(tasks_dir):
+            if all(v == "verified" for v in all_verdicts):
+                verifiers = ", ".join(f"{r['tool']}:{r.get('profile', 'deep-reasoning')}" for r in panel_runs)
+                ok, trans_res = transition_task(
+                    tasks_dir=tasks_dir,
+                    task_id=task_id,
+                    new_state="verified",
+                    verifier=verifiers,
+                    expect_task_hash=getattr(args, "expect_task_hash", None),
+                )
+                target_state = "verified"
+            else:
+                merged_findings = []
+                for r in panel_runs:
+                    if r["verdict"].get("verdict") == "bounced":
+                        merged_findings.extend(r["verdict"].get("findings", []))
+                findings_str = "; ".join(f"{f.get('id', '')}: {f.get('text', '')}" for f in merged_findings) or "Panel verification bounced"
+                ok, trans_res = transition_task(
+                    tasks_dir=tasks_dir,
+                    task_id=task_id,
+                    new_state="bounced",
+                    reason=findings_str,
+                    expect_task_hash=getattr(args, "expect_task_hash", None),
+                )
+                target_state = "bounced"
+
+            if not ok:
+                err_msg = trans_res.get("error") or str(trans_res)
+                print_error(args.json, "transition-failed", f"Failed to transition task: {err_msg}")
+                return 1
+
+        if args.json:
+            print(json.dumps({"ok": True, "task_id": task_id, "state": target_state, "panel_id": panel_id}, indent=2))
+        else:
+            print(f"Panel verdict applied: Task {task_id} transitioned to {target_state} (panel {panel_id}).")
+        return 0
+
+
+def cmd_cleanup(args: argparse.Namespace) -> int:
+    """Remove run worktree and branch for terminal runs (Spec §4, R12)."""
+    plat_err = check_platform()
+    if plat_err:
+        print_error(args.json, plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)")
+        return 1
+
+    run_id = args.run_id
+    if not validate_run_id(run_id):
+        print_error(args.json, "invalid-run-id", f"Invalid run_id format '{run_id}'")
+        return 1
+
+    ws = pathlib.Path(args.workspace or ".").resolve()
+    req_by = getattr(args, "requested_by", "cli") or "cli"
+    if req_by in ("ui", "vscode") and not getattr(args, "expect_plan_hash", None):
+        print_error(args.json, "missing-plan-hash", "--expect-plan-hash is required when requested by ui or vscode (R1)")
+        return 1
+
+    record = load_run_record(ws, run_id)
+    if not record:
+        print_error(args.json, "run-not-found", f"Run '{run_id}' not found")
+        return 1
+
+    expect_hash = getattr(args, "expect_plan_hash", None)
+    if expect_hash and record.get("plan_hash"):
+        if expect_hash.lower() != record["plan_hash"].lower():
+            print_error(args.json, "plan-hash-mismatch", f"Plan hash mismatch: expected {expect_hash}, actual {record['plan_hash']}")
+            return 1
+
+    if record.get("status") not in TERMINAL_STATES:
+        print_error(args.json, "run-not-terminal", f"Cannot clean up run '{run_id}' with non-terminal status '{record.get('status')}'")
+        return 1
+
+    # R12: refuse while any active run in the continuation chain references the same worktree
+    worktree_path_str = record.get("worktree_path")
+    if worktree_path_str:
+        all_runs = list_run_records(ws)
+        active_runs = [r for r in all_runs if r.get("status") in ACTIVE_STATES]
+        for ar in active_runs:
+            if ar.get("worktree_path") == worktree_path_str:
+                print_error(
+                    args.json,
+                    "active-chain-run",
+                    f"Active run '{ar['run_id']}' references the same worktree '{worktree_path_str}'",
+                )
+                return 1
+
+    branch = record.get("branch")
+    target_repo = ws
+    tasks_dir = ws / "tasks"
+    if tasks_dir.is_dir() and discover_emergent_tasks:
+        emergent = discover_emergent_tasks(tasks_dir)
+        task = next((t for t in emergent if t["id"] == record["task_id"]), None)
+        if task:
+            tr, _, _ = resolve_target_repo(ws, task.get("paths"))
+            if tr:
+                target_repo = tr
+
+    if getattr(args, "dry_run", False):
+        payload = {
+            "ok": True,
+            "dry_run": True,
+            "run_id": run_id,
+            "worktree_path": worktree_path_str,
+            "branch": branch,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"[dry-run] Would clean up worktree '{worktree_path_str}' and branch '{branch}' for run {run_id}.")
+        return 0
+
+    if branch and not getattr(args, "discard", False):
+        res = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", branch, "HEAD"],
+            cwd=str(target_repo),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            print_error(
+                args.json,
+                "branch-not-merged",
+                f"Branch '{branch}' is not merged into HEAD of '{target_repo}'. Pass --discard to remove anyway.",
+            )
+            return 1
+
+    if worktree_path_str and pathlib.Path(worktree_path_str).exists():
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", worktree_path_str],
+            cwd=str(target_repo),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if pathlib.Path(worktree_path_str).exists():
+            shutil.rmtree(worktree_path_str, ignore_errors=True)
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=str(target_repo),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    if branch:
+        subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=str(target_repo),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    record["cleaned_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save_run_record(ws, record)
+
+    if args.json:
+        print(json.dumps({"ok": True, "run_id": run_id, "cleaned": True}, indent=2))
+    else:
+        print(f"Cleaned up worktree and branch for run {run_id}.")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argument Parser
 # ---------------------------------------------------------------------------
@@ -2606,7 +3717,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # start
     p_start = sub.add_parser("start", help="Start agent run with supervisor")
-    p_start.add_argument("--task", required=True, help="Task ID (e.g. T007)")
+    p_start.add_argument("--task", default=None, help="Task ID (e.g. T007)")
+    p_start.add_argument("--continue", dest="continue_run_id", default=None, help="Continue a terminal run")
     p_start.add_argument("--mode", choices=("orchestrate", "execute", "verify"), default=None)
     p_start.add_argument("--tool", default=None, help="Target tool (kilo, claude, codex)")
     p_start.add_argument("--profile", default=None, help="Role profile")
@@ -2625,6 +3737,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_start.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_start.set_defaults(func=cmd_start)
+
+    # mark-delivered
+    p_deliv = sub.add_parser("mark-delivered", help="Transition task to delivered after successful execute run")
+    p_deliv.add_argument("run_id", help="Run ID")
+    p_deliv.add_argument("--expect-task-hash", "--expect-task-sha256", dest="expect_task_hash", default=None, help="Expected task bundle hash")
+    p_deliv.add_argument("--workspace", default=None, help="Project workspace root")
+    p_deliv.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+    p_deliv.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_deliv.set_defaults(func=cmd_mark_delivered)
+
+    # apply-verdict
+    p_app = sub.add_parser("apply-verdict", help="Apply verdict from verify run(s) and transition task")
+    p_app.add_argument("run_id", nargs="?", default=None, help="Run ID (for single verify run)")
+    p_app.add_argument("--panel", default=None, help="Panel ID (for panel verify runs)")
+    p_app.add_argument("--expect-task-hash", "--expect-task-sha256", dest="expect_task_hash", default=None, help="Expected task bundle hash")
+    p_app.add_argument("--workspace", default=None, help="Project workspace root")
+    p_app.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+    p_app.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_app.set_defaults(func=cmd_apply_verdict)
+
+    # cleanup
+    p_clean = sub.add_parser("cleanup", help="Remove run worktree and branch for terminal runs")
+    p_clean.add_argument("run_id", help="Run ID")
+    p_clean.add_argument("--discard", action="store_true", help="Discard unmerged branch")
+    p_clean.add_argument("--dry-run", action="store_true", help="Do not perform actual deletion")
+    p_clean.add_argument("--expect-plan-hash", default=None, help="Required for ui/vscode callers")
+    p_clean.add_argument("--requested-by", choices=("ui", "vscode", "cli"), default="cli", help="Caller origin")
+    p_clean.add_argument("--workspace", default=None, help="Project workspace root")
+    p_clean.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+    p_clean.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_clean.set_defaults(func=cmd_cleanup)
 
     # logs
     p_logs = sub.add_parser("logs", help="Display run logs with logical offsets across chunks")
