@@ -44,7 +44,7 @@
 
 ### 10.4 - Engine: microtasks (`micro` category, reduced schema, `tasks micro`, `tasks promote`, XS size), kind and labels
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/10.4-microtasks) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 10.1 (same file) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-18; claude; merged) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 10.1 (same file) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md`, `plugins/architect-side/skills/task-pipeline/SKILL.md` (document the microtask form)
 - **Goal:** Spec §5 (everything except batch runs and UI) and spec §6 engine part:
   - `kind` and `labels` fields (`T###` header extensions, `NN.T` bullets);
