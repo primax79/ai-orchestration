@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: One can delete another run's worktree; others leave tasks stuck or run in empty dirs
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
