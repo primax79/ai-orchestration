@@ -163,7 +163,7 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
 
 | Key | Question | Blocks | Decider |
 | --- | --- | --- | --- |
-| R11 | Filed as [Q001](../questions/Q001-which-permission-policy-should-headless-claude-run.md). | 07.3 default, 07.5 | owner |
+| R11 | **Decided 2026-10-17 (Q001 → A):** per-mode allow-list. `execute` and `verify` get git, the test runners and the file tools; `orchestrate` also gets the kilo-mcp tools. Implemented as built-in adapter defaults in 07.12. | — | owner |
 
 ### 07.11 - Batch runs for microtasks
 
@@ -177,3 +177,19 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
   - each microtask's state is set separately;
   - `mark-delivered` and verify work per microtask or for the whole batch.
 - **Verification:** Tests with the stub agent: three microtasks → three commits → each `in progress` → `delivered`; a microtask without a commit stays `in progress`, with the reason recorded.
+
+### 07.12 - Built-in per-mode Claude allow-list (Q001 decision A)
+
+- **Status:** `open` · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.10 (same file) · **Repo:** `ai-orchestration/`
+- **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`, `plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py` (headless schema: `allowed_tools` may be per mode), `docs/05-orchestration-config-schema.md`
+- **Goal:**
+  - Q001 answer A: the Claude adapter ships a default `allowed_tools` per mode, used when the config sets none, so a launch is no longer refused (R11) for lack of an allow-list.
+  - Config may override per mode with `[tools.claude.headless.allowed_tools] execute = [...]`, `verify = [...]` and `orchestrate = [...]`, or keep a single list for all modes.
+  - The Run preview shows the effective list and whether it comes from the default or from the config.
+- **Defaults:**
+  - **execute:** `Read`, `Edit`, `Write`, `Glob`, `Grep`, `Bash(git status:*)`, `Bash(git diff:*)`, `Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git log:*)`, `Bash(pytest:*)`, `Bash(python -m pytest:*)`, `Bash(uv run:*)`, `Bash(npm test:*)`, `Bash(npm run build:*)`;
+  - **verify:** the same as execute, minus `Edit` and `Write`;
+  - **orchestrate:** the execute set plus `mcp__kilo-mcp__*`.
+- **Verification:**
+  - Tests: the default is applied when the config has none; per-mode and single-list overrides work; preview shows the source of the list; no `--dangerously-*` flag appears.
+  - Live: `run preview --tool claude --mode execute` on this repo shows the default list.

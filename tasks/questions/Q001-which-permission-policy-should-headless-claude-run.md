@@ -2,7 +2,7 @@
 
 - id: Q001
 - question: Which permission policy should headless Claude runs use by default, per mode?
-- status: open
+- status: answered
 - blocks: -
 - decider: owner
 - asked-by: claude:orchestration
@@ -29,6 +29,6 @@ The setting lives in `orchestration.toml` under `[tools.claude.headless]` (per m
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-17

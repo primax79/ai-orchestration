@@ -78,7 +78,7 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 <!-- ai-orch:generated decisions -->
 | Key | Question | Blocks | Decider | Recommended |
 | --- | --- | --- | --- | --- |
-| [Q001](questions/Q001-which-permission-policy-should-headless-claude-run.md) | Which permission policy should headless Claude runs use by default, per mode? | - | owner | A |
+| - | None. | - | - | - |
 <!-- /ai-orch:generated decisions -->
 
 ## Done
