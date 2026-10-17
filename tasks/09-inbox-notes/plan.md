@@ -81,7 +81,7 @@
 
 ### 09.9 - Frontend: attachments by class in the note editor and the task detail
 
-- **Status:** `in progress` (2026-10-17; claude; kilo, ai-orchestration-ui worktree task/09.9-attachments-ui) · **Profile:** `bulk-execution` · **Depends on:** 09.3, 09.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `delivered` (2026-10-18; claude; merged: text viewer (pre, React text), PDF download via revoked blob URL, thumbnails, task detail attachments section; Kilo verified on a scratch workspace; owner live check pending) · **Profile:** `bulk-execution` · **Depends on:** 09.3, 09.8 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`
 - **Goal:** Spec §7 UI: thumbnails, text viewer, PDF download chip; paste/drop/picker in the task detail too.
 - **Verification:** Playwright on a scratch workspace: attach a `.log` and a `.pdf` to a note and to a task, open the text viewer, convert the note and see the attachments on the new task.
