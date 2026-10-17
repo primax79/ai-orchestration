@@ -71,6 +71,7 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T014 | P2 | [One backend test failed once in eleven runs](micro/T014-flaky-backend-test.md) | open | kilo | - |
+| T015 | P3 | [Navbar labels wrap on narrow widths](micro/T015-navbar-narrow-width.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
