@@ -23,7 +23,7 @@
 
 ### 10.2 - UI: graph and edit endpoints and the Timeline tab (arrows, ready queue, priority and dependency editing)
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, ai-orchestration-ui worktree task/10.2-timeline) · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 10.1, 06.8 (frontend lane; can run before 08.4 when 08.3 is late) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `delivered` (2026-10-18; claude; merged (rebased); 48 backend tests; Kilo Playwright evidence on a scratch copy (.tmp/timeline-gantt-10.2.png); VS Code handlers added in extension 0.3.2; owner live check pending) · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 10.1, 06.8 (frontend lane; can run before 08.4 when 08.3 is late) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`, `frontend/src/**`
 - **Goal:** Spec §3. Endpoints: `GET /api/tasks/graph`, and `POST /api/tasks/{id}/priority`, `/size` and `/deps`, each with a `/preview` variant.
 - **Verification:** Live with the Playwright MCP on a scratch copy of this repo's `tasks/`:
