@@ -725,7 +725,7 @@ def test_set_routing_and_set_profile_diff_preview(tmp_path: pathlib.Path) -> Non
         "--json",
         "set-routing",
         "--orchestrator",
-        "claude",
+        "codex",
         "--scope",
         "global",
         "--diff",
@@ -745,8 +745,8 @@ def test_set_routing_and_set_profile_diff_preview(tmp_path: pathlib.Path) -> Non
         if (l.startswith("+") or l.startswith("-")) and not (l.startswith("+++") or l.startswith("---"))
     ]
     assert len(diff_lines_sr) == 2
-    assert diff_lines_sr[0] == '-default_orchestrator = "kilo"'
-    assert diff_lines_sr[1] == '+default_orchestrator = "claude"'
+    assert diff_lines_sr[0] == '-default_orchestrator = "claude"'
+    assert diff_lines_sr[1] == '+default_orchestrator = "codex"'
 
     # When no values change, changed is False and diff is empty
     res_no_change = run_cli(
@@ -755,7 +755,7 @@ def test_set_routing_and_set_profile_diff_preview(tmp_path: pathlib.Path) -> Non
         "--json",
         "set-routing",
         "--orchestrator",
-        "kilo",
+        "claude",
         "--scope",
         "global",
         "--diff",
@@ -813,7 +813,7 @@ def test_expect_hash_match_and_mismatch(tmp_path: pathlib.Path) -> None:
         "--json",
         "set-routing",
         "--orchestrator",
-        "claude",
+        "codex",
         "--scope",
         "global",
         "--expect-hash",
@@ -832,7 +832,7 @@ def test_expect_hash_match_and_mismatch(tmp_path: pathlib.Path) -> None:
         "--json",
         "set-routing",
         "--orchestrator",
-        "claude",
+        "codex",
         "--scope",
         "global",
         "--expect-hash",
@@ -842,7 +842,7 @@ def test_expect_hash_match_and_mismatch(tmp_path: pathlib.Path) -> None:
     payload_match = json.loads(res_match.stdout)
     assert payload_match["ok"] is True
     assert global_cfg_path.read_bytes() != initial_bytes
-    assert 'default_orchestrator = "claude"' in global_cfg_path.read_text(encoding="utf-8")
+    assert 'default_orchestrator = "codex"' in global_cfg_path.read_text(encoding="utf-8")
 
     # 3. set-profile mismatch also refuses and leaves file untouched
     current_bytes = global_cfg_path.read_bytes()
@@ -1398,7 +1398,7 @@ def test_render_agents_md_no_silent_global_defaults(tmp_path: pathlib.Path) -> N
     payload_refuse = json.loads(res_refuse.stdout)
     assert payload_refuse["ok"] is False
     assert "workspace has no project config" in payload_refuse["error"]
-    assert "orchestrator='kilo'" in payload_refuse["error"]
+    assert "orchestrator='claude'" in payload_refuse["error"]
     assert not agents_md.exists()
 
     # 2. --apply with --allow-global-routing succeeds

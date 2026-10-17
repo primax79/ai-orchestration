@@ -38,6 +38,7 @@ BASIS_VALUES = {
     "provider-tier-naming",
     "model-self-knowledge",
     "operator-stated",
+    "template-default",
 }
 VERIFICATION_MODES = {"self", "independent-session", "cross-agent", "panel", "owner"}
 KNOWN_NO_XHIGH_SUBSTRINGS = ("opus-4.6", "sonnet-4.6", "opus 4.6", "sonnet 4.6")
@@ -89,7 +90,8 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
     "schema_version": 1,
     "last_verified": datetime.date.today().isoformat(),
     "routing": {
-        "default_orchestrator": "kilo",
+        # Owner default (2026-10-17): Claude orchestrates, Kilo executes.
+        "default_orchestrator": "claude",
         "default_executor": "kilo",
         "default_profile": "bulk-execution",
     },
@@ -128,22 +130,22 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
                 "deep-reasoning": {
                     "model": "google/gemini-4-argon",
                     "variant": "high",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
                 "orchestration": {
                     "model": "google/gemini-4-argon",
                     "variant": "medium",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
                 "bulk-execution": {
                     "model": "google/gemini-3.8-flash",
                     "variant": "medium",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
                 "exploration": {
                     "model": "google/gemini-3.8-flash",
                     "variant": "low",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
             },
         },
@@ -162,22 +164,22 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
                 "deep-reasoning": {
                     "model": "opus",
                     "effort": "high",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
                 "orchestration": {
                     "model": "sonnet",
                     "effort": "medium",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
                 "bulk-execution": {
                     "model": "sonnet",
                     "effort": "medium",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
                 "exploration": {
                     "model": "haiku",
                     "effort": "low",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
             },
         },
@@ -193,22 +195,22 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
                 "deep-reasoning": {
                     "model": "gpt-5-codex",
                     "effort": "high",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
                 "orchestration": {
                     "model": "gpt-5-codex",
                     "effort": "medium",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
                 "bulk-execution": {
                     "model": "gpt-5-codex-mini",
                     "effort": "medium",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
                 "exploration": {
                     "model": "gpt-5-codex-mini",
                     "effort": "low",
-                    "basis": "operator-stated",
+                    "basis": "template-default",
                 },
             },
         },
