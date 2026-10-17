@@ -5,6 +5,27 @@
 - **Origin:** owner request (2026-10-17). Interactions in the UI (answering a question, marking a note ready, a run finishing) change files, but nothing reacts to them until an orchestrator happens to look. The system needs explicit events and a reference to the orchestration session that must react.
 - **Supersedes:** spec 08 §5 "Answer and resume run" (task 08.6 becomes a trigger rule here). It also closes the gap "answered but not yet applied".
 
+## 0. Amendment (owner decision, 2026-10-17; normative, overrides §2 and §4)
+
+**The orchestrator is always headless, even when the owner chats with it.**
+
+- **One persistent orchestrator session per workspace.**
+  - `ai-orch orchestrator start --tool claude|kilo|codex [--model M]` creates it. For Claude it pre-assigns a session UUID with `--session-id`; for Kilo and Codex it captures the id on the first turn.
+  - It registers the session (§2, `kind: headless`, role `orchestrator`) and stores it in `<workspace>/.ai-orchestration/orchestrator.json`.
+  - `orchestrator stop`, `orchestrator pause` and `orchestrator resume` control it.
+- **Every stimulus is a turn.** An owner chat message or a batch of events becomes one turn: a resumption of the same session (`claude -p --resume <uuid> --output-format stream-json`, `kilo run -s <id> --format json`, `codex exec resume <id> --json`). Turns use the `orchestrate` permission policy (spec 07, 07.12 defaults, which include the kilo-mcp tools).
+- **A durable, serialized turn queue.**
+  - Turn requests live in `<workspace>/.ai-orchestration/orchestrator/queue/<seq>.json`.
+  - One worker, under a lock, drains the queue. **Never two resumptions of the same session at the same time.**
+  - Events that arrive while a turn runs are coalesced into the next turn as one batch.
+  - Owner messages take priority over event batches.
+  - A crashed turn is retried once, then reported.
+- **Transcript.** Each turn stores its input, the streamed output (assistant text, tool calls, results) and its cost/usage under `orchestrator/turns/<seq>/`. The chat UI renders it.
+- **Owner chat in the UI.** A chat panel shows the transcript and has an input box: a message → enqueue → streamed reply over the WebSocket. The owner can cancel the current turn, pause the session, and see queued items.
+- **Event turns are rate-limited** (default: at most 6 per hour, configurable) and respect the trigger kill switch. While the session is paused, events accumulate and are delivered as one batch on resume.
+- **§4 delivery changes:** the interactive-session channels (Monitor, hooks) are no longer part of the design. Every orchestration session is headless and is reached by resumption. Interactive tools (for example a Claude Code window) may still read `ai-orch events tail` manually, but nothing depends on it.
+- **`origin-session`** on questions, runs and notes points to the orchestrator session when the orchestrator created them. `resume-origin` therefore means "enqueue a turn for the orchestrator", or "continue the run" when the origin is a run.
+
 ## 1. Events (core)
 
 **Log.** The core appends every relevant fact to `<workspace>/.ai-orchestration/events.jsonl`:

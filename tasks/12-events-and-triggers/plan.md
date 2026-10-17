@@ -4,11 +4,17 @@
 
 ## Tasks (One Task = One Commit)
 
-### 12.1 - Claude Code delivery check (research, no code)
+### 12.1 - Headless resumption facts (research, no code)
 
 - **Status:** `open` · **Size:** S · **Executor:** self · **Repo:** `ai-orchestration/`
-- **Goal:** Verify against Claude Code's documentation and the installed CLI which hook events can add context to the next turn, and how a hook command receives the session id. Record the facts and the chosen mechanism in the spec §4.
-- **Verification:** A cited source for every claim. A throwaway hook in a scratch project injects a test line that a real session sees.
+- **Goal:** Verify on the installed CLIs, for Claude (`-p --session-id` then `-p --resume`), Kilo (`run -s`) and Codex (`exec resume`):
+  - that a session resumed headlessly keeps its full context across many turns;
+  - what happens when two resumptions overlap (to justify the serialized queue);
+  - how cost and usage are reported per turn;
+  - how a turn is cancelled.
+
+  Record the facts in spec §0.
+- **Verification:** A live three-turn conversation per tool in a scratch repo, recorded as fixtures.
 
 ### 12.2 - Core: event log (`events.jsonl`, emission in every locked mutation, `events tail`)
 
@@ -25,10 +31,15 @@
 - **Status:** `open` · **Size:** L · **Depends on:** 12.3, 07.12
 - **Goal:** Spec §5. The answer-and-resume rule replaces task 08.6.
 
-### 12.5 - Delivery to sessions: Claude Code hook and monitor recipe; Kilo and Codex skill guidance
+### 12.5 - Core: headless orchestrator session (start, stop, pause, durable serialized turn queue, transcripts, event coalescing)
 
-- **Status:** `open` · **Size:** M · **Depends on:** 12.1, 12.3
-- **Goal:** Spec §4. Lives in the binding repos (`kilo-mcp` skills) and in a Claude Code hook script under `ai-orchestration/hooks/`.
+- **Status:** `open` · **Size:** L · **Depends on:** 12.1, 12.3, 07.12 · **Repo:** `ai-orchestration/` (runs lane)
+- **Goal:** Spec §0.
+
+### 12.8 - UI: orchestrator chat panel (transcript, streaming reply, cancel, pause, queue view)
+
+- **Status:** `open` · **Size:** L · **Depends on:** 12.5, 12.6 (frontend and backend lanes)
+- **Goal:** Spec §0 "Owner chat in the UI".
 
 ### 12.6 - UI: event stream over WebSocket, notification area, Triggers page, session chips, "awaiting application" group
 
