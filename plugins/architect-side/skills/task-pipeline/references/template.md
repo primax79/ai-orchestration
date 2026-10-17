@@ -88,9 +88,11 @@ order - `Priority` is.
 
 ## Decisions waiting
 
-| Task | Question (exact) | Decider | Blocks |
-| --- | --- | --- | --- |
-| T013 | <the question, as it will be asked> | <who> | T015 |
+<!-- ai-orch:generated decisions -->
+| Key | Question | Blocks | Decider | Recommended |
+| --- | --- | --- | --- | --- |
+| [Q001](questions/Q001-<slug>.md) | <short question ending with ?> | T013 | owner | A |
+<!-- /ai-orch:generated decisions -->
 
 ## Done
 
@@ -161,7 +163,7 @@ and this is its `README.md`.
 - state: open
 - executor: self | <agent product> | dedicated-session | user-decision | <person>
 - depends-on: - | T### | NN.T
-- decider: - | <who must decide what>
+- decider: - | Q### (or legacy: owner: <question>)
 - sources: <conversation of <date>, file, finding, raw row id>
 - paths: <repositories and paths the task touches>
 - handoff: Read tasks/<category>/T###-<slug>.md (or T###-<slug>/README.md for a folder task), do the open steps, run the Verification, update the task and the registry.
@@ -219,6 +221,40 @@ user's explicit approval (recorded in `PROGRESS.md`). Manage transitions and
 ## Log (newest first)
 
 - <date>, <session>: <what was done, what was found, the next step>
+```
+
+---
+
+## `tasks/questions/Q###-<slug>.md` (blocking question)
+
+```markdown
+# Q### <title>
+
+- id: Q###
+- question: <short standalone question <= 160 chars ending with ?>
+- status: open
+- blocks: - | T### (in progress)
+- decider: owner
+- asked-by: <tool>:<profile> | owner
+- asked: <YYYY-MM-DD>
+- origin-run: -
+- open-answer: yes | no
+- recommended: A | -
+
+## Context
+
+<self-sufficient explanation of the stakes and trade-offs>
+
+## Options
+
+- **A** — <label>: <consequence>
+- **B** — <label>: <consequence>
+
+## Answer
+
+- choice: -
+- answered-by: -
+- answered: -
 ```
 
 ---

@@ -66,6 +66,7 @@ task/
     analyzed/          already distilled into specs/tasks (kept for provenance)
   specs/             structured specs; each may drive ONE or MANY initiatives
     <slug>.md
+  questions/         BLOCKING questions waiting on decider (Q###-<slug>.md)
   NN-<slug>/         an ACTIVE initiative
     plan.md            task breakdown; tasks NN.T, each sized for one commit
     NN.T-<name>.md     (only when expanded - see "Task packaging" below)
@@ -165,7 +166,7 @@ path. A "next steps" paragraph in the chat is not a substitute.
   - `next-up`: `yes` or `no` (default `no`);
   - `state`, `executor`;
   - `depends-on`: task ids, or `-`;
-  - `decider`: who must decide what, when a decision is open, else `-`;
+  - `decider`: `Q###` (or comma-separated `Q###` list) when blocked by questions, else `-` (legacy free-text `owner: <question>` remains valid);
   - `sources`: where it emerged (conversation date, file, finding, raw row id);
   - `paths`: the repositories and paths the task touches;
   - `handoff`: the one-line prompt that starts a fresh session or agent on the
@@ -195,8 +196,8 @@ path. A "next steps" paragraph in the chat is not a substitute.
 
 ### States
 
-`open`, `in progress`, `waiting` (on an external party: name who and what),
-`blocked` (on an unresolved question or task: name it), `delivered`,
+`open`, `in progress`, `waiting` (on a blocking question `decider: Q###` or external party),
+`blocked` (on an unresolved upstream task or dependency), `delivered`,
 `bounced` (verification failed; returns to the same executor session with
 findings `B1..Bn` recorded in `PROGRESS.md`), `verified`, `done` (or `done with
 a caveat`: name the caveat), `dropped` (say why).
@@ -243,8 +244,8 @@ table it holds:
 - **next-up**: at most five tasks, each with its handoff prompt;
 - **one table per category**, sorted by priority then id: id, priority, title
   (linked to the task file or its `README.md`), state, executor, depends-on;
-- **decisions waiting**: the exact question, who decides, and the task it
-  blocks;
+- **decisions waiting**: open questions rendered from `tasks/questions/` (key,
+  short question, blocked tasks, decider, recommendation);
 - **done**: closed tasks, newest first, with their result (`done`,
   `done with a caveat`, `dropped`).
 
@@ -341,6 +342,60 @@ about one project** is kept in that project, not in the workspace tree:
 **Never in a task file:** secrets, tokens, personal data, or details of
 undisclosed vulnerabilities. Point to where they are kept instead. A claim
 that something does not exist cites the command that searched for it.
+
+## Blocking questions (`tasks/questions/Q###-<slug>.md`)
+
+When an agent hits a decision that belongs to the owner or decider (scope changes,
+security trade-offs, financial cost, irreversible actions, conflicting requirements),
+never guess or decide silently. File a blocking question instead of stalling or
+assuming.
+
+- **File format & rules:** See `tasks/specs/blocking-questions.md`. One file per
+  question in `tasks/questions/Q###-<slug>.md`. `Q###` is unique across the tree.
+  - `question`: standalone sentence, ≤160 chars, ending with `?`. Must make sense
+    without reading anything else (no "this", "the above").
+  - `## Context`: self-sufficient facts and stakes so the decider can decide from
+    the card alone.
+  - `## Options`: ≥2 labelled options (`- **A** — <label>: <consequence>`), or
+    empty if pure open question with `open-answer: yes`.
+  - `recommended`: recommended option label (e.g. `A`), or `-`.
+  - `open-answer`: `yes` or `no`.
+- **Minimal complete example:**
+  ```markdown
+  # Q002 Permission policy for headless runs
+
+  - id: Q002
+  - question: Which permission policy should headless runs use by default?
+  - status: open
+  - blocks: T013 (in progress)
+  - decider: owner
+  - asked-by: claude:orchestration
+  - asked: 2026-10-17
+  - origin-run: -
+  - open-answer: yes
+  - recommended: A
+
+  ## Context
+  Headless runs cannot prompt. Tools outside allow-list are denied.
+
+  ## Options
+  - **A** — Per-mode allow-list: safe default, stalls logged.
+  - **B** — Broad allow-list: never stalls, grants full shell access.
+
+  ## Answer
+  - choice: -
+  - answered-by: -
+  - answered: -
+  ```
+- **Task linkage:** Asking moves the blocked task to `waiting` with `decider: Q###`
+  (recording prior state). When answered or withdrawn, the task is restored to its
+  prior state and `decider: -`. (Legacy free-text `decider: owner: <question>` remains
+  valid; convert with `ai-orch questions ask --from-task T###`).
+- **Engine commands (`ai-orch questions`):**
+  - `ai-orch questions ask --question "..." --context "..." --option "A=..." --blocks T###`
+  - `ai-orch questions answer Q### --choice A [--text "..."]`
+  - `ai-orch questions withdraw Q### --reason "..."`
+  - `ai-orch questions list` / `ai-orch questions show Q###`
 
 ## Task packaging: one file, or one file per task (by size)
 
@@ -473,6 +528,12 @@ python3 scripts/tasks_engine.py [--json] transition <task_id> <new_state> \
 
 # Deterministically regenerate or verify tasks/00-INDEX.md tables from task headers on disk
 python3 scripts/tasks_engine.py [--json] sync-index [--tasks-dir tasks] [--apply | --check]
+
+# Manage blocking questions (ask, answer, withdraw, list, show)
+python3 scripts/tasks_engine.py [--json] questions list [--status open|answered|withdrawn|all]
+python3 scripts/tasks_engine.py [--json] questions ask --question "..." --context "..." --option "A=..." --blocks T###
+python3 scripts/tasks_engine.py [--json] questions answer Q### --choice A [--text "..."]
+python3 scripts/tasks_engine.py [--json] questions withdraw Q### --reason "..."
 
 # Upgrade an older tasks/ tree to the latest task-pipeline convention
 python3 scripts/tasks_engine.py [--json] upgrade [--tasks-dir tasks]
