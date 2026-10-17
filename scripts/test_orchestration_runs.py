@@ -3892,3 +3892,261 @@ def test_runs_on_child_task_and_initiative_subtask(sample_workspace: pathlib.Pat
     assert data_prev["ok"] is True
     assert "Parent Context (plan.md)" in data_prev["prompt"]
     assert "05.1 - First Subtask" in data_prev["prompt"]
+
+
+# ---------------------------------------------------------------------------
+# 07.5 / 12.1: parsers against live-captured streams (scrubbed fixtures; no CLI runs)
+# ---------------------------------------------------------------------------
+
+FIXTURES_RUNS = pathlib.Path(__file__).resolve().parent / "fixtures" / "runs"
+
+import orchestration_runs as _runs  # noqa: E402
+
+KILO_SESSION = "ses_eb3d8ca0cffe7qLxcN47nwQ9jO"
+CLAUDE_SESSION = "fb2689fd-5a34-4749-b30e-8d1e17d70ab2"
+CODEX_SESSION = "01a14c2b-c204-71e0-a2c6-f0290b283bbe"
+
+
+def _fixture_run_dir(tmp_path: pathlib.Path, name: str) -> pathlib.Path:
+    """A run directory whose only stream chunk is the named fixture."""
+    run_dir = tmp_path / name
+    run_dir.mkdir(exist_ok=True)
+    (run_dir / "events.000.jsonl").write_bytes((FIXTURES_RUNS / f"{name}.jsonl").read_bytes())
+    return run_dir
+
+
+def test_fixtures_are_scrubbed():
+    for f in FIXTURES_RUNS.glob("*.jsonl"):
+        text = f.read_text(encoding="utf-8")
+        assert "/Users/" not in text, f.name
+        assert "@isti.cnr.it" not in text, f.name
+        for line in text.splitlines():
+            if line.strip():
+                json.loads(line)
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("kilo-execute", KILO_SESSION),
+        ("kilo-continue", KILO_SESSION),
+        ("claude-execute", CLAUDE_SESSION),
+        ("claude-continue", CLAUDE_SESSION),
+        ("claude-killed", CLAUDE_SESSION),
+        ("codex-execute", CODEX_SESSION),
+        ("codex-continue", CODEX_SESSION),
+    ],
+)
+def test_fixture_session_id_and_continuation_same_session(tmp_path, name, expected):
+    assert _runs.extract_session_id_from_run(_fixture_run_dir(tmp_path, name)) == expected
+
+
+def test_fixture_verify_runs_have_their_own_session(tmp_path):
+    assert _runs.extract_session_id_from_run(_fixture_run_dir(tmp_path, "kilo-verify")).startswith("ses_")
+    assert _runs.extract_session_id_from_run(_fixture_run_dir(tmp_path, "kilo-verify")) != KILO_SESSION
+    assert _runs.extract_session_id_from_run(_fixture_run_dir(tmp_path, "codex-verify")) == "01a14c2d-9ffe-7113-91e8-cf3867a87261"
+    assert _runs.extract_session_id_from_run(_fixture_run_dir(tmp_path, "claude-verify")) == "0b34e320-fea4-4102-a8ab-6e92ea9dcffb"
+
+
+@pytest.mark.parametrize("tool", ["kilo", "claude", "codex"])
+def test_fixture_final_report_is_clean_text(tmp_path, tool):
+    report = _runs.extract_final_report_from_run(_fixture_run_dir(tmp_path, f"{tool}-execute"))
+    assert report is not None
+    assert report.startswith("## Final Report\n")
+    assert "**Outcome**" in report
+    assert "**Issues**" in report
+    # Not raw JSON: real newlines, no trailing event payload.
+    assert report.count("\n") >= 5
+    assert '"time"' not in report and '"part"' not in report and '"usage"' not in report
+    assert '"type"' not in report and "session_id" not in report
+
+
+def test_fixture_final_report_claude_uses_result_text(tmp_path):
+    run_dir = _fixture_run_dir(tmp_path, "claude-continue")
+    final = _runs.extract_final_assistant_message(run_dir)
+    assert final is not None and final.startswith("The command ran")
+    assert _runs.extract_final_report_from_run(run_dir).startswith("## Final Report\n- **Outcome**: `partial`")
+
+
+def test_fixture_no_final_report_in_short_continuations(tmp_path):
+    assert _runs.extract_final_report_from_run(_fixture_run_dir(tmp_path, "kilo-continue")) is None
+    assert _runs.extract_final_assistant_message(_fixture_run_dir(tmp_path, "kilo-continue")) == "DELTA"
+    assert _runs.extract_final_report_from_run(_fixture_run_dir(tmp_path, "codex-continue")) is None
+
+
+@pytest.mark.parametrize(
+    "name, verdict",
+    [("kilo-verify", "verified"), ("claude-verify", "bounced"), ("codex-verify", "verified")],
+)
+def test_fixture_verdict(tmp_path, name, verdict):
+    v = _runs.extract_verdict_from_run(_fixture_run_dir(tmp_path, name))
+    assert v is not None
+    assert v["verdict"] == verdict
+    assert v["checks"] and all({"step", "result", "evidence"} <= set(c) for c in v["checks"])
+    if verdict == "bounced":
+        assert v["findings"][0]["severity"] == "major"
+
+
+def test_fixture_assistant_messages_skip_tools_and_thinking(tmp_path):
+    msgs = _runs.extract_assistant_messages(_fixture_run_dir(tmp_path, "claude-execute"))
+    assert msgs and all(m.strip() for m in msgs)
+    assert msgs[-1].startswith("## Final Report")
+    kilo = _runs.extract_assistant_messages(_fixture_run_dir(tmp_path, "kilo-execute"))
+    assert kilo[-1].startswith("## Final Report")
+    codex = _runs.extract_assistant_messages(_fixture_run_dir(tmp_path, "codex-execute"))
+    assert codex[0].startswith("I’m applying") or codex[0]
+    assert codex[-1].startswith("## Final Report")
+
+
+def test_fixture_usage_kilo(tmp_path):
+    u = _runs.extract_usage_from_run(_fixture_run_dir(tmp_path, "kilo-execute"))
+    assert set(_runs.USAGE_FIELDS) <= set(u)
+    assert u["source"] == "kilo"
+    assert u["input_tokens"] == 54367 and u["cache_read"] == 283061 and u["cache_write"] == 0
+    assert u["output_tokens"] == 750
+    # context at the last step = its tokens.total
+    assert u["estimated_context_tokens"] == 38210
+    assert u["cost_usd"] == pytest.approx(0.064817, abs=1e-6)
+
+
+def test_fixture_usage_claude(tmp_path):
+    u = _runs.extract_usage_from_run(_fixture_run_dir(tmp_path, "claude-execute"))
+    assert u["source"] == "claude"
+    assert (u["input_tokens"], u["cache_read"], u["cache_write"], u["output_tokens"]) == (12, 338095, 40482, 1839)
+    # last API call (result.usage.iterations[-1]): 2 + 63947 + 462 + 441
+    assert u["estimated_context_tokens"] == 64852
+    assert u["cost_usd"] == pytest.approx(0.0126, abs=1e-4)
+
+
+def test_fixture_usage_claude_killed_counts_each_message_once(tmp_path):
+    u = _runs.extract_usage_from_run(_fixture_run_dir(tmp_path, "claude-killed"))
+    assert u["source"] == "claude"
+    assert u["cost_usd"] is None  # no closing result event
+    assert u["estimated_context_tokens"] == u["input_tokens"] + u["cache_read"] + u["cache_write"] + u["output_tokens"]
+    assert u["estimated_context_tokens"] == 65743
+
+
+def test_fixture_usage_codex_is_cumulative_per_thread(tmp_path):
+    first = _runs.extract_usage_from_run(_fixture_run_dir(tmp_path, "codex-execute"))
+    assert first["source"] == "codex"
+    assert first["session_totals"] == {"input_tokens": 6735, "cache_read": 97920, "cache_write": 0, "output_tokens": 1298}
+    assert first["input_tokens"] == 6735 and first["estimated_context_tokens"] is None
+    second = _runs.extract_usage_from_run(_fixture_run_dir(tmp_path, "codex-continue"), first["session_totals"])
+    assert (second["input_tokens"], second["cache_read"], second["output_tokens"]) == (392, 15616, 33)
+    assert second["session_totals"]["cache_read"] == 113536
+
+
+def test_codex_rollout_last_context(tmp_path):
+    day = tmp_path / "sessions" / "2026" / "10" / "18"
+    day.mkdir(parents=True)
+    tid = "01a14c2b-c204-71e0-a2c6-f0290b283bbe"
+    lines = [
+        {"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 100, "output_tokens": 5}}}},
+        {"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 16008, "output_tokens": 33}}}},
+    ]
+    (day / f"rollout-2026-10-18T01-21-38-{tid}.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    assert _runs.codex_rollout_last_context(tid, codex_home=tmp_path) == 16041
+    assert _runs.codex_rollout_last_context("missing", codex_home=tmp_path) is None
+    assert _runs.codex_rollout_last_context("../etc", codex_home=tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "name, needle",
+    [
+        ("kilo-resume-other-project", "Unexpected server error"),
+        ("claude-resume-invalid-session", "No conversation found with session ID"),
+        ("codex-model-unsupported", "not supported when using Codex with a ChatGPT account"),
+    ],
+)
+def test_fixture_agent_error(tmp_path, name, needle):
+    err = _runs.agent_error_from_objects(_runs.read_stream_objects(_fixture_run_dir(tmp_path, name)))
+    assert err and needle in err
+
+
+def test_fixture_codex_resume_by_name_starts_a_new_thread(tmp_path):
+    # `codex exec resume not-a-thread`: no thread named so; Codex silently starts a new one.
+    sid = _runs.extract_session_id_from_run(_fixture_run_dir(tmp_path, "codex-resume-name-fallback"))
+    assert sid and sid != "not-a-thread" and sid != CODEX_SESSION
+
+
+def test_fixture_log_events_show_text_and_tools(tmp_path):
+    for tool in ("kilo", "claude", "codex"):
+        events = _runs.parse_log_events((FIXTURES_RUNS / f"{tool}-execute.jsonl").read_bytes())
+        texts = [e["text"] for e in events if e.get("text")]
+        assert any(t.startswith("## Final Report") for t in texts), tool
+        assert any(e.get("tool_call") for e in events), tool
+        assert not any(t.lstrip().startswith("{") for t in texts), tool
+
+
+def test_adapter_argv_live_flag_corrections():
+    # Kilo: `-f` is an array option, so the message needs `--` (resume included).
+    argv = build_adapter_argv("kilo", {}, "execute", "/w", "google/gemini-3.8-flash", session_id="ses_x", prompt_file="/p.md", is_resume=True)
+    assert argv[-3:] == ["/p.md", "--", "Continue."]
+    # Codex execute in a worktree: the main repo's .git is a sandbox writable root, start and resume.
+    start = build_adapter_argv("codex", {}, "execute", "/w", "m", git_common_dir="/repo/.git")
+    assert 'sandbox_workspace_write.writable_roots=["/repo/.git"]' in start
+    assert start[-1] == "-"
+    resume = build_adapter_argv("codex", {}, "execute", "/w", "m", session_id="t", is_resume=True, git_common_dir="/repo/.git")
+    assert 'sandbox_workspace_write.writable_roots=["/repo/.git"]' in resume
+    ro = build_adapter_argv("codex", {"headless": {"sandbox": "read-only"}}, "execute", "/w", "m", git_common_dir="/repo/.git")
+    assert not any("writable_roots" in a for a in ro)
+    # Claude: python3 -m pytest is allowed in execute and verify (Homebrew/macOS have no `python`).
+    for mode in ("execute", "verify", "orchestrate"):
+        assert "Bash(python3 -m pytest:*)" in DEFAULT_CLAUDE_ALLOWED_TOOLS[mode]
+
+
+def test_git_common_dir_of_worktree(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i"], cwd=repo, check=True)
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "worktree", "add", "-q", str(wt)], cwd=repo, check=True)
+    assert pathlib.Path(_runs.git_common_dir_of(wt)).resolve() == (repo / ".git").resolve()
+
+
+def test_continue_refused_while_session_busy_and_mismatch_fails(sample_workspace: pathlib.Path):
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--session-id", "sess-init"]\n'
+        f'resume_argv = ["{sys.executable}", "{STUB_AGENT}", "--session-id", "sess-fresh-thread"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "cfg busy"], cwd=str(sample_workspace), check=True)
+
+    def ai_orch(*args: str, check: bool = True) -> dict:
+        res = subprocess.run(
+            [str(BIN_AI_ORCH), "run", *args, "--workspace", str(sample_workspace), "--json"],
+            capture_output=True, text=True, check=check,
+        )
+        return json.loads(res.stdout)
+
+    r1 = ai_orch("start", "--task", "T007", "--mode", "execute", "--isolation", "worktree")["run_id"]
+    rec1 = wait_for_terminal(sample_workspace, r1)
+    assert rec1["status"] == "succeeded" and rec1["session_id"] == "sess-init"
+
+    # An active run holding the same session (this test process stands in for its supervisor).
+    busy = dict(rec1)
+    busy.update({
+        "run_id": "20261017-000001-T007-kilo-b0b0",
+        "status": "running",
+        "continued_from": r1,
+        "supervisor": {"pid": os.getpid(), "start_time": get_process_start_time(os.getpid())},
+    })
+    save_run_record(sample_workspace, busy)
+    refused = ai_orch("start", "--continue", r1, "--instructions", "x", check=False)
+    assert refused["ok"] is False and refused["reason"] == "session-busy"
+    assert busy["run_id"] in refused["error"]
+
+    busy["status"] = "succeeded"
+    save_run_record(sample_workspace, busy)
+    # The resumed agent reports another session: the continuation fails, never silently forks.
+    r2 = ai_orch("start", "--continue", r1, "--instructions", "x")["run_id"]
+    rec2 = wait_for_terminal(sample_workspace, r2)
+    assert rec2["status"] == "failed"
+    assert rec2["session_mismatch"] is True
+    assert rec2["observed_session_id"] == "sess-fresh-thread"
+    assert rec2["session_id"] == "sess-init"
+    assert "did not land in session" in rec2["invariant_error"]

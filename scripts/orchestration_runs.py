@@ -281,6 +281,7 @@ DEFAULT_CLAUDE_ALLOWED_TOOLS: dict[str, list[str]] = {
         "Bash(git log:*)",
         "Bash(pytest:*)",
         "Bash(python -m pytest:*)",
+        "Bash(python3 -m pytest:*)",
         "Bash(uv run:*)",
         "Bash(npm test:*)",
         "Bash(npm run build:*)",
@@ -296,6 +297,7 @@ DEFAULT_CLAUDE_ALLOWED_TOOLS: dict[str, list[str]] = {
         "Bash(git log:*)",
         "Bash(pytest:*)",
         "Bash(python -m pytest:*)",
+        "Bash(python3 -m pytest:*)",
         "Bash(uv run:*)",
         "Bash(npm test:*)",
         "Bash(npm run build:*)",
@@ -313,6 +315,7 @@ DEFAULT_CLAUDE_ALLOWED_TOOLS: dict[str, list[str]] = {
         "Bash(git log:*)",
         "Bash(pytest:*)",
         "Bash(python -m pytest:*)",
+        "Bash(python3 -m pytest:*)",
         "Bash(uv run:*)",
         "Bash(npm test:*)",
         "Bash(npm run build:*)",
@@ -455,6 +458,41 @@ def parse_log_events(data_bytes: bytes) -> list[dict[str, Any]]:
             if isinstance(obj, dict):
                 evt: dict[str, Any] = {"raw": obj}
                 content = None
+                typ = obj.get("type")
+                part = obj.get("part") if isinstance(obj.get("part"), dict) else None
+                item = obj.get("item") if isinstance(obj.get("item"), dict) else None
+                msg = obj.get("message") if isinstance(obj.get("message"), dict) else None
+                # Tool-specific shapes (07.5 live streams): Kilo `part`, Codex `item`, Claude `message`.
+                if part is not None and typ in ("text", "tool_use", "step_start", "step_finish", "reasoning"):
+                    if typ == "text" and isinstance(part.get("text"), str):
+                        evt["text"] = part["text"]
+                    elif typ == "tool_use":
+                        evt["tool_call"] = part.get("tool") or part
+                    evt["type"] = typ
+                    events.append(evt)
+                    continue
+                if item is not None and typ in ("item.started", "item.completed", "item.updated"):
+                    itype = item.get("type")
+                    if itype == "agent_message" and isinstance(item.get("text"), str):
+                        evt["text"] = item["text"]
+                    elif itype == "error":
+                        evt["error"] = item.get("message") or item
+                    elif itype in ("command_execution", "file_change", "mcp_tool_call", "web_search"):
+                        evt["tool_call"] = item.get("command") or itype
+                    evt["type"] = typ
+                    events.append(evt)
+                    continue
+                if msg is not None and typ in ("assistant", "user"):
+                    blocks = msg.get("content") if isinstance(msg.get("content"), list) else []
+                    texts = [b.get("text") for b in blocks if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]
+                    tools = [b.get("name") for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+                    if typ == "assistant" and texts:
+                        evt["text"] = "\n".join(texts)
+                    if tools:
+                        evt["tool_call"] = tools[0]
+                    evt["type"] = typ
+                    events.append(evt)
+                    continue
                 if "content" in obj:
                     content = obj["content"]
                 elif "text" in obj:
@@ -493,104 +531,399 @@ def read_all_log_events(run_dir: pathlib.Path) -> list[dict[str, Any]]:
     return all_events
 
 
-def extract_session_id_from_run(run_dir: pathlib.Path) -> str | None:
-    """Extract session_id from JSON events in run directory."""
-    events = read_all_log_events(run_dir)
-    for evt in reversed(events):
-        raw = evt.get("raw")
-        if isinstance(raw, dict):
-            if raw.get("session_id"):
-                return str(raw["session_id"])
-            if raw.get("sessionId"):
-                return str(raw["sessionId"])
-    return None
+# ---------------------------------------------------------------------------
+# Stream parsers (07.5: verified against live Kilo, Claude and Codex streams;
+# fixtures in scripts/fixtures/runs/{kilo,claude,codex}-*.jsonl)
+#
+#   Kilo   `kilo run --format json`: every event carries `sessionID`; assistant
+#          text is `{"type":"text","part":{"type":"text","text":...,"messageID":...}}`;
+#          usage is per step in `{"type":"step_finish","part":{"tokens":{...},"cost":...}}`.
+#   Claude `claude -p --output-format stream-json --verbose`: every event carries
+#          `session_id`; assistant text is in `{"type":"assistant","message":{"content":[{"type":"text"}]}}`;
+#          the closing `{"type":"result","result":...,"usage":...,"total_cost_usd":...}`
+#          repeats the final assistant text.
+#   Codex  `codex exec --json`: the id is `{"type":"thread.started","thread_id":...}`;
+#          assistant text is `{"type":"item.completed","item":{"type":"agent_message","text":...}}`;
+#          usage is in `{"type":"turn.completed","usage":{...}}`.
+#   Generic (stub agent and older fixtures): `{"role":"assistant","content":...}` and `session_id`.
+# ---------------------------------------------------------------------------
 
-
-def extract_final_report_from_run(run_dir: pathlib.Path) -> str | None:
-    """Extract ## Final Report section from run log events or raw output."""
+def read_stream_objects(run_dir: pathlib.Path) -> list[dict[str, Any]]:
+    """Return the JSON objects of the agent's stdout stream, in order (non-JSON lines skipped)."""
+    objs: list[dict[str, Any]] = []
     chunks = sorted(run_dir.glob("events.*.jsonl"))
-    full_text = ""
+    if not chunks and (run_dir / "events.jsonl").is_file():
+        chunks = [run_dir / "events.jsonl"]
     for chunk in chunks:
         try:
-            full_text += chunk.read_text(encoding="utf-8", errors="replace") + "\n"
-        except Exception:
-            pass
+            text = chunk.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                objs.append(obj)
+    return objs
 
-    idx = full_text.find("## Final Report")
-    if idx != -1:
-        report = full_text[idx:].strip()
-        # If the report is inside JSON or has trailing characters, clean up
-        # Remove trailing JSON closing quotes/brackets if found
-        clean_lines = []
-        for line in report.splitlines():
-            # If line is part of JSON closing like '"}', stop or skip
-            if line.strip() in ('"}', '}', '"]'):
-                break
-            clean_lines.append(line)
-        cleaned = "\n".join(clean_lines).strip()
-        if cleaned:
-            return cleaned
 
-    # Fallback: check parsed event text fields
-    events = read_all_log_events(run_dir)
-    for evt in reversed(events):
-        text = evt.get("text", "")
-        if "## Final Report" in text:
-            sub_idx = text.find("## Final Report")
-            return text[sub_idx:].strip()
-
+def session_id_from_event(obj: dict[str, Any]) -> str | None:
+    """Session id carried by one stream event, for any of the three tools (or the generic form)."""
+    for key in ("session_id", "sessionID", "sessionId"):
+        val = obj.get(key)
+        if isinstance(val, str) and val:
+            return val
+    if obj.get("type") == "thread.started" and isinstance(obj.get("thread_id"), str) and obj["thread_id"]:
+        return obj["thread_id"]
+    part = obj.get("part")
+    if isinstance(part, dict) and isinstance(part.get("sessionID"), str) and part["sessionID"]:
+        return part["sessionID"]
     return None
+
+
+def extract_session_id_from_objects(objs: list[dict[str, Any]]) -> str | None:
+    """The last session id seen in the stream (the id a resume must use)."""
+    for obj in reversed(objs):
+        sid = session_id_from_event(obj)
+        if sid:
+            return sid
+    return None
+
+
+def extract_session_id_from_run(run_dir: pathlib.Path) -> str | None:
+    """Extract session_id from JSON events in run directory."""
+    return extract_session_id_from_objects(read_stream_objects(run_dir))
+
+
+def _claude_text_blocks(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type", "text") == "text" and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+            elif isinstance(item, str):
+                parts.append(item)
+    return "\n".join(parts)
+
+
+def assistant_messages_from_objects(objs: list[dict[str, Any]]) -> list[str]:
+    """Assistant text messages in order, one entry per assistant message.
+
+    Tool calls, thinking blocks and tool results are not messages. Kilo text parts
+    are joined per `messageID`. Claude's closing `result` text replaces the last
+    message (it is the authoritative final text); Codex `agent_message` items are
+    one message each.
+    """
+    messages: list[str] = []
+    kilo_msg_index: dict[str, int] = {}
+    claude_result: str | None = None
+    for obj in objs:
+        typ = obj.get("type")
+        # Kilo
+        part = obj.get("part")
+        if typ == "text" and isinstance(part, dict) and part.get("type") == "text":
+            text = part.get("text")
+            if not isinstance(text, str):
+                continue
+            mid = part.get("messageID")
+            if isinstance(mid, str) and mid in kilo_msg_index:
+                idx = kilo_msg_index[mid]
+                messages[idx] = messages[idx] + "\n" + text if messages[idx] else text
+            else:
+                if isinstance(mid, str):
+                    kilo_msg_index[mid] = len(messages)
+                messages.append(text)
+            continue
+        # Codex
+        item = obj.get("item")
+        if typ == "item.completed" and isinstance(item, dict):
+            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                messages.append(item["text"])
+            continue
+        # Claude
+        msg_obj = obj.get("message")
+        if typ == "assistant" and isinstance(msg_obj, dict):
+            if obj.get("parent_tool_use_id"):
+                continue  # a subagent's message, not the run's
+            text = _claude_text_blocks(msg_obj.get("content"))
+            if text.strip():
+                messages.append(text)
+            continue
+        if typ == "result" and isinstance(obj.get("result"), str):
+            claude_result = obj["result"]
+            continue
+        # Generic (stub agent): {"role": "assistant", "content"|"text": ...}
+        if obj.get("role") == "assistant" or (isinstance(msg_obj, dict) and msg_obj.get("role") == "assistant"):
+            src = msg_obj if isinstance(msg_obj, dict) and msg_obj.get("role") == "assistant" else obj
+            content = src.get("content")
+            if content is None:
+                content = src.get("text")
+            if content is None:
+                continue
+            text = _claude_text_blocks(content) if isinstance(content, list) else str(content)
+            messages.append(text)
+    if claude_result is not None and claude_result.strip():
+        if messages and messages[-1].strip() and messages[-1].strip() in claude_result:
+            messages[-1] = claude_result
+        elif not messages or messages[-1] != claude_result:
+            messages.append(claude_result)
+    return messages
 
 
 def extract_assistant_messages(run_dir: pathlib.Path) -> list[str]:
     """Extract all assistant message contents from run log events in order."""
-    events = read_all_log_events(run_dir)
-    assistant_messages: list[str] = []
-    for evt in events:
-        raw = evt.get("raw")
-        if isinstance(raw, dict):
-            role = raw.get("role") or raw.get("type")
-            msg_obj = raw.get("message")
-            if isinstance(msg_obj, dict) and msg_obj.get("role") == "assistant":
-                role = "assistant"
-                content = msg_obj.get("content") or msg_obj.get("text")
-            else:
-                content = raw.get("content") or raw.get("text")
-
-            if role == "assistant":
-                if isinstance(content, list):
-                    text_parts = []
-                    for item in content:
-                        if isinstance(item, dict) and "text" in item:
-                            text_parts.append(str(item["text"]))
-                        elif isinstance(item, str):
-                            text_parts.append(item)
-                    assistant_messages.append("\n".join(text_parts))
-                elif content is not None:
-                    assistant_messages.append(str(content))
-
-    if not assistant_messages:
-        # Check raw JSON lines for assistant role
-        for chunk in sorted(run_dir.glob("events.*.jsonl")):
-            try:
-                for line in chunk.read_text(encoding="utf-8", errors="replace").splitlines():
-                    try:
-                        obj = json.loads(line.strip())
-                        if isinstance(obj, dict) and obj.get("role") == "assistant":
-                            cnt = obj.get("content") or obj.get("text") or ""
-                            assistant_messages.append(str(cnt))
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-    return assistant_messages
+    return assistant_messages_from_objects(read_stream_objects(run_dir))
 
 
 def extract_final_assistant_message(run_dir: pathlib.Path) -> str | None:
     """Extract the final assistant message content from run logs (used for verdicts and questions)."""
     messages = extract_assistant_messages(run_dir)
     return messages[-1] if messages else None
+
+
+def final_report_from_messages(messages: list[str]) -> str | None:
+    """The `## Final Report` section of the latest assistant message that has one."""
+    for text in reversed(messages):
+        idx = text.find("## Final Report")
+        if idx != -1:
+            return text[idx:].strip() or None
+    return None
+
+
+def extract_final_report_from_run(run_dir: pathlib.Path) -> str | None:
+    """Extract the ## Final Report section from the assistant messages.
+
+    For a stream that is not JSON lines, fall back to the raw text.
+    """
+    report = final_report_from_messages(extract_assistant_messages(run_dir))
+    if report:
+        return report
+    if read_stream_objects(run_dir):
+        return None
+    full_text = ""
+    for chunk in sorted(run_dir.glob("events.*.jsonl")):
+        try:
+            full_text += chunk.read_text(encoding="utf-8", errors="replace") + "\n"
+        except OSError:
+            pass
+    idx = full_text.find("## Final Report")
+    if idx == -1:
+        return None
+    return full_text[idx:].strip() or None
+
+
+def agent_error_from_objects(objs: list[dict[str, Any]]) -> str | None:
+    """The last error the agent reported on its stdout stream, as text.
+
+    Kilo: `{"type":"error","error":{"name":..,"data":{"message":..}}}`; Codex:
+    `{"type":"turn.failed","error":{"message":..}}` or `{"type":"error","message":..}`;
+    Claude: a `result` event with `is_error: true` (its `errors` list, e.g.
+    "No conversation found with session ID: <id>").
+    """
+    found: str | None = None
+    for obj in objs:
+        typ = obj.get("type")
+        if typ == "error":
+            err = obj.get("error")
+            if isinstance(err, dict):
+                data = err.get("data") if isinstance(err.get("data"), dict) else {}
+                found = str(data.get("message") or err.get("message") or err.get("name") or err)
+            elif obj.get("message"):
+                found = str(obj["message"])
+            elif err:
+                found = str(err)
+        elif typ == "turn.failed" and isinstance(obj.get("error"), dict):
+            found = str(obj["error"].get("message") or obj["error"])
+        elif typ == "result" and obj.get("is_error"):
+            errs = obj.get("errors")
+            if isinstance(errs, list) and errs:
+                found = "; ".join(str(e) for e in errs)
+            else:
+                found = str(obj.get("result") or obj.get("subtype") or "error")
+    return found
+
+
+USAGE_FIELDS = ("input_tokens", "cache_read", "cache_write", "output_tokens", "estimated_context_tokens")
+
+
+def _as_int(val: Any) -> int:
+    try:
+        return int(val or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def usage_from_objects(
+    objs: list[dict[str, Any]],
+    previous_session_totals: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Normalize the provider usage of one run (one turn) into spec 12 §0c E8 fields.
+
+    - `input_tokens`: uncached input tokens summed over the turn's model calls;
+    - `cache_read` / `cache_write`: cached input tokens read / written, summed;
+    - `output_tokens`: output tokens, reasoning included, summed;
+    - `estimated_context_tokens`: the context size at the last model call
+      (its input + cache read + cache write + output), the value rotation uses;
+    - `cost_usd`: the provider-reported cost when available (None otherwise; Codex reports none).
+
+    Kilo and Claude report `input` exclusive of cached tokens; Codex reports
+    `input_tokens` inclusive of `cached_input_tokens`, so the cached part is subtracted.
+
+    Codex `turn.completed.usage` is **cumulative over the whole thread** (verified
+    live: a one-line resumed turn reported the first turn's totals plus ~16k). The
+    cumulative values go to `session_totals`; the per-turn values are the difference
+    from `previous_session_totals` (the source run's `session_totals`) when given.
+    The stream has no per-call usage, so `estimated_context_tokens` stays None for
+    Codex here (see codex_rollout_last_context).
+    Returns None when the stream carries no usage.
+    """
+    tool_seen = None
+    codex_cumulative: dict[str, int] | None = None
+    claude_msg_usage: dict[str, dict[str, int]] = {}
+    totals = {k: 0 for k in USAGE_FIELDS if k != "estimated_context_tokens"}
+    last_call: dict[str, int] | None = None
+    cost: float | None = None
+    claude_result_usage: dict[str, Any] | None = None
+
+    for obj in objs:
+        typ = obj.get("type")
+        part = obj.get("part")
+        if typ == "step_finish" and isinstance(part, dict) and isinstance(part.get("tokens"), dict):
+            tool_seen = "kilo"
+            tok = part["tokens"]
+            cache = tok.get("cache") if isinstance(tok.get("cache"), dict) else {}
+            call = {
+                "input_tokens": _as_int(tok.get("input")),
+                "cache_read": _as_int(cache.get("read")),
+                "cache_write": _as_int(cache.get("write")),
+                "output_tokens": _as_int(tok.get("output")) + _as_int(tok.get("reasoning")),
+            }
+            for k, v in call.items():
+                totals[k] += v
+            last_call = call
+            if isinstance(part.get("cost"), (int, float)):
+                cost = (cost or 0.0) + float(part["cost"])
+            continue
+        if typ == "turn.completed" and isinstance(obj.get("usage"), dict):
+            tool_seen = "codex"
+            u = obj["usage"]
+            cached = _as_int(u.get("cached_input_tokens"))
+            codex_cumulative = {
+                "input_tokens": max(_as_int(u.get("input_tokens")) - cached, 0),
+                "cache_read": cached,
+                "cache_write": _as_int(u.get("cache_write_input_tokens")),
+                "output_tokens": _as_int(u.get("output_tokens")),
+            }
+            continue
+        msg = obj.get("message")
+        if typ == "assistant" and isinstance(msg, dict) and isinstance(msg.get("usage"), dict) and not obj.get("parent_tool_use_id"):
+            tool_seen = "claude"
+            u = msg["usage"]
+            last_call = {
+                "input_tokens": _as_int(u.get("input_tokens")),
+                "cache_read": _as_int(u.get("cache_read_input_tokens")),
+                "cache_write": _as_int(u.get("cache_creation_input_tokens")),
+                "output_tokens": _as_int(u.get("output_tokens")),
+            }
+            # One API message is streamed as several `assistant` events (one per
+            # content block) repeating its usage: count each message id once.
+            claude_msg_usage[str(msg.get("id") or len(claude_msg_usage))] = last_call
+            continue
+        if typ == "result" and isinstance(obj.get("usage"), dict):
+            tool_seen = "claude"
+            claude_result_usage = obj["usage"]
+            if isinstance(obj.get("total_cost_usd"), (int, float)):
+                cost = float(obj["total_cost_usd"])
+            iters = claude_result_usage.get("iterations")
+            if isinstance(iters, list) and iters and isinstance(iters[-1], dict):
+                it = iters[-1]
+                last_call = {
+                    "input_tokens": _as_int(it.get("input_tokens")),
+                    "cache_read": _as_int(it.get("cache_read_input_tokens")),
+                    "cache_write": _as_int(it.get("cache_creation_input_tokens")),
+                    "output_tokens": _as_int(it.get("output_tokens")),
+                }
+
+    if tool_seen is None:
+        return None
+    if tool_seen == "claude" and claude_result_usage is None:
+        # No closing `result` (killed or crashed run): sum the messages seen.
+        for call in claude_msg_usage.values():
+            for k, v in call.items():
+                totals[k] += v
+    if claude_result_usage is not None:
+        u = claude_result_usage
+        totals = {
+            "input_tokens": _as_int(u.get("input_tokens")),
+            "cache_read": _as_int(u.get("cache_read_input_tokens")),
+            "cache_write": _as_int(u.get("cache_creation_input_tokens")),
+            "output_tokens": _as_int(u.get("output_tokens")),
+        }
+    session_totals: dict[str, int] | None = None
+    if codex_cumulative is not None:
+        session_totals = codex_cumulative
+        prev = previous_session_totals if isinstance(previous_session_totals, dict) else {}
+        totals = {k: max(v - _as_int(prev.get(k)), 0) for k, v in codex_cumulative.items()}
+    usage: dict[str, Any] = dict(totals)
+    usage["estimated_context_tokens"] = sum(last_call.values()) if last_call else None
+    usage["cost_usd"] = round(cost, 6) if cost is not None else None
+    usage["source"] = tool_seen
+    if session_totals is not None:
+        usage["session_totals"] = session_totals
+    return usage
+
+
+def codex_rollout_last_context(thread_id: str, codex_home: pathlib.Path | None = None) -> int | None:
+    """Context size at the last model call of a Codex thread, from Codex's own rollout file.
+
+    `codex exec --json` streams only cumulative usage; the rollout
+    (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread_id>.jsonl`) records each
+    call's `token_count.info.last_token_usage`. Best effort: None when not found.
+    """
+    if not thread_id or not re.fullmatch(r"[0-9A-Za-z-]+", thread_id):
+        return None
+    home = codex_home or pathlib.Path(os.environ.get("CODEX_HOME") or (pathlib.Path.home() / ".codex"))
+    sessions = home / "sessions"
+    if not sessions.is_dir():
+        return None
+    try:
+        candidates = sorted(sessions.glob(f"*/*/*/rollout-*-{thread_id}.jsonl"))
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    last: int | None = None
+    try:
+        with open(candidates[-1], encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"token_count"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                info = (obj.get("payload") or {}).get("info") if isinstance(obj.get("payload"), dict) else None
+                lt = info.get("last_token_usage") if isinstance(info, dict) else None
+                if isinstance(lt, dict):
+                    last = _as_int(lt.get("input_tokens")) + _as_int(lt.get("output_tokens"))
+    except OSError:
+        return None
+    return last
+
+
+def extract_usage_from_run(
+    run_dir: pathlib.Path,
+    previous_session_totals: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Normalized usage of a run (see usage_from_objects)."""
+    return usage_from_objects(read_stream_objects(run_dir), previous_session_totals)
 
 
 def extract_verdict_from_run(run_dir: pathlib.Path) -> dict[str, Any] | None:
@@ -1535,6 +1868,24 @@ def validate_headless_argv_secrets(argv: list[str]) -> list[str]:
     return errors
 
 
+def codex_writable_roots_override(dirs: list[str]) -> str:
+    """`-c` value adding sandbox writable roots (a TOML array of strings)."""
+    return "sandbox_workspace_write.writable_roots=" + json.dumps([str(d) for d in dirs])
+
+
+def git_common_dir_of(path: pathlib.Path) -> str | None:
+    """Absolute git common dir (the main repository's `.git`) for a repo or worktree path."""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=str(path), capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return None
+    out = res.stdout.strip()
+    return out if res.returncode == 0 and out else None
+
+
 def build_adapter_argv(
     tool: str,
     tool_cfg: dict[str, Any],
@@ -1547,8 +1898,15 @@ def build_adapter_argv(
     prompt_file: str | None = None,
     is_resume: bool = False,
     attachment_paths: list[str] | None = None,
+    git_common_dir: str | None = None,
 ) -> list[str]:
-    """Build the adapter argv list for a given tool (Spec §5.7, R3, Task 09.4)."""
+    """Build the adapter argv list for a given tool (Spec §5.7, R3, Task 09.4).
+
+    `git_common_dir` (07.5): for a Codex `execute` run in a git worktree, the
+    worktree's git metadata lives in the main repository's `.git`, outside the
+    `workspace-write` sandbox, so `git commit` fails with "Unable to create
+    .../index.lock: Operation not permitted". It is added as a sandbox writable root.
+    """
     headless = tool_cfg.get("headless", {})
     if not isinstance(headless, dict):
         headless = {}
@@ -1617,7 +1975,9 @@ def build_adapter_argv(
             ]
             if variant:
                 argv.extend(["--variant", variant])
-            argv.extend(["-f", prompt_file_val, "Continue."])
+            # `-f` is a yargs array option: without `--` it swallows the message as a
+            # second file ("Error: File not found: Continue.", seen live in 07.5).
+            argv.extend(["-f", prompt_file_val, "--", "Continue."])
             return argv
 
         if tool == "claude":
@@ -1659,6 +2019,8 @@ def build_adapter_argv(
             ]
             if effort:
                 argv.extend(["-c", f"model_reasoning_effort={effort}"])
+            if git_common_dir and sandbox == "workspace-write":
+                argv.extend(["-c", codex_writable_roots_override([git_common_dir])])
             argv.append("-")
             return argv
 
@@ -1724,6 +2086,8 @@ def build_adapter_argv(
         ]
         if effort:
             argv.extend(["-c", f"model_reasoning_effort={effort}"])
+        if git_common_dir and sandbox == "workspace-write":
+            argv.extend(["-c", codex_writable_roots_override([git_common_dir])])
         if attachment_paths:
             # `-i` takes images only; text/PDF attachments are listed in the prompt
             # and read by the agent with its own (read-only) tools.
@@ -2213,6 +2577,7 @@ def create_run_record(
         "session_id": None,
         "continued_from": continued_from,
         "final_report": None,
+        "usage": None,
         "verdict": None,
         "proposal_status": None,
         "proposal_error": None,
@@ -2986,6 +3351,11 @@ def validate_run_request(
         effort=effort,
         session_id="{session_id}",
         prompt_file="{prompt_file}",
+        git_common_dir=(
+            git_common_dir_of(target_repo)
+            if tool == "codex" and mode == "execute" and isolation == "worktree"
+            else None
+        ),
     )
     argv_display = redact_argv(raw_argv)
 
@@ -3146,6 +3516,22 @@ def cmd_start(args: argparse.Namespace) -> int:
                 )
                 return 1
 
+            # 12.1: never two resumptions of the same session at once. Live, two
+            # overlapping `kilo run -s <id>` both ran and interleaved their turns
+            # in the one session (one answered "ALPHA BRAVO" to "ALPHA").
+            same_session_active = [
+                r for r in list_run_records(ws, active_only=True)
+                if r.get("session_id") == session_id and r.get("tool") == source_record.get("tool")
+            ]
+            if same_session_active:
+                print_error(
+                    args.json,
+                    "session-busy",
+                    f"Session '{session_id}' is already in use by active run '{same_session_active[0]['run_id']}'; "
+                    "wait for it to finish or cancel it before continuing",
+                )
+                return 1
+
             if source_record.get("mode") == "execute" and source_record.get("isolation") == "worktree":
                 wt_p = pathlib.Path(source_record.get("worktree_path") or source_record["cwd"])
                 if not wt_p.is_dir():
@@ -3195,6 +3581,13 @@ def cmd_start(args: argparse.Namespace) -> int:
                 session_id=session_id,
                 prompt_file=str(prompt_path),
                 is_resume=True,
+                git_common_dir=(
+                    git_common_dir_of(pathlib.Path(source_record["cwd"]))
+                    if tool == "codex" and source_record.get("mode") == "execute"
+                    and source_record.get("isolation") == "worktree"
+                    and pathlib.Path(source_record["cwd"]).is_dir()
+                    else None
+                ),
             )
             argv_display = redact_argv(resume_raw_argv)
 
@@ -3508,6 +3901,12 @@ def cmd_start(args: argparse.Namespace) -> int:
             session_id="{session_id}",
             prompt_file=str(prompt_path),
             attachment_paths=data.get("attachment_paths"),
+            git_common_dir=(
+                git_common_dir_of(pathlib.Path(actual_cwd))
+                if data["tool"] == "codex" and data["mode"] == "execute"
+                and data["isolation"] == "worktree" and pathlib.Path(actual_cwd).is_dir()
+                else None
+            ),
         )
         argv_display = redact_argv(raw_argv)
 
@@ -3612,6 +4011,12 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         prompt_file=str(prompt_path),
         is_resume=is_resume,
         attachment_paths=record.get("attachment_paths"),
+        git_common_dir=(
+            git_common_dir_of(pathlib.Path(record["cwd"]))
+            if record["tool"] == "codex" and record.get("mode") == "execute"
+            and record.get("isolation") == "worktree" and pathlib.Path(record["cwd"]).is_dir()
+            else None
+        ),
     )
 
     prompt_via = headless_cfg.get("prompt_via")
@@ -3803,11 +4208,56 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     if report_text:
         record["final_report"] = report_text
 
-    # Extract session_id if missing
+    # Extract session_id if missing; on a pre-assigned or resumed id, record a
+    # stream that reports a different session (the resume did not land in it).
+    sid = extract_session_id_from_run(run_dir)
     if not record.get("session_id"):
-        sid = extract_session_id_from_run(run_dir)
         if sid:
             record["session_id"] = sid
+    elif sid and sid != record["session_id"]:
+        record["observed_session_id"] = sid
+        record["session_mismatch"] = True
+        # §5.5: a continuation never silently starts a fresh session. Live, Codex
+        # `exec resume <non-uuid>` treats the id as a thread name and, when none
+        # matches, starts a new thread and exits 0.
+        if record.get("continued_from") and final_status == "succeeded":
+            final_status = "failed"
+            record["status"] = "failed"
+            record["invariant_error"] = (
+                f"Resume did not land in session '{record['session_id']}': the agent reported session '{sid}'"
+            )
+
+    # Agent-reported error (stdout stream first, then the last stderr line)
+    if final_status in ("failed", "lost"):
+        agent_err = agent_error_from_objects(read_stream_objects(run_dir))
+        if not agent_err:
+            try:
+                err_lines = [ln.strip() for ln in (run_dir / "stderr.log").read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+                agent_err = re.sub(r"\x1b\[[0-9;]*m", "", err_lines[-1]) if err_lines else None
+            except OSError:
+                agent_err = None
+        if agent_err:
+            record["agent_error"] = agent_err[:2000]
+
+    # Normalized usage of this turn (spec 12 §0c E8)
+    # Codex reports cumulative session usage: diff against the nearest earlier run
+    # of the chain that recorded totals (a crashed or cancelled run records none).
+    prev_totals = None
+    src_id = record.get("continued_from")
+    seen_ids: set[str] = set()
+    while src_id and src_id not in seen_ids and prev_totals is None:
+        seen_ids.add(src_id)
+        src_rec = load_run_record(workspace, src_id)
+        if not src_rec:
+            break
+        if isinstance(src_rec.get("usage"), dict):
+            prev_totals = src_rec["usage"].get("session_totals")
+        src_id = src_rec.get("continued_from")
+    usage = extract_usage_from_run(run_dir, prev_totals)
+    if usage is not None:
+        if usage.get("source") == "codex" and usage.get("estimated_context_tokens") is None and record.get("session_id"):
+            usage["estimated_context_tokens"] = codex_rollout_last_context(str(record["session_id"]))
+        record["usage"] = usage
 
     # Extract verdict if verify mode
     if record.get("mode") == "verify":

@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a14c2f-d518-7392-9f52-c3b44d2b5784"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I can’t determine that from the available conversation context."}}
+{"type":"turn.completed","usage":{"input_tokens":13474,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":64,"reasoning_output_tokens":47}}
