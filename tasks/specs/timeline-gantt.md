@@ -90,3 +90,30 @@ A **microtask** is a lightweight emergent task for very small work: a bug, a fix
   - `run start --batch T014,T015,T016` sends several microtasks of the **same target repo** to one executor in one run, with one commit per microtask;
   - each microtask's state is tracked separately;
   - verification is per microtask, but a single verify run can check the whole batch.
+
+## 6. Kind and labels (added 2026-10-17)
+
+Two classification fields, valid on every task (microtasks and full tasks):
+
+- **`kind`**, one value from a fixed set: `feature`, `bug`, `fix`, `chore`, `docs`, `investigation`.
+  - Required for microtasks, optional for full tasks.
+  - `T###`: header field `kind`, added to the optional extensions of the header closed set.
+  - `NN.T`: bullet `**Kind:**`.
+  - The UI shows a small icon per kind.
+- **`labels`**, free tags, any number of them.
+  - Format: `[a-z0-9][a-z0-9-]*`, at most 24 characters, comma-separated.
+  - `T###`: header field `labels`, added to the optional extensions.
+  - `NN.T`: bullet `**Labels:**`.
+  - Examples: `ui`, `security`, `regression`, `kilo-mcp`, `needs-owner`.
+- **Engine:**
+  - `tasks set-kind ID KIND` and `tasks set-labels ID --add L... --remove L...` follow the same pattern as `set-priority`: task-write lock, `--expect-hash`, `--dry-run`.
+  - `tasks list` and `tasks graph` accept `--kind` and `--label` (repeatable; AND across different filters, OR within the same filter) and expose `kind`/`labels` on every node.
+  - `tasks labels` lists every label in use, with its count, for autocomplete.
+  - The validator checks the label format and the `kind` set.
+- **UI:**
+  - kind icon and label chips on Backlog cards, Kanban cards and Timeline cards;
+  - each label has a deterministic colour from a hash of its name;
+  - a filter bar shared by Backlog, Kanban and Timeline (kind, labels, initiative, state, priority, size);
+  - a label editor with autocomplete from `tasks labels`, going through preview → confirm;
+  - a "group by label" option in the Timeline.
+- **Inbox (spec 09):** a note's `kind` (`bug`, `idea`, …) and its `about` are carried into the task or microtask created from it: `bug` → `kind: bug`, and the repo names in `about` → labels.
