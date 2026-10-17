@@ -66,7 +66,7 @@
 
 ### 08.5 - VS Code: "Decisions Waiting" tree from question files
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 08.4, 06.9 · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-17; merged; awaiting live check in an Extension Development Host) · **Profile:** `bulk-execution` · **Depends on:** 08.4, 06.9 · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/views/*decision*`, `src/views/dashboard-panel.ts`, `dist-webview/**`
 - **Goal:** Spec §5 "VS Code".
 - **Verification:**
