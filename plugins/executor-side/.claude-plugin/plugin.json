@@ -1,6 +1,6 @@
 {
   "name": "executor-side",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Executor-side skills for the protocol-agnostic Architect/Executor pattern: the executor-contract behavioral contract. Install this if you're the agent executing background work delegated by an orchestrating Architect AI, not the one delegating.",
   "author": {
     "name": "Alfredo Oliviero"
