@@ -71,6 +71,8 @@ try:
         normalize_state,
         transition_task,
         task_write_lock,
+        ask_question,
+        parse_option_arg,
     )
 except ImportError:
     discover_emergent_tasks = None  # type: ignore
@@ -78,6 +80,8 @@ except ImportError:
     normalize_state = None  # type: ignore
     transition_task = None  # type: ignore
     task_write_lock = None  # type: ignore
+    ask_question = None  # type: ignore
+    parse_option_arg = None  # type: ignore
 
 
 @contextlib.contextmanager
@@ -438,8 +442,8 @@ def extract_final_report_from_run(run_dir: pathlib.Path) -> str | None:
     return None
 
 
-def extract_verdict_from_run(run_dir: pathlib.Path) -> dict[str, Any] | None:
-    """Parse verdict ONLY from the final assistant message's ```ai-orch-verdict block (Spec §5.6)."""
+def extract_assistant_messages(run_dir: pathlib.Path) -> list[str]:
+    """Extract all assistant message contents from run log events in order."""
     events = read_all_log_events(run_dir)
     assistant_messages: list[str] = []
     for evt in events:
@@ -480,11 +484,21 @@ def extract_verdict_from_run(run_dir: pathlib.Path) -> dict[str, Any] | None:
             except Exception:
                 pass
 
-    if not assistant_messages:
+    return assistant_messages
+
+
+def extract_final_assistant_message(run_dir: pathlib.Path) -> str | None:
+    """Extract the final assistant message content from run logs (used for verdicts and questions)."""
+    messages = extract_assistant_messages(run_dir)
+    return messages[-1] if messages else None
+
+
+def extract_verdict_from_run(run_dir: pathlib.Path) -> dict[str, Any] | None:
+    """Parse verdict ONLY from the final assistant message's ```ai-orch-verdict block (Spec §5.6)."""
+    final_msg = extract_final_assistant_message(run_dir)
+    if not final_msg:
         return None
 
-    # Verdict parsed ONLY from the final assistant message (earlier verdict blocks are ignored)
-    final_msg = assistant_messages[-1]
     match = re.search(r"```ai-orch-verdict\s*(\{.*?\})\s*```", final_msg, re.DOTALL)
     if not match:
         return None
@@ -507,6 +521,149 @@ def extract_verdict_from_run(run_dir: pathlib.Path) -> dict[str, Any] | None:
         }
     except Exception:
         return None
+
+
+def process_run_questions(
+    workspace: pathlib.Path,
+    record: dict[str, Any],
+    run_dir: pathlib.Path,
+) -> None:
+    """Parse every ```ai-orch-question fenced JSON block in the FINAL assistant message only.
+
+    For each valid block:
+      - calls questions ask with question/context/options/recommended/open_answer from the block
+      - asked-by = <tool>:<profile>
+      - origin-run = run_id
+      - blocks = <run task id> (ignores any blocks/asked-by/origin-run keys in the block)
+      - decider = owner
+    Records question ids in run.json questions.
+    Invalid blocks -> question_errors: [{index, error}]. Never drop silently.
+    """
+    final_msg = extract_final_assistant_message(run_dir)
+    if not final_msg:
+        return
+
+    pattern = re.compile(r"```ai-orch-question\s*([\s\S]*?)\s*```")
+    matches = list(pattern.finditer(final_msg))
+
+    last_end = matches[-1].end() if matches else 0
+    unclosed_fence = "```ai-orch-question" in final_msg[last_end:]
+
+    if not matches and not unclosed_fence:
+        return
+
+    recorded_questions: list[str] = list(record.get("questions") or [])
+    question_errors: list[dict[str, Any]] = list(record.get("question_errors") or [])
+
+    for idx, m in enumerate(matches):
+        raw_content = m.group(1).strip()
+        try:
+            data = json.loads(raw_content)
+        except Exception as e:
+            question_errors.append({"index": idx, "error": f"Invalid JSON in question block: {e}"})
+            continue
+
+        if not isinstance(data, dict):
+            question_errors.append({"index": idx, "error": "Question block content must be a JSON object"})
+            continue
+
+        q_text = data.get("question")
+        if not isinstance(q_text, str) or not q_text.strip():
+            question_errors.append({"index": idx, "error": "Missing or invalid 'question' field (must be non-empty string)"})
+            continue
+
+        ctx_text = data.get("context")
+        if not isinstance(ctx_text, str) or not ctx_text.strip():
+            question_errors.append({"index": idx, "error": "Missing or invalid 'context' field (must be non-empty string)"})
+            continue
+
+        raw_opts = data.get("options")
+        parsed_options: list[tuple[str, str, str | None]] = []
+        if raw_opts is not None:
+            if not isinstance(raw_opts, list):
+                question_errors.append({"index": idx, "error": "'options' field must be a list"})
+                continue
+            opt_err = None
+            for opt_idx, opt in enumerate(raw_opts):
+                if isinstance(opt, dict):
+                    lbl = str(opt.get("label", "")).strip()
+                    ttl = str(opt.get("title") or opt.get("text") or lbl).strip()
+                    csq = opt.get("consequence")
+                    csq_str = str(csq).strip() if csq is not None else None
+                    parsed_options.append((lbl, ttl, csq_str))
+                elif isinstance(opt, str):
+                    if parse_option_arg:
+                        parsed_options.append(parse_option_arg(opt))
+                    else:
+                        parsed_options.append((opt, opt, None))
+                elif isinstance(opt, (tuple, list)) and len(opt) >= 2:
+                    lbl = str(opt[0]).strip()
+                    ttl = str(opt[1]).strip()
+                    csq = str(opt[2]).strip() if len(opt) > 2 and opt[2] is not None else None
+                    parsed_options.append((lbl, ttl, csq))
+                else:
+                    opt_err = f"Option at index {opt_idx} has invalid format: {opt!r}"
+                    break
+            if opt_err:
+                question_errors.append({"index": idx, "error": opt_err})
+                continue
+
+        recommended = data.get("recommended") or "-"
+        if not isinstance(recommended, str):
+            recommended = str(recommended)
+
+        raw_oa = data.get("open_answer")
+        if raw_oa is None:
+            raw_oa = data.get("open-answer")
+        if isinstance(raw_oa, bool):
+            open_answer = "yes" if raw_oa else "no"
+        elif isinstance(raw_oa, str):
+            open_answer = "yes" if raw_oa.strip().lower() in ("yes", "true", "1") else "no"
+        else:
+            open_answer = "no"
+
+        # Supervisor forces asked_by, origin_run, blocks, decider
+        tool_val = record.get("tool", "unknown")
+        profile_val = record.get("profile", "unknown")
+        asked_by = f"{tool_val}:{profile_val}"
+        origin_run = record.get("run_id", "-")
+        blocks = record.get("task_id", "-")
+        decider = "owner"
+
+        tasks_dir = workspace / "tasks"
+        if not ask_question:
+            question_errors.append({"index": idx, "error": "ask_question function is not available"})
+            continue
+
+        try:
+            ok, res = ask_question(
+                tasks_dir=tasks_dir,
+                question=q_text,
+                context=ctx_text,
+                options=parsed_options,
+                recommended=recommended,
+                open_answer=open_answer,
+                blocks=blocks,
+                decider=decider,
+                asked_by=asked_by,
+                origin_run=origin_run,
+            )
+            if ok:
+                q_id = res["id"]
+                if q_id not in recorded_questions:
+                    recorded_questions.append(q_id)
+            else:
+                err_msg = res.get("error") or res.get("message") or "Failed to ask question"
+                question_errors.append({"index": idx, "error": err_msg})
+        except Exception as exc:
+            question_errors.append({"index": idx, "error": str(exc)})
+
+    if unclosed_fence:
+        question_errors.append({"index": len(matches), "error": "Unclosed code fence for ```ai-orch-question"})
+
+    record["questions"] = recorded_questions
+    if question_errors:
+        record["question_errors"] = question_errors
 
 
 # ---------------------------------------------------------------------------
@@ -1617,6 +1774,7 @@ def create_run_record(
     continued_from: str | None = None,
     panel_id: str | None = None,
     verification_mode: str | None = None,
+    keep_worktree: bool = False,
 ) -> dict[str, Any]:
     """Initialize a run.json record structure (Spec §5.1, R2, R3, R8)."""
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -1656,7 +1814,10 @@ def create_run_record(
         "verdict": None,
         "panel_id": panel_id,
         "verification_mode": verification_mode,
+        "keep_worktree": keep_worktree,
+        "worktree_removed": None,
         "questions": [],
+        "question_errors": [],
         "task_transition_error": None,
     }
 
@@ -2388,6 +2549,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                 continued_from=args.continue_run_id,
                 panel_id=source_record.get("panel_id"),
                 verification_mode=source_record.get("verification_mode"),
+                keep_worktree=bool(getattr(args, "keep_worktree", False) or source_record.get("keep_worktree", False)),
             )
             record["session_id"] = session_id
             save_run_record(ws, record)
@@ -2563,6 +2725,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                     target_commit=target_commit,
                     panel_id=panel_id,
                     verification_mode="panel",
+                    keep_worktree=bool(getattr(args, "keep_worktree", False)),
                 )
                 if session_id:
                     rec["session_id"] = session_id
@@ -2696,6 +2859,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             target_run=data["target_run_id"],  # type: ignore
             target_commit=target_commit,
             verification_mode=data.get("verification_mode"),
+            keep_worktree=bool(getattr(args, "keep_worktree", False)),
         )
         if session_id:
             record["session_id"] = session_id
@@ -2970,6 +3134,45 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     # Extract verdict if verify mode
     if record.get("mode") == "verify":
         record["verdict"] = extract_verdict_from_run(run_dir)
+        # 07.10: verify run throwaway worktree auto-removal
+        if record.get("keep_worktree"):
+            record["worktree_removed"] = False
+        else:
+            wt_path_str = record.get("worktree_path")
+            if wt_path_str:
+                wt_path = pathlib.Path(wt_path_str)
+                target_repo = workspace
+                tasks_dir = workspace / "tasks"
+                if tasks_dir.is_dir() and discover_emergent_tasks:
+                    emergent = discover_emergent_tasks(tasks_dir)
+                    task = next((t for t in emergent if t["id"] == record["task_id"]), None)
+                    if task:
+                        tr, _, _ = resolve_target_repo(workspace, task.get("paths"))
+                        if tr:
+                            target_repo = tr
+                if wt_path.exists():
+                    subprocess.run(
+                        ["git", "worktree", "remove", "--force", str(wt_path)],
+                        cwd=str(target_repo),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if wt_path.exists():
+                        shutil.rmtree(wt_path, ignore_errors=True)
+                    subprocess.run(
+                        ["git", "worktree", "prune"],
+                        cwd=str(target_repo),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                record["worktree_removed"] = not wt_path.exists()
+            else:
+                record["worktree_removed"] = False
+
+    # 07.10: process blocking questions from final assistant message
+    process_run_questions(workspace, record, run_dir)
 
     # Invariants check for execute mode (R7)
     if record.get("mode") == "execute" and final_status == "succeeded":
@@ -3710,6 +3913,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_prev.add_argument("--allow-same-tool", action="store_true", help="Allow same tool for verify (downgrades to independent-session)")
     p_prev.add_argument("--allow-dirty-base", action="store_true", help="Proceed from dirty HEAD with warning")
     p_prev.add_argument("--force", action="store_true", help="Bypass same-task active run guard")
+    p_prev.add_argument("--keep-worktree", action="store_true", default=False, help="Keep detached throwaway worktree after verify run completion")
     p_prev.add_argument("--workspace", default=None, help="Project workspace root")
     p_prev.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_prev.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -3731,6 +3935,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--allow-same-tool", action="store_true", help="Allow same tool for verify (downgrades to independent-session)")
     p_start.add_argument("--allow-dirty-base", action="store_true", help="Proceed from dirty HEAD with warning")
     p_start.add_argument("--force", action="store_true", help="Bypass same-task active run guard")
+    p_start.add_argument("--keep-worktree", action="store_true", default=False, help="Keep detached throwaway worktree after verify run completion")
     p_start.add_argument("--expect-plan-hash", default=None, help="Required for ui/vscode, optional for cli")
     p_start.add_argument("--requested-by", choices=("ui", "vscode", "cli"), default="cli", help="Caller origin")
     p_start.add_argument("--workspace", default=None, help="Project workspace root")

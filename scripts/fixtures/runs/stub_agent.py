@@ -39,6 +39,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--switch-branch", type=str, default=None, help="Switch git branch in cwd before exiting")
     parser.add_argument("--dirty-tree", action="store_true", help="Create uncommitted dirty file in cwd")
 
+    # 07.10 extensions
+    parser.add_argument("--question", action="append", default=None, help="Print a ```ai-orch-question block with JSON in the final message")
+    parser.add_argument("--earlier-question", action="append", default=None, help="Print a ```ai-orch-question block with JSON in an earlier message")
+
     # Consume known args, ignore all other adapter flags (-m, -C, -f, --dir, --output-format, etc.)
     args, unknown = parser.parse_known_args(argv)
 
@@ -120,6 +124,20 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(json.dumps(evt_early) + "\n")
         sys.stdout.flush()
 
+    # Emit earlier question if requested (to test that earlier question blocks are ignored)
+    if args.earlier_question:
+        for eq_str in args.earlier_question:
+            early_q_content = f"Draft question:\n```ai-orch-question\n{eq_str}\n```"
+            evt_early_q = {
+                "type": "message",
+                "index": 0,
+                "role": "assistant",
+                "content": early_q_content,
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+            sys.stdout.write(json.dumps(evt_early_q) + "\n")
+            sys.stdout.flush()
+
     # Emit JSON lines
     if args.lines > 0:
         for i in range(args.lines):
@@ -172,6 +190,10 @@ def main(argv: list[str] | None = None) -> int:
         }
         final_parts.append(f"```ai-orch-verdict\n{json.dumps(verdict_obj, indent=2)}\n```")
 
+    if args.question:
+        for q_str in args.question:
+            final_parts.append(f"```ai-orch-question\n{q_str}\n```")
+
     if final_parts:
         evt_final = {
             "type": "message",
@@ -182,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         sys.stdout.write(json.dumps(evt_final) + "\n")
         sys.stdout.flush()
-    elif args.earlier_verdict or args.lines == 0:
+    elif args.earlier_verdict or args.earlier_question or args.lines == 0:
         evt_final = {
             "type": "message",
             "index": 999,

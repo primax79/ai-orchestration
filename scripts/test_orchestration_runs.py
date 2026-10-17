@@ -1785,9 +1785,46 @@ def test_verify_in_detached_worktree_at_final_commit(sample_workspace: pathlib.P
     assert v_rec["status"] == "succeeded"
     assert v_rec["mode"] == "verify"
     assert v_rec["branch"] is None
-    assert pathlib.Path(v_rec["worktree_path"]).is_dir()
+    assert v_rec["worktree_removed"] is True
+    assert not pathlib.Path(v_rec["worktree_path"]).exists()
     assert v_rec["verdict"] is not None
     assert v_rec["verdict"]["verdict"] == "verified"
+
+    # Verify run cleanup on already-removed worktree is a no-op success (07.10)
+    cmd_clean = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cleanup",
+        v_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_clean = subprocess.run(cmd_clean, capture_output=True, text=True, check=True)
+    assert json.loads(res_clean.stdout)["cleaned"] is True
+
+    # Verify run with --keep-worktree keeps worktree intact (07.10)
+    cmd_verify_keep = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "verify",
+        "--tool",
+        "claude",
+        "--keep-worktree",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_vk = subprocess.run(cmd_verify_keep, capture_output=True, text=True, check=True)
+    vk_run_id = json.loads(res_vk.stdout)["run_id"]
+    vk_rec = wait_for_terminal(sample_workspace, vk_run_id)
+    assert vk_rec["status"] == "succeeded"
+    assert vk_rec["worktree_removed"] is False
+    assert pathlib.Path(vk_rec["worktree_path"]).is_dir()
 
 
 def test_independence_guard_and_modes(sample_workspace: pathlib.Path):
@@ -2301,4 +2338,314 @@ def test_cleanup_invariants_and_refusals(sample_workspace: pathlib.Path):
     kept_rec = load_run_record(sample_workspace, run_id)
     assert kept_rec is not None
     assert kept_rec.get("cleaned_at") is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 07.10 Tests: Supervisor Questions Integration
+# ---------------------------------------------------------------------------
+
+def test_supervisor_files_valid_question_block(sample_workspace: pathlib.Path):
+    q_data = {
+        "question": "Which cache backend should be used?",
+        "context": "Redis and Memcached are both viable options for session storage.",
+        "options": [
+            {"label": "A", "title": "Redis", "consequence": "Persistence supported."},
+            {"label": "B", "title": "Memcached", "consequence": "Simple in-memory caching."},
+        ],
+        "recommended": "A",
+        "open_answer": False,
+    }
+    q_json = json.dumps(q_data)
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--question", {json.dumps(q_json)}]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "cfg question test"], cwd=str(sample_workspace), check=True)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--force",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_s = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res_s.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+
+    assert len(rec.get("questions", [])) == 1
+    assert rec.get("question_errors", []) == []
+    q_id = rec["questions"][0]
+
+    q_file = sample_workspace / "tasks" / "questions" / f"{q_id}-which-cache-backend-should-be-used.md"
+    assert q_file.is_file()
+    content = q_file.read_text(encoding="utf-8")
+    assert f"- id: {q_id}" in content
+    assert "- question: Which cache backend should be used?" in content
+    assert "- status: open" in content
+    assert "- blocks: T007 (in progress)" in content
+    assert "- decider: owner" in content
+    assert "- asked-by: kilo:bulk-execution" in content
+    assert f"- origin-run: {run_id}" in content
+    assert "- open-answer: no" in content
+    assert "- recommended: A" in content
+    assert "Redis and Memcached are both viable" in content
+    assert "- **A** — Redis: Persistence supported." in content
+    assert "- **B** — Memcached: Simple in-memory caching." in content
+
+    # Task moved to waiting
+    task_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    t_content = task_file.read_text(encoding="utf-8")
+    assert "state: waiting" in t_content
+    assert f"decider: {q_id}" in t_content
+
+
+def test_supervisor_forces_run_task_in_blocks_ignoring_block_values(sample_workspace: pathlib.Path):
+    q_data = {
+        "question": "Which protocol version should be used?",
+        "context": "Protocol v1 vs v2 context.",
+        "options": [
+            {"label": "A", "title": "v1", "consequence": "Legacy"},
+            {"label": "B", "title": "v2", "consequence": "Modern"},
+        ],
+        "recommended": "B",
+        "blocks": ["T999"],
+        "asked-by": "untrusted:role",
+        "origin-run": "fake-run-id",
+        "decider": "somebody-else",
+    }
+    q_json = json.dumps(q_data)
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--question", {json.dumps(q_json)}]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "cfg question force test"], cwd=str(sample_workspace), check=True)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--force",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_s = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res_s.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+
+    assert len(rec.get("questions", [])) == 1
+    q_id = rec["questions"][0]
+
+    q_file = sample_workspace / "tasks" / "questions" / f"{q_id}-which-protocol-version-should-be-used.md"
+    assert q_file.is_file()
+    content = q_file.read_text(encoding="utf-8")
+    # Must be forced to the run's task T007, supervisor tool:profile, run_id, and owner
+    assert "- blocks: T007 (in progress)" in content
+    assert "T999" not in content
+    assert "- asked-by: kilo:bulk-execution" in content
+    assert "untrusted:role" not in content
+    assert f"- origin-run: {run_id}" in content
+    assert "fake-run-id" not in content
+    assert "- decider: owner" in content
+    assert "somebody-else" not in content
+
+    # Task T007 is waiting
+    task_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    t_content = task_file.read_text(encoding="utf-8")
+    assert "state: waiting" in t_content
+    assert f"decider: {q_id}" in t_content
+
+
+def test_supervisor_handles_malformed_question_json(sample_workspace: pathlib.Path):
+    malformed_raw = '{"question": "Broken JSON...'
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--question", {json.dumps(malformed_raw)}]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "cfg malformed question test"], cwd=str(sample_workspace), check=True)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--force",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_s = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res_s.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+
+    assert rec.get("questions") == []
+    errors = rec.get("question_errors", [])
+    assert len(errors) == 1
+    assert errors[0]["index"] == 0
+    assert "Invalid JSON" in errors[0]["error"]
+
+    # No question files created
+    q_dir = sample_workspace / "tasks" / "questions"
+    if q_dir.is_dir():
+        assert list(q_dir.glob("Q*.md")) == []
+
+    # Task was NOT moved to waiting
+    task_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    t_content = task_file.read_text(encoding="utf-8")
+    assert "state: waiting" not in t_content
+
+
+def test_supervisor_ignores_question_in_earlier_message(sample_workspace: pathlib.Path):
+    q_data = {
+        "question": "Should this earlier question be ignored?",
+        "context": "Context for earlier question.",
+        "options": [
+            {"label": "A", "title": "Yes", "consequence": "Ignored"},
+            {"label": "B", "title": "No", "consequence": "Error"},
+        ],
+        "recommended": "A",
+    }
+    q_json = json.dumps(q_data)
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--earlier-question", {json.dumps(q_json)}]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "cfg earlier question test"], cwd=str(sample_workspace), check=True)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--force",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_s = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res_s.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+
+    assert rec.get("questions") == []
+    assert rec.get("question_errors", []) == []
+
+    # No question files created
+    q_dir = sample_workspace / "tasks" / "questions"
+    if q_dir.is_dir():
+        assert list(q_dir.glob("Q*.md")) == []
+
+    # Task was NOT moved to waiting
+    task_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    t_content = task_file.read_text(encoding="utf-8")
+    assert "state: waiting" not in t_content
+
+
+def test_supervisor_multiple_questions_in_final_message(sample_workspace: pathlib.Path):
+    q1 = {
+        "question": "Which storage engine?",
+        "context": "Storage engine context.",
+        "options": [
+            {"label": "A", "title": "Postgres", "consequence": "SQL"},
+            {"label": "B", "title": "Mongo", "consequence": "NoSQL"},
+        ],
+        "recommended": "A",
+    }
+    q2 = {
+        "question": "Which auth provider?",
+        "context": "Auth provider context.",
+        "options": [
+            {"label": "A", "title": "OAuth", "consequence": "Standard"},
+            {"label": "B", "title": "SAML", "consequence": "Enterprise"},
+        ],
+        "recommended": "A",
+    }
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--question", {json.dumps(json.dumps(q1))}, "--question", {json.dumps(json.dumps(q2))}]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "cfg multiple questions test"], cwd=str(sample_workspace), check=True)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--force",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_s = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res_s.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+
+    assert len(rec.get("questions", [])) == 2
+    q1_id, q2_id = rec["questions"]
+    assert q1_id != q2_id
+
+    # Both question files exist
+    assert (sample_workspace / "tasks" / "questions" / f"{q1_id}-which-storage-engine.md").is_file()
+    assert (sample_workspace / "tasks" / "questions" / f"{q2_id}-which-auth-provider.md").is_file()
+
+    # Task decider has both questions
+    task_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    t_content = task_file.read_text(encoding="utf-8")
+    assert "state: waiting" in t_content
+    assert f"decider: {q1_id}, {q2_id}" in t_content
+
 
