@@ -3,6 +3,34 @@ name: {{NAME}}
 description: "{{DESCRIPTION}}"
 ---
 
+<!--
+TEMPLATE SLOTS (for binding maps in bindings/*.json):
+  Top-level:
+    NAME                - Skill name (e.g. orchestration-workflow, kilo-mcp-orchestrator)
+    DESCRIPTION         - Frontmatter description
+  Tools:
+    implement_call      - Primary delegation call (e.g. `kilo_implement`)
+    edit_tools          - Orchestrator's edit tools
+    executor_name       - Executor name (e.g. Kilo)
+    executor_poss       - Executor possessive (e.g. Kilo's)
+    spec_skill_link     - Link/name for task-spec-authoring skill
+  Blocks:
+    intro               - Skill intro block under Quick Reference
+    precedence_note     - Precedence relationship between generic and bound skills (under Role discipline)
+    corrective_call     - Phrase for follow-up delegation into existing session
+    phase1_suffix       - Suffix to Phase 1 heading (e.g. " & RAG")
+    phase1_body         - Phase 1 Discovery body
+    phase2_body         - Phase 2 Isolation body
+    phase3_body         - Phase 3 Delegation body
+    phase4_body         - Phase 4 Monitoring body
+    phase5_tool_notes   - Phase 5 Tool-specific inspection / execution notes (Verification Modes & Decision Table remain invariant)
+    phase6_body         - Phase 6 Closure & Telemetry body
+    closing_note        - Final closing reminder (Scaffolding & Task State Table remain invariant)
+  Additions:
+    phase4_extra        - Extra items under Phase 4
+    end                 - Extra sections at the end of the skill
+-->
+
 # {{NAME}}
 
 ## Quick Reference
@@ -46,6 +74,10 @@ misnamed variable - without a full round-trip. Anything bigger than a
 handful of lines, or that touches actual logic, goes back to {{TOOL:executor_name|the Executor}} via
 {{BLOCK:corrective_call}}a corrective follow-up into the same session{{/BLOCK}}, not a direct edit. When
 in doubt, delegate rather than fix it yourself.
+
+{{BLOCK:precedence_note}}### Precedence with Bound Skills
+
+If a bound skill for your executor, e.g. `kilo-mcp-orchestrator`, is also loaded and the execution channel is Kilo via `kilo-mcp`, defer tool-level invocation details (e.g. `kilo_implement`, `kilo_task_wait`, `kilo_rag_search`, `kilo_log_issue`) to `kilo-mcp-orchestrator`. All architectural rules—the 6-phase lifecycle, verification modes (`independent-session`, `cross-agent`, etc.), the Post-Verification Decision Table, formal task states (`open` → `delivered` → `verified` → `done`), and economic rules—remain authoritative as defined here.{{/BLOCK}}
 
 ## Logic and Behavior
 
@@ -138,7 +170,7 @@ in doubt, delegate rather than fix it yourself.
     When the branch updates or the task report arrives, immediately transition the task
     to `delivered` in the main registry and proceed to Phase 5 Independent Verification.{{/BLOCK}}{{ADD:phase4_extra}}
 - **Phase 5 - Verification & Review: NEVER trust the Final Report alone.**
-  {{BLOCK:phase5_body}}Inspect the actual resulting diff/workspace status, then actually
+  {{BLOCK:phase5_tool_notes}}Inspect the actual resulting diff/workspace status, then actually
   **execute** what was built - reading the report or the diff is not
   verification, it's a summary. Calibrate to what was built:
   - **Backend**: actually start the app against a real seeded database,
@@ -149,7 +181,7 @@ in doubt, delegate rather than fix it yourself.
   - **Infra**: if there's a compose file, actually bring it up, wait for
     the healthcheck, and query the resulting service/DB for real.
   - See the {{TOOL:spec_skill_link|`task-spec-authoring`}} skill for calibrating verification depth to
-    task risk in more detail.
+    task risk in more detail.{{/BLOCK}}
   - **Verification Modes (`delivered` → `verified`):** An Executor can only
     mark a task `delivered`. Moving to `verified` follows the configured
     verification mode (`orchestration.toml` `[verification].default_mode` or
@@ -179,7 +211,7 @@ in doubt, delegate rather than fix it yourself.
   | **All acceptance criteria pass** and diff is within scope | **Merge**: transition to `verified`, proceed to Phase 5b/6 integration merge, and close as `done`. |
   | **Trivial mechanical defect (`<= 5` lines)** — typo, missing import, misnamed local variable, zero logic/signature impact | **Fix inline**: apply the fix directly in the Executor's worktree, re-run the check, and proceed to merge. |
   | **Logic, test, or scope defect (`> 5` lines or behavioral)** where the spec itself is still sound | **Bounce to same Executor session**: transition task to `bounced`, record `B1..Bn` findings in `PROGRESS.md`, and send the exact failing criterion back to the **same** Executor session. |
-  | **Ambiguous requirement, incompatible design conflict, or repeated (2+) bounce failure** | **Stop and ask user** (or escalate to `deep-reasoning` re-architecture): record the blocker in the task file and surface the concrete decision fork. |{{/BLOCK}}
+  | **Ambiguous requirement, incompatible design conflict, or repeated (2+) bounce failure** | **Stop and ask user** (or escalate to `deep-reasoning` re-architecture): record the blocker in the task file and surface the concrete decision fork. |
 - **Phase 5b - Verify the integration, not only the tasks.** Every task in a
   batch can be green in its own worktree and the merged result still be broken:
   tasks branched from the same commit cannot see each other (see `references/incidents.md` #6
@@ -364,7 +396,7 @@ the orchestrator must never guess or decide on the owner's behalf.
   only when they are strictly independent. If question B depends on the answer
   to question A, ask question A first to avoid wasted effort and confusion.
 
-{{BLOCK:closing}}## Scaffolding steps can write configuration for *your* harness
+## Scaffolding steps can write configuration for *your* harness
 
 When a delegated task runs a project generator, review what it actually
 committed file by file, not just the files you asked for. Observed live: a
@@ -406,7 +438,20 @@ requires independent verification (or explicit owner sign-off). Publish this
 state in `tasks/00-INDEX.md` (via `tasks_engine.py`) whenever work spans
 multiple tasks or sessions.
 
-Remember: if the Executor exposes semantic codebase search as a standing
+**The state follows the work, at the moment it happens** (owner rule, 2026-10-17: "chi è assegnato deve finire in progress"). Every step below is an `ai-orch tasks transition <id> <state> --actor <you> --reason "..."`, which works for emergent `T###` and plan `NN.T` tasks alike:
+
+| When | Transition |
+| --- | --- |
+| You assign/dispatch a task ({{TOOL:implement_call|a delegation call}}, a subagent, `ai-orch run start`, or you start it yourself) | `open`/`bounced` → `in progress`, **before** the executor starts; reason names the executor and the branch/worktree |
+| The executor committed and returned its Final Report | `in progress` → `delivered` (reason: commit + "review pending") |
+| Your review passes and it is merged | `delivered` → `verified` (independent check or owner approval) → `done` |
+| Review fails | `delivered` → `bounced`, then `in progress` again when re-dispatched |
+| The run died or you cancelled it, work kept on a branch | stays `in progress`; reason records where the work is |
+| You abandon it | `waiting`/`blocked` with the reason, or `dropped` |
+
+A task being worked on while still `open`, or finished while still `in progress`, is a bookkeeping bug: fix it before anything else. `ai-orch run start` performs the dispatch transition itself; for every other way of dispatching, you do.
+
+{{BLOCK:closing_note}}Remember: if the Executor exposes semantic codebase search as a standing
 capability, it's useful for your own exploration and Q&A too - use it even
 when you are not delegating anything.{{/BLOCK}}
 {{ADD:end}}

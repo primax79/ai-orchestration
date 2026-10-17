@@ -1,8 +1,36 @@
 ---
 name: orchestration-workflow
-description: "Orchestrate an Executor agent through the Architect/Executor pattern - discovery-first exploration, isolation before delegating, non-blocking parallel delegation, complexity-scaled monitoring/intervention, real verification (not just reading the report), defect telemetry, and capture of work that emerges mid-session as task files in the repository (whoever will execute it, including the orchestrator itself), so it never lives only in the session context. Use when coordinating development work delegated to another agent, or when new tasks appear during a working session."
+description: "Orchestrate an Executor agent through the Architect/Executor pattern - discovery-first exploration, isolation before delegating, non-blocking parallel delegation, complexity-scaled monitoring/intervention, real verification, defect telemetry, and capture of emergent tasks. Use for native subagent/worktree orchestration or multi-framework pipelines. When delegating specifically to Kilo via kilo-mcp tools, prefer kilo-mcp-orchestrator."
 ---
 <!-- GENERATED FROM SKILL.template.md — DO NOT EDIT BY HAND. Run generate_binding.py to regenerate. -->
+
+<!--
+TEMPLATE SLOTS (for binding maps in bindings/*.json):
+  Top-level:
+    NAME                - Skill name (e.g. orchestration-workflow, kilo-mcp-orchestrator)
+    DESCRIPTION         - Frontmatter description
+  Tools:
+    implement_call      - Primary delegation call (e.g. `kilo_implement`)
+    edit_tools          - Orchestrator's edit tools
+    executor_name       - Executor name (e.g. Kilo)
+    executor_poss       - Executor possessive (e.g. Kilo's)
+    spec_skill_link     - Link/name for task-spec-authoring skill
+  Blocks:
+    intro               - Skill intro block under Quick Reference
+    precedence_note     - Precedence relationship between generic and bound skills (under Role discipline)
+    corrective_call     - Phrase for follow-up delegation into existing session
+    phase1_suffix       - Suffix to Phase 1 heading (e.g. " & RAG")
+    phase1_body         - Phase 1 Discovery body
+    phase2_body         - Phase 2 Isolation body
+    phase3_body         - Phase 3 Delegation body
+    phase4_body         - Phase 4 Monitoring body
+    phase5_tool_notes   - Phase 5 Tool-specific inspection / execution notes (Verification Modes & Decision Table remain invariant)
+    phase6_body         - Phase 6 Closure & Telemetry body
+    closing_note        - Final closing reminder (Scaffolding & Task State Table remain invariant)
+  Additions:
+    phase4_extra        - Extra items under Phase 4
+    end                 - Extra sections at the end of the skill
+-->
 
 # orchestration-workflow
 
@@ -45,6 +73,10 @@ misnamed variable - without a full round-trip. Anything bigger than a
 handful of lines, or that touches actual logic, goes back to the Executor via
 a corrective follow-up into the same session, not a direct edit. When
 in doubt, delegate rather than fix it yourself.
+
+### Precedence with Bound Skills
+
+If a bound skill for your executor, e.g. `kilo-mcp-orchestrator`, is also loaded and the execution channel is Kilo via `kilo-mcp`, defer tool-level invocation details (e.g. `kilo_implement`, `kilo_task_wait`, `kilo_rag_search`, `kilo_log_issue`) to `kilo-mcp-orchestrator`. All architectural rules—the 6-phase lifecycle, verification modes (`independent-session`, `cross-agent`, etc.), the Post-Verification Decision Table, formal task states (`open` → `delivered` → `verified` → `done`), and economic rules—remain authoritative as defined here.
 
 ## Logic and Behavior
 
@@ -404,6 +436,19 @@ progress` to `done`.** `delivered` always sits in between, and leaving it
 requires independent verification (or explicit owner sign-off). Publish this
 state in `tasks/00-INDEX.md` (via `tasks_engine.py`) whenever work spans
 multiple tasks or sessions.
+
+**The state follows the work, at the moment it happens** (owner rule, 2026-10-17: "chi è assegnato deve finire in progress"). Every step below is an `ai-orch tasks transition <id> <state> --actor <you> --reason "..."`, which works for emergent `T###` and plan `NN.T` tasks alike:
+
+| When | Transition |
+| --- | --- |
+| You assign/dispatch a task (a delegation call, a subagent, `ai-orch run start`, or you start it yourself) | `open`/`bounced` → `in progress`, **before** the executor starts; reason names the executor and the branch/worktree |
+| The executor committed and returned its Final Report | `in progress` → `delivered` (reason: commit + "review pending") |
+| Your review passes and it is merged | `delivered` → `verified` (independent check or owner approval) → `done` |
+| Review fails | `delivered` → `bounced`, then `in progress` again when re-dispatched |
+| The run died or you cancelled it, work kept on a branch | stays `in progress`; reason records where the work is |
+| You abandon it | `waiting`/`blocked` with the reason, or `dropped` |
+
+A task being worked on while still `open`, or finished while still `in progress`, is a bookkeeping bug: fix it before anything else. `ai-orch run start` performs the dispatch transition itself; for every other way of dispatching, you do.
 
 Remember: if the Executor exposes semantic codebase search as a standing
 capability, it's useful for your own exploration and Q&A too - use it even

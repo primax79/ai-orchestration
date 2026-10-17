@@ -25,6 +25,16 @@ TEMPLATES = (
     ('plugins/executor-side/skills/executor-contract/SKILL.template.md', 'executor-contract'),
 )
 
+GENERIC_DESCRIPTIONS = {
+    'orchestration-workflow': (
+        'Orchestrate an Executor agent through the Architect/Executor pattern - '
+        'discovery-first exploration, isolation before delegating, non-blocking parallel delegation, '
+        'complexity-scaled monitoring/intervention, real verification, defect telemetry, and capture '
+        'of emergent tasks. Use for native subagent/worktree orchestration or multi-framework '
+        'pipelines. When delegating specifically to Kilo via kilo-mcp tools, prefer kilo-mcp-orchestrator.'
+    ),
+}
+
 FRONTMATTER_RE = re.compile(r'^---\nname:\s*(.+?)\ndescription:\s*(.+?)\n---', re.DOTALL)
 
 
@@ -53,8 +63,9 @@ def main():
         template = REPO_ROOT / rel_template
         skill_dir = template.parent
         out_path = skill_dir / 'SKILL.md'
-        _, description = read_current_frontmatter(out_path)
+        _, current_description = read_current_frontmatter(out_path)
         name = default_name
+        description = GENERIC_DESCRIPTIONS.get(name, current_description)
         if not description:
             print(f"[FAIL] {out_path}: couldn't read current name/description to seed the generic pass")
             failures += 1
