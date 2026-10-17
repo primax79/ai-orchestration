@@ -57,6 +57,8 @@ OPTIONAL_EXTENSION_FIELDS: tuple[str, ...] = (
     "branch",
     "worktree",
     "run-id",
+    "use-cases",
+    "use_cases",
 )
 
 ALL_ALLOWED_HEADER_FIELDS: set[str] = set(CORE_HEADER_FIELDS) | set(OPTIONAL_EXTENSION_FIELDS)
@@ -66,6 +68,21 @@ PRIORITY_SORT_KEY: dict[str, int] = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 NEXT_UP_VALUES: set[str] = {"yes", "no"}
 PROFILES: set[str] = {"deep-reasoning", "orchestration", "bulk-execution", "exploration"}
 VERIFICATION_MODES: set[str] = {"self", "independent-session", "cross-agent", "panel", "owner"}
+
+USE_CASE_ID_RE: re.Pattern = re.compile(r"^UC\d{3,}$")
+USE_CASE_STATUSES: set[str] = {"draft", "active", "verified", "failing", "partial"}
+USE_CASE_VERIFICATION_TYPES: set[str] = {"automated-probe", "e2e", "code-audit", "api-probe"}
+USE_CASE_HEADER_FIELDS: tuple[str, ...] = (
+    "id",
+    "title",
+    "actor",
+    "status",
+    "priority",
+    "linked-tasks",
+    "verification-type",
+    "last-tested",
+    "last-verdict",
+)
 
 CANONICAL_STATES: set[str] = {
     "open",
@@ -2464,9 +2481,200 @@ def _find_earliest_prior_state_for_task(tasks_dir: pathlib.Path, task_id: str, q
         if not q:
             continue
         for tid, prior_state in q["blocks_parsed"]:
-            if tid == task_id and prior_state and prior_state != "waiting" and prior_state in CANONICAL_STATES:
+            if tid == task_id and prior_state and prior_state not in ("waiting", "blocked") and prior_state in CANONICAL_STATES:
                 return prior_state
     return "open"
+
+
+# ---------------------------------------------------------------------------
+# Use Cases Discovery, Management & AI Validation (Spec 15)
+# ---------------------------------------------------------------------------
+
+def parse_use_case_file(file_path: pathlib.Path, tasks_dir: pathlib.Path) -> dict[str, Any]:
+    text = file_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    h1_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+    h1_title = h1_match.group(1).strip() if h1_match else file_path.stem
+
+    headers: dict[str, str] = {}
+    for line in lines:
+        if line.startswith("#"):
+            continue
+        m = re.match(r"^-\s+([a-zA-Z0-9_-]+):\s*(.*)$", line)
+        if m:
+            headers[m.group(1).strip().lower()] = m.group(2).strip()
+        elif headers and not line.strip():
+            break
+
+    uc_id = headers.get("id") or file_path.stem.split("-")[0]
+    title = headers.get("title") or (h1_title.split("-", 1)[-1].strip() if "-" in h1_title else h1_title)
+    actor = headers.get("actor", "End-User")
+    status = headers.get("status", "draft")
+    priority = headers.get("priority", "P1")
+    linked_raw = headers.get("linked-tasks") or headers.get("linked_tasks") or ""
+    linked_tasks = [t.strip() for t in linked_raw.split(",") if t.strip() and t.strip() != "-"]
+    vtype = headers.get("verification-type") or headers.get("verification_type") or "automated-probe"
+    last_tested = headers.get("last-tested") or headers.get("last_tested")
+    last_verdict = headers.get("last-verdict") or headers.get("last_verdict")
+
+    def _extract_section(heading: str) -> str:
+        pos = text.find(heading)
+        if pos < 0:
+            return ""
+        after = text[pos + len(heading):]
+        next_pos = re.search(r"\n##\s+", after)
+        if next_pos:
+            return after[:next_pos.start()].strip()
+        return after.strip()
+
+    desc = _extract_section("## Description & Business Value") or _extract_section("## Description")
+    preconditions = _extract_section("## Preconditions")
+    scenario = _extract_section("## Scenario / Interaction Steps") or _extract_section("## Scenario")
+    command = _extract_section("## Automated Verification Command") or _extract_section("## Verification Command")
+    cmd_clean = command
+    cmd_m = re.search(r"```(?:bash|sh)?\n(.*?)\n```", command, re.DOTALL)
+    if cmd_m:
+        cmd_clean = cmd_m.group(1).strip()
+
+    criteria = _extract_section("## Acceptance Criteria")
+    log = _extract_section("## AI Validation Log") or _extract_section("## Validation History")
+
+    return {
+        "id": uc_id,
+        "title": title,
+        "actor": actor,
+        "status": status,
+        "priority": priority,
+        "linked_tasks": linked_tasks,
+        "verification_type": vtype,
+        "last_tested": last_tested,
+        "last_verdict": last_verdict,
+        "description": desc,
+        "preconditions": preconditions,
+        "scenario": scenario,
+        "verification_command": cmd_clean,
+        "acceptance_criteria": criteria,
+        "validation_log": log,
+        "file_path": str(file_path),
+        "rel_path": str(file_path.relative_to(tasks_dir)),
+        "content": text,
+    }
+
+
+def discover_use_cases(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
+    uc_dir = tasks_dir / "use-cases"
+    if not uc_dir.is_dir():
+        return []
+    use_cases: list[dict[str, Any]] = []
+    for entry in sorted(uc_dir.iterdir()):
+        if entry.is_file() and entry.suffix == ".md":
+            prefix = entry.name.split("-")[0]
+            if USE_CASE_ID_RE.match(prefix):
+                try:
+                    uc = parse_use_case_file(entry, tasks_dir)
+                    use_cases.append(uc)
+                except Exception:
+                    pass
+    return use_cases
+
+
+def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    uc_id = data.get("id")
+    if not uc_id or not USE_CASE_ID_RE.match(uc_id):
+        return False, {"error": f"Invalid use case id {uc_id!r}, must match UC###"}
+    title = data.get("title", "Untitled Use Case")
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    fname = f"{uc_id}-{slug}.md"
+    uc_dir = tasks_dir / "use-cases"
+    uc_dir.mkdir(parents=True, exist_ok=True)
+    fpath = uc_dir / fname
+
+    existing = list(uc_dir.glob(f"{uc_id}-*.md"))
+    if existing:
+        fpath = existing[0]
+
+    linked_tasks_str = ", ".join(data.get("linked_tasks", [])) or "-"
+    content = f"""# {uc_id} - {title}
+
+- id: {uc_id}
+- title: {title}
+- actor: {data.get("actor", "End-User")}
+- status: {data.get("status", "draft")}
+- priority: {data.get("priority", "P1")}
+- linked-tasks: {linked_tasks_str}
+- verification-type: {data.get("verification_type", "automated-probe")}
+- last-tested: {data.get("last_tested") or "-"}
+- last-verdict: {data.get("last_verdict") or "-"}
+
+## Description & Business Value
+{data.get("description", "Describe user value and business context.")}
+
+## Preconditions
+{data.get("preconditions", "- System running and initialized.")}
+
+## Scenario / Interaction Steps
+{data.get("scenario", "1. User initiates action.\\n2. System responds.")}
+
+## Automated Verification Command
+```bash
+{data.get("verification_command", "echo 'No verification command specified'")}
+```
+
+## Acceptance Criteria
+{data.get("acceptance_criteria", "- [ ] Core flow works as expected.")}
+
+## AI Validation Log
+{data.get("validation_log", "")}
+"""
+    _atomic_write_text(fpath, content)
+    return True, {"ok": True, "id": uc_id, "file_path": str(fpath), "rel_path": str(fpath.relative_to(tasks_dir))}
+
+
+def record_use_case_validation(
+    tasks_dir: pathlib.Path,
+    uc_id: str,
+    verdict: str,
+    summary: str,
+    evidence: str = "",
+    actor: str = "ai-validator",
+    gaps: list[str] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    use_cases = discover_use_cases(tasks_dir)
+    target = next((u for u in use_cases if u["id"] == uc_id), None)
+    if not target:
+        return False, {"error": f"Use case {uc_id} not found"}
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now_date = datetime.date.today().isoformat()
+    verdict_clean = verdict.strip().lower()
+    new_status = "verified" if verdict_clean == "pass" else ("failing" if verdict_clean == "fail" else "partial")
+
+    log_entry = f"\n### [{now_iso}] AI Validation by {actor}\n- **Verdict:** `{verdict.upper()}`\n- **Summary:** {summary}\n"
+    if evidence:
+        log_entry += f"- **Evidence:**\n{evidence}\n"
+    if gaps:
+        log_entry += "- **Gaps Found:**\n" + "\n".join(f"  - {g}" for g in gaps) + "\n"
+
+    existing_content = target["content"]
+    updated_content = re.sub(r"-\s+last-tested:\s*.*$", f"- last-tested: {now_date}", existing_content, flags=re.MULTILINE)
+    updated_content = re.sub(r"-\s+last-verdict:\s*.*$", f"- last-verdict: {verdict_clean}", updated_content, flags=re.MULTILINE)
+    updated_content = re.sub(r"-\s+status:\s*.*$", f"- status: {new_status}", updated_content, flags=re.MULTILINE)
+
+    if "## AI Validation Log" in updated_content:
+        updated_content = updated_content.rstrip() + "\n" + log_entry
+    else:
+        updated_content = updated_content.rstrip() + "\n\n## AI Validation Log\n" + log_entry
+
+    fpath = pathlib.Path(target["file_path"])
+    _atomic_write_text(fpath, updated_content)
+    return True, {
+        "ok": True,
+        "id": uc_id,
+        "verdict": verdict,
+        "status": new_status,
+        "last_tested": now_date,
+        "file_path": str(fpath),
+    }
 
 
 def parse_option_arg(opt: str) -> tuple[str, str, str | None]:
@@ -3179,6 +3387,56 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                             errors.append(
                                 f"{q_rel}: question is resolved ({st}) and task {tid!r} is '{target_task.state}', but task decider still references {qid}."
                             )
+
+    # Validate use cases
+    uc_dir = tasks_dir / "use-cases"
+    seen_uc_ids: dict[str, str] = {}
+    if uc_dir.is_dir():
+        for uc_entry in sorted(uc_dir.iterdir()):
+            if uc_entry.name.startswith(".") or not uc_entry.is_file() or uc_entry.suffix != ".md":
+                continue
+            uc_rel = uc_entry.relative_to(tasks_dir).as_posix()
+            try:
+                uc = parse_use_case_file(uc_entry, tasks_dir)
+            except Exception as e:
+                errors.append(f"{uc_rel}: failed to parse use case file: {e}")
+                continue
+
+            ucid = uc["id"]
+            if not ucid:
+                errors.append(f"{uc_rel}: missing required 'id' header field.")
+            else:
+                if not USE_CASE_ID_RE.match(ucid):
+                    errors.append(f"{uc_rel}: invalid use case id {ucid!r} (expected format UC###).")
+                if ucid in seen_uc_ids:
+                    errors.append(f"{uc_rel}: duplicate use case id {ucid!r} (already defined in {seen_uc_ids[ucid]}).")
+                else:
+                    seen_uc_ids[ucid] = uc_rel
+
+            st = uc.get("status", "draft")
+            if st not in USE_CASE_STATUSES:
+                errors.append(f"{uc_rel}: invalid use case status {st!r} (allowed: {sorted(USE_CASE_STATUSES)}).")
+
+            prio = uc.get("priority", "P1")
+            if prio not in PRIORITIES:
+                errors.append(f"{uc_rel}: invalid priority {prio!r} (allowed: {sorted(PRIORITIES)}).")
+
+            vt = uc.get("verification_type", "automated-probe")
+            if vt not in USE_CASE_VERIFICATION_TYPES:
+                errors.append(f"{uc_rel}: invalid verification-type {vt!r} (allowed: {sorted(USE_CASE_VERIFICATION_TYPES)}).")
+
+            for ltid in uc.get("linked_tasks", []):
+                if ltid not in tree:
+                    warnings.append(f"{uc_rel}: linked task {ltid!r} not found in tasks tree.")
+
+    # Warn if a task references an unknown use case
+    for nid, node in tree.items():
+        fields = node.own_fields or {}
+        uc_refs = fields.get("use-cases") or fields.get("use_cases")
+        if uc_refs and uc_refs != "-":
+            for ref in [r.strip() for r in str(uc_refs).split(",") if r.strip()]:
+                if ref not in seen_uc_ids:
+                    warnings.append(f"{node.rel_path}: task references unknown use case {ref!r}.")
 
     return errors, warnings, emergent, initiatives
 
@@ -5230,12 +5488,15 @@ def ask_question(
                         if cstate == "waiting" and re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", str(raw_dec).strip()):
                             tasks_to_update.append((t, "waiting", "APPEND"))
                             blocks_entries.append(f"{tid} (waiting)")
-                        else:
-                            return False, {
-                                "ok": False,
-                                "error": f"Asking against task {tid!r} waiting/blocked for a non-question reason is refused.",
-                            }
-                    elif cstate in ("open", "in progress"):
+                        elif cstate == "blocked":
+                            # A blocked task can be formally gated on an explicit blocking question Q###!
+                            tasks_to_update.append((t, "waiting", "SET"))
+                            blocks_entries.append(f"{tid} (blocked)")
+                        elif cstate == "waiting":
+                            # Legacy free-form decider: convert to new question
+                            tasks_to_update.append((t, "waiting", "SET"))
+                            blocks_entries.append(f"{tid} (waiting)")
+                    elif cstate in ("open", "in progress", "paused"):
                         tasks_to_update.append((t, "waiting", "SET"))
                         blocks_entries.append(f"{tid} ({cstate})")
                     else:
@@ -5772,6 +6033,111 @@ def cmd_questions_withdraw(args: argparse.Namespace) -> int:
             print(f"[ok] Withdrew {res['id']} with reason {res['reason']!r} (unblocked tasks: {unb})")
         else:
             print(f"[FAIL] {res.get('error', 'withdraw failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Use Cases Commands (Spec 15)
+# ---------------------------------------------------------------------------
+
+def cmd_use_cases_list(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ucs = discover_use_cases(tasks_dir)
+    status_filter = getattr(args, "status", None)
+    if status_filter and status_filter != "all":
+        ucs = [u for u in ucs if u.get("status") == status_filter]
+
+    payload = {
+        "ok": True,
+        "tasks_dir": str(tasks_dir),
+        "total": len(ucs),
+        "use_cases": ucs,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        if not ucs:
+            print(f"No use cases found in {tasks_dir}/use-cases.")
+        else:
+            print(f"Use Cases ({len(ucs)}):")
+            for u in ucs:
+                v = f"[{u.get('last_verdict') or 'untested'}]"
+                print(f"  [{u['id']}] ({u.get('status')}) {u['title']} — Actor: {u.get('actor')} {v}")
+    return 0
+
+
+def cmd_use_cases_show(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ucs = discover_use_cases(tasks_dir)
+    target = next((u for u in ucs if u["id"] == args.uc_id), None)
+    if not target:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": f"Use case {args.uc_id} not found"}, indent=2))
+        else:
+            print(f"[FAIL] Use case {args.uc_id} not found.")
+        return 1
+
+    payload = {"ok": True, "use_case": target}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Use Case : {target['id']} — {target['title']}")
+        print(f"Actor    : {target['actor']}")
+        print(f"Status   : {target['status']} (Last tested: {target.get('last_tested') or '-'}, Verdict: {target.get('last_verdict') or '-'})")
+        print(f"Priority : {target['priority']}")
+        print(f"Linked   : {', '.join(target['linked_tasks']) or '-'}")
+        if target.get("verification_command"):
+            print(f"Command  : {target['verification_command']}")
+    return 0
+
+
+def cmd_use_cases_create(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    linked_raw = getattr(args, "linked_tasks", "") or ""
+    data = {
+        "id": args.id,
+        "title": args.title,
+        "actor": getattr(args, "actor", "End-User"),
+        "status": getattr(args, "status", "draft"),
+        "priority": getattr(args, "priority", "P1"),
+        "linked_tasks": [t.strip() for t in linked_raw.split(",") if t.strip() and t.strip() != "-"],
+        "verification_type": getattr(args, "verification_type", "automated-probe"),
+        "verification_command": getattr(args, "verification_command", "echo 'No verification command specified'"),
+        "description": getattr(args, "description", ""),
+        "preconditions": getattr(args, "preconditions", ""),
+        "scenario": getattr(args, "scenario", ""),
+    }
+    ok, res = create_or_update_use_case(tasks_dir, data)
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Created use case {args.id} at {res['file_path']}")
+        else:
+            print(f"[FAIL] {res.get('error')}")
+    return 0 if ok else 1
+
+
+def cmd_use_cases_record_validation(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    gaps_raw = getattr(args, "gaps", None)
+    gaps = [g.strip() for g in gaps_raw.split(";") if g.strip()] if gaps_raw else None
+    ok, res = record_use_case_validation(
+        tasks_dir=tasks_dir,
+        uc_id=args.uc_id,
+        verdict=args.verdict,
+        summary=args.summary,
+        evidence=getattr(args, "evidence", ""),
+        actor=getattr(args, "actor", "ai-validator"),
+        gaps=gaps,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Recorded validation for {args.uc_id}: verdict={res['verdict']}, status={res['status']}")
+        else:
+            print(f"[FAIL] {res.get('error')}")
     return 0 if ok else 1
 
 
@@ -8016,6 +8382,51 @@ def build_parser() -> argparse.ArgumentParser:
     p_sl.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_sl.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_sl.set_defaults(func=cmd_set_labels)
+
+    # use-cases (Spec 15)
+    p_uc = sub.add_parser("use-cases", help="Manage use cases and recorded AI validations (Spec 15)")
+    p_uc.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_uc.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    uc_sub = p_uc.add_subparsers(dest="uc_cmd", required=True)
+
+    uc_list = uc_sub.add_parser("list", help="List use cases")
+    uc_list.add_argument("--tasks-dir", default="tasks")
+    uc_list.add_argument("--status", choices=["all", "draft", "active", "verified", "failing", "partial"], default="all")
+    uc_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_list.set_defaults(func=cmd_use_cases_list)
+
+    uc_show = uc_sub.add_parser("show", help="Show use case detail")
+    uc_show.add_argument("uc_id", help="Use case ID (e.g. UC001)")
+    uc_show.add_argument("--tasks-dir", default="tasks")
+    uc_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_show.set_defaults(func=cmd_use_cases_show)
+
+    uc_create = uc_sub.add_parser("create", help="Create or update a use case")
+    uc_create.add_argument("--id", required=True, help="Use case ID (e.g. UC001)")
+    uc_create.add_argument("--title", required=True, help="Use case title")
+    uc_create.add_argument("--actor", default="End-User", help="Primary actor / persona")
+    uc_create.add_argument("--status", choices=list(USE_CASE_STATUSES), default="draft")
+    uc_create.add_argument("--priority", choices=list(PRIORITIES), default="P1")
+    uc_create.add_argument("--linked-tasks", default="", help="Comma-separated task IDs")
+    uc_create.add_argument("--verification-type", choices=list(USE_CASE_VERIFICATION_TYPES), default="automated-probe")
+    uc_create.add_argument("--verification-command", default="")
+    uc_create.add_argument("--description", default="")
+    uc_create.add_argument("--preconditions", default="")
+    uc_create.add_argument("--scenario", default="")
+    uc_create.add_argument("--tasks-dir", default="tasks")
+    uc_create.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_create.set_defaults(func=cmd_use_cases_create)
+
+    uc_rec = uc_sub.add_parser("record-validation", help="Record an AI validation result on a use case")
+    uc_rec.add_argument("uc_id", help="Use case ID (e.g. UC001)")
+    uc_rec.add_argument("--verdict", choices=["pass", "fail", "partial"], required=True)
+    uc_rec.add_argument("--summary", required=True, help="Summary of validation findings")
+    uc_rec.add_argument("--evidence", default="", help="Execution evidence / output snippet")
+    uc_rec.add_argument("--gaps", default="", help="Semicolon-separated list of gaps found")
+    uc_rec.add_argument("--actor", default="ai-validator", help="Validating agent name / model")
+    uc_rec.add_argument("--tasks-dir", default="tasks")
+    uc_rec.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_rec.set_defaults(func=cmd_use_cases_record_validation)
 
     return ap
 

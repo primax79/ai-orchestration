@@ -2412,6 +2412,56 @@ def test_questions_ask_with_no_blocked_task(tmp_path: pathlib.Path) -> None:
     assert val.returncode == 0, val.stdout + val.stderr
 
 
+def test_questions_ask_against_blocked_task(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # 1. Create a task in blocked state
+    task_file = tasks_dir / "features" / "T042-blocked-feature.md"
+    _write_sample_task(task_file, task_id="T042", state="blocked")
+
+    # 2. Ask a question blocking T042
+    res_ask = run_cli(
+        "questions", "ask",
+        "--tasks-dir", str(tasks_dir),
+        "--question", "How should we resolve this blocker?",
+        "--context", "External dependency is missing, need architecture decision.",
+        "--open-answer", "yes",
+        "--blocks", "T042",
+        "--json",
+    )
+    assert res_ask.returncode == 0
+    payload_ask = json.loads(res_ask.stdout)
+    assert payload_ask["ok"] is True
+    qid = payload_ask["id"]
+
+    # Verify task transitioned from blocked -> waiting
+    task_text = task_file.read_text(encoding="utf-8")
+    assert "- state: waiting\n" in task_text
+    assert f"- decider: {qid}\n" in task_text
+
+    # Verify question file recorded blocks: T042 (blocked)
+    q_file = tasks_dir / "questions" / f"{qid}-how-should-we-resolve-this-blocker.md"
+    assert f"- blocks: T042 (blocked)\n" in q_file.read_text(encoding="utf-8")
+
+    # 3. Answer question
+    res_ans = run_cli(
+        "questions", "answer",
+        qid,
+        "--choice", "open",
+        "--text", "Decision made: use internal fallback.",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_ans.returncode == 0
+
+    # Verify task unblocked to open
+    updated_task = task_file.read_text(encoding="utf-8")
+    assert "- state: open\n" in updated_task
+    assert "- decider: -\n" in updated_task
+
+
 # ---------------------------------------------------------------------------
 # Inbox Notes & Tasks New From Note Tests
 # ---------------------------------------------------------------------------
@@ -4225,3 +4275,82 @@ def test_tasks_new_from_note_copies_attachments_and_rewrites_links(tmp_path: pat
     res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
     assert res_val.returncode == 0
     assert json.loads(res_val.stdout)["ok"] is True
+
+
+def test_use_cases_crud_and_validation(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # 1. Create a task that references UC001 (placed after handoff per header grammar)
+    task_file = tasks_dir / "features" / "T001-car-search.md"
+    _write_sample_task(task_file, task_id="T001")
+    task_text = task_file.read_text(encoding="utf-8")
+    task_file.write_text(task_text.replace("- verifier: -", "- verifier: -\n- use-cases: UC001"), encoding="utf-8")
+
+    # Validate warns because UC001 does not exist yet
+    res_val1 = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert any("references unknown use case 'UC001'" in w for w in json.loads(res_val1.stdout)["warnings"])
+
+    # 2. Create UC001
+    res_create = run_cli(
+        "use-cases", "create",
+        "--id", "UC001",
+        "--title", "Search by budget and fuel",
+        "--actor", "Buyer",
+        "--status", "active",
+        "--priority", "P1",
+        "--linked-tasks", "T001",
+        "--verification-type", "automated-probe",
+        "--verification-command", "curl -fsS http://localhost/search",
+        "--description", "Allows buyer to filter by price and fuel",
+        "--scenario", "1. User submits search form.\n2. Filtered results display.",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_create.returncode == 0
+    payload_create = json.loads(res_create.stdout)
+    assert payload_create["ok"] is True
+    assert payload_create["id"] == "UC001"
+
+    # 3. List use cases
+    res_list = run_cli("use-cases", "list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_list.returncode == 0
+    payload_list = json.loads(res_list.stdout)
+    assert payload_list["total"] == 1
+    assert payload_list["use_cases"][0]["id"] == "UC001"
+    assert payload_list["use_cases"][0]["actor"] == "Buyer"
+    assert payload_list["use_cases"][0]["linked_tasks"] == ["T001"]
+
+    # 4. Show use case
+    res_show = run_cli("use-cases", "show", "UC001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_show.returncode == 0
+    assert json.loads(res_show.stdout)["use_case"]["title"] == "Search by budget and fuel"
+
+    # 5. Record validation result
+    res_rec = run_cli(
+        "use-cases", "record-validation", "UC001",
+        "--verdict", "pass",
+        "--summary", "All 3 acceptance criteria verified against test database",
+        "--evidence", "curl exit code 0",
+        "--actor", "kilo:gemini-4-argon",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_rec.returncode == 0
+    payload_rec = json.loads(res_rec.stdout)
+    assert payload_rec["ok"] is True
+    assert payload_rec["verdict"] == "pass"
+    assert payload_rec["status"] == "verified"
+
+    # Verify updated content has AI Validation Log
+    uc_file = tasks_dir / "use-cases" / "UC001-search-by-budget-and-fuel.md"
+    uc_text = uc_file.read_text(encoding="utf-8")
+    assert "- status: verified" in uc_text
+    assert "- last-verdict: pass" in uc_text
+    assert "### [" in uc_text
+    assert "AI Validation by kilo:gemini-4-argon" in uc_text
+
+    # 6. Validate passes with zero errors/warnings now!
+    res_val2 = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert json.loads(res_val2.stdout)["ok"] is True
+
