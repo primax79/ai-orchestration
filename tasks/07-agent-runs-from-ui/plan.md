@@ -72,7 +72,7 @@
 
 ### 07.5 - Live capture with the real CLIs: session ids, Final Report, verdict, continue; flag table correction
 
-- **Status:** `in progress` (2026-10-18; claude; claude subagent, worktree task/07.5-live-capture, scratch repo under the worktree .tmp) · **Size:** M · **Profile:** `deep-reasoning` · **Executor:** `self` (orchestrator: needs the real CLIs and auth) · **Depends on:** 07.4 · **Repo:** `ai-orchestration/`
+- **Status:** `delivered` (2026-10-18; claude; merged 2e76ee0 (claude subagent): live execute/continue/verify for kilo, claude, codex; fixtures; parser fixes (session ids, Final Report, verdict, usage E8); spec 5.7 corrected; 90 tests) · **Size:** M · **Profile:** `deep-reasoning` · **Executor:** `self` (orchestrator: needs the real CLIs and auth) · **Depends on:** 07.4 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/fixtures/runs/{claude,kilo,codex}-*.jsonl` (new), `scripts/test_orchestration_runs.py`, `tasks/specs/agent-runs-from-ui.md` (§5.7 table)
 - **Goal:** In a scratch git repo with a one-step task, do per tool:
   - one `execute`, one `--continue` and one `verify`;
