@@ -24,7 +24,25 @@
 - **Owner chat in the UI.** A chat panel shows the transcript and has an input box: a message → enqueue → streamed reply over the WebSocket. The owner can cancel the current turn, pause the session, and see queued items.
 - **Event turns are rate-limited** (default: at most 6 per hour, configurable) and respect the trigger kill switch. While the session is paused, events accumulate and are delivered as one batch on resume.
 - **§4 delivery changes:** the interactive-session channels (Monitor, hooks) are no longer part of the design. Every orchestration session is headless and is reached by resumption. Interactive tools (for example a Claude Code window) may still read `ai-orch events tail` manually, but nothing depends on it.
-- **`origin-session`** on questions, runs and notes points to the orchestrator session when the orchestrator created them. `resume-origin` therefore means "enqueue a turn for the orchestrator", or "continue the run" when the origin is a run.
+- **Role vs session; succession.** The **orchestrator role** owns the turn queue, the event cursor, the subscriptions and the transcript. The **tool session** currently holding the role is replaceable.
+  - `orchestrator.json` records `generation` and `current: {tool, session_id, started, turns, last_usage}`; `sessions/<id>.json` keeps every past generation with `retired: {at, reason}`.
+  - A new generation is started when:
+    - a resumption fails irrecoverably (the session is not found, or there are 2 consecutive turn failures);
+    - the context grows past a configurable threshold (`[orchestrator] rotate_after_tokens`, using the usage reported per turn; spec §0 12.1 facts);
+    - the owner asks for it (`orchestrator rotate`).
+  - The new session **registers itself**: it gets a new id and generation N+1, the old one is marked retired with the reason, and an event `orchestrator.rotated` is emitted.
+  - The new session's **first turn is a handoff prompt** generated from files only, never from the dead session:
+    - the role instructions;
+    - the `tasks/00-INDEX.md` summary;
+    - open questions and answered questions awaiting application;
+    - active runs and their states;
+    - events after the role cursor;
+    - a summary of the last N turns, taken from the transcripts (the stored assistant texts, truncated);
+    - the pending queue.
+
+    After the handoff turn, the queue resumes from where it stopped.
+  - **References survive succession:** `origin-session` on questions, runs and notes points to the **role** (`orchestrator`), not to a tool session id, so `resume-origin` always reaches the current generation.
+- **`origin-session`** on questions, runs and notes is `orchestrator` (the role) when the orchestrator created them. `resume-origin` therefore means "enqueue a turn for the orchestrator", or "continue the run" when the origin is a run.
 
 ## 1. Events (core)
 

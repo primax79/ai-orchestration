@@ -34,7 +34,13 @@
 ### 12.5 - Core: headless orchestrator session (start, stop, pause, durable serialized turn queue, transcripts, event coalescing)
 
 - **Status:** `open` · **Size:** L · **Depends on:** 12.1, 12.3, 07.12 · **Repo:** `ai-orchestration/` (runs lane)
-- **Goal:** Spec §0.
+- **Goal:** Spec §0, including role vs session, succession (automatic and manual rotation), the handoff prompt built from files, and `orchestrator.rotated` events.
+- **Verification:**
+  - Tests with stub agents:
+    - a resumption failure triggers succession;
+    - the new generation receives a handoff turn that contains the pending events and the open questions;
+    - the queue continues after succession;
+    - two concurrent enqueues never produce overlapping resumptions.
 
 ### 12.8 - UI: orchestrator chat panel (transcript, streaming reply, cancel, pause, queue view)
 
