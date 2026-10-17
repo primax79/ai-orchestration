@@ -68,6 +68,7 @@ try:
     from tasks_engine import (
         discover_emergent_tasks,
         discover_initiatives,
+        discover_task_tree,
         task_bundle_sha256,
         normalize_state,
         transition_task,
@@ -83,6 +84,7 @@ try:
 except ImportError:
     discover_emergent_tasks = None  # type: ignore
     discover_initiatives = None  # type: ignore
+    discover_task_tree = None  # type: ignore
     task_bundle_sha256 = None  # type: ignore
     normalize_state = None  # type: ignore
     transition_task = None  # type: ignore
@@ -843,15 +845,71 @@ def check_platform(plat: str = sys.platform, fcntl_mod: Any = fcntl) -> str | No
 
 
 def check_task_id(task_id: str) -> tuple[bool, str | None]:
-    """Spec §1 — Emergent tasks (T###) only. Refuse NN.T or invalid formats."""
+    """Validate task ID format. Accepts emergent tasks (T###), child tasks (T###.N),
+    and initiative subtasks (NN.T, e.g. 07.2, 08.T1, 11.2)."""
     if not isinstance(task_id, str) or not task_id.strip():
         return False, "Task ID cannot be empty"
     t_clean = task_id.strip()
-    if re.match(r"^T\d{3,}$", t_clean):
+    if re.match(r"^T\d{3,}(?:\.\d+)*$", t_clean):
         return True, None
-    if re.match(r"^(?:NN|\d+)\.(?:T|\d+)", t_clean, re.IGNORECASE) or t_clean.upper() == "NN.T":
-        return False, "Initiative tasks (NN.T) are not supported in v1; emergent tasks (T###) only"
-    return False, f"Invalid task ID '{task_id}'; emergent tasks (T###) only"
+    if re.match(r"^\d{2,}\.(?:T\w+|\d+)(?:\.\d+)*$", t_clean):
+        return True, None
+    if t_clean.upper() == "NN.T":
+        return False, "Task ID 'NN.T' is a placeholder; use a concrete task ID (e.g. 07.2)"
+    return False, f"Invalid task ID '{task_id}'; must be T###, child T###.N, or initiative task NN.T"
+
+
+def resolve_task_by_id(tasks_dir: pathlib.Path, task_id: str) -> dict[str, Any] | None:
+    """Resolve any task (emergent, child, or initiative subtask) by ID."""
+    if discover_task_tree is not None and tasks_dir.is_dir():
+        try:
+            tree = discover_task_tree(tasks_dir)
+            if task_id in tree:
+                node = tree[task_id]
+                fields = node.own_fields or {}
+                paths = fields.get("paths") or (node.fields.get("paths", {}).get("value") if node.fields else None)
+                profile = fields.get("profile") or (node.fields.get("profile", {}).get("value") if node.fields else None)
+                vmode = (
+                    fields.get("verification-mode")
+                    or fields.get("verification_mode")
+                    or (node.fields.get("verification-mode", {}).get("value") if node.fields else None)
+                )
+                executor = node.executor or fields.get("executor", "kilo")
+                priority = node.priority or fields.get("priority", "P1")
+                return {
+                    "id": node.id,
+                    "title": node.title,
+                    "canonical_state": node.canonical_state,
+                    "state": node.state,
+                    "executor": executor,
+                    "priority": priority,
+                    "paths": paths,
+                    "profile": profile,
+                    "verification_mode": vmode,
+                    "verification-mode": vmode,
+                    "depends_on": ",".join(node.depends_on) if node.depends_on else "-",
+                    "file_path": node.file_path,
+                    "rel_path": node.rel_path,
+                    "bundle_sha256": node.task_hash,
+                    "task_hash": node.task_hash,
+                    "is_leaf": node.is_leaf,
+                    "is_container": node.is_container,
+                    "is_folder": node.is_folder,
+                    "parent_id": node.parent,
+                    "block_text": node.block_text,
+                    "parent_file": node.file_path if node.block_text else None,
+                }
+        except Exception:
+            pass
+
+    if discover_emergent_tasks is not None and tasks_dir.is_dir():
+        all_tasks = discover_emergent_tasks(tasks_dir)
+        t = next((x for x in all_tasks if x["id"] == task_id), None)
+        if t:
+            t["is_leaf"] = True
+            return t
+
+    return None
 
 
 def check_note_id(note_id: str) -> tuple[bool, str | None]:
@@ -1684,7 +1742,18 @@ def build_adapter_argv(
 # ---------------------------------------------------------------------------
 
 def load_task_files_content(task: dict[str, Any]) -> str:
-    """Read task file content (or all markdown files for a folder task)."""
+    """Read task file content (or all markdown files for a folder task, or block + parent plan context)."""
+    if task.get("block_text"):
+        block = str(task["block_text"]).strip()
+        parent_file = task.get("parent_file") or task.get("file_path")
+        if parent_file and pathlib.Path(parent_file).is_file():
+            p_text = pathlib.Path(parent_file).read_text(encoding="utf-8")
+            tasks_pos = p_text.find("## Tasks")
+            if tasks_pos > 0:
+                parent_header = p_text[:tasks_pos].strip()
+                return f"### Parent Context ({pathlib.Path(parent_file).name})\n\n{parent_header}\n\n---\n\n### Task Specification\n\n{block}"
+        return block
+
     is_folder = bool(task.get("is_folder", False))
     task_root_str = task.get("task_root") or task.get("file_path", "")
     task_root = pathlib.Path(task_root_str)
@@ -2320,18 +2389,16 @@ def cmd_options(args: argparse.Namespace) -> int:
     else:
         valid_task, task_err = check_task_id(target_id)
         if not valid_task:
-            reason = "initiative-tasks-not-supported" if "Initiative" in (task_err or "") else "invalid-task-id"
-            print_error(args.json, reason, task_err or "Invalid task ID")
+            print_error(args.json, "invalid-task-id", task_err or "Invalid task ID")
             return 1
 
-        if discover_emergent_tasks is None:
-            print_error(args.json, "engine-missing", "tasks_engine module could not be imported")
-            return 1
-
-        all_tasks = discover_emergent_tasks(tasks_dir)
-        task = next((t for t in all_tasks if t["id"] == target_id), None)
+        task = resolve_task_by_id(tasks_dir, target_id)
         if not task:
             print_error(args.json, "task-not-found", f"Task '{target_id}' not found in tasks directory")
+            return 1
+
+        if not task.get("is_leaf", True):
+            print_error(args.json, "container-task-not-executable", f"Task '{target_id}' is a container with subtasks; runs can only target leaf tasks")
             return 1
 
         canonical_state = task.get("canonical_state", "open")
@@ -2692,16 +2759,14 @@ def validate_run_request(
 
     valid_task, task_err = check_task_id(task_id)
     if not valid_task:
-        reason = "initiative-tasks-not-supported" if "Initiative" in (task_err or "") else "invalid-task-id"
-        return False, (reason, task_err or "Invalid task ID"), None
+        return False, ("invalid-task-id", task_err or "Invalid task ID"), None
 
-    if discover_emergent_tasks is None:
-        return False, ("engine-missing", "tasks_engine module could not be imported"), None
-
-    all_tasks = discover_emergent_tasks(tasks_dir)
-    task = next((t for t in all_tasks if t["id"] == task_id), None)
+    task = resolve_task_by_id(tasks_dir, task_id)
     if not task:
         return False, ("task-not-found", f"Task '{task_id}' not found in tasks directory"), None
+
+    if not task.get("is_leaf", True):
+        return False, ("container-task-not-executable", f"Task '{task_id}' is a container with subtasks; runs can only target leaf tasks"), None
 
     canonical_state = task.get("canonical_state", "open")
     mode = args.mode or get_default_mode_for_state(canonical_state)
@@ -3608,17 +3673,9 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     if record.get("mode") == "execute":
         try:
             tasks_dir = workspace / "tasks"
-            if tasks_dir.is_dir() and discover_emergent_tasks and transition_task:
-                all_tasks = discover_emergent_tasks(tasks_dir)
-                t = next((x for x in all_tasks if x["id"] == record["task_id"]), None)
+            if tasks_dir.is_dir() and transition_task:
+                t = resolve_task_by_id(tasks_dir, record["task_id"])
                 state = t.get("canonical_state") if t else None
-                if t is None and discover_initiatives:
-                    # Initiative task NN.T: state comes from its Status line in plan.md
-                    for init in discover_initiatives(tasks_dir):
-                        sub = next((x for x in init.get("tasks", []) if x["id"] == record["task_id"]), None)
-                        if sub:
-                            state = sub.get("state")
-                            break
                 if state in ("open", "bounced"):
                     ok, trans_res = transition_task(
                         tasks_dir=tasks_dir,
@@ -4142,8 +4199,7 @@ def cmd_mark_delivered(args: argparse.Namespace) -> int:
             return 1
 
         # 6. Task transition
-        emergent = discover_emergent_tasks(tasks_dir) if discover_emergent_tasks else []
-        task = next((t for t in emergent if t["id"] == record["task_id"]), None)
+        task = resolve_task_by_id(tasks_dir, record["task_id"])
         if not task:
             print_error(args.json, "task-not-found", f"Task '{record['task_id']}' not found in tasks/")
             return 1
@@ -4219,8 +4275,7 @@ def cmd_apply_verdict(args: argparse.Namespace) -> int:
             print_error(args.json, "invalid-verdict", f"Verdict '{verdict_val}' must be 'verified' or 'bounced'")
             return 1
 
-        emergent = discover_emergent_tasks(tasks_dir) if discover_emergent_tasks else []
-        task = next((t for t in emergent if t["id"] == record["task_id"]), None)
+        task = resolve_task_by_id(tasks_dir, record["task_id"])
         if not task:
             print_error(args.json, "task-not-found", f"Task '{record['task_id']}' not found in tasks/")
             return 1
@@ -4307,8 +4362,7 @@ def cmd_apply_verdict(args: argparse.Namespace) -> int:
             return 1
 
         task_id = panel_runs[0]["task_id"]
-        emergent = discover_emergent_tasks(tasks_dir) if discover_emergent_tasks else []
-        task = next((t for t in emergent if t["id"] == task_id), None)
+        task = resolve_task_by_id(tasks_dir, task_id)
         if not task:
             print_error(args.json, "task-not-found", f"Task '{task_id}' not found")
             return 1
@@ -4688,9 +4742,8 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     branch = record.get("branch")
     target_repo = ws
     tasks_dir = ws / "tasks"
-    if tasks_dir.is_dir() and discover_emergent_tasks:
-        emergent = discover_emergent_tasks(tasks_dir)
-        task = next((t for t in emergent if t["id"] == record["task_id"]), None)
+    if tasks_dir.is_dir():
+        task = resolve_task_by_id(tasks_dir, record["task_id"])
         if task:
             tr, _, _ = resolve_target_repo(ws, task.get("paths"))
             if tr:

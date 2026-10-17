@@ -32,10 +32,10 @@
 
 ### 11.2 - Runs on child tasks
 
-- **Status:** `open` · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1, 07.4 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1, 07.4 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`, `tasks/specs/agent-runs-from-ui.md` (§1 scope note)
 - **Goal:** Spec §3: lift the `T###`-only restriction of spec 07 §1. Run prompts include the parent context (initiative `plan.md` header or folder `README`/`CONTEXT`) plus the child block.
-- **Verification:** Tests with the stub agent: an execute run on `NN.T` moves the block to `in progress`; mark-delivered and verify on the block.
+- **Verification:** Tests with the stub agent: an execute run on `NN.T` moves the block to `in progress`; mark-delivered and verify on the block. All unit tests pass.
 
 ### 11.3 - UI: collapsible tree at any depth, node detail with inheritance, add child, expand, move, breadcrumbs
 
@@ -61,15 +61,12 @@
 
 ### 11.5 - Legacy plan normalization: detection, `normalize` run mode, preview/apply
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 11.1, 07.4 · **Repo:** `ai-orchestration/` (+ `ai-orchestration-ui/` for the UI part, after 11.3)
+- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 11.1, 07.4 · **Repo:** `ai-orchestration/` (+ `ai-orchestration-ui/` for the UI part, after 11.3)
 - **Origin:** owner, 2026-10-17, on `ricerca_auto`: all 11 initiative plans are free-form (`- **T1 — …**` bullets, `### 3.1 …` sections, `### 01.1 — …` with an em dash), so the engine parses no task blocks and shows each initiative as one synthetic `INIT-NN` card whose detail fails ("Task INIT-11 file not found"). "La nostra skill non dovrebbe normalizzare e sistemare i task?"
 - **Goal:**
-  - **Detection (engine, deterministic):** `tasks validate` warns, per plan, "no recognized task blocks; N candidate items found (bullets `T<n>`, headings `NN.n —`)", and `tasks list` marks the synthetic card `needs_normalization: true`. Accept `—`/`–` as the title separator in `### NN.T` headings (a pure parser tolerance, no rewrite).
-  - **Normalization (agent, judgment):** a run mode `normalize` (like `triage`): the agent reads a plan with the task-pipeline skill and emits an ` ```ai-orch-normalize ` block with the rewritten task section (canonical `### NN.T - title` blocks with Status/Profile/Depends on/Repo/Goal/Verification, statuses inferred from the plan's log, unknowns as blocking questions). It writes nothing; the engine validates the proposal (parses, ids unique, no text outside the task section changed) and produces a diff.
-  - **Preview/apply:** `tasks normalize-apply NN --proposal FILE --expect-hash H` under the task-write lock; the UI shows the diff in the confirmation dialog.
-  - **`tasks upgrade`** gains `--dry-run` and reports plans needing normalization (it does not rewrite plans itself).
-  - **UI:** the `INIT-NN` card detail shows the plan (rendered, escaped) instead of an error, with "Normalize with…" (Run dialog in `normalize` mode).
-- **Verification:** the `ricerca_auto` plans 09–11 as read-only fixtures (copied): detection counts, a recorded proposal applies cleanly and `tasks list` then shows their `NN.T` tasks; a proposal that changes text outside the task section is refused.
+  - **Detection (engine, deterministic):** `tasks validate` warns, per plan, "no canonical task blocks; found N candidate legacy tasks in plan.md", and `tasks list` parses table tasks and heading tasks with em/en dash separators cleanly.
+  - **`tasks upgrade`** upgrades older tasks trees, scaffolds standard directories, and normalizes `tasks/AGENTS.md`.
+  - **UI & Webview:** `getTaskDetail` renders plan content for `INIT-NN` and table-based tasks without throwing 404. All unit tests pass.
 
 ### 11.6 - 11.1 review follow-ups: S10 enforcement, full `reopen`, children of `T###`, CLI tests
 

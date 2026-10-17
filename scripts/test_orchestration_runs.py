@@ -103,20 +103,21 @@ def test_check_platform():
     assert check_platform("darwin", fcntl_mod=None) == "unsupported-platform"
 
 
-def test_check_task_id_and_nn_t_refusal():
+def test_check_task_id_accepts_emergent_and_child_and_initiative():
     # Valid emergent IDs
-    ok, err = check_task_id("T001")
-    assert ok is True and err is None
-    ok, err = check_task_id("T007")
-    assert ok is True and err is None
-    ok, err = check_task_id("T1234")
-    assert ok is True and err is None
+    for tid in ("T001", "T007", "T1234", "T001.1", "T001.2.1"):
+        ok, err = check_task_id(tid)
+        assert ok is True and err is None
 
-    # Initiative tasks (NN.T) refused
-    for init_id in ("07.2", "01.T1", "12.T3", "NN.T"):
+    # Initiative subtasks (NN.T) supported in 11.2
+    for init_id in ("07.2", "01.T1", "12.T3", "08.1"):
         ok, err = check_task_id(init_id)
-        assert ok is False
-        assert "Initiative tasks (NN.T) are not supported" in (err or "")
+        assert ok is True and err is None
+
+    # Placeholder NN.T refused
+    ok, err = check_task_id("NN.T")
+    assert ok is False
+    assert "placeholder" in (err or "").lower()
 
     # Invalid / empty formats
     for bad in ("", "   ", "abc", "task-007", "007"):
@@ -3757,3 +3758,39 @@ def test_codex_triage_passes_only_images_with_dash_i():
     )
     pairs = [argv[i + 1] for i, a in enumerate(argv) if a == "-i"]
     assert pairs == ["n/attachments/01-shot.PNG"]
+
+
+def test_runs_on_child_task_and_initiative_subtask(sample_workspace: pathlib.Path):
+    init_dir = sample_workspace / "tasks" / "05-feature"
+    init_dir.mkdir(parents=True)
+    plan_text = (
+        "# 05 - Feature Initiative\n\n"
+        "> **Goal:** High-level initiative\n\n"
+        "## Tasks\n\n"
+        "### 05.1 - First Subtask\n"
+        "- **Status:** `open`\n"
+        "- **Priority:** `P1`\n"
+        "- **Goal:** Implement core module\n"
+        "- **Verification:** `pytest test_core.py`\n\n"
+        "### 05.2 - Second Subtask\n"
+        "- **Status:** `open`\n"
+    )
+    (init_dir / "plan.md").write_text(plan_text, encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "add initiative 05"], cwd=str(sample_workspace), check=True)
+
+    # 1. Test options on 05.1
+    cmd_opt = [str(BIN_AI_ORCH), "run", "options", "--task", "05.1", "--workspace", str(sample_workspace), "--json"]
+    res_opt = subprocess.run(cmd_opt, capture_output=True, text=True, check=True)
+    data_opt = json.loads(res_opt.stdout)
+    assert data_opt["ok"] is True
+    assert data_opt["task"]["id"] == "05.1"
+    assert "execute" in data_opt["allowed_modes"]
+
+    # 2. Test preview on 05.1
+    cmd_prev = [str(BIN_AI_ORCH), "run", "preview", "--task", "05.1", "--mode", "execute", "--workspace", str(sample_workspace), "--json"]
+    res_prev = subprocess.run(cmd_prev, capture_output=True, text=True, check=True)
+    data_prev = json.loads(res_prev.stdout)
+    assert data_prev["ok"] is True
+    assert "Parent Context (plan.md)" in data_prev["prompt"]
+    assert "05.1 - First Subtask" in data_prev["prompt"]

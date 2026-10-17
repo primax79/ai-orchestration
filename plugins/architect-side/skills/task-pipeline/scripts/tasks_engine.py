@@ -2972,6 +2972,15 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
     emergent_map = {t["id"]: t for t in emergent}
     seen_q_ids: dict[str, str] = {}
 
+    # Warn on legacy un-normalized initiative plans (11.5)
+    for init in initiatives:
+        if init.get("legacy"):
+            warnings.append(
+                f"Initiative #{init['id']} ({init['slug']}) has no canonical task blocks; "
+                f"found {len(init['tasks'])} candidate legacy task(s) in plan.md. "
+                "Consider normalizing task blocks into canonical format."
+            )
+
     if questions_dir.is_dir():
         for q_entry in sorted(questions_dir.iterdir()):
             if q_entry.name.startswith(".") or not q_entry.is_file() or q_entry.suffix != ".md":
