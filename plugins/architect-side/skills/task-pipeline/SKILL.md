@@ -121,8 +121,9 @@ Copy-paste skeletons for every file kind are in
 1. **Capture.** Drop unstructured material into `_inbox/to-analyze/`. Either as a
    plain Markdown file (e.g. `2026-07-20-call-luca.md`) or as a structured note
    folder `_inbox/to-analyze/<YYYYMMDD-HHMMSS>-<slug>/` containing `note.md`
-   (with `N###` header) and optional `attachments/` images. Plain `.md` notes
-   remain valid and convert to folder form on first edit.
+   (with `N###` header) and optional `attachments/` (images, PDFs, text files; up
+   to 10 MB per file, max 30 attachments). Plain `.md` notes remain valid and
+   convert to folder form on first edit or attachment.
 2. **Analyze.** Distil it into one or more `specs/<slug>.md`. The spec is the
    *what & why* and becomes the source of truth for implementation - not the
    raw note. Move the processed raw file to `_inbox/analyzed/`, noting which
@@ -159,16 +160,22 @@ path. A "next steps" paragraph in the chat is not a substitute.
   in the same repository at the same time, and id collisions do happen.
 - **Shape.** A small task is one file, `T###-<slug>.md`. A task with context or
   progress worth keeping is a folder, `T###-<slug>/`, so that the definition,
-  context and progress live in the task and not in a session:
+  context, progress and evidence live in the task and not in a session:
   - `README.md`: the definition (header, goal, steps, verification);
   - `CONTEXT.md`: everything needed to resume without the original session:
     where the work is, how to build and check it, rules the user gave, facts
     already established (each with the command or file that established it).
     Write it while the context is still fresh: that is its point;
   - `PROGRESS.md`: a log, newest first, and the checklist of open items.
-    Update it in the same change as any work on the task.
+    Update it in the same change as any work on the task;
+  - `attachments/`: evidence and supporting files (images, PDFs, text files; up to
+    10 MB each, max 30 files), added with `ai-orch tasks attach` and detached
+    with `ai-orch tasks detach`. Attaching to a single-file task automatically
+    promotes it to folder form (`cat/T###-slug/README.md`) byte-identically.
+  Converting an inbox note via `ai-orch tasks new --from-note` preserves evidence
+  by copying note attachments into the new task folder and rewriting links.
   A file is promoted to a folder, with the same id, when it gets progress worth
-  keeping.
+  keeping or receives attachments.
 - **Header.** One `key: value` line per field, so the headers can be grepped.
   The set is **closed** and the order is the one below, always all fields
   present; an empty value is `-` (never omit a line):
@@ -545,6 +552,12 @@ python3 scripts/tasks_engine.py [--json] questions list [--status open|answered|
 python3 scripts/tasks_engine.py [--json] questions ask --question "..." --context "..." --option "A=..." --blocks T###
 python3 scripts/tasks_engine.py [--json] questions answer Q### --choice A [--text "..."]
 python3 scripts/tasks_engine.py [--json] questions withdraw Q### --reason "..."
+
+# Attachments on emergent tasks and inbox notes (images, PDFs, text files; <=10MB)
+python3 scripts/tasks_engine.py [--json] attach <task_id> --file <path> [--name <stem>] [--expect-task-hash <hash>]
+python3 scripts/tasks_engine.py [--json] detach <task_id> --name <filename> [--expect-task-hash <hash>]
+python3 scripts/tasks_engine.py [--json] inbox attach <note_id> --file <path> [--name <stem>] [--expect-hash <hash>]
+python3 scripts/tasks_engine.py [--json] inbox detach <note_id> --name <filename> [--expect-hash <hash>]
 
 # Upgrade an older tasks/ tree to the latest task-pipeline convention
 python3 scripts/tasks_engine.py [--json] upgrade [--tasks-dir tasks]

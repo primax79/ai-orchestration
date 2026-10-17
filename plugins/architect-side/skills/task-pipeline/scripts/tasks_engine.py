@@ -125,11 +125,19 @@ NOTE_HEADER_FIELDS: tuple[str, ...] = (
     "produced",
     "processed-by",
 )
-NOTE_KINDS: set[str] = {"note", "bug", "idea", "request", "question"}
+NOTE_KINDS: set[str] = {"note", "bug", "feature", "idea", "request", "question"}
 NOTE_STATUSES: set[str] = {"draft", "ready", "processing", "processed", "discarded"}
 NOTE_ID_RE = re.compile(r"^N\d{3,}$")
 MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024  # 10 MB
-MAX_ATTACHMENTS_PER_NOTE = 20
+MAX_ATTACHMENTS_PER_NOTE = 30
+MAX_ATTACHMENTS_PER_TASK = 30
+IMAGE_EXTENSIONS: set[str] = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+TEXT_EXTENSIONS: set[str] = {
+    ".txt", ".log", ".md", ".json", ".yaml", ".yml", ".toml",
+    ".csv", ".xml", ".diff", ".patch", ".html", ".js", ".ts",
+    ".tsx", ".py", ".java", ".sh", ".sql", ".ini", ".cfg",
+    ".conf", ".properties",
+}
 
 CANONICAL_TASKS_AGENTS_MD = """# tasks/ convention (task-pipeline + emergent tasks)
 
@@ -2145,6 +2153,19 @@ def parse_emergent_task_file(
     )
 
     raw_state = headers.get("state", "")
+    attachments: list[dict[str, Any]] = []
+    if is_folder:
+        attachments_dir = task_root / "attachments"
+        if attachments_dir.is_dir():
+            for f in sorted(attachments_dir.iterdir()):
+                if f.is_file() and not f.name.startswith("."):
+                    att_class = classify_existing_attachment_file(f)
+                    attachments.append({
+                        "name": f.name,
+                        "class": att_class,
+                        "size": f.stat().st_size,
+                    })
+
     task_dict = {
         "kind": "emergent",
         "id": headers.get("id", ""),
@@ -2176,6 +2197,7 @@ def parse_emergent_task_file(
         "file_path": str(file_path),
         "task_root": str(task_root),
         "rel_path": rel_path,
+        "attachments": attachments,
     }
     task_dict["bundle_sha256"] = task_bundle_sha256(task_dict)
     return task_dict
@@ -5755,22 +5777,109 @@ def sniff_image_type(data: bytes, original_suffix: str = "") -> tuple[str, str] 
     return None
 
 
+def validate_and_classify_attachment(
+    data: bytes, original_suffix: str
+) -> tuple[bool, str, str, str, str]:
+    """Validate and classify attachment data.
+    Returns (ok, att_class, real_ext, error_code, error_message).
+    Classes: 'image', 'pdf', 'text'.
+    """
+    if len(data) > MAX_ATTACHMENT_SIZE:
+        return False, "", "", "size-limit-exceeded", f"Attachment exceeds 10 MB limit ({len(data)} bytes)."
+
+    ext_lower = original_suffix.lower()
+
+    # 1. Image check by magic bytes
+    sniff = sniff_image_type(data, original_suffix=original_suffix)
+    if sniff is not None:
+        return True, "image", sniff[1], "", ""
+
+    # 2. PDF check
+    if data.startswith(b"%PDF-"):
+        return True, "pdf", ".pdf", "", ""
+
+    # If image extension was specified but magic bytes failed
+    if ext_lower in IMAGE_EXTENSIONS:
+        return (
+            False,
+            "",
+            "",
+            "invalid-image-type",
+            "File is not a supported image (magic bytes do not match png, jpeg, gif, or webp).",
+        )
+
+    # If PDF extension was specified but didn't start with %PDF-
+    if ext_lower == ".pdf":
+        return (
+            False,
+            "",
+            "",
+            "invalid-pdf-type",
+            "File is not a valid PDF (content must start with '%PDF-').",
+        )
+
+    # 3. Text check
+    if ext_lower in TEXT_EXTENSIONS:
+        if b"\x00" in data[:65536]:
+            return (
+                False,
+                "",
+                "",
+                "invalid-text-type",
+                f"File with extension {ext_lower!r} contains NUL byte in the first 64 KB.",
+            )
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError as ue:
+            return (
+                False,
+                "",
+                "",
+                "invalid-text-type",
+                f"File with extension {ext_lower!r} is not valid UTF-8: {ue}",
+            )
+        return True, "text", ext_lower, "", ""
+
+    return (
+        False,
+        "",
+        "",
+        "invalid-attachment-type",
+        f"Unsupported attachment type with extension {ext_lower!r}. Allowed classes are images (png, jpeg, gif, webp), PDFs (starting with '%PDF-'), and plain text files ({', '.join(sorted(TEXT_EXTENSIONS))}).",
+    )
+
+
+def classify_existing_attachment_file(path: pathlib.Path) -> str:
+    """Classify an existing attachment file on disk into 'image', 'pdf', or 'text'."""
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            chunk = f.read(min(size, 65536))
+    except Exception:
+        return "text"
+    if sniff_image_type(chunk, original_suffix=path.suffix) is not None:
+        return "image"
+    if chunk.startswith(b"%PDF-"):
+        return "pdf"
+    return "text"
+
+
 def sanitize_attachment_name(stem: str, ext: str, index: int) -> str:
     """Sanitize attachment name to <NN>-<clean><ext> (lowercase, [a-z0-9._-], max 60 chars)."""
     nn = f"{index:02d}"
     clean = re.sub(r"[^a-z0-9._-]+", "-", stem.lower()).strip("-._")
     if not clean:
-        clean = "image"
+        clean = "attachment"
     max_stem_len = 60 - len(nn) - 1 - len(ext)
     clean = clean[:max_stem_len].rstrip("-._")
     if not clean:
-        clean = "img"
+        clean = "att"
     return f"{nn}-{clean}{ext}"
 
 
 def validate_attachment_name(name: str, attachments_dir: pathlib.Path) -> pathlib.Path:
     """Validate attachment name against path traversal and return resolved path."""
-    if not name or "/" in name or "\\" in name or name in (".", ".."):
+    if not name or "/" in name or "\\" in name or "\x00" in name or name in (".", "..") or ".." in name:
         raise ValueError(f"Invalid attachment name: path traversal or invalid characters in {name!r}")
     target = (attachments_dir / name).resolve()
     base = attachments_dir.resolve()
@@ -5865,11 +5974,16 @@ def parse_note_folder(
     body = "\n".join(body_lines).strip()
 
     attachments_dir = folder_path / "attachments"
-    attachments: list[str] = []
+    attachments: list[dict[str, Any]] = []
     if attachments_dir.is_dir():
         for f in sorted(attachments_dir.iterdir()):
             if f.is_file() and not f.name.startswith("."):
-                attachments.append(f.name)
+                att_class = classify_existing_attachment_file(f)
+                attachments.append({
+                    "name": f.name,
+                    "class": att_class,
+                    "size": f.stat().st_size,
+                })
 
     note_id = headers.get("id", "")
     title = headers.get("title", "")
@@ -6284,6 +6398,7 @@ def inbox_attach(
     target: str,
     file_path: str | pathlib.Path,
     name: str | None = None,
+    expect_hash: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -6293,26 +6408,26 @@ def inbox_attach(
         }
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if name:
+        if "/" in name or "\\" in name or "\x00" in name or ".." in name:
+            return False, {
+                "ok": False,
+                "error": "invalid-attachment-name",
+                "message": f"Invalid attachment name: path traversal or invalid characters in {name!r}",
+            }
+
     src = pathlib.Path(file_path).resolve()
     if not src.is_file():
         return False, {"ok": False, "error": f"Attachment file not found: {file_path}"}
 
     data = src.read_bytes()
-    if len(data) > MAX_ATTACHMENT_SIZE:
+    ok_att, att_class, real_ext, err_code, err_msg = validate_and_classify_attachment(data, src.suffix)
+    if not ok_att:
         return False, {
             "ok": False,
-            "error": "size-limit-exceeded",
-            "message": f"Attachment exceeds 10 MB limit ({len(data)} bytes).",
+            "error": err_code,
+            "message": err_msg,
         }
-
-    sniff = sniff_image_type(data, original_suffix=src.suffix)
-    if sniff is None:
-        return False, {
-            "ok": False,
-            "error": "invalid-image-type",
-            "message": "File is not a supported image (magic bytes do not match png, jpeg, gif, or webp).",
-        }
-    img_type, real_ext = sniff
 
     try:
         with task_write_lock(tasks_dir):
@@ -6338,6 +6453,16 @@ def inbox_attach(
                     "message": f"Note {note['id']} is {current_status}; reopen it first before modifying attachments.",
                 }
 
+            if expect_hash:
+                actual_hash = note["bundle_sha256"]
+                if actual_hash != expect_hash:
+                    return False, {
+                        "ok": False,
+                        "error": "stale-note",
+                        "expected": expect_hash,
+                        "actual": actual_hash,
+                    }
+
             attachments_dir = folder_path / "attachments"
             attachments_dir.mkdir(parents=True, exist_ok=True)
 
@@ -6346,7 +6471,7 @@ def inbox_attach(
                 return False, {
                     "ok": False,
                     "error": "attachment-limit-reached",
-                    "message": f"Note {note['id']} already has the maximum allowed attachments (20).",
+                    "message": f"Note {note['id']} already has the maximum allowed attachments ({MAX_ATTACHMENTS_PER_NOTE}).",
                 }
 
             existing_nums = [
@@ -6360,13 +6485,18 @@ def inbox_attach(
 
             shutil.copy2(src, dest_path)
 
-            markdown_ref = f"![](attachments/{dest_filename})"
+            if att_class == "image":
+                markdown_ref = f"![](attachments/{dest_filename})"
+            else:
+                markdown_ref = f"[{dest_filename}](attachments/{dest_filename})"
+
             updated = parse_note_folder(folder_path, tasks_dir, in_analyzed=note["in_analyzed"])
 
             return True, {
                 "ok": True,
                 "id": updated["id"],
                 "attachment": dest_filename,
+                "class": att_class,
                 "markdown": markdown_ref,
                 "path": str(dest_path),
                 "bundle_sha256": updated["bundle_sha256"],
@@ -6379,6 +6509,7 @@ def inbox_detach(
     tasks_dir: pathlib.Path,
     target: str,
     name: str,
+    expect_hash: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -6388,6 +6519,13 @@ def inbox_detach(
         }
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if not name or "/" in name or "\\" in name or "\x00" in name or ".." in name:
+        return False, {
+            "ok": False,
+            "error": "invalid-attachment",
+            "message": f"Invalid attachment name: {name!r}",
+        }
+
     try:
         with task_write_lock(tasks_dir):
             note = find_inbox_note(tasks_dir, target)
@@ -6411,6 +6549,16 @@ def inbox_detach(
                     "error": "note-closed",
                     "message": f"Note {note['id']} is {current_status}; reopen it first.",
                 }
+
+            if expect_hash:
+                actual_hash = note["bundle_sha256"]
+                if actual_hash != expect_hash:
+                    return False, {
+                        "ok": False,
+                        "error": "stale-note",
+                        "expected": expect_hash,
+                        "actual": actual_hash,
+                    }
 
             attachments_dir = folder_path / "attachments"
             try:
@@ -6847,10 +6995,29 @@ def inbox_reopen(
         return False, {"ok": False, "error": str(e)}
 
 
+def _update_index_task_path(tasks_dir: pathlib.Path, old_rel: str, new_rel: str) -> None:
+    index_path = tasks_dir / "00-INDEX.md"
+    if not index_path.is_file():
+        return
+    try:
+        content = index_path.read_text(encoding="utf-8")
+        if old_rel in content:
+            new_content = content.replace(f"({old_rel})", f"({new_rel})").replace(f"tasks/{old_rel}", f"tasks/{new_rel}")
+            if new_content != content:
+                _atomic_write_text(index_path, new_content, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _rewrite_attachment_references_to_local(text: str) -> str:
+    pat = re.compile(r"(?:tasks/)?_inbox/(?:to-analyze|analyzed)/[^/\s\)\"\']+/attachments/([^\s\)\"\']+)")
+    return pat.sub(r"attachments/\1", text)
+
+
 def tasks_new_from_note(
     tasks_dir: pathlib.Path,
-    from_note: str,
-    category: str,
+    from_note: str | None,
+    category: str | None,
     title: str,
     priority: str = "P2",
     priority_reason: str | None = None,
@@ -6873,12 +7040,22 @@ def tasks_new_from_note(
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     from_note = (from_note or "").strip()
+    category = (category or "").strip()
+    if from_note and not category:
+        note_for_hint = find_inbox_note(tasks_dir, from_note)
+        if note_for_hint:
+            nk = note_for_hint.get("kind", "")
+            if nk == "bug":
+                category = "bugfix"
+            elif nk in ("feature", "request"):
+                category = "feature"
+
     if not from_note:
         if not goal or not goal.strip():
             return False, {"ok": False, "error": "Without --from-note, --goal is required."}
         if not priority_reason or not priority_reason.strip():
             return False, {"ok": False, "error": "Without --from-note, --priority-reason is required."}
-    if not category or not category.strip():
+    if not category:
         return False, {"ok": False, "error": "Missing required --category."}
     if not title or not title.strip():
         return False, {"ok": False, "error": "Missing required --title."}
@@ -6920,15 +7097,54 @@ def tasks_new_from_note(
             filename = ""
             task_file_path = None
 
-            while True:
-                t_id = f"T{next_num:03d}"
-                filename = f"{t_id}-{slug}.md"
-                task_file_path = category_dir / filename
-                try:
-                    fd = os.open(str(task_file_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                    break
-                except FileExistsError:
-                    next_num += 1
+            note_attachments: list[pathlib.Path] = []
+            if note and not note.get("legacy"):
+                note_folder = pathlib.Path(note["folder_path"])
+                att_dir = note_folder / "attachments"
+                if att_dir.is_dir():
+                    note_attachments = [
+                        f for f in sorted(att_dir.iterdir())
+                        if f.is_file() and not f.name.startswith(".")
+                    ]
+
+            task_folder: pathlib.Path | None = None
+            if note_attachments:
+                while True:
+                    t_id = f"T{next_num:03d}"
+                    folder_name = f"{t_id}-{slug}"
+                    task_folder = category_dir / folder_name
+                    if task_folder.exists():
+                        next_num += 1
+                        continue
+                    try:
+                        task_folder.mkdir(parents=True, exist_ok=False)
+                    except FileExistsError:
+                        next_num += 1
+                        continue
+
+                    task_att_dir = task_folder / "attachments"
+                    task_att_dir.mkdir(parents=True, exist_ok=True)
+                    for naf in note_attachments:
+                        shutil.copy2(naf, task_att_dir / naf.name)
+
+                    task_file_path = task_folder / "README.md"
+                    try:
+                        fd = os.open(str(task_file_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                        filename = f"{folder_name}/README.md"
+                        break
+                    except FileExistsError:
+                        shutil.rmtree(task_folder, ignore_errors=True)
+                        next_num += 1
+            else:
+                while True:
+                    t_id = f"T{next_num:03d}"
+                    filename = f"{t_id}-{slug}.md"
+                    task_file_path = category_dir / filename
+                    try:
+                        fd = os.open(str(task_file_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                        break
+                    except FileExistsError:
+                        next_num += 1
 
             handoff = f"Read tasks/{category}/{filename}, do the open steps, run the Verification, update the task and the registry."
             if note:
@@ -6947,7 +7163,7 @@ def tasks_new_from_note(
                 p_reason = priority_reason.strip()
                 sources = (sources or "").strip() or "-"
                 paths = (paths or "").strip() or "-"
-            goal = goal.strip()
+            goal = _rewrite_attachment_references_to_local(goal.strip())
 
             task_content = f"""# {t_id} {title.strip()}
 
@@ -6981,7 +7197,9 @@ def tasks_new_from_note(
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(task_content)
             except BaseException:
-                if task_file_path and task_file_path.exists():
+                if note_attachments and task_folder and task_folder.exists():
+                    shutil.rmtree(task_folder, ignore_errors=True)
+                elif task_file_path and task_file_path.exists():
                     task_file_path.unlink()
                 raise
 
@@ -6991,7 +7209,10 @@ def tasks_new_from_note(
             task_errors = [e for e in errors if rel_task in e]
             if task_errors:
                 try:
-                    task_file_path.unlink()
+                    if note_attachments and task_folder:
+                        shutil.rmtree(task_folder, ignore_errors=True)
+                    elif task_file_path:
+                        task_file_path.unlink()
                 except OSError:
                     pass
                 return False, {"ok": False, "error": f"Created task failed validation: {'; '.join(task_errors)}"}
@@ -7004,6 +7225,239 @@ def tasks_new_from_note(
                 "sources": sources,
                 "paths": paths,
             }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def tasks_attach(
+    tasks_dir: pathlib.Path,
+    target: str,
+    file_path: str | pathlib.Path,
+    name: str | None = None,
+    expect_task_hash: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    target_clean = (target or "").strip()
+    if re.match(r"^\d{2,}(?:\.\d+)*$", target_clean):
+        return False, {
+            "ok": False,
+            "error": "plan-task-attachments-unsupported",
+            "message": f"Plan tasks ({target_clean}) do not support attachments; only emergent tasks (T###) can have attachments.",
+        }
+    if not EMERGENT_ID_RE.match(target_clean):
+        return False, {
+            "ok": False,
+            "error": "invalid-task-id",
+            "message": f"Invalid emergent task ID {target_clean!r} (expected format T###).",
+        }
+
+    if name:
+        if "/" in name or "\\" in name or "\x00" in name or ".." in name:
+            return False, {
+                "ok": False,
+                "error": "invalid-attachment-name",
+                "message": f"Invalid attachment name: path traversal or invalid characters in {name!r}",
+            }
+
+    src = pathlib.Path(file_path).resolve()
+    if not src.is_file():
+        return False, {"ok": False, "error": f"Attachment file not found: {file_path}"}
+
+    data = src.read_bytes()
+    ok_att, att_class, real_ext, err_code, err_msg = validate_and_classify_attachment(data, src.suffix)
+    if not ok_att:
+        return False, {
+            "ok": False,
+            "error": err_code,
+            "message": err_msg,
+        }
+
+    try:
+        with task_write_lock(tasks_dir):
+            all_emergent = discover_emergent_tasks(tasks_dir)
+            task = next((t for t in all_emergent if t.get("id") == target_clean), None)
+            if not task:
+                tree = discover_task_tree(tasks_dir)
+                if target_clean in tree:
+                    return False, {
+                        "ok": False,
+                        "error": "plan-task-attachments-unsupported",
+                        "message": f"Plan tasks ({target_clean}) do not support attachments; only emergent tasks (T###) can have attachments.",
+                    }
+                return False, {"ok": False, "error": f"Task {target_clean!r} not found."}
+
+            if expect_task_hash:
+                actual_hash = task["bundle_sha256"]
+                if actual_hash != expect_task_hash:
+                    return False, {
+                        "ok": False,
+                        "error": "stale-task-hash",
+                        "message": f"Task bundle hash mismatch: expected {expect_task_hash}, actual {actual_hash}",
+                        "expected": expect_task_hash,
+                        "actual": actual_hash,
+                    }
+
+            is_folder = task["is_folder"]
+            if not is_folder:
+                # Convert single-file task to folder form byte-identically
+                single_file = pathlib.Path(task["file_path"])
+                task_folder = single_file.parent / single_file.stem
+                task_folder.mkdir(parents=True, exist_ok=True)
+                readme_file = task_folder / "README.md"
+                content_bytes = single_file.read_bytes()
+                readme_file.write_bytes(content_bytes)
+                single_file.unlink()
+                _update_index_task_path(
+                    tasks_dir,
+                    old_rel=task["rel_path"],
+                    new_rel=readme_file.relative_to(tasks_dir).as_posix(),
+                )
+            else:
+                task_folder = pathlib.Path(task["task_root"])
+                readme_file = task_folder / "README.md"
+
+            attachments_dir = task_folder / "attachments"
+            attachments_dir.mkdir(parents=True, exist_ok=True)
+
+            existing_files = [f.name for f in attachments_dir.iterdir() if f.is_file() and not f.name.startswith(".")]
+            if len(existing_files) >= MAX_ATTACHMENTS_PER_TASK:
+                return False, {
+                    "ok": False,
+                    "error": "attachment-limit-reached",
+                    "message": f"Task {task['id']} already has the maximum allowed attachments ({MAX_ATTACHMENTS_PER_TASK}).",
+                }
+
+            existing_nums = [
+                int(m.group(1)) for f in existing_files if (m := re.match(r"^(\d{2})-", f))
+            ]
+            next_idx = max(existing_nums, default=0) + 1
+
+            stem = name if name else src.stem
+            dest_filename = sanitize_attachment_name(stem, real_ext, next_idx)
+            dest_path = attachments_dir / dest_filename
+
+            shutil.copy2(src, dest_path)
+
+            if att_class == "image":
+                markdown_ref = f"![](attachments/{dest_filename})"
+            else:
+                markdown_ref = f"[{dest_filename}](attachments/{dest_filename})"
+
+            updated = parse_emergent_task_file(readme_file, tasks_dir, in_done=task["in_done"])
+
+            return True, {
+                "ok": True,
+                "id": updated["id"],
+                "attachment": dest_filename,
+                "class": att_class,
+                "markdown": markdown_ref,
+                "path": str(dest_path),
+                "bundle_sha256": updated["bundle_sha256"],
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def tasks_detach(
+    tasks_dir: pathlib.Path,
+    target: str,
+    name: str,
+    expect_task_hash: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    target_clean = (target or "").strip()
+    if re.match(r"^\d{2,}(?:\.\d+)*$", target_clean):
+        return False, {
+            "ok": False,
+            "error": "plan-task-attachments-unsupported",
+            "message": f"Plan tasks ({target_clean}) do not support attachments; only emergent tasks (T###) can have attachments.",
+        }
+    if not EMERGENT_ID_RE.match(target_clean):
+        return False, {
+            "ok": False,
+            "error": "invalid-task-id",
+            "message": f"Invalid emergent task ID {target_clean!r} (expected format T###).",
+        }
+
+    if not name or "/" in name or "\\" in name or "\x00" in name or ".." in name:
+        return False, {
+            "ok": False,
+            "error": "invalid-attachment",
+            "message": f"Invalid attachment name: {name!r}",
+        }
+
+    try:
+        with task_write_lock(tasks_dir):
+            all_emergent = discover_emergent_tasks(tasks_dir)
+            task = next((t for t in all_emergent if t.get("id") == target_clean), None)
+            if not task:
+                tree = discover_task_tree(tasks_dir)
+                if target_clean in tree:
+                    return False, {
+                        "ok": False,
+                        "error": "plan-task-attachments-unsupported",
+                        "message": f"Plan tasks ({target_clean}) do not support attachments; only emergent tasks (T###) can have attachments.",
+                    }
+                return False, {"ok": False, "error": f"Task {target_clean!r} not found."}
+
+            if expect_task_hash:
+                actual_hash = task["bundle_sha256"]
+                if actual_hash != expect_task_hash:
+                    return False, {
+                        "ok": False,
+                        "error": "stale-task-hash",
+                        "message": f"Task bundle hash mismatch: expected {expect_task_hash}, actual {actual_hash}",
+                        "expected": expect_task_hash,
+                        "actual": actual_hash,
+                    }
+
+            if not task["is_folder"]:
+                return False, {
+                    "ok": False,
+                    "error": "no-attachments",
+                    "message": f"Task {target_clean} is a single-file task and has no attachments.",
+                }
+
+            task_folder = pathlib.Path(task["task_root"])
+            attachments_dir = task_folder / "attachments"
+            if not attachments_dir.is_dir():
+                return False, {
+                    "ok": False,
+                    "error": "no-attachments",
+                    "message": f"Task {target_clean} has no attachments directory.",
+                }
+
+            try:
+                target_file = validate_attachment_name(name, attachments_dir)
+            except (ValueError, FileNotFoundError) as ve:
+                return False, {"ok": False, "error": "invalid-attachment", "message": str(ve)}
+
+            target_file.unlink()
+            readme_file = task_folder / "README.md"
+            updated = parse_emergent_task_file(readme_file, tasks_dir, in_done=task["in_done"])
+
+            return True, {
+                "ok": True,
+                "id": updated["id"],
+                "detached": name,
+                "bundle_sha256": updated["bundle_sha256"],
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
 
@@ -7048,7 +7502,8 @@ def cmd_inbox_show(args: argparse.Namespace) -> int:
         print(f"Produced: {note['produced']}")
         print(f"Processed by: {note['processed_by']}")
         print(f"Bundle hash: {note['bundle_sha256']}")
-        print(f"Attachments ({len(note['attachments'])}): {', '.join(note['attachments']) if note['attachments'] else 'none'}")
+        att_str = ", ".join((a["name"] if isinstance(a, dict) else a) for a in note["attachments"]) if note["attachments"] else "none"
+        print(f"Attachments ({len(note['attachments'])}): {att_str}")
         print("\n--- Body ---")
         print(note["body"])
     return 0
@@ -7107,6 +7562,7 @@ def cmd_inbox_attach(args: argparse.Namespace) -> int:
         target=args.note_id,
         file_path=args.file,
         name=getattr(args, "name", None),
+        expect_hash=getattr(args, "expect_hash", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -7124,6 +7580,7 @@ def cmd_inbox_detach(args: argparse.Namespace) -> int:
         tasks_dir=tasks_dir,
         target=args.note_id,
         name=args.name,
+        expect_hash=getattr(args, "expect_hash", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -7132,6 +7589,43 @@ def cmd_inbox_detach(args: argparse.Namespace) -> int:
             print(f"[ok] Detached {res['detached']} from note {res['id']}")
         else:
             print(f"[FAIL] {res.get('error') or res.get('message', 'inbox detach failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_tasks_attach(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = tasks_attach(
+        tasks_dir=tasks_dir,
+        target=args.task_id,
+        file_path=args.file,
+        name=getattr(args, "name", None),
+        expect_task_hash=getattr(args, "expect_task_hash", None),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Attached {res['attachment']} to {res['id']}: {res['markdown']}")
+        else:
+            print(f"[FAIL] {res.get('error') or res.get('message', 'tasks attach failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_tasks_detach(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = tasks_detach(
+        tasks_dir=tasks_dir,
+        target=args.task_id,
+        name=args.name,
+        expect_task_hash=getattr(args, "expect_task_hash", None),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Detached {res['detached']} from {res['id']}")
+        else:
+            print(f"[FAIL] {res.get('error') or res.get('message', 'tasks detach failed')}", file=sys.stderr)
     return 0 if ok else 1
 
 
@@ -7359,10 +7853,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ie.set_defaults(func=cmd_inbox_edit)
 
     # inbox attach
-    p_iatt = inbox_sub.add_parser("attach", help="Attach an image to an inbox note")
+    p_iatt = inbox_sub.add_parser("attach", help="Attach a file to an inbox note")
     p_iatt.add_argument("note_id", help="Note ID (e.g. N001)")
-    p_iatt.add_argument("--file", required=True, help="Path to image file (png, jpeg, gif, webp; <=10MB)")
+    p_iatt.add_argument("--file", required=True, help="Path to file to attach (image, text, pdf; <=10MB)")
     p_iatt.add_argument("--name", default=None, help="Custom attachment name/stem")
+    p_iatt.add_argument("--expect-hash", default=None, help="Refuse attach if bundle SHA256 does not match")
     p_iatt.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_iatt.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_iatt.set_defaults(func=cmd_inbox_attach)
@@ -7371,6 +7866,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_idet = inbox_sub.add_parser("detach", help="Detach an attachment from an inbox note")
     p_idet.add_argument("note_id", help="Note ID (e.g. N001)")
     p_idet.add_argument("--name", required=True, help="Attachment filename to detach")
+    p_idet.add_argument("--expect-hash", default=None, help="Refuse detach if bundle SHA256 does not match")
     p_idet.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_idet.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_idet.set_defaults(func=cmd_inbox_detach)
@@ -7405,7 +7901,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--goal", default=None, help="Goal paragraph (required without --from-note)")
     p_new.add_argument("--sources", default=None, help="Sources header value (standalone tasks)")
     p_new.add_argument("--paths", default=None, help="Paths header value (standalone tasks)")
-    p_new.add_argument("--category", required=True, help="Category folder name")
+    p_new.add_argument("--category", default=None, help="Category folder name (defaults to kind hint if --from-note given)")
     p_new.add_argument("--title", required=True, help="Task title")
     p_new.add_argument("--priority", choices=sorted(PRIORITIES), default="P2", help="Priority (default P2)")
     p_new.add_argument("--priority-reason", default=None, help="Priority explanation")
@@ -7416,6 +7912,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_new.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_new.set_defaults(func=cmd_tasks_new)
+
+    # tasks attach
+    p_tatt = sub.add_parser("attach", help="Attach a file to an emergent task")
+    p_tatt.add_argument("task_id", help="Task ID (e.g. T001)")
+    p_tatt.add_argument("--file", required=True, help="Path to file to attach (image, text, pdf; <=10MB)")
+    p_tatt.add_argument("--name", default=None, help="Optional attachment name stem")
+    p_tatt.add_argument("--expect-task-hash", default=None, help="Expected task bundle SHA256")
+    p_tatt.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_tatt.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_tatt.set_defaults(func=cmd_tasks_attach)
+
+    # tasks detach
+    p_tdet = sub.add_parser("detach", help="Detach an attachment from an emergent task")
+    p_tdet.add_argument("task_id", help="Task ID (e.g. T001)")
+    p_tdet.add_argument("--name", required=True, help="Attachment file name to detach (e.g. 01-doc.pdf)")
+    p_tdet.add_argument("--expect-task-hash", default=None, help="Expected task bundle SHA256")
+    p_tdet.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_tdet.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_tdet.set_defaults(func=cmd_tasks_detach)
 
     # tasks child add
     p_child = sub.add_parser("child", help="Structure commands: child tasks")
