@@ -2409,3 +2409,491 @@ def test_questions_ask_with_no_blocked_task(tmp_path: pathlib.Path) -> None:
     assert "- blocks: -\n" in qfile.read_text(encoding="utf-8")
     val = run_cli("validate", "--tasks-dir", str(tasks_dir))
     assert val.returncode == 0, val.stdout + val.stderr
+
+
+# ---------------------------------------------------------------------------
+# Inbox Notes & Tasks New From Note Tests
+# ---------------------------------------------------------------------------
+
+def _create_test_png(width: int = 2, height: int = 2) -> bytes:
+    """Create a minimal valid PNG using Python stdlib (zlib, struct)."""
+    import struct
+    import zlib
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    ihdr_crc = struct.pack(">I", zlib.crc32(b"IHDR" + ihdr_data))
+    ihdr_chunk = struct.pack(">I", len(ihdr_data)) + b"IHDR" + ihdr_data + ihdr_crc
+
+    raw = b"\x00\xff\x00\x00\xff\x00\xff\x00\xff" + b"\x00\x00\x00\xff\xff\xff\xff\xff\xff"
+    compressed = zlib.compress(raw)
+    idat_crc = struct.pack(">I", zlib.crc32(b"IDAT" + compressed))
+    idat_chunk = struct.pack(">I", len(compressed)) + b"IDAT" + compressed + idat_crc
+
+    iend_crc = struct.pack(">I", zlib.crc32(b"IEND"))
+    iend_chunk = struct.pack(">I", 0) + b"IEND" + iend_crc
+    return sig + ihdr_chunk + idat_chunk + iend_chunk
+
+
+def test_inbox_add_show_list_roundtrip(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # 1. Add note
+    res_add = run_cli(
+        "inbox", "add",
+        "--title", "Login defect on Safari",
+        "--kind", "bug",
+        "--body", "User cannot log in on Safari 17.\nToken is rejected.",
+        "--about", "src/auth/login.py",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_add.returncode == 0, res_add.stdout + res_add.stderr
+    data_add = json.loads(res_add.stdout)
+    assert data_add["ok"] is True
+    assert data_add["id"] == "N001"
+    assert (tasks_dir / "_inbox" / "to-analyze" / data_add["folder"] / "note.md").is_file()
+
+    # 2. Show note
+    res_show = run_cli("inbox", "show", "N001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_show.returncode == 0, res_show.stdout + res_show.stderr
+    data_show = json.loads(res_show.stdout)
+    assert data_show["ok"] is True
+    note = data_show["note"]
+    assert note["id"] == "N001"
+    assert note["title"] == "Login defect on Safari"
+    assert note["kind"] == "bug"
+    assert note["status"] == "draft"
+    assert note["about"] == "src/auth/login.py"
+    assert "User cannot log in on Safari 17." in note["body"]
+    assert note["attachments"] == []
+    assert note["bundle_sha256"] != ""
+
+    # Show text mode
+    res_show_text = run_cli("inbox", "show", "N001", "--tasks-dir", str(tasks_dir))
+    assert res_show_text.returncode == 0
+    assert "Note: N001 (draft)" in res_show_text.stdout
+
+    # 3. List notes
+    res_list = run_cli("inbox", "list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_list.returncode == 0
+    data_list = json.loads(res_list.stdout)
+    assert len(data_list["notes"]) == 1
+    assert data_list["notes"][0]["id"] == "N001"
+
+    # Add second note with ready status
+    res_add2 = run_cli(
+        "inbox", "add",
+        "--title", "Idea for caching",
+        "--kind", "idea",
+        "--status", "ready",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_add2.returncode == 0
+    data_add2 = json.loads(res_add2.stdout)
+    assert data_add2["id"] == "N002"
+
+    # List filtered by status
+    res_list_ready = run_cli("inbox", "list", "--status", "ready", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_list_ready.returncode == 0
+    data_ready = json.loads(res_list_ready.stdout)
+    assert len(data_ready["notes"]) == 1
+    assert data_ready["notes"][0]["id"] == "N002"
+
+
+def test_inbox_edit_roundtrip_and_expect_hash(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # Add note
+    res_add = run_cli(
+        "inbox", "add",
+        "--title", "Draft Note",
+        "--kind", "note",
+        "--body", "Initial body text",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_add.returncode == 0
+    initial_hash = json.loads(res_add.stdout)["bundle_sha256"]
+
+    # Refuse edit with stale expect-hash
+    res_stale = run_cli(
+        "inbox", "edit", "N001",
+        "--title", "Updated Title",
+        "--expect-hash", "bad0000000000000000000000000000000000000000000000000000000000000",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_stale.returncode != 0
+    data_stale = json.loads(res_stale.stdout)
+    assert data_stale["ok"] is False
+    assert data_stale["error"] == "stale-note"
+
+    # Edit with matching expect-hash
+    res_edit = run_cli(
+        "inbox", "edit", "N001",
+        "--title", "Updated Title",
+        "--body", "Updated body text",
+        "--status", "ready",
+        "--expect-hash", initial_hash,
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_edit.returncode == 0
+    data_edit = json.loads(res_edit.stdout)
+    assert data_edit["ok"] is True
+    assert data_edit["status"] == "ready"
+    assert data_edit["bundle_sha256"] != initial_hash
+
+    # Verify updated content
+    show = json.loads(run_cli("inbox", "show", "N001", "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
+    assert show["title"] == "Updated Title"
+    assert show["body"] == "Updated body text"
+    assert show["status"] == "ready"
+
+    # Test processing status blocks edits
+    note_file = pathlib.Path(show["file_path"])
+    note_content = note_file.read_text(encoding="utf-8").replace("- status: ready", "- status: processing")
+    note_file.write_text(note_content, encoding="utf-8")
+
+    res_proc_edit = run_cli(
+        "inbox", "edit", "N001",
+        "--title", "Cannot Edit While Processing",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_proc_edit.returncode != 0
+    data_proc = json.loads(res_proc_edit.stdout)
+    assert data_proc["error"] == "locked-processing"
+
+
+def test_inbox_attach_and_detach_and_limits(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # Add note
+    res_add = run_cli("inbox", "add", "--title", "Note with images", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_add.returncode == 0
+
+    png_bytes = _create_test_png(2, 2)
+    valid_png_path = tmp_path / "screenshot.png"
+    valid_png_path.write_bytes(png_bytes)
+
+    # 1. Attach valid PNG
+    res_att = run_cli("inbox", "attach", "N001", "--file", str(valid_png_path), "--tasks-dir", str(tasks_dir), "--json")
+    assert res_att.returncode == 0, res_att.stdout + res_att.stderr
+    data_att = json.loads(res_att.stdout)
+    assert data_att["ok"] is True
+    assert data_att["attachment"] == "01-screenshot.png"
+    assert data_att["markdown"] == "![](attachments/01-screenshot.png)"
+
+    # Check show reports attachment
+    show1 = json.loads(run_cli("inbox", "show", "N001", "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
+    assert show1["attachments"] == ["01-screenshot.png"]
+
+    # 2. Refuse invalid image magic bytes (e.g. text file named fake.png)
+    fake_png = tmp_path / "fake.png"
+    fake_png.write_text("Not a png at all, just plain text", encoding="utf-8")
+    res_fake = run_cli("inbox", "attach", "N001", "--file", str(fake_png), "--tasks-dir", str(tasks_dir), "--json")
+    assert res_fake.returncode != 0
+    assert json.loads(res_fake.stdout)["error"] == "invalid-image-type"
+
+    # 3. Refuse > 10 MB attachment
+    oversized = tmp_path / "huge.png"
+    with open(oversized, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.seek(10 * 1024 * 1024 + 50)
+        f.write(b"\x00")
+    res_huge = run_cli("inbox", "attach", "N001", "--file", str(oversized), "--tasks-dir", str(tasks_dir), "--json")
+    assert res_huge.returncode != 0
+    assert json.loads(res_huge.stdout)["error"] == "size-limit-exceeded"
+
+    # 4. Attach up to 20 images
+    for i in range(2, 21):
+        fpath = tmp_path / f"img_{i}.png"
+        fpath.write_bytes(png_bytes)
+        res_i = run_cli("inbox", "attach", "N001", "--file", str(fpath), "--tasks-dir", str(tasks_dir), "--json")
+        assert res_i.returncode == 0
+
+    show20 = json.loads(run_cli("inbox", "show", "N001", "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
+    assert len(show20["attachments"]) == 20
+
+    # 5. 21st attachment is refused
+    fpath21 = tmp_path / "img_21.png"
+    fpath21.write_bytes(png_bytes)
+    res_21 = run_cli("inbox", "attach", "N001", "--file", str(fpath21), "--tasks-dir", str(tasks_dir), "--json")
+    assert res_21.returncode != 0
+    assert json.loads(res_21.stdout)["error"] == "attachment-limit-reached"
+
+    # 6. Detach path traversal refused
+    res_trav = run_cli("inbox", "detach", "N001", "--name", "../screenshot.png", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_trav.returncode != 0
+
+    res_trav2 = run_cli("inbox", "detach", "N001", "--name", "..", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_trav2.returncode != 0
+
+    # 7. Detach valid file
+    res_det = run_cli("inbox", "detach", "N001", "--name", "01-screenshot.png", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_det.returncode == 0
+    assert json.loads(res_det.stdout)["ok"] is True
+
+    show_after_det = json.loads(run_cli("inbox", "show", "N001", "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
+    assert "01-screenshot.png" not in show_after_det["attachments"]
+    assert len(show_after_det["attachments"]) == 19
+
+
+def test_inbox_resolve_discard_reopen_lifecycle(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # Add note
+    res_add = run_cli(
+        "inbox", "add",
+        "--title", "Performance bug",
+        "--kind", "bug",
+        "--body", "Slow query on database",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_add.returncode == 0
+
+    # 1. Resolve note
+    res_res = run_cli(
+        "inbox", "resolve", "N001",
+        "--produced", "T010, T011",
+        "--by", "owner",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_res.returncode == 0, res_res.stdout + res_res.stderr
+    data_res = json.loads(res_res.stdout)
+    assert data_res["ok"] is True
+    assert data_res["status"] == "processed"
+
+    # Note folder has moved to analyzed/
+    assert not (tasks_dir / "_inbox" / "to-analyze" / data_res["folder"]).exists()
+    assert (tasks_dir / "_inbox" / "analyzed" / data_res["folder"]).exists()
+
+    show_proc = json.loads(run_cli("inbox", "show", "N001", "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
+    assert show_proc["status"] == "processed"
+    assert show_proc["produced"] == "T010, T011"
+    assert show_proc["processed_by"] == "owner"
+
+    # Edit on processed note is refused
+    res_closed_edit = run_cli("inbox", "edit", "N001", "--title", "New Title", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_closed_edit.returncode != 0
+    assert json.loads(res_closed_edit.stdout)["error"] == "note-closed"
+
+    # 2. Reopen note
+    res_reop = run_cli("inbox", "reopen", "N001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_reop.returncode == 0
+    data_reop = json.loads(res_reop.stdout)
+    assert data_reop["status"] == "ready"
+
+    # Moved back to to-analyze
+    assert (tasks_dir / "_inbox" / "to-analyze" / data_res["folder"]).exists()
+    assert not (tasks_dir / "_inbox" / "analyzed" / data_res["folder"]).exists()
+
+    # 3. Discard note
+    res_disc = run_cli(
+        "inbox", "discard", "N001",
+        "--reason", "Duplicate report",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_disc.returncode == 0
+    data_disc = json.loads(res_disc.stdout)
+    assert data_disc["status"] == "discarded"
+    assert (tasks_dir / "_inbox" / "analyzed" / data_res["folder"]).exists()
+
+    show_disc = json.loads(run_cli("inbox", "show", "N001", "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
+    assert show_disc["status"] == "discarded"
+    assert "Duplicate report" in show_disc["body"]
+
+    # Reopen discarded note
+    res_reop2 = run_cli("inbox", "reopen", "N001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_reop2.returncode == 0
+    assert (tasks_dir / "_inbox" / "to-analyze" / data_res["folder"]).exists()
+
+
+def test_inbox_concurrent_add_distinct_ids(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    results: list[dict[str, Any]] = []
+    errors: list[Exception] = []
+
+    def worker(idx: int) -> None:
+        try:
+            ok, res = te.inbox_add(
+                tasks_dir=tasks_dir,
+                title=f"Concurrent note {idx}",
+                kind="idea",
+                body=f"Body for note {idx}",
+            )
+            if ok:
+                results.append(res)
+            else:
+                errors.append(Exception(res.get("error")))
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(errors) == 0
+    assert len(results) == 5
+    ids = {r["id"] for r in results}
+    assert len(ids) == 5
+    assert ids == {"N001", "N002", "N003", "N004", "N005"}
+
+
+def test_legacy_notes_listed_and_converted_on_edit(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True)
+    (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True)
+
+    legacy_to_analyze = tasks_dir / "_inbox" / "to-analyze" / "2026-07-20-call-luca.md"
+    legacy_to_analyze.write_text("# Call with Luca\n\nNeed to support OAuth2.\n", encoding="utf-8")
+
+    legacy_analyzed = tasks_dir / "_inbox" / "analyzed" / "old-call.md"
+    legacy_analyzed.write_text("# Old Call\n\nResolved discussion.\n", encoding="utf-8")
+
+    # List notes: both listed with legacy: True, id: "-"
+    notes = json.loads(run_cli("inbox", "list", "--tasks-dir", str(tasks_dir), "--json").stdout)["notes"]
+    assert len(notes) == 2
+    for n in notes:
+        assert n["legacy"] is True
+        assert n["id"] == "-"
+
+    # Show legacy note by filename
+    show_legacy = json.loads(run_cli("inbox", "show", "2026-07-20-call-luca.md", "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
+    assert show_legacy["title"] == "Call with Luca"
+    assert "Need to support OAuth2." in show_legacy["body"]
+
+    # Edit legacy note: converts it to folder form with an allocated id
+    res_edit = run_cli(
+        "inbox", "edit", "2026-07-20-call-luca.md",
+        "--title", "Call with Luca - Auth",
+        "--status", "ready",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_edit.returncode == 0, res_edit.stdout + res_edit.stderr
+    data_edit = json.loads(res_edit.stdout)
+    assert data_edit["ok"] is True
+    allocated_id = data_edit["id"]
+    assert allocated_id == "N001"
+
+    # Original plain .md is gone, folder exists
+    assert not legacy_to_analyze.exists()
+    folder_note = tasks_dir / data_edit["rel_path"]
+    assert folder_note.is_file()
+
+    # Show newly converted note
+    show_converted = json.loads(run_cli("inbox", "show", "N001", "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
+    assert show_converted["legacy"] is False
+    assert show_converted["id"] == "N001"
+    assert show_converted["title"] == "Call with Luca - Auth"
+    assert show_converted["status"] == "ready"
+
+
+def test_tasks_new_from_note(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # 1. Add note
+    res_add = run_cli(
+        "inbox", "add",
+        "--title", "JWT rotation and session refresh",
+        "--kind", "request",
+        "--body", "Implement JWT token rotation for increased security.\n\nTokens should expire after 15 minutes and refresh automatically.",
+        "--about", "src/auth/tokens.py, src/auth/session.py",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_add.returncode == 0
+    note_id = json.loads(res_add.stdout)["id"]
+
+    # 2. Create task from note
+    res_new = run_cli(
+        "new",
+        "--from-note", note_id,
+        "--category", "features",
+        "--title", "JWT token rotation",
+        "--priority", "P1",
+        "--priority-reason", "Security compliance requirement",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_new.returncode == 0, res_new.stdout + res_new.stderr
+    data_new = json.loads(res_new.stdout)
+    assert data_new["ok"] is True
+    assert data_new["id"] == "T001"
+    assert data_new["sources"].startswith("_inbox/to-analyze/")
+    assert data_new["paths"] == "src/auth/tokens.py, src/auth/session.py"
+
+    # 3. Verify task content on disk
+    task_file = tasks_dir / data_new["rel_path"]
+    assert task_file.is_file()
+    task_data = te.parse_emergent_task_file(task_file, tasks_dir)
+    assert task_data["id"] == "T001"
+    assert task_data["title"] == "JWT token rotation"
+    assert task_data["category"] == "features"
+    assert task_data["priority"] == "P1"
+    assert task_data["priority_reason"] == "Security compliance requirement"
+    assert task_data["state"] == "open"
+    assert task_data["sources"] == data_new["sources"]
+    assert task_data["paths"] == "src/auth/tokens.py, src/auth/session.py"
+
+    # Goal extracted from first paragraph of note body
+    assert "Implement JWT token rotation for increased security." in task_file.read_text(encoding="utf-8")
+
+    # 4. tasks validate passes
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0, res_val.stdout + res_val.stderr
+    val_data = json.loads(res_val.stdout)
+    assert val_data["ok"] is True
+
+    # 5. Note is NOT resolved (still in to-analyze, status draft)
+    note_after = json.loads(run_cli("inbox", "show", note_id, "--tasks-dir", str(tasks_dir), "--json").stdout)["note"]
+    assert note_after["status"] == "draft"
+    assert note_after["in_analyzed"] is False
+
+
+def test_ai_orch_inbox_and_tasks_new_integration(tmp_path: pathlib.Path) -> None:
+    ai_orch_bin = REPO_ROOT / "bin" / "ai-orch"
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # Add note via ai-orch inbox add
+    res_add = subprocess.run(
+        [sys.executable, str(ai_orch_bin), "inbox", "add", "--title", "CLI Note", "--tasks-dir", str(tasks_dir), "--json"],
+        capture_output=True,
+        text=True,
+    )
+    assert res_add.returncode == 0, res_add.stdout + res_add.stderr
+    note_id = json.loads(res_add.stdout)["id"]
+
+    # tasks new via ai-orch tasks new
+    res_new = subprocess.run(
+        [
+            sys.executable, str(ai_orch_bin), "tasks", "new",
+            "--from-note", note_id,
+            "--category", "features",
+            "--title", "Task from CLI",
+            "--tasks-dir", str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_new.returncode == 0, res_new.stdout + res_new.stderr
+    assert json.loads(res_new.stdout)["id"] == "T001"
+

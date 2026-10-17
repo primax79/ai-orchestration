@@ -4,6 +4,7 @@
 Dispatches:
   - `ai-orch config <subcommand> [args...]` -> `orchestration_config.py`
   - `ai-orch tasks <subcommand> [args...]`  -> `tasks_engine.py`
+  - `ai-orch inbox <subcommand> [args...]`  -> `tasks_engine.py inbox`
   - `ai-orch env <subcommand> [args...]`    -> `orchestration_env.py`
   - `ai-orch run <subcommand> [args...]`    -> `orchestration_runs.py`
   - `ai-orch render-agents-md [args...]`    -> `orchestration_config.py render-agents-md`
@@ -183,6 +184,58 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks upgrade [--tasks-dir <dir>] [--json]",
                     "description": "Upgrade an existing tasks/ directory to the latest task-pipeline v0.3.0 convention.",
                 },
+                "new": {
+                    "usage": "ai-orch tasks new --from-note <id> --category <cat> --title <title> [--priority <P0-P3>] [--priority-reason <reason>] [--tasks-dir <dir>] [--json]",
+                    "description": "Create a new emergent task from an inbox note under the task-write lock.",
+                },
+            },
+        },
+        "inbox": {
+            "script": str(TASKS_ENGINE_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch inbox <subcommand> [options] [--json]",
+            "subcommands": {
+                "list": {
+                    "usage": "ai-orch inbox list [--status <status>] [--tasks-dir <dir>] [--json]",
+                    "description": "List inbox notes with their header, status, and attachment list.",
+                },
+                "show": {
+                    "usage": "ai-orch inbox show <id> [--tasks-dir <dir>] [--json]",
+                    "description": "Show one inbox note: header, body, attachment paths, and bundle hash.",
+                },
+                "add": {
+                    "usage": (
+                        "ai-orch inbox add --title <title> --kind <kind> [--body <text> | --body-file <path>] "
+                        "[--about <about>] [--author <author>] [--tasks-dir <dir>] [--json]"
+                    ),
+                    "description": "Create a new inbox note folder under the task-write lock and return its id.",
+                },
+                "edit": {
+                    "usage": (
+                        "ai-orch inbox edit <id> [--title <title>] [--kind <kind>] [--body <text> | --body-file <path>] "
+                        "[--about <about>] [--status draft|ready] [--expect-hash <hash>] [--tasks-dir <dir>] [--json]"
+                    ),
+                    "description": "Edit an inbox note with optimistic locking (--expect-hash) and status machine enforcement.",
+                },
+                "attach": {
+                    "usage": "ai-orch inbox attach <id> --file <path> [--name <name>] [--tasks-dir <dir>] [--json]",
+                    "description": "Attach an image (sniffed by magic bytes, <=10MB, <=20 per note) and return Markdown reference.",
+                },
+                "detach": {
+                    "usage": "ai-orch inbox detach <id> --name <name> [--tasks-dir <dir>] [--json]",
+                    "description": "Remove an attachment from an inbox note.",
+                },
+                "resolve": {
+                    "usage": "ai-orch inbox resolve <id> --produced <ids> --by <who> [--tasks-dir <dir>] [--json]",
+                    "description": "Mark an inbox note processed and move its folder to tasks/_inbox/analyzed/.",
+                },
+                "discard": {
+                    "usage": "ai-orch inbox discard <id> --reason <text> [--tasks-dir <dir>] [--json]",
+                    "description": "Discard an inbox note with a reason and move its folder to tasks/_inbox/analyzed/.",
+                },
+                "reopen": {
+                    "usage": "ai-orch inbox reopen <id> [--tasks-dir <dir>] [--json]",
+                    "description": "Reopen a processed or discarded inbox note and move it back to tasks/_inbox/to-analyze/ as ready.",
+                },
             },
         },
         "questions": {
@@ -295,6 +348,10 @@ def main() -> int:
 
     if group == "questions":
         proc = subprocess.run([sys.executable, str(TASKS_ENGINE_SCRIPT), "questions", *rest], check=False)
+        return proc.returncode
+
+    if group == "inbox":
+        proc = subprocess.run([sys.executable, str(TASKS_ENGINE_SCRIPT), "inbox", *rest], check=False)
         return proc.returncode
 
     if group == "env":

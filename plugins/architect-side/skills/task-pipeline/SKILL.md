@@ -110,8 +110,11 @@ Copy-paste skeletons for every file kind are in
 
 ## The pipeline: raw → spec → plan → summary
 
-1. **Capture.** Drop unstructured material into `_inbox/to-analyze/`. No format
-   required; a date prefix helps (`2026-07-20-call-luca.md`).
+1. **Capture.** Drop unstructured material into `_inbox/to-analyze/`. Either as a
+   plain Markdown file (e.g. `2026-07-20-call-luca.md`) or as a structured note
+   folder `_inbox/to-analyze/<YYYYMMDD-HHMMSS>-<slug>/` containing `note.md`
+   (with `N###` header) and optional `attachments/` images. Plain `.md` notes
+   remain valid and convert to folder form on first edit.
 2. **Analyze.** Distil it into one or more `specs/<slug>.md`. The spec is the
    *what & why* and becomes the source of truth for implementation - not the
    raw note. Move the processed raw file to `_inbox/analyzed/`, noting which

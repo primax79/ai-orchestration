@@ -114,6 +114,23 @@ QUESTION_ID_RE = re.compile(r"^Q\d{3,}$")
 QUESTION_FILE_RE = re.compile(r"^(Q\d{3,})-([a-z0-9-]+)\.md$")
 OPTION_LINE_RE = re.compile(r"^-\s+\*\*([A-Za-z0-9]+)\*\*\s+[—–-]\s+(.+?)(?::\s*(.*))?$")
 
+NOTE_HEADER_FIELDS: tuple[str, ...] = (
+    "id",
+    "title",
+    "kind",
+    "status",
+    "created",
+    "author",
+    "about",
+    "produced",
+    "processed-by",
+)
+NOTE_KINDS: set[str] = {"note", "bug", "idea", "request", "question"}
+NOTE_STATUSES: set[str] = {"draft", "ready", "processing", "processed", "discarded"}
+NOTE_ID_RE = re.compile(r"^N\d{3,}$")
+MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_ATTACHMENTS_PER_NOTE = 20
+
 CANONICAL_TASKS_AGENTS_MD = """# tasks/ convention (task-pipeline + emergent tasks)
 
 Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`).
@@ -3678,6 +3695,1236 @@ def cmd_questions_withdraw(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------------------
+# Inbox Notes (N###) Data Model, Operations & Commands
+# ---------------------------------------------------------------------------
+
+def sniff_image_type(data: bytes, original_suffix: str = "") -> tuple[str, str] | None:
+    """Sniff image type from magic bytes. Returns (type_name, extension) or None."""
+    if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png", ".png"
+    if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
+        ext = ".jpeg" if original_suffix.lower() == ".jpeg" else ".jpg"
+        return "jpeg", ext
+    if len(data) >= 6 and (data[:6] == b"GIF87a" or data[:6] == b"GIF89a"):
+        return "gif", ".gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp", ".webp"
+    return None
+
+
+def sanitize_attachment_name(stem: str, ext: str, index: int) -> str:
+    """Sanitize attachment name to <NN>-<clean><ext> (lowercase, [a-z0-9._-], max 60 chars)."""
+    nn = f"{index:02d}"
+    clean = re.sub(r"[^a-z0-9._-]+", "-", stem.lower()).strip("-._")
+    if not clean:
+        clean = "image"
+    max_stem_len = 60 - len(nn) - 1 - len(ext)
+    clean = clean[:max_stem_len].rstrip("-._")
+    if not clean:
+        clean = "img"
+    return f"{nn}-{clean}{ext}"
+
+
+def validate_attachment_name(name: str, attachments_dir: pathlib.Path) -> pathlib.Path:
+    """Validate attachment name against path traversal and return resolved path."""
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        raise ValueError(f"Invalid attachment name: path traversal or invalid characters in {name!r}")
+    target = (attachments_dir / name).resolve()
+    base = attachments_dir.resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        raise ValueError(f"Invalid attachment name: path traversal in {name!r}")
+    if not target.is_file():
+        raise FileNotFoundError(f"Attachment {name!r} not found in {attachments_dir}")
+    return target
+
+
+def note_bundle_sha256(path: pathlib.Path) -> str:
+    """Compute sha256 of a note folder bundle (or legacy single-file note)."""
+    if path.is_dir():
+        return _folder_bundle_sha256(path)
+    return _file_sha256(path)
+
+
+def format_note_content(
+    id: str,
+    title: str,
+    kind: str,
+    status: str,
+    created: str,
+    author: str = "owner",
+    about: str = "-",
+    produced: str = "-",
+    processed_by: str = "-",
+    body: str = "",
+) -> str:
+    lines = [
+        f"# {id} {title}",
+        "",
+        f"- id: {id}",
+        f"- title: {title}",
+        f"- kind: {kind}",
+        f"- status: {status}",
+        f"- created: {created}",
+        f"- author: {author}",
+        f"- about: {about if about and about.strip() else '-'}",
+        f"- produced: {produced if produced and produced.strip() else '-'}",
+        f"- processed-by: {processed_by if processed_by and processed_by.strip() else '-'}",
+        "",
+    ]
+    if body:
+        lines.append(body.strip("\r\n"))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def parse_note_folder(
+    folder_path: pathlib.Path,
+    tasks_dir: pathlib.Path,
+    in_analyzed: bool = False,
+) -> dict[str, Any]:
+    note_file = folder_path / "note.md"
+    text = note_file.read_text(encoding="utf-8")
+    scanned_lines, _ = scan_markdown_blocks(text)
+
+    rel_path = note_file.relative_to(tasks_dir).as_posix()
+
+    h1_idx: int | None = None
+    h1_text = ""
+    for idx, sline in enumerate(scanned_lines):
+        if not sline.is_fenced and sline.text.startswith("# "):
+            h1_idx = idx
+            h1_text = sline.text[2:].strip()
+            break
+
+    header_keys: list[str] = []
+    headers: dict[str, str] = {}
+
+    scan_start = (h1_idx + 1) if h1_idx is not None else 0
+    idx = scan_start
+    while idx < len(scanned_lines) and not scanned_lines[idx].text.strip():
+        idx += 1
+    while idx < len(scanned_lines):
+        sline = scanned_lines[idx]
+        if sline.is_fenced:
+            break
+        m = HEADER_LINE_RE.match(sline.text)
+        if not m:
+            break
+        k, v = m.group(1), m.group(2).strip()
+        header_keys.append(k)
+        headers[k] = v
+        idx += 1
+    header_end = idx
+
+    body_lines = [sline.text for sline in scanned_lines[header_end:]]
+    body = "\n".join(body_lines).strip()
+
+    attachments_dir = folder_path / "attachments"
+    attachments: list[str] = []
+    if attachments_dir.is_dir():
+        for f in sorted(attachments_dir.iterdir()):
+            if f.is_file() and not f.name.startswith("."):
+                attachments.append(f.name)
+
+    note_id = headers.get("id", "")
+    title = headers.get("title", "")
+    if not title and h1_text:
+        parts = h1_text.split(None, 1)
+        if len(parts) > 1 and NOTE_ID_RE.match(parts[0]):
+            title = parts[1].strip()
+        else:
+            title = h1_text
+
+    bundle_hash = _folder_bundle_sha256(folder_path)
+
+    return {
+        "id": note_id,
+        "title": title,
+        "kind": headers.get("kind", "note"),
+        "status": headers.get("status", "draft"),
+        "created": headers.get("created", ""),
+        "author": headers.get("author", "owner"),
+        "about": headers.get("about", "-"),
+        "produced": headers.get("produced", "-"),
+        "processed_by": headers.get("processed-by", "-"),
+        "body": body,
+        "attachments": attachments,
+        "bundle_sha256": bundle_hash,
+        "legacy": False,
+        "folder_name": folder_path.name,
+        "folder_path": str(folder_path),
+        "file_path": str(note_file),
+        "rel_path": rel_path,
+        "in_analyzed": in_analyzed,
+        "headers": headers,
+        "header_keys": header_keys,
+    }
+
+
+def parse_legacy_note_file(
+    file_path: pathlib.Path,
+    tasks_dir: pathlib.Path,
+    in_analyzed: bool = False,
+) -> dict[str, Any]:
+    text = file_path.read_text(encoding="utf-8")
+    scanned_lines, _ = scan_markdown_blocks(text)
+    rel_path = file_path.relative_to(tasks_dir).as_posix()
+
+    h1_text = ""
+    for sline in scanned_lines:
+        if not sline.is_fenced and sline.text.startswith("# "):
+            h1_text = sline.text[2:].strip()
+            break
+
+    title = h1_text or file_path.stem
+    m_date = re.match(r"^(\d{4}-\d{2}-\d{2})", file_path.stem)
+    if m_date:
+        created = f"{m_date.group(1)}T00:00:00Z"
+    else:
+        try:
+            mtime = file_path.stat().st_mtime
+            created = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
+        except OSError:
+            created = "-"
+
+    status = "processed" if in_analyzed else "ready"
+    bundle_hash = _file_sha256(file_path)
+
+    return {
+        "id": "-",
+        "title": title,
+        "kind": "note",
+        "status": status,
+        "created": created,
+        "author": "owner",
+        "about": "-",
+        "produced": "-",
+        "processed_by": "-",
+        "body": text.strip(),
+        "attachments": [],
+        "bundle_sha256": bundle_hash,
+        "legacy": True,
+        "folder_name": file_path.name,
+        "folder_path": str(file_path.parent),
+        "file_path": str(file_path),
+        "rel_path": rel_path,
+        "in_analyzed": in_analyzed,
+        "headers": {},
+        "header_keys": [],
+    }
+
+
+def discover_inbox_notes(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
+    inbox_dir = tasks_dir / "_inbox"
+    if not inbox_dir.is_dir():
+        return []
+
+    notes: list[dict[str, Any]] = []
+
+    def scan_dir(d: pathlib.Path, in_analyzed: bool) -> None:
+        if not d.is_dir():
+            return
+        for child in sorted(d.iterdir()):
+            if child.name.startswith("."):
+                continue
+            if child.is_dir():
+                if (child / "note.md").is_file():
+                    try:
+                        notes.append(parse_note_folder(child, tasks_dir, in_analyzed=in_analyzed))
+                    except Exception:
+                        pass
+            elif child.is_file() and child.suffix == ".md":
+                try:
+                    notes.append(parse_legacy_note_file(child, tasks_dir, in_analyzed=in_analyzed))
+                except Exception:
+                    pass
+
+    scan_dir(inbox_dir / "to-analyze", in_analyzed=False)
+    scan_dir(inbox_dir / "analyzed", in_analyzed=True)
+    return notes
+
+
+def find_inbox_note(tasks_dir: pathlib.Path, target: str) -> dict[str, Any] | None:
+    notes = discover_inbox_notes(tasks_dir)
+    target_clean = target.strip()
+    if NOTE_ID_RE.match(target_clean):
+        for n in notes:
+            if n["id"] == target_clean:
+                return n
+        return None
+
+    for n in notes:
+        if n["folder_name"] == target_clean or n["rel_path"] == target_clean:
+            return n
+    for n in notes:
+        if n["legacy"] and (pathlib.Path(n["file_path"]).stem == target_clean or n["folder_name"].startswith(target_clean)):
+            return n
+    return None
+
+
+def convert_legacy_note_to_folder(tasks_dir: pathlib.Path, note: dict[str, Any]) -> dict[str, Any]:
+    all_notes = discover_inbox_notes(tasks_dir)
+    existing_nums = [
+        int(n["id"][1:]) for n in all_notes if n["id"] and NOTE_ID_RE.match(n["id"])
+    ]
+    next_num = max(existing_nums, default=0) + 1
+    new_id = f"N{next_num:03d}"
+
+    legacy_file = pathlib.Path(note["file_path"])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ts = now.strftime("%Y%m%d-%H%M%S")
+    slug = re.sub(r"[^a-z0-9]+", "-", legacy_file.stem.lower()).strip("-")[:40] or "note"
+    folder_name = f"{ts}-{slug}"
+
+    parent_dir = legacy_file.parent
+    folder_path = parent_dir / folder_name
+    idx_suffix = 1
+    while folder_path.exists():
+        idx_suffix += 1
+        folder_path = parent_dir / f"{ts}-{slug}-{idx_suffix}"
+
+    folder_path.mkdir(parents=True, exist_ok=False)
+    (folder_path / "attachments").mkdir(parents=True, exist_ok=True)
+
+    title = note["title"] or legacy_file.stem
+    content = format_note_content(
+        id=new_id,
+        title=title,
+        kind="note",
+        status=note["status"],
+        created=note["created"] if note["created"] and note["created"] != "-" else now.isoformat(),
+        author=note["author"],
+        about="-",
+        produced="-",
+        processed_by="-",
+        body=note["body"],
+    )
+
+    note_path = folder_path / "note.md"
+    _atomic_write_text(note_path, content)
+    try:
+        legacy_file.unlink()
+    except OSError:
+        pass
+
+    return parse_note_folder(folder_path, tasks_dir, in_analyzed=note["in_analyzed"])
+
+
+def inbox_add(
+    tasks_dir: pathlib.Path,
+    title: str,
+    kind: str = "note",
+    body: str | None = None,
+    body_file: str | pathlib.Path | None = None,
+    about: str = "-",
+    author: str = "owner",
+    status: str = "draft",
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if not title or not title.strip():
+        return False, {"ok": False, "error": "Missing required --title."}
+    title = title.strip()
+
+    if kind not in NOTE_KINDS:
+        return False, {"ok": False, "error": f"Invalid kind {kind!r} (expected one of {sorted(NOTE_KINDS)})."}
+
+    if status not in ("draft", "ready"):
+        return False, {"ok": False, "error": f"Initial status must be 'draft' or 'ready' (got {status!r})."}
+
+    if body_file:
+        bf = pathlib.Path(body_file)
+        if not bf.is_file():
+            return False, {"ok": False, "error": f"Body file not found: {body_file}"}
+        body_text = bf.read_text(encoding="utf-8")
+    else:
+        body_text = body or ""
+
+    try:
+        with task_write_lock(tasks_dir):
+            all_notes = discover_inbox_notes(tasks_dir)
+            existing_nums = [
+                int(n["id"][1:]) for n in all_notes if n["id"] and NOTE_ID_RE.match(n["id"])
+            ]
+            next_num = max(existing_nums, default=0) + 1
+
+            to_analyze_dir = tasks_dir / "_inbox" / "to-analyze"
+            to_analyze_dir.mkdir(parents=True, exist_ok=True)
+
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "note"
+            now = datetime.datetime.now(datetime.timezone.utc)
+            ts = now.strftime("%Y%m%d-%H%M%S")
+
+            note_id = ""
+            folder_path = None
+            fd = None
+
+            while True:
+                note_id = f"N{next_num:03d}"
+                folder_name = f"{ts}-{slug}"
+                candidate_folder = to_analyze_dir / folder_name
+                if candidate_folder.exists():
+                    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+                    folder_name = f"{ts}-{slug}-{next_num}"
+                    candidate_folder = to_analyze_dir / folder_name
+                try:
+                    candidate_folder.mkdir(parents=True, exist_ok=False)
+                except FileExistsError:
+                    next_num += 1
+                    continue
+
+                attachments_dir = candidate_folder / "attachments"
+                attachments_dir.mkdir(parents=True, exist_ok=True)
+
+                candidate_file = candidate_folder / "note.md"
+                try:
+                    fd = os.open(str(candidate_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                    folder_path = candidate_folder
+                    break
+                except FileExistsError:
+                    next_num += 1
+
+            created_iso = now.isoformat()
+            content = format_note_content(
+                id=note_id,
+                title=title,
+                kind=kind,
+                status=status,
+                created=created_iso,
+                author=author or "owner",
+                about=about or "-",
+                produced="-",
+                processed_by="-",
+                body=body_text,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except BaseException:
+                if folder_path and folder_path.exists():
+                    shutil.rmtree(folder_path, ignore_errors=True)
+                raise
+
+            parsed = parse_note_folder(folder_path, tasks_dir, in_analyzed=False)
+            return True, {
+                "ok": True,
+                "id": note_id,
+                "folder": folder_path.name,
+                "rel_path": parsed["rel_path"],
+                "bundle_sha256": parsed["bundle_sha256"],
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def inbox_edit(
+    tasks_dir: pathlib.Path,
+    target: str,
+    title: str | None = None,
+    kind: str | None = None,
+    body: str | None = None,
+    body_file: str | pathlib.Path | None = None,
+    about: str | None = None,
+    author: str | None = None,
+    status: str | None = None,
+    expect_hash: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    try:
+        with task_write_lock(tasks_dir):
+            note = find_inbox_note(tasks_dir, target)
+            if not note:
+                return False, {"ok": False, "error": f"Inbox note {target!r} not found."}
+
+            if note["legacy"]:
+                note = convert_legacy_note_to_folder(tasks_dir, note)
+
+            folder_path = pathlib.Path(note["folder_path"])
+
+            current_status = note["status"]
+            if current_status == "processing":
+                return False, {
+                    "ok": False,
+                    "error": "locked-processing",
+                    "message": f"Note {note['id']} is currently processing and locked against edits.",
+                }
+            if current_status in ("processed", "discarded"):
+                return False, {
+                    "ok": False,
+                    "error": "note-closed",
+                    "message": f"Note {note['id']} is {current_status}; reopen it first before editing.",
+                }
+
+            if expect_hash:
+                actual_hash = note["bundle_sha256"]
+                if actual_hash != expect_hash:
+                    return False, {
+                        "ok": False,
+                        "error": "stale-note",
+                        "expected": expect_hash,
+                        "actual": actual_hash,
+                    }
+
+            new_title = title.strip() if title is not None else note["title"]
+            new_kind = kind.strip() if kind is not None else note["kind"]
+            if new_kind not in NOTE_KINDS:
+                return False, {"ok": False, "error": f"Invalid kind {new_kind!r}."}
+
+            if status is not None:
+                if status not in ("draft", "ready"):
+                    return False, {
+                        "ok": False,
+                        "error": f"Invalid status transition to {status!r} via edit (only 'draft' or 'ready' allowed).",
+                    }
+                new_status = status
+            else:
+                new_status = note["status"]
+
+            if body_file:
+                bf = pathlib.Path(body_file)
+                if not bf.is_file():
+                    return False, {"ok": False, "error": f"Body file not found: {body_file}"}
+                new_body = bf.read_text(encoding="utf-8")
+            elif body is not None:
+                new_body = body
+            else:
+                new_body = note["body"]
+
+            new_about = about.strip() if about is not None else note["about"]
+            new_author = author.strip() if author is not None else note["author"]
+
+            content = format_note_content(
+                id=note["id"],
+                title=new_title,
+                kind=new_kind,
+                status=new_status,
+                created=note["created"],
+                author=new_author,
+                about=new_about,
+                produced=note["produced"],
+                processed_by=note["processed_by"],
+                body=new_body,
+            )
+
+            note_file = folder_path / "note.md"
+            _atomic_write_text(note_file, content)
+
+            updated = parse_note_folder(folder_path, tasks_dir, in_analyzed=note["in_analyzed"])
+            return True, {
+                "ok": True,
+                "id": updated["id"],
+                "status": updated["status"],
+                "bundle_sha256": updated["bundle_sha256"],
+                "rel_path": updated["rel_path"],
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def inbox_attach(
+    tasks_dir: pathlib.Path,
+    target: str,
+    file_path: str | pathlib.Path,
+    name: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    src = pathlib.Path(file_path).resolve()
+    if not src.is_file():
+        return False, {"ok": False, "error": f"Attachment file not found: {file_path}"}
+
+    data = src.read_bytes()
+    if len(data) > MAX_ATTACHMENT_SIZE:
+        return False, {
+            "ok": False,
+            "error": "size-limit-exceeded",
+            "message": f"Attachment exceeds 10 MB limit ({len(data)} bytes).",
+        }
+
+    sniff = sniff_image_type(data, original_suffix=src.suffix)
+    if sniff is None:
+        return False, {
+            "ok": False,
+            "error": "invalid-image-type",
+            "message": "File is not a supported image (magic bytes do not match png, jpeg, gif, or webp).",
+        }
+    img_type, real_ext = sniff
+
+    try:
+        with task_write_lock(tasks_dir):
+            note = find_inbox_note(tasks_dir, target)
+            if not note:
+                return False, {"ok": False, "error": f"Inbox note {target!r} not found."}
+
+            if note["legacy"]:
+                note = convert_legacy_note_to_folder(tasks_dir, note)
+
+            folder_path = pathlib.Path(note["folder_path"])
+            current_status = note["status"]
+            if current_status == "processing":
+                return False, {
+                    "ok": False,
+                    "error": "locked-processing",
+                    "message": f"Note {note['id']} is currently processing and locked against edits.",
+                }
+            if current_status in ("processed", "discarded"):
+                return False, {
+                    "ok": False,
+                    "error": "note-closed",
+                    "message": f"Note {note['id']} is {current_status}; reopen it first before modifying attachments.",
+                }
+
+            attachments_dir = folder_path / "attachments"
+            attachments_dir.mkdir(parents=True, exist_ok=True)
+
+            existing_files = [f.name for f in attachments_dir.iterdir() if f.is_file() and not f.name.startswith(".")]
+            if len(existing_files) >= MAX_ATTACHMENTS_PER_NOTE:
+                return False, {
+                    "ok": False,
+                    "error": "attachment-limit-reached",
+                    "message": f"Note {note['id']} already has the maximum allowed attachments (20).",
+                }
+
+            existing_nums = [
+                int(m.group(1)) for f in existing_files if (m := re.match(r"^(\d{2})-", f))
+            ]
+            next_idx = max(existing_nums, default=0) + 1
+
+            stem = name if name else src.stem
+            dest_filename = sanitize_attachment_name(stem, real_ext, next_idx)
+            dest_path = attachments_dir / dest_filename
+
+            shutil.copy2(src, dest_path)
+
+            markdown_ref = f"![](attachments/{dest_filename})"
+            updated = parse_note_folder(folder_path, tasks_dir, in_analyzed=note["in_analyzed"])
+
+            return True, {
+                "ok": True,
+                "id": updated["id"],
+                "attachment": dest_filename,
+                "markdown": markdown_ref,
+                "path": str(dest_path),
+                "bundle_sha256": updated["bundle_sha256"],
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def inbox_detach(
+    tasks_dir: pathlib.Path,
+    target: str,
+    name: str,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    try:
+        with task_write_lock(tasks_dir):
+            note = find_inbox_note(tasks_dir, target)
+            if not note:
+                return False, {"ok": False, "error": f"Inbox note {target!r} not found."}
+
+            if note["legacy"]:
+                return False, {"ok": False, "error": "Legacy notes have no attachments."}
+
+            folder_path = pathlib.Path(note["folder_path"])
+            current_status = note["status"]
+            if current_status == "processing":
+                return False, {
+                    "ok": False,
+                    "error": "locked-processing",
+                    "message": f"Note {note['id']} is currently processing and locked.",
+                }
+            if current_status in ("processed", "discarded"):
+                return False, {
+                    "ok": False,
+                    "error": "note-closed",
+                    "message": f"Note {note['id']} is {current_status}; reopen it first.",
+                }
+
+            attachments_dir = folder_path / "attachments"
+            try:
+                target_file = validate_attachment_name(name, attachments_dir)
+            except (ValueError, FileNotFoundError) as ve:
+                return False, {"ok": False, "error": "invalid-attachment", "message": str(ve)}
+
+            target_file.unlink()
+            updated = parse_note_folder(folder_path, tasks_dir, in_analyzed=note["in_analyzed"])
+
+            return True, {
+                "ok": True,
+                "id": updated["id"],
+                "detached": name,
+                "bundle_sha256": updated["bundle_sha256"],
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def inbox_resolve(
+    tasks_dir: pathlib.Path,
+    target: str,
+    produced: str,
+    by: str = "owner",
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if not produced or not produced.strip():
+        return False, {"ok": False, "error": "Missing required --produced."}
+
+    try:
+        with task_write_lock(tasks_dir):
+            note = find_inbox_note(tasks_dir, target)
+            if not note:
+                return False, {"ok": False, "error": f"Inbox note {target!r} not found."}
+
+            if note["in_analyzed"]:
+                return False, {"ok": False, "error": f"Note {note['id']} is already in analyzed/."}
+
+            if note["legacy"]:
+                note = convert_legacy_note_to_folder(tasks_dir, note)
+
+            folder_path = pathlib.Path(note["folder_path"])
+
+            content = format_note_content(
+                id=note["id"],
+                title=note["title"],
+                kind=note["kind"],
+                status="processed",
+                created=note["created"],
+                author=note["author"],
+                about=note["about"],
+                produced=produced.strip(),
+                processed_by=by.strip() or "owner",
+                body=note["body"],
+            )
+            note_file = folder_path / "note.md"
+            _atomic_write_text(note_file, content)
+
+            analyzed_dir = tasks_dir / "_inbox" / "analyzed"
+            analyzed_dir.mkdir(parents=True, exist_ok=True)
+            dst_folder = analyzed_dir / folder_path.name
+            os.replace(folder_path, dst_folder)
+
+            updated = parse_note_folder(dst_folder, tasks_dir, in_analyzed=True)
+            return True, {
+                "ok": True,
+                "id": updated["id"],
+                "status": "processed",
+                "produced": updated["produced"],
+                "processed_by": updated["processed_by"],
+                "folder": dst_folder.name,
+                "rel_path": updated["rel_path"],
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def inbox_discard(
+    tasks_dir: pathlib.Path,
+    target: str,
+    reason: str,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if not reason or not reason.strip():
+        return False, {"ok": False, "error": "Missing required --reason."}
+
+    try:
+        with task_write_lock(tasks_dir):
+            note = find_inbox_note(tasks_dir, target)
+            if not note:
+                return False, {"ok": False, "error": f"Inbox note {target!r} not found."}
+
+            if note["in_analyzed"]:
+                return False, {"ok": False, "error": f"Note {note['id']} is already in analyzed/."}
+
+            if note["legacy"]:
+                note = convert_legacy_note_to_folder(tasks_dir, note)
+
+            folder_path = pathlib.Path(note["folder_path"])
+
+            body = note["body"]
+            if body:
+                body += f"\n\n## Discard Reason\n\n{reason.strip()}"
+            else:
+                body = f"## Discard Reason\n\n{reason.strip()}"
+
+            content = format_note_content(
+                id=note["id"],
+                title=note["title"],
+                kind=note["kind"],
+                status="discarded",
+                created=note["created"],
+                author=note["author"],
+                about=note["about"],
+                produced=note["produced"],
+                processed_by=note["processed_by"],
+                body=body,
+            )
+            note_file = folder_path / "note.md"
+            _atomic_write_text(note_file, content)
+
+            analyzed_dir = tasks_dir / "_inbox" / "analyzed"
+            analyzed_dir.mkdir(parents=True, exist_ok=True)
+            dst_folder = analyzed_dir / folder_path.name
+            os.replace(folder_path, dst_folder)
+
+            updated = parse_note_folder(dst_folder, tasks_dir, in_analyzed=True)
+            return True, {
+                "ok": True,
+                "id": updated["id"],
+                "status": "discarded",
+                "reason": reason.strip(),
+                "folder": dst_folder.name,
+                "rel_path": updated["rel_path"],
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def inbox_reopen(
+    tasks_dir: pathlib.Path,
+    target: str,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    try:
+        with task_write_lock(tasks_dir):
+            note = find_inbox_note(tasks_dir, target)
+            if not note:
+                return False, {"ok": False, "error": f"Inbox note {target!r} not found."}
+
+            if not note["in_analyzed"]:
+                return False, {"ok": False, "error": f"Note {note['id']} is not in analyzed/ (already open)."}
+
+            folder_path = pathlib.Path(note["folder_path"])
+
+            content = format_note_content(
+                id=note["id"],
+                title=note["title"],
+                kind=note["kind"],
+                status="ready",
+                created=note["created"],
+                author=note["author"],
+                about=note["about"],
+                produced=note["produced"],
+                processed_by=note["processed_by"],
+                body=note["body"],
+            )
+            note_file = folder_path / "note.md"
+            _atomic_write_text(note_file, content)
+
+            to_analyze_dir = tasks_dir / "_inbox" / "to-analyze"
+            to_analyze_dir.mkdir(parents=True, exist_ok=True)
+            dst_folder = to_analyze_dir / folder_path.name
+            os.replace(folder_path, dst_folder)
+
+            updated = parse_note_folder(dst_folder, tasks_dir, in_analyzed=False)
+            return True, {
+                "ok": True,
+                "id": updated["id"],
+                "status": "ready",
+                "folder": dst_folder.name,
+                "rel_path": updated["rel_path"],
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def tasks_new_from_note(
+    tasks_dir: pathlib.Path,
+    from_note: str,
+    category: str,
+    title: str,
+    priority: str = "P2",
+    priority_reason: str | None = None,
+    executor: str = "kilo",
+    next_up: str = "no",
+    depends_on: str = "-",
+    decider: str = "-",
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if not from_note or not from_note.strip():
+        return False, {"ok": False, "error": "Missing required --from-note."}
+    if not category or not category.strip():
+        return False, {"ok": False, "error": "Missing required --category."}
+    if not title or not title.strip():
+        return False, {"ok": False, "error": "Missing required --title."}
+
+    category = category.strip()
+    if category in RESERVED_DIRS or category.startswith(".") or category.startswith("_"):
+        return False, {"ok": False, "error": f"Invalid category name {category!r} (cannot be reserved directory)."}
+
+    if priority not in PRIORITIES:
+        return False, {"ok": False, "error": f"Invalid priority {priority!r} (expected one of {sorted(PRIORITIES)})."}
+
+    if next_up not in NEXT_UP_VALUES:
+        return False, {"ok": False, "error": f"Invalid next-up {next_up!r} (expected 'yes' or 'no')."}
+
+    try:
+        with task_write_lock(tasks_dir):
+            note = find_inbox_note(tasks_dir, from_note)
+            if not note:
+                return False, {"ok": False, "error": f"Inbox note {from_note!r} not found."}
+
+            emergent = discover_emergent_tasks(tasks_dir)
+            existing_nums = []
+            for t in emergent:
+                tid = t.get("id", "")
+                if tid and TASK_ID_RE.match(tid):
+                    existing_nums.append(int(tid[1:]))
+
+            next_num = max(existing_nums, default=0) + 1
+
+            category_dir = tasks_dir / category
+            category_dir.mkdir(parents=True, exist_ok=True)
+
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50].rstrip("-") or "task"
+
+            fd = None
+            t_id = ""
+            filename = ""
+            task_file_path = None
+
+            while True:
+                t_id = f"T{next_num:03d}"
+                filename = f"{t_id}-{slug}.md"
+                task_file_path = category_dir / filename
+                try:
+                    fd = os.open(str(task_file_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                    break
+                except FileExistsError:
+                    next_num += 1
+
+            p_reason = (
+                priority_reason.strip()
+                if priority_reason and priority_reason.strip()
+                else f"Derived from inbox note {note['id'] if note['id'] != '-' else from_note}"
+            )
+
+            sources = note["rel_path"]
+            paths = note["about"].strip() if note["about"] and note["about"].strip() != "-" else "-"
+            handoff = f"Read tasks/{category}/{filename}, do the open steps, run the Verification, update the task and the registry."
+
+            body = note.get("body", "").strip()
+            paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+            goal = paragraphs[0] if paragraphs else f"Goal derived from inbox note {from_note}."
+
+            task_content = f"""# {t_id} {title.strip()}
+
+- id: {t_id}
+- title: {title.strip()}
+- category: {category}
+- priority: {priority}
+- priority-reason: {p_reason}
+- next-up: {next_up}
+- state: open
+- executor: {executor.strip() or 'kilo'}
+- depends-on: {depends_on.strip() or '-'}
+- decider: {decider.strip() or '-'}
+- sources: {sources}
+- paths: {paths}
+- handoff: {handoff}
+
+## Goal
+
+{goal}
+
+## Steps
+
+- [ ] Implement task steps.
+
+## Verification
+
+- [ ] Verify task implementation.
+"""
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(task_content)
+            except BaseException:
+                if task_file_path and task_file_path.exists():
+                    task_file_path.unlink()
+                raise
+
+            rel_task = task_file_path.relative_to(tasks_dir).as_posix()
+
+            errors, warnings, _, _ = validate_tasks_tree(tasks_dir)
+            task_errors = [e for e in errors if rel_task in e]
+            if task_errors:
+                try:
+                    task_file_path.unlink()
+                except OSError:
+                    pass
+                return False, {"ok": False, "error": f"Created task failed validation: {'; '.join(task_errors)}"}
+
+            return True, {
+                "ok": True,
+                "id": t_id,
+                "file_path": str(task_file_path),
+                "rel_path": rel_task,
+                "sources": sources,
+                "paths": paths,
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def cmd_inbox_list(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    status = getattr(args, "status", "all")
+    notes = discover_inbox_notes(tasks_dir)
+    if status != "all":
+        notes = [n for n in notes if n["status"] == status]
+
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, "notes": notes}, indent=2))
+    else:
+        print(f"[ok] Found {len(notes)} note(s) in {tasks_dir / '_inbox'}:")
+        for n in notes:
+            legacy_flag = " (legacy)" if n["legacy"] else ""
+            att_info = f", attachments: {len(n['attachments'])}" if n["attachments"] else ""
+            print(f"  - {n['id']} [{n['status']}] ({n['kind']}) {n['title']}{legacy_flag}{att_info}")
+    return 0
+
+
+def cmd_inbox_show(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    note = find_inbox_note(tasks_dir, args.note_id)
+    if not note:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": f"Inbox note {args.note_id!r} not found."}, indent=2))
+        else:
+            print(f"[FAIL] Inbox note {args.note_id!r} not found.", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, "note": note}, indent=2))
+    else:
+        print(f"Note: {note['id']} ({note['status']})")
+        print(f"Title: {note['title']}")
+        print(f"Kind: {note['kind']}")
+        print(f"Created: {note['created']}")
+        print(f"Author: {note['author']}")
+        print(f"About: {note['about']}")
+        print(f"Produced: {note['produced']}")
+        print(f"Processed by: {note['processed_by']}")
+        print(f"Bundle hash: {note['bundle_sha256']}")
+        print(f"Attachments ({len(note['attachments'])}): {', '.join(note['attachments']) if note['attachments'] else 'none'}")
+        print("\n--- Body ---")
+        print(note["body"])
+    return 0
+
+
+def cmd_inbox_add(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = inbox_add(
+        tasks_dir=tasks_dir,
+        title=args.title,
+        kind=args.kind,
+        body=getattr(args, "body", None),
+        body_file=getattr(args, "body_file", None),
+        about=getattr(args, "about", "-"),
+        author=getattr(args, "author", "owner"),
+        status=getattr(args, "status", "draft"),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Created note {res['id']}: {res['rel_path']}")
+        else:
+            print(f"[FAIL] {res.get('error', 'inbox add failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_inbox_edit(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = inbox_edit(
+        tasks_dir=tasks_dir,
+        target=args.note_id,
+        title=getattr(args, "title", None),
+        kind=getattr(args, "kind", None),
+        body=getattr(args, "body", None),
+        body_file=getattr(args, "body_file", None),
+        about=getattr(args, "about", None),
+        author=getattr(args, "author", None),
+        status=getattr(args, "status", None),
+        expect_hash=getattr(args, "expect_hash", None),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Updated note {res['id']}: status={res['status']}, hash={res['bundle_sha256']}")
+        else:
+            print(f"[FAIL] {res.get('error') or res.get('message', 'inbox edit failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_inbox_attach(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = inbox_attach(
+        tasks_dir=tasks_dir,
+        target=args.note_id,
+        file_path=args.file,
+        name=getattr(args, "name", None),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Attached {res['attachment']}: {res['markdown']}")
+        else:
+            print(f"[FAIL] {res.get('error') or res.get('message', 'inbox attach failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_inbox_detach(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = inbox_detach(
+        tasks_dir=tasks_dir,
+        target=args.note_id,
+        name=args.name,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Detached {res['detached']} from note {res['id']}")
+        else:
+            print(f"[FAIL] {res.get('error') or res.get('message', 'inbox detach failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_inbox_resolve(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = inbox_resolve(
+        tasks_dir=tasks_dir,
+        target=args.note_id,
+        produced=args.produced,
+        by=getattr(args, "by", "owner"),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Resolved note {res['id']} -> {res['folder']} (produced: {res['produced']})")
+        else:
+            print(f"[FAIL] {res.get('error', 'inbox resolve failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_inbox_discard(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = inbox_discard(
+        tasks_dir=tasks_dir,
+        target=args.note_id,
+        reason=args.reason,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Discarded note {res['id']} -> {res['folder']}")
+        else:
+            print(f"[FAIL] {res.get('error', 'inbox discard failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_inbox_reopen(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = inbox_reopen(
+        tasks_dir=tasks_dir,
+        target=args.note_id,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Reopened note {res['id']} -> {res['folder']} (status: ready)")
+        else:
+            print(f"[FAIL] {res.get('error', 'inbox reopen failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_tasks_new(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = tasks_new_from_note(
+        tasks_dir=tasks_dir,
+        from_note=args.from_note,
+        category=args.category,
+        title=args.title,
+        priority=getattr(args, "priority", "P2"),
+        priority_reason=getattr(args, "priority_reason", None),
+        executor=getattr(args, "executor", "kilo"),
+        next_up=getattr(args, "next_up", "no"),
+        depends_on=getattr(args, "depends_on", "-"),
+        decider=getattr(args, "decider", "-"),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Created task {res['id']}: {res['rel_path']}")
+        else:
+            print(f"[FAIL] {res.get('error', 'tasks new failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", action="store_true", help="Output structured JSON on stdout")
@@ -3775,6 +5022,109 @@ def build_parser() -> argparse.ArgumentParser:
     p_upg.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_upg.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_upg.set_defaults(func=cmd_upgrade)
+
+    p_inbox = sub.add_parser("inbox", help="Manage inbox draft notes, image attachments, and triage")
+    p_inbox.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_inbox.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    inbox_sub = p_inbox.add_subparsers(dest="inbox_cmd", required=True)
+
+    # inbox list
+    p_il = inbox_sub.add_parser("list", help="List inbox notes")
+    p_il.add_argument("--status", choices=["draft", "ready", "processing", "processed", "discarded", "all"], default="all")
+    p_il.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_il.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_il.set_defaults(func=cmd_inbox_list)
+
+    # inbox show
+    p_is = inbox_sub.add_parser("show", help="Show an inbox note")
+    p_is.add_argument("note_id", help="Note ID (e.g. N001) or legacy filename")
+    p_is.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_is.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_is.set_defaults(func=cmd_inbox_show)
+
+    # inbox add
+    p_ia = inbox_sub.add_parser("add", help="Add a new inbox note")
+    p_ia.add_argument("--title", required=True, help="Short title of the note")
+    p_ia.add_argument("--kind", choices=sorted(NOTE_KINDS), default="note", help="Kind of note")
+    p_ia.add_argument("--body", default=None, help="Markdown body text")
+    p_ia.add_argument("--body-file", default=None, help="Path to file containing body Markdown")
+    p_ia.add_argument("--about", default="-", help="About paths, repos or task IDs")
+    p_ia.add_argument("--author", default="owner", help="Author of the note")
+    p_ia.add_argument("--status", choices=["draft", "ready"], default="draft", help="Initial status")
+    p_ia.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_ia.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_ia.set_defaults(func=cmd_inbox_add)
+
+    # inbox edit
+    p_ie = inbox_sub.add_parser("edit", help="Edit an inbox note")
+    p_ie.add_argument("note_id", help="Note ID (e.g. N001) or legacy filename")
+    p_ie.add_argument("--title", default=None, help="Updated title")
+    p_ie.add_argument("--kind", choices=sorted(NOTE_KINDS), default=None, help="Updated kind")
+    p_ie.add_argument("--body", default=None, help="Updated body text")
+    p_ie.add_argument("--body-file", default=None, help="Updated body file")
+    p_ie.add_argument("--about", default=None, help="Updated about")
+    p_ie.add_argument("--author", default=None, help="Updated author")
+    p_ie.add_argument("--status", choices=["draft", "ready"], default=None, help="Updated status")
+    p_ie.add_argument("--expect-hash", default=None, help="Refuse edit if bundle SHA256 does not match")
+    p_ie.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_ie.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_ie.set_defaults(func=cmd_inbox_edit)
+
+    # inbox attach
+    p_iatt = inbox_sub.add_parser("attach", help="Attach an image to an inbox note")
+    p_iatt.add_argument("note_id", help="Note ID (e.g. N001)")
+    p_iatt.add_argument("--file", required=True, help="Path to image file (png, jpeg, gif, webp; <=10MB)")
+    p_iatt.add_argument("--name", default=None, help="Custom attachment name/stem")
+    p_iatt.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_iatt.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_iatt.set_defaults(func=cmd_inbox_attach)
+
+    # inbox detach
+    p_idet = inbox_sub.add_parser("detach", help="Detach an attachment from an inbox note")
+    p_idet.add_argument("note_id", help="Note ID (e.g. N001)")
+    p_idet.add_argument("--name", required=True, help="Attachment filename to detach")
+    p_idet.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_idet.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_idet.set_defaults(func=cmd_inbox_detach)
+
+    # inbox resolve
+    p_ires = inbox_sub.add_parser("resolve", help="Mark an inbox note processed and move to analyzed/")
+    p_ires.add_argument("note_id", help="Note ID (e.g. N001)")
+    p_ires.add_argument("--produced", required=True, help="IDs/paths produced by processing")
+    p_ires.add_argument("--by", default="owner", help="Who processed the note")
+    p_ires.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_ires.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_ires.set_defaults(func=cmd_inbox_resolve)
+
+    # inbox discard
+    p_idisc = inbox_sub.add_parser("discard", help="Discard an inbox note and move to analyzed/")
+    p_idisc.add_argument("note_id", help="Note ID (e.g. N001)")
+    p_idisc.add_argument("--reason", required=True, help="Reason for discarding the note")
+    p_idisc.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_idisc.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_idisc.set_defaults(func=cmd_inbox_discard)
+
+    # inbox reopen
+    p_ireop = inbox_sub.add_parser("reopen", help="Reopen an inbox note and move back to to-analyze/ as ready")
+    p_ireop.add_argument("note_id", help="Note ID (e.g. N001)")
+    p_ireop.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_ireop.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_ireop.set_defaults(func=cmd_inbox_reopen)
+
+    # tasks new
+    p_new = sub.add_parser("new", help="Create a new task from an inbox note")
+    p_new.add_argument("--from-note", required=True, help="Source inbox note ID (e.g. N001) or filename")
+    p_new.add_argument("--category", required=True, help="Category folder name")
+    p_new.add_argument("--title", required=True, help="Task title")
+    p_new.add_argument("--priority", choices=sorted(PRIORITIES), default="P2", help="Priority (default P2)")
+    p_new.add_argument("--priority-reason", default=None, help="Priority explanation")
+    p_new.add_argument("--executor", default="kilo", help="Assigned executor")
+    p_new.add_argument("--next-up", choices=sorted(NEXT_UP_VALUES), default="no", help="Next up flag")
+    p_new.add_argument("--depends-on", default="-", help="Dependencies")
+    p_new.add_argument("--decider", default="-", help="Decider")
+    p_new.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_new.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_new.set_defaults(func=cmd_tasks_new)
 
     return ap
 
