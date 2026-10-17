@@ -1060,6 +1060,294 @@ def discover_claude_plugin_skills(
     return results
 
 
+def hash_plugin_directory(dir_path: pathlib.Path) -> str:
+    """Deterministic SHA-256 over files in a plugin directory (ignoring volatile files/dirs, but including .claude-plugin/plugin.json)."""
+    h = hashlib.sha256()
+    if not dir_path.is_dir():
+        return ""
+    for root, dirs, files in os.walk(dir_path):
+        dirs[:] = sorted(
+            d for d in dirs
+            if (not d.startswith(".") or d == ".claude-plugin")
+            and d not in ("__pycache__", ".in_use", ".git", ".pytest_cache", ".venv", ".mypy_cache")
+        )
+        for fname in sorted(files):
+            if (fname.startswith(".") and fname != ".claude-plugin") or fname.endswith(".pyc") or fname in ("index.json", ".ai-orch-source.json", ".DS_Store"):
+                continue
+            fpath = pathlib.Path(root) / fname
+            try:
+                rel = fpath.relative_to(dir_path).as_posix()
+                h.update(rel.encode("utf-8") + b"\0")
+                h.update(fpath.read_bytes() + b"\0")
+            except Exception:
+                pass
+    return h.hexdigest()[:16]
+
+
+def read_plugin_json_version(plugin_dir: pathlib.Path) -> str | None:
+    """Read version string from .claude-plugin/plugin.json or plugin.json in plugin_dir."""
+    for cand in [plugin_dir / ".claude-plugin" / "plugin.json", plugin_dir / "plugin.json"]:
+        if cand.is_file():
+            try:
+                data = json.loads(cand.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and "version" in data and data["version"] is not None:
+                    return str(data["version"])
+            except Exception:
+                pass
+    return None
+
+
+def find_marketplace_clone(marketplace_name: str, home: pathlib.Path | None = None) -> pathlib.Path | None:
+    """Locate the marketplace clone or source repo for a marketplace."""
+    if not marketplace_name:
+        return None
+    h = home or get_home_dir()
+    clone_cand = h / ".claude" / "plugins" / "marketplaces" / marketplace_name
+    if clone_cand.is_dir():
+        return clone_cand
+
+    if home is not None:
+        cached = get_repos_cache_dir(home) / marketplace_name
+        if cached.is_dir():
+            return cached
+    else:
+        sr = resolve_source_repo(marketplace_name, None)
+        if sr and sr.is_dir():
+            return sr
+    return None
+
+
+def find_plugin_source_dir(clone_dir: pathlib.Path, plugin_name: str) -> pathlib.Path | None:
+    """Find the directory containing the plugin within a marketplace clone / source repo."""
+    if not clone_dir or not clone_dir.is_dir():
+        return None
+
+    # 1. Try reading marketplace.json
+    for mjson in [clone_dir / ".claude-plugin" / "marketplace.json", clone_dir / "marketplace.json"]:
+        if mjson.is_file():
+            try:
+                mdata = json.loads(mjson.read_text(encoding="utf-8"))
+                for p in mdata.get("plugins", []):
+                    if isinstance(p, dict) and p.get("name") == plugin_name:
+                        src = p.get("source")
+                        if isinstance(src, str):
+                            rel = src.lstrip("./") if src.startswith("./") else src
+                            cand = clone_dir / rel
+                            if cand.is_dir():
+                                return cand
+                        elif isinstance(src, dict) and src.get("path"):
+                            cand = clone_dir / src.get("path")
+                            if cand.is_dir():
+                                return cand
+            except Exception:
+                pass
+
+    # 2. Standard subdirectory layouts
+    for cand in [clone_dir / "plugins" / plugin_name, clone_dir / plugin_name]:
+        if cand.is_dir():
+            return cand
+
+    # 3. Check if clone_dir itself is the plugin root
+    if (clone_dir / ".claude-plugin" / "plugin.json").is_file() or (clone_dir / "plugin.json").is_file() or (clone_dir / "SKILL.md").is_file():
+        return clone_dir
+
+    return None
+
+
+def compute_plugin_commit_distance(
+    repo_dir: pathlib.Path,
+    plugin_dir: pathlib.Path,
+    git_commit_sha: str | None,
+    marketplace_name: str = "",
+    home: pathlib.Path | None = None,
+) -> int | str:
+    """Compute commit distance: number of commits touching the plugin dir after git_commit_sha.
+    Degrades to 'unknown' on any git failure.
+    """
+    if not git_commit_sha:
+        return "unknown"
+    sha = str(git_commit_sha).strip()
+    if not sha or not all(c in "0123456789abcdefABCDEF" for c in sha):
+        return "unknown"
+
+    try:
+        rel_path = plugin_dir.relative_to(repo_dir).as_posix()
+    except ValueError:
+        rel_path = "."
+
+    repos_to_check: list[tuple[pathlib.Path, str]] = [(repo_dir, rel_path)]
+
+    if marketplace_name:
+        sr = resolve_source_repo(marketplace_name, home)
+        if sr and sr.is_dir() and sr != repo_dir and (sr / ".git").exists():
+            try:
+                rel_sr = plugin_dir.relative_to(sr).as_posix()
+            except ValueError:
+                rel_sr = f"plugins/{plugin_dir.name}" if (sr / "plugins" / plugin_dir.name).is_dir() else (plugin_dir.name if (sr / plugin_dir.name).is_dir() else ".")
+            repos_to_check.append((sr, rel_sr))
+
+    for r_dir, r_rel in repos_to_check:
+        try:
+            chk = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"],
+                cwd=r_dir,
+                timeout=10,
+                capture_output=True,
+                text=True,
+            )
+            if chk.returncode == 0:
+                pargs = ["--", r_rel] if r_rel != "." else []
+                r = subprocess.run(
+                    ["git", "rev-list", "--count", f"{sha}..HEAD"] + pargs,
+                    cwd=r_dir,
+                    timeout=10,
+                    capture_output=True,
+                    text=True,
+                )
+                if r.returncode == 0:
+                    try:
+                        return int(r.stdout.strip())
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+
+    return "unknown"
+
+
+def discover_stale_claude_plugins(
+    home: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+    scope: str = "global",
+) -> list[dict[str, Any]]:
+    """Inspect enabled Claude plugins and report those that are stale vs their marketplace clone / source repo."""
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+
+    reg_path = h / ".claude" / "plugins" / "installed_plugins.json"
+    if not reg_path.is_file():
+        return []
+
+    try:
+        data = json.loads(reg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    plugins_map = data.get("plugins", {})
+    if not isinstance(plugins_map, dict):
+        return []
+
+    global_enabled, project_enabled = load_claude_plugin_settings(h, ws)
+    enabled_map = global_enabled if scope == "global" else project_enabled
+
+    stale_list: list[dict[str, Any]] = []
+
+    for plugin_id, installs in sorted(plugins_map.items()):
+        if isinstance(installs, dict):
+            installs_list = [installs]
+        elif isinstance(installs, list):
+            installs_list = installs
+        else:
+            continue
+
+        for install in installs_list:
+            if not isinstance(install, dict):
+                continue
+            iscope = install.get("scope", "user")
+            project_path = install.get("projectPath")
+
+            if scope == "global":
+                if iscope != "user":
+                    continue
+            elif scope == "project":
+                if ws is None:
+                    continue
+                if iscope == "user":
+                    pass
+                elif iscope in ("project", "local"):
+                    if not project_path:
+                        continue
+                    try:
+                        if pathlib.Path(project_path).resolve() != ws:
+                            continue
+                    except Exception:
+                        continue
+                else:
+                    continue
+
+            if not enabled_map.get(plugin_id, True):
+                continue
+
+            ip_str = install.get("installPath")
+            if not ip_str:
+                continue
+            ip = pathlib.Path(ip_str).expanduser()
+            if not ip.is_dir():
+                continue
+
+            cached_ver = install.get("version")
+            if not cached_ver:
+                cached_ver = read_plugin_json_version(ip)
+
+            sha = install.get("gitCommitSha")
+
+            if "@" in plugin_id:
+                pname, mname = plugin_id.split("@", 1)
+            else:
+                pname, mname = plugin_id, ""
+
+            clone = find_marketplace_clone(mname, home)
+            if not clone or not clone.is_dir():
+                continue
+
+            s_pdir = find_plugin_source_dir(clone, pname)
+            if not s_pdir or not s_pdir.is_dir():
+                continue
+
+            s_ver = read_plugin_json_version(s_pdir)
+            eq = (cached_ver is not None and s_ver is not None and str(cached_ver) == str(s_ver))
+
+            dist = compute_plugin_commit_distance(clone, s_pdir, sha, mname, home)
+            differs = (hash_plugin_directory(ip) != hash_plugin_directory(s_pdir))
+
+            is_stale = False
+            if isinstance(dist, int):
+                if dist > 0:
+                    is_stale = True
+                elif not eq:
+                    is_stale = True
+                elif differs:
+                    is_stale = True
+            else:
+                if differs or not eq:
+                    is_stale = True
+
+            if is_stale:
+                if eq:
+                    mkt = mname or "marketplace"
+                    adv = (
+                        f"bump the plugin version in its repo, push, then "
+                        f"`claude plugin marketplace update {mkt}` and `claude plugin update {plugin_id}`"
+                    )
+                else:
+                    adv = f"run `claude plugin update {plugin_id}`"
+
+                stale_list.append({
+                    "plugin_id": plugin_id,
+                    "scope": iscope,
+                    "cached_version": str(cached_ver) if cached_ver is not None else None,
+                    "source_version": str(s_ver) if s_ver is not None else None,
+                    "versions_equal": eq,
+                    "commit_distance": dist,
+                    "content_differs": differs,
+                    "advice": adv,
+                    "install_path": str(ip),
+                    "source_path": str(s_pdir),
+                })
+
+    return stale_list
+
+
 def is_project_entry(entry: dict[str, Any], ws: pathlib.Path | None) -> bool:
     """Return True if the entry belongs to project workspace scope."""
     if ws is None:
@@ -1275,6 +1563,23 @@ def plan_for_conflict(
                     "after_sha256": None,
                 }
                 p_items.append(p_item)
+
+    elif kind == "stale-plugin-copy":
+        target_path_str = sc.get("install_path") or (sc.get("entries", [{}])[0].get("path") if sc.get("entries") else "")
+        target_path = pathlib.Path(target_path_str) if target_path_str else None
+        advice_list = sc.get("advice", [])
+        advice_text = advice_list[0] if advice_list else (sc.get("advice") if isinstance(sc.get("advice"), str) else "")
+        if target_path_str and target_path_str not in seen:
+            seen.add(target_path_str)
+            p_item = {
+                "action": "advise",
+                "path": target_path_str,
+                "reason": advice_text,
+                "current_state": "conflict",
+                "before_sha256": compute_target_hash(target_path) if target_path else None,
+                "after_sha256": None,
+            }
+            p_items.append(p_item)
 
     return p_items, c_items
 
@@ -1549,6 +1854,45 @@ def inspect_environment(
                         origins_str = ", ".join(sorted({e["origin"] for e in unique_entries}))
                         conflicts.append(f"Duplicate skill '{name}' found across origins: {origins_str}")
 
+            if assistant == "claude":
+                stale_plugins = discover_stale_claude_plugins(h, ws, scope=scope)
+                for sp in stale_plugins:
+                    key = ("stale-plugin-copy", (sp["plugin_id"],))
+                    already_in_global = key in global_conflict_keys.get(assistant, set())
+                    is_user_scope = sp.get("scope") == "user"
+                    if not (scope == "project" and is_user_scope and already_in_global):
+                        sc_item = {
+                            "kind": "stale-plugin-copy",
+                            "names": [sp["plugin_id"]],
+                            "plugin_id": sp["plugin_id"],
+                            "scope": scope,
+                            "install_path": sp["install_path"],
+                            "entries": [
+                                {
+                                    "name": sp["plugin_id"],
+                                    "origin": f"plugin:{sp['plugin_id']}",
+                                    "scope": sp.get("scope", scope),
+                                    "path": sp["install_path"],
+                                    "enabled": True,
+                                    "state": "plugin",
+                                }
+                            ],
+                            "cached_version": sp["cached_version"],
+                            "source_version": sp["source_version"],
+                            "versions_equal": sp["versions_equal"],
+                            "commit_distance": sp["commit_distance"],
+                            "content_differs": sp["content_differs"],
+                            "fixable": False,
+                            "actionable": False,
+                            "actions": [],
+                            "advice": [sp["advice"]],
+                        }
+                        structured_conflicts_map[key] = sc_item
+                        if scope == "global":
+                            global_conflict_keys.setdefault(assistant, set()).add(key)
+            else:
+                stale_plugins = []
+
             structured_conflicts = list(structured_conflicts_map.values())
 
             if assistant == "kilo":
@@ -1577,6 +1921,7 @@ def inspect_environment(
                 "agents": installed_agents,
                 "conflicts": conflicts,
                 "structured_conflicts": structured_conflicts,
+                "stale_plugins": stale_plugins,
                 "mcp_config_path": str(mcp_cfg_path) if mcp_cfg_path else None,
                 "registered_mcps": registered_mcps,
                 "mcp_servers": mcp_servers,
@@ -2626,6 +2971,10 @@ def cmd_status(args: argparse.Namespace) -> int:
                     print(f"  * [mcp] {mname:<25} [scope: {mscope}] (source: {prov}){ov_str}")
             for c in sinfo["conflicts"]:
                 print(f"  ! CONFLICT: {c}")
+            for sp in sinfo.get("stale_plugins", []):
+                dist_str = f"{sp['commit_distance']} commit(s) behind" if sp['commit_distance'] != "unknown" else "distance unknown"
+                print(f"  ! STALE PLUGIN: {sp['plugin_id']} (cached: {sp['cached_version']}, source: {sp['source_version']}, {dist_str})")
+                print(f"    Advice: {sp['advice']}")
 
     if report.get("stray"):
         print("\n=== Stray Config Files ===")

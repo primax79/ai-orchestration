@@ -1648,4 +1648,327 @@ def test_doctor_project_scope_does_not_repeat_global_findings(tmp_path: pathlib.
     assert not any(sc["kind"] == "trigger-conflict" for sc in p_scs2)
 
 
+# ---------------------------------------------------------------------------
+# Task 13.4: Doctor Stale Claude Plugin Detection
+# ---------------------------------------------------------------------------
+
+def test_stale_plugin_detection_older_commit_distance_n(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # 1. Set up marketplace clone with git repo
+    mkt_dir = fake_home / ".claude" / "plugins" / "marketplaces" / "test-marketplace"
+    mkt_dir.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=mkt_dir, check=True, capture_output=True)
+
+    # Plugin structure in marketplace clone
+    plugin_dir = mkt_dir / "plugins" / "demo-plugin"
+    (plugin_dir / ".claude-plugin").mkdir(parents=True)
+    (plugin_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "demo-plugin",
+        "version": "1.0.0",
+        "description": "Demo Plugin"
+    }))
+    (plugin_dir / "skills" / "demo-skill").mkdir(parents=True)
+    (plugin_dir / "skills" / "demo-skill" / "SKILL.md").write_text("# Demo Skill v1\n")
+
+    # Initial commit (commit 1)
+    subprocess.run(["git", "add", "."], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "commit 1"], cwd=mkt_dir, check=True, capture_output=True)
+    sha1 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=mkt_dir, check=True, capture_output=True, text=True).stdout.strip()
+
+    # 2. Set up cached copy identical to commit 1
+    cache_dir = fake_home / ".claude" / "plugins" / "cache" / "test-marketplace" / "demo-plugin" / "1.0.0"
+    (cache_dir / ".claude-plugin").mkdir(parents=True)
+    (cache_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "demo-plugin",
+        "version": "1.0.0",
+        "description": "Demo Plugin"
+    }))
+    (cache_dir / "skills" / "demo-skill").mkdir(parents=True)
+    (cache_dir / "skills" / "demo-skill" / "SKILL.md").write_text("# Demo Skill v1\n")
+
+    # 3. Create 2 new commits touching the plugin directory in the marketplace clone
+    (plugin_dir / "skills" / "demo-skill" / "SKILL.md").write_text("# Demo Skill v2\n")
+    subprocess.run(["git", "add", "."], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "commit 2"], cwd=mkt_dir, check=True, capture_output=True)
+
+    (plugin_dir / "skills" / "demo-skill" / "SKILL.md").write_text("# Demo Skill v3\n")
+    subprocess.run(["git", "add", "."], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "commit 3"], cwd=mkt_dir, check=True, capture_output=True)
+
+    # 4. Set up installed_plugins.json recording sha1 and version 1.0.0
+    installed_reg = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    installed_reg.parent.mkdir(parents=True, exist_ok=True)
+    installed_reg.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "demo-plugin@test-marketplace": [
+                {
+                    "scope": "user",
+                    "installPath": str(cache_dir),
+                    "version": "1.0.0",
+                    "installedAt": "2026-10-01T00:00:00.000Z",
+                    "lastUpdated": "2026-10-01T00:00:00.000Z",
+                    "gitCommitSha": sha1,
+                }
+            ]
+        }
+    }))
+
+    # 5. Run status
+    st = run_env(["status"], fake_home)
+    claude_global = st["environments"]["claude"]["global"]
+    stale_list = claude_global["stale_plugins"]
+    assert len(stale_list) == 1
+    sp = stale_list[0]
+    assert sp["plugin_id"] == "demo-plugin@test-marketplace"
+    assert sp["cached_version"] == "1.0.0"
+    assert sp["source_version"] == "1.0.0"
+    assert sp["versions_equal"] is True
+    assert sp["commit_distance"] == 2
+    assert sp["content_differs"] is True
+    assert "bump the plugin version" in sp["advice"]
+    assert "claude plugin marketplace update test-marketplace" in sp["advice"]
+    assert "claude plugin update demo-plugin@test-marketplace" in sp["advice"]
+
+    # Also verify structured_conflicts has stale-plugin-copy with fixable: False
+    scs = claude_global["structured_conflicts"]
+    stale_scs = [sc for sc in scs if sc["kind"] == "stale-plugin-copy"]
+    assert len(stale_scs) == 1
+    assert stale_scs[0]["fixable"] is False
+    assert stale_scs[0]["actionable"] is False
+    assert stale_scs[0]["advice"] == [sp["advice"]]
+
+
+def test_stale_plugin_equal_is_not_stale(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    mkt_dir = fake_home / ".claude" / "plugins" / "marketplaces" / "test-marketplace"
+    mkt_dir.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=mkt_dir, check=True, capture_output=True)
+
+    plugin_dir = mkt_dir / "plugins" / "demo-plugin"
+    (plugin_dir / ".claude-plugin").mkdir(parents=True)
+    (plugin_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "demo-plugin",
+        "version": "1.0.0",
+        "description": "Demo Plugin"
+    }))
+    (plugin_dir / "skills" / "demo-skill").mkdir(parents=True)
+    (plugin_dir / "skills" / "demo-skill" / "SKILL.md").write_text("# Demo Skill v1\n")
+
+    subprocess.run(["git", "add", "."], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "commit 1"], cwd=mkt_dir, check=True, capture_output=True)
+    sha1 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=mkt_dir, check=True, capture_output=True, text=True).stdout.strip()
+
+    # Cache copy matching commit 1 exactly
+    cache_dir = fake_home / ".claude" / "plugins" / "cache" / "test-marketplace" / "demo-plugin" / "1.0.0"
+    (cache_dir / ".claude-plugin").mkdir(parents=True)
+    (cache_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "demo-plugin",
+        "version": "1.0.0",
+        "description": "Demo Plugin"
+    }))
+    (cache_dir / "skills" / "demo-skill").mkdir(parents=True)
+    (cache_dir / "skills" / "demo-skill" / "SKILL.md").write_text("# Demo Skill v1\n")
+
+    installed_reg = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    installed_reg.parent.mkdir(parents=True, exist_ok=True)
+    installed_reg.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "demo-plugin@test-marketplace": [
+                {
+                    "scope": "user",
+                    "installPath": str(cache_dir),
+                    "version": "1.0.0",
+                    "gitCommitSha": sha1,
+                }
+            ]
+        }
+    }))
+
+    st = run_env(["status"], fake_home)
+    assert st["environments"]["claude"]["global"]["stale_plugins"] == []
+    scs = st["environments"]["claude"]["global"]["structured_conflicts"]
+    assert not any(sc["kind"] == "stale-plugin-copy" for sc in scs)
+
+
+def test_stale_plugin_version_bumped_advice(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    mkt_dir = fake_home / ".claude" / "plugins" / "marketplaces" / "test-marketplace"
+    mkt_dir.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=mkt_dir, check=True, capture_output=True)
+
+    plugin_dir = mkt_dir / "plugins" / "demo-plugin"
+    (plugin_dir / ".claude-plugin").mkdir(parents=True)
+    (plugin_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "demo-plugin",
+        "version": "1.0.0",
+        "description": "Demo Plugin"
+    }))
+    subprocess.run(["git", "add", "."], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "v1.0.0"], cwd=mkt_dir, check=True, capture_output=True)
+    sha1 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=mkt_dir, check=True, capture_output=True, text=True).stdout.strip()
+
+    # Cached copy at 1.0.0
+    cache_dir = fake_home / ".claude" / "plugins" / "cache" / "test-marketplace" / "demo-plugin" / "1.0.0"
+    (cache_dir / ".claude-plugin").mkdir(parents=True)
+    (cache_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "demo-plugin",
+        "version": "1.0.0",
+        "description": "Demo Plugin"
+    }))
+
+    # Bump version in marketplace clone to 1.1.0
+    (plugin_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "demo-plugin",
+        "version": "1.1.0",
+        "description": "Demo Plugin"
+    }))
+    subprocess.run(["git", "add", "."], cwd=mkt_dir, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "bump to 1.1.0"], cwd=mkt_dir, check=True, capture_output=True)
+
+    installed_reg = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    installed_reg.parent.mkdir(parents=True, exist_ok=True)
+    installed_reg.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "demo-plugin@test-marketplace": [
+                {
+                    "scope": "user",
+                    "installPath": str(cache_dir),
+                    "version": "1.0.0",
+                    "gitCommitSha": sha1,
+                }
+            ]
+        }
+    }))
+
+    st = run_env(["status"], fake_home)
+    stale_list = st["environments"]["claude"]["global"]["stale_plugins"]
+    assert len(stale_list) == 1
+    sp = stale_list[0]
+    assert sp["cached_version"] == "1.0.0"
+    assert sp["source_version"] == "1.1.0"
+    assert sp["versions_equal"] is False
+    assert sp["commit_distance"] == 1
+    assert "plugin update" in sp["advice"]
+    assert sp["advice"] == "run `claude plugin update demo-plugin@test-marketplace`"
+
+
+def test_stale_plugin_missing_git_degrades_to_unknown_no_crash(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Marketplace clone WITHOUT .git directory (e.g. downloaded archive or git missing)
+    mkt_dir = fake_home / ".claude" / "plugins" / "marketplaces" / "test-marketplace"
+    plugin_dir = mkt_dir / "plugins" / "demo-plugin"
+    (plugin_dir / ".claude-plugin").mkdir(parents=True)
+    (plugin_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "demo-plugin",
+        "version": "1.0.0",
+        "description": "Demo Plugin"
+    }))
+    (plugin_dir / "skills" / "demo-skill").mkdir(parents=True)
+    (plugin_dir / "skills" / "demo-skill" / "SKILL.md").write_text("# Newer content in clone\n")
+
+    # Cache copy with older / different content
+    cache_dir = fake_home / ".claude" / "plugins" / "cache" / "test-marketplace" / "demo-plugin" / "1.0.0"
+    (cache_dir / ".claude-plugin").mkdir(parents=True)
+    (cache_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "demo-plugin",
+        "version": "1.0.0",
+        "description": "Demo Plugin"
+    }))
+    (cache_dir / "skills" / "demo-skill").mkdir(parents=True)
+    (cache_dir / "skills" / "demo-skill" / "SKILL.md").write_text("# Older content in cache\n")
+
+    installed_reg = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    installed_reg.parent.mkdir(parents=True, exist_ok=True)
+    installed_reg.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "demo-plugin@test-marketplace": [
+                {
+                    "scope": "user",
+                    "installPath": str(cache_dir),
+                    "version": "1.0.0",
+                    "gitCommitSha": "some-random-sha-not-in-git",
+                }
+            ]
+        }
+    }))
+
+    # Must not crash, commit_distance degrades to "unknown"
+    st = run_env(["status"], fake_home)
+    stale_list = st["environments"]["claude"]["global"]["stale_plugins"]
+    assert len(stale_list) == 1
+    sp = stale_list[0]
+    assert sp["commit_distance"] == "unknown"
+    assert sp["content_differs"] is True
+    assert sp["versions_equal"] is True
+    assert "bump the plugin version" in sp["advice"]
+
+
+def test_stale_plugin_disabled_plugin_not_reported(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Disable the plugin in ~/.claude/settings.json
+    claude_dir = fake_home / ".claude"
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "settings.json").write_text(json.dumps({
+        "enabledPlugins": {
+            "demo-plugin@test-marketplace": False
+        }
+    }))
+
+    mkt_dir = fake_home / ".claude" / "plugins" / "marketplaces" / "test-marketplace"
+    plugin_dir = mkt_dir / "plugins" / "demo-plugin"
+    (plugin_dir / ".claude-plugin").mkdir(parents=True)
+    (plugin_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "demo-plugin",
+        "version": "2.0.0",
+        "description": "Demo Plugin"
+    }))
+
+    cache_dir = fake_home / ".claude" / "plugins" / "cache" / "test-marketplace" / "demo-plugin" / "1.0.0"
+    (cache_dir / ".claude-plugin").mkdir(parents=True)
+    (cache_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "demo-plugin",
+        "version": "1.0.0",
+        "description": "Demo Plugin"
+    }))
+
+    installed_reg = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    installed_reg.parent.mkdir(parents=True, exist_ok=True)
+    installed_reg.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "demo-plugin@test-marketplace": [
+                {
+                    "scope": "user",
+                    "installPath": str(cache_dir),
+                    "version": "1.0.0",
+                }
+            ]
+        }
+    }))
+
+    st = run_env(["status"], fake_home)
+    assert st["environments"]["claude"]["global"]["stale_plugins"] == []
+
+
+
 
