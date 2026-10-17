@@ -85,3 +85,10 @@
 - **Focus files:** `frontend/src/**`
 - **Goal:** Spec §7 UI: thumbnails, text viewer, PDF download chip; paste/drop/picker in the task detail too.
 - **Verification:** Playwright on a scratch workspace: attach a `.log` and a `.pdf` to a note and to a task, open the text viewer, convert the note and see the attachments on the new task.
+
+### 09.10 - Edit proposed tasks before accepting a triage proposal
+
+- **Status:** `open` · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 09.4, 09.5 · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
+- **Origin:** 09.4/09.5 dispatch (2026-10-17): `run accept-triage` takes `--only` but no edits, while spec §4 says each proposed task can be edited before acceptance.
+- **Goal:** `run accept-triage ... --edits-file F` (JSON: per proposed task index, overridden title/category/priority/priority_reason/goal/steps/verification, validated like the proposal); the review panel's cards become editable and send the edits.
+- **Verification:** engine tests (edited fields land in the created task, invalid edits refused); live: edit one proposed task, accept, the task has the edited title.
