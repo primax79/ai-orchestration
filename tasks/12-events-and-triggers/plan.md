@@ -1,58 +1,74 @@
 # 12 - Events, orchestration sessions and triggers
 
-> **Derived from:** [`../specs/events-and-triggers.md`](../specs/events-and-triggers.md). Codex review of the spec comes first, before 12.1 is dispatched.
+> **Derived from:** [`../specs/events-and-triggers.md`](../specs/events-and-triggers.md). The §0, §0b and §0c amendments are normative. Plan rewritten on 2026-10-17 after the Codex review: 12.2 is split per file, and the lane dependencies are explicit.
 
 ## Tasks (One Task = One Commit)
 
-### 12.1 - Headless resumption facts (research, no code)
+### 12.1 - Headless resumption facts (merged into 07.5)
 
-- **Status:** `open` · **Size:** S · **Executor:** self · **Repo:** `ai-orchestration/`
-- **Goal:** Verify on the installed CLIs, for Claude (`-p --session-id` then `-p --resume`), Kilo (`run -s`) and Codex (`exec resume`):
-  - that a session resumed headlessly keeps its full context across many turns;
-  - what happens when two resumptions overlap (to justify the serialized queue);
-  - how cost and usage are reported per turn;
-  - how a turn is cancelled.
+- **Status:** `open` · **Size:** M · **Executor:** self · **Depends on:** 07.12
+- **Goal:** Task 07.5 (live capture with the real CLIs) also covers spec §0 and E8:
+  - resume from a fresh process, after a crash, after a cancel, with an invalid session id, with two overlapping resumes, and after a cwd change;
+  - normalized usage fields.
 
-  Record the facts in spec §0.
-- **Verification:** A live three-turn conversation per tool in a scratch repo, recorded as fixtures.
+  Kilo runs with disposable writable XDG state directories. The fixtures go to `scripts/fixtures/runs/`.
 
-### 12.2 - Core: event log (`events.jsonl`, emission in every locked mutation, `events tail`)
+### 12.2a - Core: event store (outbox, counter, chunk manifest, reconciliation, `events tail`)
 
-- **Status:** `open` · **Size:** L · **Depends on:** 11.4 and 10.4 (`tasks_engine.py` lane), 07.12 (runs lane) · **Repo:** `ai-orchestration/`
-- **Goal:** Spec §1, for `tasks_engine.py` (tasks, questions, inbox), `orchestration_runs.py` (runs) and `orchestration_config.py` (config).
+- **Status:** `open` · **Size:** L · **Depends on:** 10.4 (`tasks_engine.py` lane end) · **Repo:** `ai-orchestration/` (new module `scripts/orchestration_events.py`)
+- **Goal:** E1, E13 and §1 reading.
 
-### 12.3 - Core: session registry and the `questions apply` step
+### 12.2b - Emit events from `tasks_engine.py`
 
-- **Status:** `open` · **Size:** M · **Depends on:** 12.2
-- **Goal:** Spec §2 and §3, including the `origin-session` field.
+- **Status:** `open` · **Size:** M · **Depends on:** 12.2a
+- **Goal:** Events for tasks, questions and the inbox, through the outbox; the E11 application ledger with `questions apply`.
 
-### 12.4 - Core: trigger engine (`triggers run-once` and `triggers daemon`, rules, safety)
+### 12.2c - Emit events from `orchestration_runs.py` and extract the supervised-invocation primitive
 
-- **Status:** `open` · **Size:** L · **Depends on:** 12.3, 07.12
-- **Goal:** Spec §5. The answer-and-resume rule replaces task 08.6.
+- **Status:** `open` · **Size:** L · **Depends on:** 12.2a, 07.11 (runs lane end)
+- **Goal:** E1 and E4.
 
-### 12.5 - Core: headless orchestrator session (start, stop, pause, durable serialized turn queue, transcripts, event coalescing)
+### 12.2d - Emit events from `orchestration_config.py`; config writes under a lock
 
-- **Status:** `open` · **Size:** L · **Depends on:** 12.1, 12.3, 07.12 · **Repo:** `ai-orchestration/` (runs lane)
-- **Goal:** Spec §0, including role vs session, succession (automatic and manual rotation), the handoff prompt built from files, and `orchestrator.rotated` events.
-- **Verification:**
-  - Tests with stub agents:
-    - a resumption failure triggers succession;
-    - the new generation receives a handoff turn that contains the pending events and the open questions;
-    - the queue continues after succession;
-    - two concurrent enqueues never produce overlapping resumptions.
+- **Status:** `open` · **Size:** S · **Depends on:** 12.2a
+- **Goal:** E1 and E10 `config.changed`.
 
-### 12.8 - UI: orchestrator chat panel (transcript, streaming reply, cancel, pause, queue view)
+### 12.3 - Session registry and identifiers
 
-- **Status:** `open` · **Size:** L · **Depends on:** 12.5, 12.6 (frontend and backend lanes)
-- **Goal:** Spec §0 "Owner chat in the UI".
+- **Status:** `open` · **Size:** M · **Depends on:** 12.2b, 12.2c
+- **Goal:** §2 and E10, including the header amendments in specs 08 and 09.
 
-### 12.6 - UI: event stream over WebSocket, notification area, Triggers page, session chips, "awaiting application" group
+### 12.4 - Trigger engine
 
-- **Status:** `open` · **Size:** L · **Depends on:** 12.4 (frontend and backend lanes)
-- **Goal:** Spec §6.
+- **Status:** `open` · **Size:** L · **Depends on:** 12.3
+- **Goal:** §5, E7, and the reduced-capability policy for unattended turns (E3).
+
+### 12.5 - Headless orchestrator role (sessions, queue, turns, succession, bounds)
+
+- **Status:** `open` · **Size:** L · **Depends on:** 12.1, 12.3, 12.2c
+- **Goal:** §0, E2, E4, E5, E6, E8 and E9.
+
+### 12.9 - Orchestrator configuration: reassignment as succession, `ai-orch setup` engine shared with the `orchestration-setup` skill
+
+- **Status:** `open` · **Size:** M · **Depends on:** 12.5
+- **Goal:** §0b, core part.
+
+### 12.6 - UI: event and queue streams, notification area, Triggers page, session chips, "awaiting application" group
+
+- **Status:** `open` · **Size:** L · **Depends on:** 12.4, frontend lane after 10.5
+- **Goal:** §6 and E12.
+
+### 12.8 - UI: orchestrator chat panel
+
+- **Status:** `open` · **Size:** L · **Depends on:** 12.5, 12.6
+- **Goal:** §0 "Owner chat in the UI" and E12; proposed-action confirmations (E3).
+
+### 12.10 - UI: Orchestrator card in Config (current holder, Reassign…, pause/rotate) and first-run setup wizard
+
+- **Status:** `open` · **Size:** M · **Depends on:** 12.9, 12.8
+- **Goal:** §0b, UI part.
 
 ### 12.7 - VS Code: event watcher and notifications
 
-- **Status:** `open` · **Size:** S · **Depends on:** 12.6 (VS Code lane)
-- **Goal:** Spec §1 "Reading" and §6, in the extension.
+- **Status:** `open` · **Size:** S · **Depends on:** 12.6, VS Code lane after 10.3
+- **Goal:** §1 "Reading" (E13) and §6.

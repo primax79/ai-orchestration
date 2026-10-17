@@ -44,6 +44,59 @@
   - **References survive succession:** `origin-session` on questions, runs and notes points to the **role** (`orchestrator`), not to a tool session id, so `resume-origin` always reaches the current generation.
 - **`origin-session`** on questions, runs and notes is `orchestrator` (the role) when the orchestrator created them. `resume-origin` therefore means "enqueue a turn for the orchestrator", or "continue the run" when the origin is a run.
 
+## 0b. Orchestrator configuration and reassignment (owner request, 2026-10-17; normative)
+
+- **`routing.default_orchestrator` names the tool that holds the orchestrator role**, and `routing.default_executor` the default executor that the orchestrator delegates to. The Config tab shows them in an "Orchestrator" card, together with the current role holder: tool, generation, session id, turns, last usage, and status (`active`, `paused`, `rotating`).
+- **Reassigning the orchestrator** (changing `default_orchestrator`, or "Reassign…" in the card) is a succession with a tool change:
+  - **Preview:** shows the config diff and the plan "generation N (claude) → N+1 (kilo), with a handoff turn"; the plan has a hash.
+  - **Confirm:** writes the config, then rotates the role (§0 succession), with the reason `reassigned`.
+  - The queue and the cursor carry over; the old session is retired.
+- **First-run setup (wizard)** runs when the workspace has no project config, or on demand. The UI version and the CLI version (`ai-orch setup`) share one engine with the `orchestration-setup` skill. The steps:
+  1. detect the installed tools, with their versions and auth status;
+  2. choose the orchestrator tool and the default executor;
+  3. choose the verification mode and the cross-agent order;
+  4. choose models per profile, prefilled from the global config;
+  5. choose the scope: project-local (`.ai-orchestration.local.toml`) or global;
+  6. choose the permission policy, showing the Q001 defaults;
+  7. preview the whole config diff → apply → optionally start the orchestrator.
+
+  Every write goes through preview → confirm with hashes.
+- `orchestrator start` refuses when the routing points to a tool that is not enabled or not installed, and the error names the setup command.
+
+## 0c. Amendments after the Codex review (2026-10-17; normative, override the sections they name)
+
+- **E1 — events use an outbox, not "iff" (§1).**
+  - **Write path:** each mutation first writes an outbox record `prepared` (mutation id, intended changes, event payload), applies its file changes (each file carrying the mutation id where the format allows), then marks the record `committed`. Readers only see committed events.
+  - **Recovery:** startup reconciliation commits a `prepared` record whose changes are fully applied, or rolls it back (it restores the pre-images stored in the record) when they are not.
+  - **Locking:** one workspace event lock with one durable counter serves every producer (tasks, runs, config). The lock order is task lock → run lock → event lock.
+- **E2 — the cursor belongs to the role; deliveries are batches (§0, §2).**
+  - The role cursor lives in `orchestrator.json`. Each delivery is an immutable batch: an id, a list of event ids, and a state `pending`, `running`, `acknowledged` or `dead`.
+  - The cursor advances only after the turn's transcript is durably stored. A retry reuses the same batch id.
+  - Agent-triggered core mutations carry an idempotency key (`batch_id:n`), and the core refuses a repeated key.
+  - Succession inherits the outstanding batches; it does not rebuild them from the cursor.
+- **E3 — unattended turns run with reduced capabilities (§0, §5).**
+  - Event-batch turns (not owner chat turns) get a **read-mostly policy**: file read, `ai-orch` read commands, and `ai-orch questions ask` and `notify`.
+  - Delegation (kilo-mcp `implement`), shell, config changes, task transitions and writes are **not** allowed. The turn proposes them as actions that the owner confirms in the UI (one click; the proposed action is recorded with its hash).
+  - Owner chat turns use the `orchestrate` policy.
+  - **Untrusted content:** every piece of file or event content placed in a prompt is wrapped as quoted, typed data with its provenance, under an explicit instruction that it is data, not instructions.
+- **E4 — a turn is not a run (§0).** Turns are their own record type (`orchestrator/turns/<turn_id>/`). A shared **supervised-invocation primitive** (adapters, process groups, logging, cancel) is extracted from `orchestration_runs.py`; runs and turns wrap it with their own validation and lifecycle.
+- **E5 — every turn has bounds.** A wall-clock timeout (default 15 min), an output/log cap, a provider budget where the CLI supports one, and a tool-call budget enforced by the supervisor. A turn that hits a bound is killed (whole process group) and moved to `dead`, which is visible in the UI.
+- **E6 — the queue protocol.**
+  - Enqueue is atomic (temp file + rename).
+  - Each item has a lifecycle state `queued`, `claimed`, `running`, `done`, `failed` or `dead`, a worker lease with stale-claim recovery, and a persisted retry count.
+  - Owner messages take priority, but at least one event batch runs after every 3 owner turns.
+  - Owner cancellation moves the item to `cancelled`.
+- **E7 — trigger state per (rule, event).** The state is `pending`, `fired`, `skipped`, `retry` or `dead`, and every firing has a deterministic firing id. The scan watermark advances only when every applicable rule has reached a terminal state. The daemon is a singleton (lock and lease). Rate limits are persisted token buckets (one for agent launches, a separate one for notifications), and deferred items carry `not_before`.
+- **E8 — rotation measures context explicitly.** 12.1 normalizes provider usage into `input_tokens`, `cache_read`, `cache_write`, `output_tokens` and `estimated_context_tokens`. Rotation uses the estimated current context (or an explicit compaction signal), never a sum of per-turn inputs. Cost is tracked separately.
+- **E9 — succession is fenced.** Under the orchestrator lock the role goes `active → rotating → active`, with a generation fencing token. The new session is created and its handoff completed **before** it becomes current; the old one is retired afterwards. If the bootstrap fails, the rotation rolls back. Output carrying a stale generation token is rejected.
+- **E10 — identifiers.**
+  - Four distinct ids: `role_id` (`orchestrator`), `generation`, `registry_session_id` and `provider_session_id`.
+  - `origin-session` is added explicitly to the question header (after `origin-run`), to the inbox note header (after `processed-by`) and to `run.json`. When both an origin run and an origin role exist, the run takes precedence for `resume-origin`.
+  - `config.changed` covers the project config only; a global config change is announced per workspace when the next turn reads it.
+- **E11 — the application ledger.** Applying an answer is recorded in an append-only ledger, `tasks/questions/applied.jsonl` (`{question, by, at, ref}`), not inside `## Answer`, so spec 08's answer grammar does not change. Questions never move (spec 11 S3); this also fixes 11.4.
+- **E12 — the UI streaming contract.** There are three authenticated WebSocket message families: domain events (`event`, with `seq`), queue state (`queue`), and turn output (`turn_output`, with a monotonic per-turn offset). On reconnect the client replays from its last `seq` and offset. Turn output is persisted before the turn is acknowledged.
+- **E13 — readers use the core.** The event log is read through `ai-orch events tail`, which uses a chunk manifest updated under the event lock and tolerates a truncated final line. The extension watches the manifest, not one file.
+
 ## 1. Events (core)
 
 **Log.** The core appends every relevant fact to `<workspace>/.ai-orchestration/events.jsonl`:
