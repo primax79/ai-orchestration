@@ -164,3 +164,16 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
 | Key | Question | Blocks | Decider |
 | --- | --- | --- | --- |
 | R11 | Filed as [Q001](../questions/Q001-which-permission-policy-should-headless-claude-run.md). | 07.3 default, 07.5 | owner |
+
+### 07.11 - Batch runs for microtasks
+
+- **Status:** `open` · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 10.4 · **Repo:** `ai-orchestration/`
+- **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
+- **Goal:** `../specs/timeline-gantt.md` §5 "Batch runs":
+  - `run start --batch IDS` takes microtasks of one target repo only (refused otherwise);
+  - one worktree;
+  - the prompt lists the microtasks, with one commit per microtask required;
+  - the supervisor maps commits to microtasks (by a `T###` prefix in the commit message);
+  - each microtask's state is set separately;
+  - `mark-delivered` and verify work per microtask or for the whole batch.
+- **Verification:** Tests with the stub agent: three microtasks → three commits → each `in progress` → `delivered`; a microtask without a commit stays `in progress`, with the reason recorded.

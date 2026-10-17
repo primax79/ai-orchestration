@@ -41,3 +41,18 @@
 - **Focus files:** `src/views/dashboard-panel.ts`, `src/cli-client.ts`, `dist-webview/**`
 - **Goal:** Spec §3 "VS Code".
 - **Verification:** Live in an Extension Development Host.
+
+### 10.4 - Engine: microtasks (`micro` category, reduced schema, `tasks micro`, `tasks promote`, XS size)
+
+- **Status:** `open` · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 10.1 (same file) · **Repo:** `ai-orchestration/`
+- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md`, `plugins/architect-side/skills/task-pipeline/SKILL.md` (document the microtask form)
+- **Goal:** Spec §5: everything except batch runs and UI.
+- **Verification:**
+  - Tests: a microtask validates with the reduced header and `## What` only; it appears in `tasks graph` with size `XS`; `promote` produces a full task that validates and keeps its id and the dependencies that point to it; `tasks micro` allocates ids concurrently without clashes.
+
+### 10.5 - UI: microtask quick-add, XS pills, "Promote"
+
+- **Status:** `open` · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 10.4, 10.2 (frontend lane) · **Repo:** `ai-orchestration-ui/`
+- **Focus files:** `backend/server.py`, `frontend/src/**`
+- **Goal:** Spec §5 "Creation" (UI) and the timeline pill. Also: in the inbox tab (09.3), "Convert to microtask" for `bug` notes, when 09.3 has landed.
+- **Verification:** Live with Playwright: quick-add a bug microtask → it appears as an XS pill in the ready queue → Promote → it becomes a full card.

@@ -72,3 +72,21 @@ The hash covers the task bundle for `T###`, or the plan file for `NN.T`. Every c
 
 - Dates, estimates and calendars.
 - Reordering by drag. Priority and dependencies are the only ordering inputs.
+
+## 5. Microtasks (added 2026-10-17)
+
+A **microtask** is a lightweight emergent task for very small work: a bug, a fix, a chore, a docs touch-up. It is **not a separate type**. It is a `T###` in a lighter form, so dependencies, priority, timeline, runs and blocking questions all apply unchanged.
+
+- **Location:** `tasks/micro/T###-<slug>.md`. `micro` is a normal category, with its own `README.md`.
+- **Header** (closed set, in this order): `id`, `title`, `kind` (`bug`, `fix`, `chore`, `docs`), `priority`, `state`, `executor`, `paths`, `depends-on`. The other core fields are not required.
+- **Body:** one required section, `## What`. It says what to change, and optionally "done when …". No Goal/Steps/Verification.
+- **Size** is always `XS`, the weight below `S` (S=1, M=2, L=3, XS=0.5). In the timeline it is drawn as a small pill.
+- **Validator:** `tasks validate` recognises the `micro` category and applies this reduced schema. A microtask that grows past the format (it needs steps or a verification plan) is **promoted**: `tasks promote T###` moves it to a chosen category and adds the missing header fields and sections, keeping the id and the links.
+- **Creation:**
+  - `tasks micro --title T --kind bug [--priority P2] [--paths …]` allocates the id under the task-write lock;
+  - from the inbox (spec 09), a `bug` note can be converted directly into a microtask;
+  - in the UI, a one-line quick-add form sits in the Backlog and Timeline tabs.
+- **Batch runs** (initiative 07 follow-up):
+  - `run start --batch T014,T015,T016` sends several microtasks of the **same target repo** to one executor in one run, with one commit per microtask;
+  - each microtask's state is tracked separately;
+  - verification is per microtask, but a single verify run can check the whole batch.
