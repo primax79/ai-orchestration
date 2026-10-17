@@ -70,5 +70,9 @@
   - The Backlog tab gets a view switcher: **Queue**, **Kanban**, **Tree** (11.3), **Timeline** (10.2). The last chosen view is remembered (localStorage).
   - **Queue** = "what to start next": at most 5 compact rows with id, title, priority, size and kind, plus a one-line explanation ("tasks marked next-up, or the first ready tasks by priority once the timeline engine lands"). There are no cards.
   - The KPI counters become a single compact strip.
+  - **Kanban (owner feedback, 2026-10-17):**
+    - the Done column is hidden by default, with a toggle button ("Show done") whose state is remembered;
+    - Delivered and Verified share one column: Delivered cards on top, Verified cards below, with a thin divider and a sub-heading for each;
+    - same for the column-toggle of Dropped, if present.
   - Until 10.1 lands, Queue uses `next-up: yes` emergent tasks only, never `NN.T`; after 10.1 it uses the `ready_queue`.
 - **Verification:** Live with Playwright on this repo's `tasks/`: the Queue view shows at most 5 rows; switching views keeps the filters; at 1000 px every view fits without horizontal scroll.
