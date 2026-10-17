@@ -59,7 +59,7 @@
 
 ### 09.6 - VS Code: inbox tab parity (paste and upload through postMessage)
 
-- **Status:** `in progress` (2026-10-17; claude; kilo, vscode-ai-orchestration worktree task/09.6-inbox-vscode) · **Profile:** `bulk-execution` · **Depends on:** 09.3, 06.9 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-17; claude; merged in vscode 0.3.0; owner live check in VS Code pending) · **Profile:** `bulk-execution` · **Depends on:** 09.3, 06.9 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/views/dashboard-panel.ts`, `src/cli-client.ts`, `dist-webview/**`
 - **Goal:** Spec §5 "VS Code".
 - **Verification:** Live in an Extension Development Host: paste a screenshot into a note; the file appears in `attachments/`.

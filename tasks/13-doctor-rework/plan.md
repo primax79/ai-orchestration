@@ -8,7 +8,7 @@
 
 ### 13.1 - P1-a: stop the no-op "Resolve" loop
 
-- **Status:** `in progress` (2026-10-17; claude; kilo, ai-orchestration-ui worktree task/13.1-doctor-ui) missing) still to do) · **Size:** S · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
+- **Status:** `verified` (2026-10-17; claude; live: Doctor shows one Resolve (the single fixable finding) and the rest as advice) · **Size:** S · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
 - **Goal:**
   - each conflict carries `fixable: true|false`;
   - the UI shows red and "Resolve…" only when the plan contains executable actions;
@@ -31,7 +31,7 @@
 
 ### 13.4 - P1-d: detect stale plugin copies
 
-- **Status:** `in progress` (2026-10-17; claude; kilo, ai-orchestration worktree task/13.4-stale-plugins) · **Size:** S/M
+- **Status:** `delivered` (2026-10-17; claude; Kilo e4a710b, 44 tests, live: finds third-party-skills@agentic-coding-kit 8 commits behind; merge waits for another session's uncommitted edit to orchestration_env.py) · **Size:** S/M
 - **Goal:** Report Claude plugin copies that are behind their source, with the commit distance and the unchanged version string.
 
 ### 13.5 - P2-a + P2-d: history-aware classification of legacy installs (`outdated-legacy` + "Update")
