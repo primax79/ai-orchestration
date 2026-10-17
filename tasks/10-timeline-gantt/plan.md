@@ -6,7 +6,7 @@
 
 ### 10.1 - Engine: `tasks graph` (columns, ready queue, heaviest chain, Mermaid), `size` field, `tasks set-priority`, `tasks set-size`, `tasks set-deps`, cycle check
 
-- **Status:** `in progress` (2026-10-17; claude; kilo, worktree task/10.1-graph) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (child parser; same file, `tasks_engine.py` lane) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-18; claude; merged) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (child parser; same file, `tasks_engine.py` lane) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md` (the `size` extension field)
 - **Goal:** Spec §2. Also add `**Size:**` to the open tasks of the plans 06–10, using these estimates: 06.8 L, 06.9 M, 07.4 L, 07.5 M, 07.6 M, 07.7 L, 07.8 M, 07.9 S, 07.10 S, 08.3 S, 08.4 M, 08.5 S, 08.6 S, 09.1 M, 09.2 M, 09.3 L, 09.4 M, 09.5 M, 09.6 S, 10.1 M, 10.2 L, 10.3 S.
 - **Verification:**
@@ -23,7 +23,7 @@
 
 ### 10.2 - UI: graph and edit endpoints and the Timeline tab (arrows, ready queue, priority and dependency editing)
 
-- **Status:** `open` · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 10.1, 06.8 (frontend lane; can run before 08.4 when 08.3 is late) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `in progress` (2026-10-18; claude; kilo, ai-orchestration-ui worktree task/10.2-timeline) · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 10.1, 06.8 (frontend lane; can run before 08.4 when 08.3 is late) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`, `frontend/src/**`
 - **Goal:** Spec §3. Endpoints: `GET /api/tasks/graph`, and `POST /api/tasks/{id}/priority`, `/size` and `/deps`, each with a `/preview` variant.
 - **Verification:** Live with the Playwright MCP on a scratch copy of this repo's `tasks/`:
@@ -44,7 +44,7 @@
 
 ### 10.4 - Engine: microtasks (`micro` category, reduced schema, `tasks micro`, `tasks promote`, XS size), kind and labels
 
-- **Status:** `open` · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 10.1 (same file) · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/10.4-microtasks) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 10.1 (same file) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md`, `plugins/architect-side/skills/task-pipeline/SKILL.md` (document the microtask form)
 - **Goal:** Spec §5 (everything except batch runs and UI) and spec §6 engine part:
   - `kind` and `labels` fields (`T###` header extensions, `NN.T` bullets);
