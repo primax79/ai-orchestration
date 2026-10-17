@@ -15,7 +15,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 5 | 05 | [Standalone CLI (`ai-orch`), From-Scratch Installer & Extension Control Plane](done/05-cli-and-ui-handoff/plan.md) | done | 02, 03 | L |
 | 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](06-control-plane-safety/plan.md) | in progress (done: 06.1–06.8, 06.10; to verify: 06.9) | 05 | L |
 | 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | in progress (done: 07.1–07.4, 07.6–07.8, 07.10, 07.12; running: 07.11; to verify: 07.5, 07.9) | 05, 06 | L |
-| 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1–08.4; running: 08.6; to verify: 08.5, 08.7) | 06 | M |
+| 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1–08.4; to verify: 08.5–08.7) | 06 | M |
 | 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1–09.3, 09.7; to verify: 09.4–09.6, 09.8–09.9, 09.11) | 06 (07 for agent triage) | M |
 | 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | in progress (done: 10.1, 10.4; to verify: 10.2–10.3, 10.6) | 06, 09.1 | S |
 | 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | in progress (done: 11.1–11.2, 11.5; running: 11.3, 11.6) | 06, 09.1 | M |
@@ -56,7 +56,7 @@ Evolutions and refinements to the orchestration skills (`orchestration-methodolo
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T021 | P2 | [Precedence between orchestration-workflow and kilo-mcp-orchestrator; fix binding template drift](methodology/T021-precedence-between-orchestration-workflow-and-kilo.md) | in progress | kilo | - |
+| T021 | P2 | [Precedence between orchestration-workflow and kilo-mcp-orchestrator; fix binding template drift](methodology/T021-precedence-between-orchestration-workflow-and-kilo.md) | delivered | kilo | - |
 
 ### server-and-bindings
 

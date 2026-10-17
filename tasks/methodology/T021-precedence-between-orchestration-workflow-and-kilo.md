@@ -6,13 +6,15 @@
 - priority: P2
 - priority-reason: Owner's open answer to Q003; T018 shows the bound skill lost verification modes, decision table and state table
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: -
 - paths: plugins/architect-side/skills/orchestration-workflow/, ../kilo-mcp/bindings/orchestration-workflow.json, ../kilo-mcp/plugins/architect-side/skills/kilo-mcp-orchestrator/
 - handoff: Read tasks/methodology/T021-precedence-between-orchestration-workflow-and-kilo.md, do the open steps, run the Verification, update the task and the registry.
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
