@@ -180,7 +180,7 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
 
 ### 07.12 - Built-in per-mode Claude allow-list (Q001 decision A)
 
-- **Status:** `open` · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.10 (same file) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.10 (same file) · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`, `plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py` (headless schema: `allowed_tools` may be per mode), `docs/05-orchestration-config-schema.md`
 - **Goal:**
   - Q001 answer A: the Claude adapter ships a default `allowed_tools` per mode, used when the config sets none, so a launch is no longer refused (R11) for lack of an allow-list.

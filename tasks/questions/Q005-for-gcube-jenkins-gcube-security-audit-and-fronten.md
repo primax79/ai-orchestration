@@ -2,7 +2,7 @@
 
 - id: Q005
 - question: For gcube-jenkins, gcube-security-audit and frontend-design, which copy is canonical: the standalone one or the plugin one?
-- status: open
+- status: answered
 - blocks: -
 - decider: owner
 - asked-by: claude:orchestration
@@ -23,6 +23,6 @@ The standalone copies in ~/.claude/skills carry extra content compared with the 
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: C
+- answered-by: owner
+- answered: 2026-10-17

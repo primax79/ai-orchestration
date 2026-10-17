@@ -2,7 +2,7 @@
 
 - id: Q002
 - question: Were the project-scope skills in ai-orchestration (.claude, .codex, .kilo) installed on purpose, and should they stay?
-- status: open
+- status: answered
 - blocks: -
 - decider: owner
 - asked-by: claude:orchestration
@@ -23,6 +23,6 @@ At 13:13 today skill copies and a project MCP config appeared, untracked, in ai-
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-17

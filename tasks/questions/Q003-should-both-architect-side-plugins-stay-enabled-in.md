@@ -2,7 +2,7 @@
 
 - id: Q003
 - question: Should both architect-side plugins stay enabled in Claude, or should Claude keep only one?
-- status: open
+- status: answered
 - blocks: -
 - decider: owner
 - asked-by: claude:orchestration
@@ -23,6 +23,11 @@ Claude loads architect-side@ai-orchestration (generic orchestration-workflow) an
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: open
+- answered-by: owner
+- answered: 2026-10-17
+
+```text
+non mi è chiaro se siano incompatibili in assoluto, o solo nella formulazione corrente
+eventualmente, riusciamo a dare priorità tra di loro, o fare modo via prompt di indicare come regolarsi se esistono assieme?
+```

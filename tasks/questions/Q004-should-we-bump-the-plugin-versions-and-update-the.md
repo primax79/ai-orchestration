@@ -2,7 +2,7 @@
 
 - id: Q004
 - question: Should we bump the plugin versions and update the Claude plugins now?
-- status: open
+- status: answered
 - blocks: -
 - decider: owner
 - asked-by: claude:orchestration
@@ -23,6 +23,6 @@ Claude runs architect-side@ai-orchestration 0.3.0 and architect-side@kilo-mcp 0.
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-17
