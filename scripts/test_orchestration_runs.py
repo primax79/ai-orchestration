@@ -546,10 +546,25 @@ def sample_workspace(tmp_path: pathlib.Path) -> pathlib.Path:
 
     subprocess.run(["git", "add", "."], cwd=str(ws), check=True)
     subprocess.run(["git", "commit", "-m", "initial commit"], cwd=str(ws), check=True)
+    subprocess.run(["git", "status"], cwd=str(ws), check=True, capture_output=True)
     return ws
 
 
+def get_tree_map(root: pathlib.Path) -> dict[str, bytes]:
+    res = {}
+    for dirpath, _, filenames in os.walk(root):
+        for fname in filenames:
+            fpath = pathlib.Path(dirpath) / fname
+            rel = fpath.relative_to(root).as_posix()
+            try:
+                res[rel] = fpath.read_bytes()
+            except OSError:
+                pass
+    return res
+
+
 def test_preview_side_effect_free(sample_workspace: pathlib.Path):
+    map_before = get_tree_map(sample_workspace)
     tree_hash_before = compute_tree_hash(sample_workspace)
 
     # Run preview via CLI
@@ -571,7 +586,13 @@ def test_preview_side_effect_free(sample_workspace: pathlib.Path):
     assert "plan_hash" in data
 
     # Assert tree hash after is byte-identical
+    map_after = get_tree_map(sample_workspace)
     tree_hash_after = compute_tree_hash(sample_workspace)
+    if tree_hash_before != tree_hash_after:
+        added = set(map_after) - set(map_before)
+        removed = set(map_before) - set(map_after)
+        modified = [k for k in set(map_before) & set(map_after) if map_before[k] != map_after[k]]
+        raise AssertionError(f"Tree hash differs! added={added}, removed={removed}, modified={modified}")
     assert tree_hash_before == tree_hash_after
 
     # Assert .ai-orchestration directory was NOT created
@@ -941,53 +962,63 @@ def test_cancel_and_grandchild_process_group_killed(sample_workspace: pathlib.Pa
     data_start = json.loads(res_start.stdout)
     run_id = data_start["run_id"]
 
-    # Wait for grandchild PID to be written
-    deadline = time.time() + 10.0
-    while time.time() < deadline and not gc_pid_file.is_file():
-        time.sleep(0.1)
+    gc_pid = None
+    agent_pid = None
+    try:
+        # Wait for grandchild PID to be written
+        deadline = time.time() + 10.0
+        while time.time() < deadline and not gc_pid_file.is_file():
+            time.sleep(0.1)
 
-    assert gc_pid_file.is_file()
-    gc_pid = int(gc_pid_file.read_text(encoding="utf-8").strip())
+        assert gc_pid_file.is_file()
+        gc_pid = int(gc_pid_file.read_text(encoding="utf-8").strip())
 
-    # Get agent pid
-    record = load_run_record(sample_workspace, run_id)
-    assert record is not None
-    agent_pid = record["agent"]["pid"]
-    assert agent_pid is not None
+        # Get agent pid
+        record = load_run_record(sample_workspace, run_id)
+        assert record is not None
+        agent_pid = record["agent"]["pid"]
+        assert agent_pid is not None
 
-    # Check both grandchild and agent are alive
-    assert is_process_alive(gc_pid) is True
-    assert is_process_alive(agent_pid) is True
+        # Check both grandchild and agent are alive
+        assert is_process_alive(gc_pid) is True
+        assert is_process_alive(agent_pid) is True
 
-    # Cancel the run
-    cmd_cancel = [
-        str(BIN_AI_ORCH),
-        "run",
-        "cancel",
-        run_id,
-        "--workspace",
-        str(sample_workspace),
-        "--json",
-    ]
-    res_cancel = subprocess.run(cmd_cancel, capture_output=True, text=True, check=True)
-    data_cancel = json.loads(res_cancel.stdout)
-    assert data_cancel["ok"] is True
-    assert data_cancel["status"] == "cancelled"
+        # Cancel the run
+        cmd_cancel = [
+            str(BIN_AI_ORCH),
+            "run",
+            "cancel",
+            run_id,
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ]
+        res_cancel = subprocess.run(cmd_cancel, capture_output=True, text=True, check=True)
+        data_cancel = json.loads(res_cancel.stdout)
+        assert data_cancel["ok"] is True
+        assert data_cancel["status"] == "cancelled"
 
-    # Both agent and grandchild must now be dead
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        if not is_process_alive(gc_pid) and not is_process_alive(agent_pid):
-            break
-        time.sleep(0.1)
+        # Both agent and grandchild must now be dead
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if not is_process_alive(gc_pid) and not is_process_alive(agent_pid):
+                break
+            time.sleep(0.1)
 
-    assert is_process_alive(gc_pid) is False
-    assert is_process_alive(agent_pid) is False
+        assert is_process_alive(gc_pid) is False
+        assert is_process_alive(agent_pid) is False
 
-    # Status in run.json must be cancelled
-    updated_rec = load_run_record(sample_workspace, run_id)
-    assert updated_rec is not None
-    assert updated_rec["status"] == "cancelled"
+        # Status in run.json must be cancelled
+        updated_rec = load_run_record(sample_workspace, run_id)
+        assert updated_rec is not None
+        assert updated_rec["status"] == "cancelled"
+    finally:
+        for p in (gc_pid, agent_pid):
+            if p:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
 
 
 def test_reconcile_supervisor_sigkill_marks_lost_and_kills_agent_group(
@@ -1019,62 +1050,77 @@ def test_reconcile_supervisor_sigkill_marks_lost_and_kills_agent_group(
     res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
     run_id = json.loads(res_start.stdout)["run_id"]
 
-    # Wait for running
-    deadline = time.time() + 10.0
-    record = None
-    while time.time() < deadline:
-        record = load_run_record(sample_workspace, run_id)
-        if record and record.get("status") == "running" and gc_pid_file.is_file():
-            break
-        time.sleep(0.1)
+    gc_pid = None
+    agent_pid = None
+    sup_pid = None
+    try:
+        # Wait for running
+        deadline = time.time() + 10.0
+        record = None
+        while time.time() < deadline:
+            record = load_run_record(sample_workspace, run_id)
+            if record and record.get("status") == "running" and gc_pid_file.is_file():
+                break
+            time.sleep(0.1)
 
-    assert record is not None
-    assert record["status"] == "running"
-    sup_pid = record["supervisor"]["pid"]
-    agent_pid = record["agent"]["pid"]
-    gc_pid = int(gc_pid_file.read_text(encoding="utf-8").strip())
+        assert record is not None
+        assert record["status"] == "running"
+        sup_pid = record["supervisor"]["pid"]
+        agent_pid = record["agent"]["pid"]
+        gc_pid = int(gc_pid_file.read_text(encoding="utf-8").strip())
 
-    assert is_process_alive(sup_pid) is True
-    assert is_process_alive(agent_pid) is True
-    assert is_process_alive(gc_pid) is True
+        assert is_process_alive(sup_pid) is True
+        assert is_process_alive(agent_pid) is True
+        assert is_process_alive(gc_pid) is True
 
-    # SIGKILL the supervisor!
-    os.kill(sup_pid, signal.SIGKILL)
-    time.sleep(0.2)
-    assert is_process_alive(sup_pid) is False
+        # SIGKILL the supervisor!
+        os.kill(sup_pid, signal.SIGKILL)
+        time.sleep(0.2)
+        assert is_process_alive(sup_pid) is False
 
-    # Calling list triggers reconciliation on read
-    cmd_list = [
-        str(BIN_AI_ORCH),
-        "run",
-        "list",
-        "--workspace",
-        str(sample_workspace),
-        "--json",
-    ]
-    res_list = subprocess.run(cmd_list, capture_output=True, text=True, check=True)
-    data_list = json.loads(res_list.stdout)
-    target_entry = next((r for r in data_list["runs"] if r["run_id"] == run_id), None)
-    assert target_entry is not None
-    assert target_entry["status"] == "lost"
+        # Calling list triggers reconciliation on read
+        cmd_list = [
+            str(BIN_AI_ORCH),
+            "run",
+            "list",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ]
+        res_list = subprocess.run(cmd_list, capture_output=True, text=True, check=True)
+        data_list = json.loads(res_list.stdout)
+        target_entry = next((r for r in data_list["runs"] if r["run_id"] == run_id), None)
+        assert target_entry is not None
+        assert target_entry["status"] == "lost"
 
-    # Verify agent and grandchild were killed!
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        if not is_process_alive(agent_pid) and not is_process_alive(gc_pid):
-            break
-        time.sleep(0.1)
+        # Verify agent and grandchild were killed!
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if not is_process_alive(agent_pid) and not is_process_alive(gc_pid):
+                break
+            time.sleep(0.1)
 
-    assert is_process_alive(agent_pid) is False
-    assert is_process_alive(gc_pid) is False
+        assert is_process_alive(agent_pid) is False
+        assert is_process_alive(gc_pid) is False
+    finally:
+        for p in (gc_pid, agent_pid, sup_pid):
+            if p:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
 
 
 def test_reconcile_pid_reuse_simulated_does_not_kill(sample_workspace: pathlib.Path):
     proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
     orig_cfg = proj_cfg.read_text(encoding="utf-8")
 
+    fifo_path = sample_workspace / "helper.fifo"
+    os.mkfifo(fifo_path)
+    fifo_fd = os.open(str(fifo_path), os.O_RDWR)
+
     proj_cfg.write_text(
-        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--sleep", "30"]\n',
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "-c", "import sys; open(sys.argv[1], \\"rb\\").read()", "{fifo_path}"]\n',
         encoding="utf-8",
     )
 
@@ -1107,38 +1153,42 @@ def test_reconcile_pid_reuse_simulated_does_not_kill(sample_workspace: pathlib.P
     sup_pid = record["supervisor"]["pid"]
     agent_pid = record["agent"]["pid"]
 
-    # Mutate agent start_time in run.json to simulate PID reuse
-    run_file = sample_workspace / ".ai-orchestration" / "runs" / run_id / "run.json"
-    raw_data = json.loads(run_file.read_text(encoding="utf-8"))
-    raw_data["agent"]["start_time"] = "2000-01-01T00:00:00"
-    run_file.write_text(json.dumps(raw_data, indent=2), encoding="utf-8")
-
-    # Kill supervisor
-    os.kill(sup_pid, signal.SIGKILL)
-    time.sleep(0.2)
-
-    # Trigger reconcile via list
-    cmd_list = [
-        str(BIN_AI_ORCH),
-        "run",
-        "list",
-        "--workspace",
-        str(sample_workspace),
-        "--json",
-    ]
-    res_list = subprocess.run(cmd_list, capture_output=True, text=True, check=True)
-    entry = next((r for r in json.loads(res_list.stdout)["runs"] if r["run_id"] == run_id), None)
-    assert entry is not None
-    assert entry["status"] == "lost"
-
-    # Agent must NOT be killed because start_time differed!
-    assert is_process_alive(agent_pid) is True
-
-    # Cleanup manually
     try:
-        os.kill(agent_pid, signal.SIGKILL)
-    except OSError:
-        pass
+        # Mutate agent start_time in run.json to simulate PID reuse
+        run_file = sample_workspace / ".ai-orchestration" / "runs" / run_id / "run.json"
+        raw_data = json.loads(run_file.read_text(encoding="utf-8"))
+        raw_data["agent"]["start_time"] = "2000-01-01T00:00:00"
+        run_file.write_text(json.dumps(raw_data, indent=2), encoding="utf-8")
+
+        # Kill supervisor
+        os.kill(sup_pid, signal.SIGKILL)
+        time.sleep(0.2)
+
+        # Trigger reconcile via list
+        cmd_list = [
+            str(BIN_AI_ORCH),
+            "run",
+            "list",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ]
+        res_list = subprocess.run(cmd_list, capture_output=True, text=True, check=True)
+        entry = next((r for r in json.loads(res_list.stdout)["runs"] if r["run_id"] == run_id), None)
+        assert entry is not None
+        assert entry["status"] == "lost"
+
+        # Agent must NOT be killed because start_time differed!
+        assert is_process_alive(agent_pid) is True
+    finally:
+        try:
+            os.close(fifo_fd)
+        except Exception:
+            pass
+        try:
+            os.kill(agent_pid, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 def test_prompt_not_in_ps_args(sample_workspace: pathlib.Path):
@@ -1181,13 +1231,18 @@ def test_prompt_not_in_ps_args(sample_workspace: pathlib.Path):
     assert record is not None
     agent_pid = record["agent"]["pid"]
 
-    # Check ps -o args= -p <agent_pid>
-    res_ps = subprocess.run(["ps", "-o", "args=", "-p", str(agent_pid)], capture_output=True, text=True, check=True)
-    ps_output = res_ps.stdout
-    assert canary not in ps_output
-
-    # Cancel to cleanup
-    subprocess.run([str(BIN_AI_ORCH), "run", "cancel", run_id, "--workspace", str(sample_workspace)], check=True)
+    try:
+        # Check ps -o args= -p <agent_pid>
+        res_ps = subprocess.run(["ps", "-o", "args=", "-p", str(agent_pid)], capture_output=True, text=True, check=True)
+        ps_output = res_ps.stdout
+        assert canary not in ps_output
+    finally:
+        # Cancel to cleanup
+        subprocess.run([str(BIN_AI_ORCH), "run", "cancel", run_id, "--workspace", str(sample_workspace)], check=False)
+        try:
+            os.kill(agent_pid, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 def test_two_concurrent_start_for_same_task(sample_workspace: pathlib.Path):
@@ -1226,16 +1281,19 @@ def test_two_concurrent_start_for_same_task(sample_workspace: pathlib.Path):
     successful = r1 if r1.returncode == 0 else r2
     failed = r2 if r1.returncode == 0 else r1
 
-    succ_data = json.loads(successful.stdout)
-    assert succ_data["ok"] is True
-    run_id = succ_data["run_id"]
+    run_id = None
+    try:
+        succ_data = json.loads(successful.stdout)
+        assert succ_data["ok"] is True
+        run_id = succ_data["run_id"]
 
-    fail_data = json.loads(failed.stdout)
-    assert fail_data["ok"] is False
-    assert fail_data["reason"] == "same-task-active"
-
-    # Cleanup
-    subprocess.run([str(BIN_AI_ORCH), "run", "cancel", run_id, "--workspace", str(sample_workspace)], check=True)
+        fail_data = json.loads(failed.stdout)
+        assert fail_data["ok"] is False
+        assert fail_data["reason"] == "same-task-active"
+    finally:
+        # Cleanup
+        if run_id:
+            subprocess.run([str(BIN_AI_ORCH), "run", "cancel", run_id, "--workspace", str(sample_workspace)], check=False)
 
 
 def test_log_rotation_and_offsets(sample_workspace: pathlib.Path, monkeypatch):

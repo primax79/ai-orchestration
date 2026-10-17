@@ -1143,7 +1143,7 @@ def get_repo_head(repo_root: pathlib.Path) -> str:
     """Get HEAD commit hash of repository."""
     try:
         res = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "--no-optional-locks", "rev-parse", "HEAD"],
             cwd=str(repo_root),
             capture_output=True,
             text=True,
@@ -1160,7 +1160,7 @@ def check_repo_clean(repo_root: pathlib.Path) -> tuple[bool, list[str]]:
     """Check if repository is clean, ignoring .ai-orchestration/."""
     try:
         res = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "--no-optional-locks", "status", "--porcelain"],
             cwd=str(repo_root),
             capture_output=True,
             text=True,
@@ -2114,9 +2114,12 @@ def reconcile(record: dict[str, Any], workspace: pathlib.Path | None = None) -> 
             except Exception:
                 pass
     else:
-        cur_sup_start = get_process_start_time(sup_pid)
-        if cur_sup_start is None or cur_sup_start != sup_start:
+        if not is_process_alive(sup_pid):
             is_lost = True
+        else:
+            cur_sup_start = get_process_start_time(sup_pid)
+            if cur_sup_start is not None and sup_start is not None and cur_sup_start != sup_start:
+                is_lost = True
 
     if is_lost:
         record["status"] = "lost"
