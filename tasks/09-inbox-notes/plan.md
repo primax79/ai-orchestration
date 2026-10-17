@@ -26,7 +26,7 @@
 
 ### 09.3 - Frontend: Inbox tab, editor with paste and drag-drop images, manual "Convert to task"
 
-- **Status:** `delivered` (2026-10-17; claude; Kilo committed 841fcbe with Final Report; orchestrator review pending) · **Profile:** `bulk-execution` · **Depends on:** 09.2, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `verified` (2026-10-17; claude; orchestrator review (SafeMarkdown escapes, CSP blocks remote images) + live check of the Inbox tab; merged into ai-orchestration-ui main) · **Profile:** `bulk-execution` · **Depends on:** 09.2, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Spec §5, except "Process with…".
 - **Verification:**
@@ -39,7 +39,7 @@
 
 ### 09.4 - Agent triage: `triage` run mode, proposal review, accept
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 09.1, 07.4, 07.10 (questions) · **Repo:** `ai-orchestration/` (+ UI in 09.5)
+- **Status:** `in progress` (2026-10-17; claude; kilo, ai-orchestration worktree task/09.4-triage) · **Profile:** `deep-reasoning` · **Depends on:** 09.1, 07.4, 07.10 (questions) · **Repo:** `ai-orchestration/` (+ UI in 09.5)
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:** Spec §4 "By an agent":
   - the `triage` mode, with its prompt and per-tool image passing;
@@ -59,7 +59,7 @@
 
 ### 09.6 - VS Code: inbox tab parity (paste and upload through postMessage)
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 09.3, 06.9 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `in progress` (2026-10-17; claude; kilo, vscode-ai-orchestration worktree task/09.6-inbox-vscode) · **Profile:** `bulk-execution` · **Depends on:** 09.3, 06.9 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/views/dashboard-panel.ts`, `src/cli-client.ts`, `dist-webview/**`
 - **Goal:** Spec §5 "VS Code".
 - **Verification:** Live in an Extension Development Host: paste a screenshot into a note; the file appears in `attachments/`.
