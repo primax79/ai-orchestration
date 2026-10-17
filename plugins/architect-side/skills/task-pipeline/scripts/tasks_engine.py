@@ -3960,7 +3960,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                                 _collect_leaves_rec(c)
 
                             done_leaves = [l for l in leaf_nodes if l.canonical_state in ("done", "done with a caveat", "dropped")]
-                            running_leaves = [l for l in leaf_nodes if l.canonical_state in ("in progress", "delivered", "bounced", "verified")]
+                            running_leaves = [l for l in leaf_nodes if l.canonical_state in ("in progress", "bounced")]
+                            # Finished by the executor, waiting for a check (delivered) or for closing (verified)
+                            to_check_leaves = [l for l in leaf_nodes if l.canonical_state in ("delivered", "verified")]
                             open_leaves = [l for l in leaf_nodes if l.canonical_state == "open"]
                             blocked_leaves = [l for l in leaf_nodes if l.canonical_state == "blocked"]
                             waiting_leaves = [l for l in leaf_nodes if l.canonical_state == "waiting"]
@@ -3970,6 +3972,10 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                                 summary_parts.append(f"done: {format_id_ranges([l.id for l in done_leaves])}")
                             if running_leaves:
                                 summary_parts.append(f"running: {format_id_ranges([l.id for l in running_leaves])}")
+                            if to_check_leaves:
+                                summary_parts.append(f"to verify: {format_id_ranges([l.id for l in to_check_leaves])}")
+                            if running_leaves or to_check_leaves:
+                                pass  # active work already summarised; "next" only when nothing is active
                             elif open_leaves:
                                 summary_parts.append(f"next: {format_id_ranges([l.id for l in open_leaves])}")
                             elif blocked_leaves:

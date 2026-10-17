@@ -6,7 +6,7 @@
 
 ### 11.1 - Engine: recursive node parser, inheritance, leaf-only transitions, derived container state, container dependencies, structure commands (`child add`, `expand`, `collapse`, `reopen`; no `move`, spec S1)
 
-- **Status:** `in progress` (2026-10-17; Kilo run interrupted, work saved as WIP 55e725a on `task/11.1-task-tree`, under review) · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 09.1 (same file) · **Note:** the biggest engine task so far; review in two passes (parser and state first, structure commands second) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17; claude; merged into main) · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 09.1 (same file) · **Note:** the biggest engine task so far; review in two passes (parser and state first, structure commands second) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md`, `tasks/specs/blocking-questions.md` (`blocks` accepts child ids)
 - **Goal:** Spec §1–§3 and §5:
   - the three rules at any depth;
@@ -70,3 +70,16 @@
   - **`tasks upgrade`** gains `--dry-run` and reports plans needing normalization (it does not rewrite plans itself).
   - **UI:** the `INIT-NN` card detail shows the plan (rendered, escaped) instead of an error, with "Normalize with…" (Run dialog in `normalize` mode).
 - **Verification:** the `ricerca_auto` plans 09–11 as read-only fixtures (copied): detection counts, a recorded proposal applies cleanly and `tasks list` then shows their `NN.T` tasks; a proposal that changes text outside the task section is refused.
+
+### 11.6 - 11.1 review follow-ups: S10 enforcement, full `reopen`, children of `T###`, CLI tests
+
+- **Status:** `open` · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 · **Repo:** `ai-orchestration/`
+- **Origin:** review of 11.1 (2026-10-17), items the merged engine does not cover yet.
+- **Goal:**
+  - S10: `--expect-plan-hash` required on apply for `child add`, `expand`, `collapse`, `reopen` (today optional);
+  - `reopen` writes `--reason` and restores ancestors (S2) for nodes still in place (the `done/` and `## Closed` cases stay with 11.4);
+  - `child add` / `set-labels` on file and folder nodes (`T014.1`), and `tasks new --from-note --parent ID` (spec §3);
+  - `set-deps` on an emergent file rewrites only its header line;
+  - `tasks/specs/blocking-questions.md`: `blocks` accepts child ids;
+  - CLI-level tests for `child add`, `expand`, `collapse`, `reopen`, `set-deps`, `set-labels`, `expand`/`collapse` at depth > 2, and the generated Initiative status cells in `sync-index`.
+- **Verification:** the tests above; `validate` clean on this repo and on `ricerca_auto` (read-only).

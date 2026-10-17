@@ -13,29 +13,29 @@
 
   Kilo runs with disposable writable XDG state directories. The fixtures go to `scripts/fixtures/runs/`.
 
-### 12.2a - Core: event store (outbox, counter, chunk manifest, reconciliation, `events tail`)
+### 12.11 - Core: event store (outbox, counter, chunk manifest, reconciliation, `events tail`)
 
 - **Status:** `open` · **Size:** L · **Depends on:** 10.4 (`tasks_engine.py` lane end) · **Repo:** `ai-orchestration/` (new module `scripts/orchestration_events.py`)
 - **Goal:** E1, E13 and §1 reading.
 
-### 12.2b - Emit events from `tasks_engine.py`
+### 12.12 - Emit events from `tasks_engine.py`
 
-- **Status:** `open` · **Size:** M · **Depends on:** 12.2a
+- **Status:** `open` · **Size:** M · **Depends on:** 12.11
 - **Goal:** Events for tasks, questions and the inbox, through the outbox; the E11 application ledger with `questions apply`.
 
-### 12.2c - Emit events from `orchestration_runs.py` and extract the supervised-invocation primitive
+### 12.13 - Emit events from `orchestration_runs.py` and extract the supervised-invocation primitive
 
-- **Status:** `open` · **Size:** L · **Depends on:** 12.2a, 07.11 (runs lane end)
+- **Status:** `open` · **Size:** L · **Depends on:** 12.11, 07.11 (runs lane end)
 - **Goal:** E1 and E4.
 
-### 12.2d - Emit events from `orchestration_config.py`; config writes under a lock
+### 12.14 - Emit events from `orchestration_config.py`; config writes under a lock
 
-- **Status:** `open` · **Size:** S · **Depends on:** 12.2a
+- **Status:** `open` · **Size:** S · **Depends on:** 12.11
 - **Goal:** E1 and E10 `config.changed`.
 
 ### 12.3 - Session registry and identifiers
 
-- **Status:** `open` · **Size:** M · **Depends on:** 12.2b, 12.2c
+- **Status:** `open` · **Size:** M · **Depends on:** 12.12, 12.13
 - **Goal:** §2 and E10, including the header amendments in specs 08 and 09.
 
 ### 12.4 - Trigger engine
@@ -45,7 +45,7 @@
 
 ### 12.5 - Headless orchestrator role (sessions, queue, turns, succession, bounds)
 
-- **Status:** `open` · **Size:** L · **Depends on:** 12.1, 12.3, 12.2c
+- **Status:** `open` · **Size:** L · **Depends on:** 12.1, 12.3, 12.13
 - **Goal:** §0, E2, E4, E5, E6, E8 and E9.
 
 ### 12.9 - Orchestrator configuration: reassignment as succession, `ai-orch setup` engine shared with the `orchestration-setup` skill
@@ -72,3 +72,5 @@
 
 - **Status:** `open` · **Size:** S · **Depends on:** 12.6, VS Code lane after 10.3
 - **Goal:** §1 "Reading" (E13) and §6.
+
+> 2026-10-17: tasks `12.2a`–`12.2d` renumbered `12.11`–`12.14` (letter-suffixed ids are not task ids; validate flagged them and their dependencies were invisible).

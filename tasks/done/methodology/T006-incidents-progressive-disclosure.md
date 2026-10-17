@@ -6,13 +6,14 @@
 - priority: P3
 - priority-reason: Reduces skill activation token footprint without changing operational behavior
 - next-up: no
-- state: open
+- state: done
 - executor: self
 - depends-on: T003
 - decider: -
 - sources: ../architect-executor-consolidated-review.md (§1.4, Tier 3), docs/02-gap-analysis-and-evolution-roadmap.md
 - paths: ../ai-architect-executor/plugins/architect-side/skills/orchestration-methodology/, ../kilo-mcp/bindings/orchestration-methodology.json
 - handoff: Read tasks/methodology/T006-incidents-progressive-disclosure.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: orchestrator:deep-reasoning
 
 ## Goal
 

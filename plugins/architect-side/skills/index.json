@@ -18,7 +18,8 @@
       "name": "orchestration-workflow",
       "files": [
         "SKILL.md",
-        "SKILL.template.md"
+        "SKILL.template.md",
+        "references/incidents.md"
       ]
     },
     {

@@ -11,16 +11,16 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 1 | 01 | [Consolidate Orchestration & Task Skills into `ai-orchestration`](done/01-repo-consolidation/plan.md) | done | - | M |
 | 2 | 02 | [Formal Task Model, State Machine & `orchestration.toml` Specification](done/02-task-and-config-spec/plan.md) | done | 01 | M |
 | 3 | 03 | [Configuration & Task Management Skill + Python Scripts (`orchestration_config.py`, `tasks_engine.py`)](done/03-skill-and-script-engine/plan.md) | done | 02 | M |
-| 4 | 04 | [Orchestration Methodology & Skill Refinements (Review Tier 2)](04-methodology-refinements/plan.md) | partial (`T003`–`T005` done; `T006` open) | 01 | M |
+| 4 | 04 | [Orchestration Methodology & Skill Refinements (Review Tier 2)](done/04-methodology-refinements/plan.md) | done | 01 | M |
 | 5 | 05 | [Standalone CLI (`ai-orch`), From-Scratch Installer & Extension Control Plane](done/05-cli-and-ui-handoff/plan.md) | done | 02, 03 | L |
-| 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](06-control-plane-safety/plan.md) | in progress (done: 06.1–06.8, 06.10; 06.9 delivered, live VS Code check pending) | 05 | L |
-| 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | in progress (done: 07.1–07.4, 07.6, 07.7, 07.10; next: 07.8, 11.2) | 05, 06 | L |
-| 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1–08.4; 08.5 delivered, live VS Code check pending; next: 08.6) | 06 | M |
-| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1, 09.2; next: 09.3) | 06 (07 for agent triage) | M |
-| 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | open | 06, 09.1 | S |
-| 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | open | 06, 09.1 | M |
-| 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | open (spec in review) | 07, 08, 11 | L |
-| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | open | 06 | M |
+| 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](06-control-plane-safety/plan.md) | in progress (done: 06.1–06.8, 06.10; to verify: 06.9) | 05 | L |
+| 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | in progress (done: 07.1–07.4, 07.6–07.8, 07.10, 07.12; to verify: 07.9) | 05, 06 | L |
+| 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1–08.4; to verify: 08.5, 08.7) | 06 | M |
+| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1–09.2; running: 09.4, 09.6; to verify: 09.3) | 06 (07 for agent triage) | M |
+| 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | in progress (to verify: 10.6) | 06, 09.1 | S |
+| 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | in progress (done: 11.1; next: 11.2–11.6) | 06, 09.1 | M |
+| 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | open | 07, 08, 11 | L |
+| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (running: 13.1, 13.4) | 06 | M |
 
 ## Specs
 
@@ -43,7 +43,6 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | Id | Priority | Task | Executor | Handoff |
 | --- | --- | --- | --- | --- |
 | T008 | P1 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](server-and-bindings/T008-claude-mcp-phase1-spike.md) | claude | `Read tasks/server-and-bindings/T008-claude-mcp-phase1-spike.md and ../claude-mcp/SPEC.md, run the Phase 1 spike, record findings, and update the task and the registry.` |
-| T007 | P2 | [Structured verification gate tool in kilo-mcp](server-and-bindings/T007-verification-gate-tool.md) | kilo | `Read tasks/server-and-bindings/T007-verification-gate-tool.md, do the open steps, run the Verification, update the task and the registry.` |
 | T016 | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | claude | `Read tasks/env-doctor/T016-doctor-findings-study.md and produce the report in tasks/env-doctor/notes/.` |
 <!-- /ai-orch:generated next-up -->
 
@@ -56,7 +55,6 @@ Evolutions and refinements to the orchestration skills (`orchestration-methodolo
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T006 | P3 | [Extract incident narratives to references/incidents.md (progressive disclosure)](methodology/T006-incidents-progressive-disclosure.md) | open | self | T003 |
 
 ### server-and-bindings
 
@@ -65,7 +63,6 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T008 | P1 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](server-and-bindings/T008-claude-mcp-phase1-spike.md) | open | claude | - |
-| T007 | P2 | [Structured verification gate tool in kilo-mcp](server-and-bindings/T007-verification-gate-tool.md) | delivered | kilo | - |
 | T012 | P2 | [kilo-mcp: detect kilo run processes that hang after finishing](server-and-bindings/T012-kilo-run-hangs-after-completion.md) | verified | kilo | - |
 
 ### micro
@@ -111,6 +108,8 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 | T011 | [render-agents-md: render rules that match the actual orchestrator/executor topology](done/methodology/T011-render-agents-md-topology.md) | done | 2026-10-17 |
 | T013 | [Answer confirmation dialog says "No modifications required"](done/micro/T013-answer-dialog-wording.md) | done | 2026-10-17 |
 | T014 | [One backend test failed once in eleven runs](done/micro/T014-flaky-backend-test.md) | done | 2026-10-17 |
+| T006 | [Extract incident narratives to references/incidents.md (progressive disclosure)](done/methodology/T006-incidents-progressive-disclosure.md) | done | 2026-10-17 |
+| T007 | [Structured verification gate tool in kilo-mcp](done/server-and-bindings/T007-verification-gate-tool.md) | done | 2026-10-17 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

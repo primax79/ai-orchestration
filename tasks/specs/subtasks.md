@@ -14,7 +14,7 @@
   1. no children → `open`, with a validator warning "empty container";
   2. every child is `dropped` → `dropped`;
   3. every child is `done`, `done with a caveat` or `dropped` → `done`, or `done with a caveat` when at least one child is;
-  4. any child is `in progress`, `delivered`, `bounced` or `verified` → `in progress`;
+  4. any child is `in progress`, `delivered`, `bounced` or `verified`, **or** some children are closed (`done`, `done with a caveat`) while others are not → `in progress` (amended 2026-10-17 at the 11.1 review: work on the container has started; the engine already behaved so);
   5. any child is `blocked` → `blocked`;
   6. any child is `waiting` → `waiting`;
   7. otherwise → `open`.
