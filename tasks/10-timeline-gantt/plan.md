@@ -4,18 +4,19 @@
 
 ## Tasks (One Task = One Commit)
 
-### 10.1 - Engine: `tasks graph` (columns, ready queue, longest chain, Mermaid), `tasks set-priority`, `tasks set-deps`, cycle check
+### 10.1 - Engine: `tasks graph` (columns, ready queue, heaviest chain, Mermaid), `size` field, `tasks set-priority`, `tasks set-size`, `tasks set-deps`, cycle check
 
 - **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 09.1 (same file, `tasks_engine.py` lane) · **Repo:** `ai-orchestration/`
-- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`
-- **Goal:** Spec §2.
+- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md` (the `size` extension field)
+- **Goal:** Spec §2. Also add `**Size:**` to the open tasks of the plans 06–10, using these estimates: 06.8 L, 06.9 M, 07.4 L, 07.5 M, 07.6 M, 07.7 L, 07.8 M, 07.9 S, 07.10 S, 08.3 S, 08.4 M, 08.5 S, 08.6 S, 09.1 M, 09.2 M, 09.3 L, 09.4 M, 09.5 M, 09.6 S, 10.1 M, 10.2 L, 10.3 S.
 - **Verification:**
   - Tests:
     - every form of the `NN.T` bullets is parsed, with inherited priorities;
     - columns and the ready queue are computed correctly;
     - `set-deps` refuses a cycle and names it;
     - `set-deps` keeps the free text of a `**Depends on:**` bullet;
-    - `set-priority` works on `T###` (header) and on `NN.T` (bullet created or updated);
+    - `set-priority` and `set-size` work on `T###` (header) and on `NN.T` (bullet created or updated);
+    - the heaviest chain and the totals follow the sizes;
     - a stale hash is refused;
     - `--dry-run` writes nothing.
   - Live: `tasks graph --json` on this repo shows 06–10 in coherent columns, and `--mermaid` renders in VS Code.
@@ -24,10 +25,11 @@
 
 - **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 10.1, 06.8 (frontend lane; can run before 08.4 when 08.3 is late) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`, `frontend/src/**`
-- **Goal:** Spec §3. Endpoints: `GET /api/tasks/graph`, and `POST /api/tasks/{id}/priority` and `/deps`, each with a `/preview` variant.
+- **Goal:** Spec §3. Endpoints: `GET /api/tasks/graph`, and `POST /api/tasks/{id}/priority`, `/size` and `/deps`, each with a `/preview` variant.
 - **Verification:** Live with the Playwright MCP on a scratch copy of this repo's `tasks/`:
   - the columns and arrows are visible;
   - changing a priority reorders the column and the ready queue;
+  - changing a size changes the card width and the totals;
   - adding a dependency moves the card one column to the right;
   - a cycle is refused in the picker;
   - removing an arrow works;
