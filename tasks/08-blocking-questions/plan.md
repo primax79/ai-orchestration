@@ -57,7 +57,7 @@
 
 ### 08.4 - Frontend: Decisions tab, navbar badge, task-modal Questions section, ask form
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 08.3, 06.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 08.3, 06.8 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Spec §5, except "Answer and resume run".
 - **Verification:**
