@@ -70,7 +70,6 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T013 | P3 | [Answer confirmation dialog says "No modifications required"](micro/T013-answer-dialog-wording.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -94,6 +93,7 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 | T002 | [Decision telemetry (kilo_log_decision) and ROI analysis rework](done/server-and-bindings/T002-decision-telemetry-and-roi-rework.md) | done | 2026-10-15 |
 | T001 | [Task completion wait (kilo_task_wait) and watcher guidance](done/server-and-bindings/T001-task-completion-wait-and-watcher.md) | done | 2026-10-15 |
 | T011 | [render-agents-md: render rules that match the actual orchestrator/executor topology](done/methodology/T011-render-agents-md-topology.md) | done | 2026-10-17 |
+| T013 | [Answer confirmation dialog says "No modifications required"](done/micro/T013-answer-dialog-wording.md) | done | 2026-10-17 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

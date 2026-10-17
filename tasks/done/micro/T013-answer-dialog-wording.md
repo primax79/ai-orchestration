@@ -6,13 +6,14 @@
 - priority: P3
 - priority-reason: Cosmetic; the answer is applied correctly
 - next-up: no
-- state: open
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: architect live check of 08.4 (2026-10-17)
 - paths: ../ai-orchestration-ui/frontend/src/components/DecisionsTab.tsx
 - handoff: Read tasks/micro/T013-answer-dialog-wording.md and fix it.
+- verifier: claude:orchestration
 
 ## Goal
 
