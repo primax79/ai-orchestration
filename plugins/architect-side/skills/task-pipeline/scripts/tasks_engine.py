@@ -151,6 +151,7 @@ EMERGENT_ID_RE = re.compile(r"^T\d{3,}$")
 INITIATIVE_DIR_RE = re.compile(r"^(\d{2,})-(.+)$")
 HEADER_LINE_RE = re.compile(r"^-\s+([a-z][a-z0-9-]*):\s*(.*)$")
 INLINE_TASK_HEADING_RE = re.compile(r"^###\s+(\d{2,}\.\d+)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
+PLAN_TASK_STATUS_RE = re.compile(r"^\s*[-*]\s+\*\*Status:\*\*\s*`([^`]+)`")
 
 
 def normalize_state(raw_state: str) -> str:
@@ -1094,11 +1095,23 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
                     init_status = "open"
 
             inline_tasks = []
-            for sline in scanned_lines:
+            for idx, sline in enumerate(scanned_lines):
                 if not sline.is_fenced:
                     tm = INLINE_TASK_HEADING_RE.match(sline.text)
                     if tm:
-                        inline_tasks.append({"id": tm.group(1), "title": tm.group(2).strip(), "state": init_status})
+                        # The task's own `- **Status:** `<state>`` line (within the next few
+                        # lines) wins over the initiative's state.
+                        task_state = init_status
+                        for nxt in scanned_lines[idx + 1 : idx + 6]:
+                            if nxt.is_fenced or INLINE_TASK_HEADING_RE.match(nxt.text):
+                                break
+                            sm = PLAN_TASK_STATUS_RE.match(nxt.text)
+                            if sm:
+                                cand = normalize_state(sm.group(1))
+                                if cand in CANONICAL_STATES:
+                                    task_state = cand
+                                break
+                        inline_tasks.append({"id": tm.group(1), "title": tm.group(2).strip(), "state": task_state})
 
             # Also check table tasks in plan.md (e.g. | **T1** | **Title**: desc |)
             table_tasks = []
@@ -4856,7 +4869,12 @@ def tasks_new_from_note(
     next_up: str = "no",
     depends_on: str = "-",
     decider: str = "-",
+    goal: str | None = None,
+    sources: str | None = None,
+    paths: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
+    """Create an emergent task `T###`, from an inbox note (`from_note`) or standalone
+    (then `goal` and `priority_reason` are required)."""
     if not is_platform_supported():
         return False, {
             "ok": False,
@@ -4865,8 +4883,12 @@ def tasks_new_from_note(
         }
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
-    if not from_note or not from_note.strip():
-        return False, {"ok": False, "error": "Missing required --from-note."}
+    from_note = (from_note or "").strip()
+    if not from_note:
+        if not goal or not goal.strip():
+            return False, {"ok": False, "error": "Without --from-note, --goal is required."}
+        if not priority_reason or not priority_reason.strip():
+            return False, {"ok": False, "error": "Without --from-note, --priority-reason is required."}
     if not category or not category.strip():
         return False, {"ok": False, "error": "Missing required --category."}
     if not title or not title.strip():
@@ -4884,9 +4906,11 @@ def tasks_new_from_note(
 
     try:
         with task_write_lock(tasks_dir):
-            note = find_inbox_note(tasks_dir, from_note)
-            if not note:
-                return False, {"ok": False, "error": f"Inbox note {from_note!r} not found."}
+            note = None
+            if from_note:
+                note = find_inbox_note(tasks_dir, from_note)
+                if not note:
+                    return False, {"ok": False, "error": f"Inbox note {from_note!r} not found."}
 
             emergent = discover_emergent_tasks(tasks_dir)
             existing_nums = []
@@ -4917,19 +4941,24 @@ def tasks_new_from_note(
                 except FileExistsError:
                     next_num += 1
 
-            p_reason = (
-                priority_reason.strip()
-                if priority_reason and priority_reason.strip()
-                else f"Derived from inbox note {note['id'] if note['id'] != '-' else from_note}"
-            )
-
-            sources = note["rel_path"]
-            paths = note["about"].strip() if note["about"] and note["about"].strip() != "-" else "-"
             handoff = f"Read tasks/{category}/{filename}, do the open steps, run the Verification, update the task and the registry."
-
-            body = note.get("body", "").strip()
-            paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
-            goal = paragraphs[0] if paragraphs else f"Goal derived from inbox note {from_note}."
+            if note:
+                p_reason = (
+                    priority_reason.strip()
+                    if priority_reason and priority_reason.strip()
+                    else f"Derived from inbox note {note['id'] if note['id'] != '-' else from_note}"
+                )
+                sources = note["rel_path"]
+                paths = note["about"].strip() if note["about"] and note["about"].strip() != "-" else "-"
+                body = note.get("body", "").strip()
+                paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+                if not (goal and goal.strip()):
+                    goal = paragraphs[0] if paragraphs else f"Goal derived from inbox note {from_note}."
+            else:
+                p_reason = priority_reason.strip()
+                sources = (sources or "").strip() or "-"
+                paths = (paths or "").strip() or "-"
+            goal = goal.strip()
 
             task_content = f"""# {t_id} {title.strip()}
 
@@ -5181,6 +5210,9 @@ def cmd_tasks_new(args: argparse.Namespace) -> int:
         next_up=getattr(args, "next_up", "no"),
         depends_on=getattr(args, "depends_on", "-"),
         decider=getattr(args, "decider", "-"),
+        goal=getattr(args, "goal", None),
+        sources=getattr(args, "sources", None),
+        paths=getattr(args, "paths", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -5380,7 +5412,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # tasks new
     p_new = sub.add_parser("new", help="Create a new task from an inbox note")
-    p_new.add_argument("--from-note", required=True, help="Source inbox note ID (e.g. N001) or filename")
+    p_new.add_argument("--from-note", default=None, help="Source inbox note ID (e.g. N001) or filename; omit to create a standalone task")
+    p_new.add_argument("--goal", default=None, help="Goal paragraph (required without --from-note)")
+    p_new.add_argument("--sources", default=None, help="Sources header value (standalone tasks)")
+    p_new.add_argument("--paths", default=None, help="Paths header value (standalone tasks)")
     p_new.add_argument("--category", required=True, help="Category folder name")
     p_new.add_argument("--title", required=True, help="Task title")
     p_new.add_argument("--priority", choices=sorted(PRIORITIES), default="P2", help="Priority (default P2)")

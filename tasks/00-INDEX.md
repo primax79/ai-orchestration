@@ -90,10 +90,7 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 <!-- ai-orch:generated decisions -->
 | Key | Question | Blocks | Decider | Recommended |
 | --- | --- | --- | --- | --- |
-| [Q002](questions/Q002-were-the-project-scope-skills-in-ai-orchestration.md) | Were the project-scope skills in ai-orchestration (.claude, .codex, .kilo) installed on purpose, and should they stay? | - | owner | A |
-| [Q003](questions/Q003-should-both-architect-side-plugins-stay-enabled-in.md) | Should both architect-side plugins stay enabled in Claude, or should Claude keep only one? | - | owner | A |
-| [Q004](questions/Q004-should-we-bump-the-plugin-versions-and-update-the.md) | Should we bump the plugin versions and update the Claude plugins now? | - | owner | A |
-| [Q005](questions/Q005-for-gcube-jenkins-gcube-security-audit-and-fronten.md) | For gcube-jenkins, gcube-security-audit and frontend-design, which copy is canonical: the standalone one or the plugin one? | - | owner | C |
+| - | None. | - | - | - |
 <!-- /ai-orch:generated decisions -->
 
 ## Done

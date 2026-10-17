@@ -3177,3 +3177,38 @@ def test_plan_format_warnings_flag_non_canonical_task_items(tmp_path: pathlib.Pa
 
     plan.write_text("### 05.1 - Fine\n### 05.10 — Em dash is accepted\n", encoding="utf-8")
     assert te.plan_format_warnings(plan, "05-x/plan.md") == []
+
+
+def test_plan_task_state_comes_from_its_status_line(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    init = tasks_dir / "05-sample"
+    init.mkdir(parents=True)
+    (init / "plan.md").write_text(
+        "# 05 - Sample\n\n## Tasks\n\n"
+        "### 05.1 - Finished\n\n- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution`\n\n"
+        "### 05.2 - Running\n- **Status:** `in progress` (Kilo)\n\n"
+        "### 05.3 - No status line\n\nSome text.\n",
+        encoding="utf-8",
+    )
+    states = {t["id"]: t["state"] for i in te.discover_initiatives(tasks_dir) for t in i.get("tasks", [])}
+    assert states["05.1"] == "done"
+    assert states["05.2"] == "in progress"
+    assert states["05.3"] != "done"
+
+
+def test_tasks_new_without_note(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    ok, res = te.tasks_new_from_note(tasks_dir, None, "bugfix", "Fix the thing", priority="P1")
+    assert not ok and "--goal" in res["error"]
+    ok, res = te.tasks_new_from_note(tasks_dir, None, "bugfix", "Fix the thing", goal="Make it work.")
+    assert not ok and "--priority-reason" in res["error"]
+    ok, res = te.tasks_new_from_note(
+        tasks_dir, None, "bugfix", "Fix the thing", priority="P1",
+        priority_reason="Blocks the owner", goal="Make it work.", paths="src/x.py",
+    )
+    assert ok, res
+    text = (tasks_dir / res["rel_path"]).read_text(encoding="utf-8")
+    assert "- id: T001" in text and "- paths: src/x.py" in text and "Make it work." in text
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
