@@ -106,7 +106,7 @@
 
 ### 07.8 - Frontend: Config tab editing (routing and profile/model matrix)
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/components/OrchestrationConfigurator.tsx`, `frontend/src/api.ts`, `frontend/src/types.ts`, `frontend/dist/**`
 - **Goal:** Spec §7 "Config tab".
 - **Verification:** Live: edit routing and one profile in project scope; the `.ai-orchestration.local.toml` diff shows only those values.

@@ -43,6 +43,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | --- | --- | --- | --- | --- |
 | T008 | P1 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](server-and-bindings/T008-claude-mcp-phase1-spike.md) | claude | `Read tasks/server-and-bindings/T008-claude-mcp-phase1-spike.md and ../claude-mcp/SPEC.md, run the Phase 1 spike, record findings, and update the task and the registry.` |
 | T007 | P2 | [Structured verification gate tool in kilo-mcp](server-and-bindings/T007-verification-gate-tool.md) | kilo | `Read tasks/server-and-bindings/T007-verification-gate-tool.md, do the open steps, run the Verification, update the task and the registry.` |
+| T016 | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | claude | `Read tasks/env-doctor/T016-doctor-findings-study.md and produce the report in tasks/env-doctor/notes/.` |
 <!-- /ai-orch:generated next-up -->
 
 ## Tasks by category
@@ -74,6 +75,14 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 | --- | --- | --- | --- | --- | --- |
 | T014 | P2 | [One backend test failed once in eleven runs](micro/T014-flaky-backend-test.md) | open | kilo | - |
 | T015 | P3 | [Navbar labels wrap on narrow widths](micro/T015-navbar-narrow-width.md) | open | kilo | - |
+
+### env-doctor
+
+Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)).
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T016 | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | in progress | claude | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
