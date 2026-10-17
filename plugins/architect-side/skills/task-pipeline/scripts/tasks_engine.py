@@ -5272,7 +5272,12 @@ def compute_tasks_graph(tasks_dir: pathlib.Path) -> dict[str, Any]:
         columns[n.id] = _col_for(n.id)
 
     # 4. Ready queue: column-0 tasks sorted by priority, then next-up: yes first, then id
-    col0_nodes = [n for n in open_leaves if columns.get(n.id) == 0]
+    # Only work that can be started: not-yet-started (or bounced back) leaves, not ones
+    # already in progress or delivered/verified awaiting a check.
+    col0_nodes = [
+        n for n in open_leaves
+        if columns.get(n.id) == 0 and n.canonical_state in ("open", "bounced")
+    ]
 
     def _ready_sort_key(n: TaskNode):
         p_rank = PRIORITY_SORT_KEY.get(n.priority, 2)
@@ -5421,10 +5426,27 @@ def compute_tasks_graph(tasks_dir: pathlib.Path) -> dict[str, Any]:
     }
 
 
-def render_mermaid_graph(graph_data: dict[str, Any], tasks_dir: pathlib.Path | None = None) -> str:
+
+def _edge_ends(e: Any) -> tuple[str, str]:
+    if isinstance(e, dict):
+        return str(e.get("from") or e.get("source") or ""), str(e.get("to") or e.get("target") or "")
+    return str(e[0]), str(e[1])
+
+
+CLOSED_GRAPH_STATES = {"done", "done with a caveat", "dropped"}
+
+
+def render_mermaid_graph(
+    graph_data: dict[str, Any], tasks_dir: pathlib.Path | None = None, include_closed: bool = False
+) -> str:
     lines = ["flowchart LR"]
     nodes = graph_data.get("nodes", [])
     edges = graph_data.get("edges", [])
+    if not include_closed:
+        # Closed work is history: the diagram shows what is still ahead.
+        nodes = [n for n in nodes if n.get("canonical_state") not in CLOSED_GRAPH_STATES]
+        kept = {n["id"] for n in nodes}
+        edges = [e for e in edges if _edge_ends(e)[0] in kept and _edge_ends(e)[1] in kept]
 
     groups: dict[str, list[dict[str, Any]]] = {}
     for n in nodes:
@@ -5737,7 +5759,7 @@ def cmd_graph(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     graph_data = compute_tasks_graph(tasks_dir)
     if getattr(args, "mermaid", False):
-        print(render_mermaid_graph(graph_data, tasks_dir=tasks_dir), end="")
+        print(render_mermaid_graph(graph_data, tasks_dir=tasks_dir, include_closed=getattr(args, "all", False)), end="")
     elif getattr(args, "json", False):
         print(json.dumps(graph_data, indent=2))
     else:
@@ -9322,6 +9344,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_graph = sub.add_parser("graph", help="Compute abstract timeline dependency graph")
     p_graph.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_graph.add_argument("--mermaid", action="store_true", default=False, help="Output Mermaid flowchart")
+    p_graph.add_argument("--all", action="store_true", default=False, help="Mermaid: include closed tasks too")
     p_graph.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_graph.set_defaults(func=cmd_graph)
 

@@ -4845,3 +4845,19 @@ def test_dry_run_writes_nothing(tmp_path: pathlib.Path) -> None:
     assert "diff" in sd_data and len(sd_data["diff"]) > 0
     assert plan_file.read_text(encoding="utf-8") == original_plan
 
+
+
+def test_graph_ready_queue_holds_only_startable_leaves(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "05-sample").mkdir(parents=True)
+    (tasks_dir / "05-sample" / "plan.md").write_text(
+        "# 05 - Sample\n\n## Tasks\n\n"
+        "### 05.1 - Open\n- **Status:** `open`\n\n"
+        "### 05.2 - Running\n- **Status:** `in progress`\n\n"
+        "### 05.3 - Delivered\n- **Status:** `delivered`\n\n"
+        "### 05.4 - Waits on running\n- **Status:** `open` · **Depends on:** 05.2\n",
+        encoding="utf-8",
+    )
+    res = run_cli("graph", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["ready_queue"] == ["05.1"]
