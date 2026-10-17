@@ -43,7 +43,7 @@
 
 ### 08.3 - UI backend: question endpoints
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 08.1, 06.7 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 08.1, 06.7 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Add these endpoints, as thin async wrappers:
   - `GET /api/questions?status&blocks`

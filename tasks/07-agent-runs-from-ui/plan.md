@@ -56,7 +56,7 @@
 
 ### 07.4 - Run engine C: worktree isolation, verify target, verdict parsing and `apply-verdict`, continue invariants, `cleanup`
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 07.3 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 07.3 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:** Spec §5.4, §5.5, §5.6, and `run cleanup`.
 - **Verification:** Tests in temp git repos:

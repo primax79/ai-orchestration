@@ -6,7 +6,7 @@
 
 ### 09.1 - Engine: note folders, `ai-orch inbox ...`, `tasks new --from-note`
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 06.10 (lock); runs in the `tasks_engine.py` lane after 06.10, before or after 08.1 (never in parallel with it) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 06.10 (lock); runs in the `tasks_engine.py` lane after 06.10, before or after 08.1 (never in parallel with it) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `plugins/architect-side/skills/task-pipeline/SKILL.md` (document the note folder form under "Capture")
 - **Goal:** Spec §2 and §3.
 - **Verification:**

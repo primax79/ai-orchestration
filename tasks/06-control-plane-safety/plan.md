@@ -127,7 +127,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.8 - Frontend: confirmation modal with previews, safer installer defaults, Doctor origins, error banners, WS reconnect (U3, U7, V3)
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 06.7 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 06.7 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Implement spec §2.4; rebuild `dist/`.
 - **Verification:**
