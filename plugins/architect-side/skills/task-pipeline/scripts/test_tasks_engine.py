@@ -4354,3 +4354,58 @@ def test_use_cases_crud_and_validation(tmp_path: pathlib.Path) -> None:
     res_val2 = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
     assert json.loads(res_val2.stdout)["ok"] is True
 
+
+def test_use_cases_validate_probe_and_campaign(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # 1. Create passing UC001
+    run_cli(
+        "use-cases", "create",
+        "--id", "UC001",
+        "--title", "Passing Scenario",
+        "--actor", "Buyer",
+        "--verification-command", "echo 'PASS_DATA'",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+
+    # 2. Create failing UC002
+    run_cli(
+        "use-cases", "create",
+        "--id", "UC002",
+        "--title", "Failing Scenario",
+        "--actor", "Buyer",
+        "--verification-command", "exit 1",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+
+    # 3. Validate UC001 probe
+    res_val1 = run_cli("use-cases", "validate", "UC001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val1.returncode == 0
+    p1 = json.loads(res_val1.stdout)
+    assert p1["ok"] is True
+    assert p1["verdict"] == "pass"
+    assert p1["status"] == "verified"
+
+    # 4. Validate UC002 probe (fails)
+    res_val2 = run_cli("use-cases", "validate", "UC002", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val2.returncode == 1
+    p2 = json.loads(res_val2.stdout)
+    assert p2["ok"] is True
+    assert p2["verdict"] == "fail"
+    assert p2["status"] == "failing"
+
+    # 5. Run full product campaign
+    res_camp = run_cli("use-cases", "campaign", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_camp.returncode == 1  # 1 failure
+    pc = json.loads(res_camp.stdout)
+    assert pc["ok"] is True
+    assert pc["total"] == 2
+    assert pc["passed"] == 1
+    assert pc["failed"] == 1
+    assert pc["readiness_score"] == 50.0
+    assert pathlib.Path(pc["report_file"]).is_file()
+

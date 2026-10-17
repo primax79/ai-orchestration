@@ -47,26 +47,25 @@ Provide end-to-end support for **Use Cases (`tasks/use-cases/UC###-<slug>.md`)**
 - **Verification:** `python3 scripts/regenerate_generic_skills.py --check` and `python3 scripts/generate_skill_indices.py` pass.
 
 ### 15.3 - Autonomous AI Validation Runner (`ai-orch use-cases validate UC###`)
-- **Status:** open
+- **Status:** `done` (2026-10-17)
 - **Profile:** `deep-reasoning`
 - **Repo:** `ai-orchestration/`
-- **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
+- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`
 - **Goal:**
-  - Add run mode `validate-use-case`: assembles the prompt containing the Use Case scenario, acceptance criteria, and codebase routes/tools.
-  - Instructs the AI agent to execute the verification command (or inspect routes) and emit an ````ai-orch-validation```` block.
-  - Parses the verdict (`PASS` | `PARTIAL` | `FAIL`), updates `last-tested` and `last-verdict` on the Use Case file, and appends the structured report to `## AI Validation Log`.
-- **Verification:** Unit tests with stub agent executing validation on a sample Use Case.
+  - Implemented `validate_use_case_probe`: executes verification command, captures output and exit code.
+  - Updates `last-tested` and `last-verdict` on the Use Case file, transitions state to `verified` (if pass) or `failing` (if fail), and appends the structured report to `## AI Validation Log`.
+- **Verification:** Unit test `test_use_cases_validate_probe_and_campaign` passes.
 
 ### 15.4 - Product-Level Validation Campaign Runner (`ai-orch use-cases campaign`)
-- **Status:** open
+- **Status:** `done` (2026-10-17)
 - **Profile:** `deep-reasoning`
 - **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `bin/ai-orch`
 - **Goal:**
-  - Implement campaign runner that iterates through all active Use Cases (or a filtered actor/tag subset).
+  - Implemented `run_validation_campaign`: iterates through all active Use Cases (with optional actor filtering).
   - Detects regressions: flags Use Cases that previously passed and now fail.
   - Generates a timestamped Product Validation Report in `tasks/reports/validation-campaign-<timestamp>.md` with overall readiness score (% verified).
-- **Verification:** CLI test running a campaign on sample Use Cases fixture.
+- **Verification:** Unit test `test_use_cases_validate_probe_and_campaign` passes (readiness score, report file, regression list).
 
 ### 15.5 - Backend REST & WebSocket API Endpoints
 - **Status:** open

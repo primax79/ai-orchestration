@@ -2677,6 +2677,172 @@ def record_use_case_validation(
     }
 
 
+def validate_use_case_probe(
+    tasks_dir: pathlib.Path,
+    uc_id: str,
+    timeout_seconds: int = 60,
+    actor: str = "automated-probe",
+) -> tuple[bool, dict[str, Any]]:
+    """Execute the automated verification command of a use case and record the verdict."""
+    use_cases = discover_use_cases(tasks_dir)
+    target = next((u for u in use_cases if u["id"] == uc_id), None)
+    if not target:
+        return False, {"error": f"Use case {uc_id} not found"}
+
+    cmd = target.get("verification_command", "").strip()
+    if not cmd or cmd.startswith("echo 'No verification command"):
+        return True, {
+            "ok": True,
+            "id": uc_id,
+            "verdict": target.get("last_verdict") or "untested",
+            "status": target.get("status"),
+            "message": "No runnable verification command specified; manual or AI agent audit required.",
+        }
+
+    workspace = tasks_dir.parent
+    start_t = time.time()
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        elapsed = time.time() - start_t
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        exit_code = proc.returncode
+
+        if exit_code == 0:
+            verdict = "pass"
+            summary = f"Automated probe passed in {elapsed:.2f}s with exit code 0"
+            evidence = f"```\n$ {cmd}\n(exit code 0)\n{out[:500]}\n```"
+            gaps = None
+        else:
+            verdict = "fail"
+            summary = f"Automated probe failed with exit code {exit_code} in {elapsed:.2f}s"
+            evidence = f"```\n$ {cmd}\n(exit code {exit_code})\nSTDOUT:\n{out[:300]}\nSTDERR:\n{err[:300]}\n```"
+            gaps = [err or out or f"Command failed with exit code {exit_code}"]
+
+        ok, res = record_use_case_validation(
+            tasks_dir=tasks_dir,
+            uc_id=uc_id,
+            verdict=verdict,
+            summary=summary,
+            evidence=evidence,
+            actor=actor,
+            gaps=gaps,
+        )
+        res["exit_code"] = exit_code
+        res["elapsed_seconds"] = round(elapsed, 2)
+        res["command"] = cmd
+        return ok, res
+    except subprocess.TimeoutExpired:
+        elapsed = time.time() - start_t
+        summary = f"Automated probe timed out after {timeout_seconds}s"
+        evidence = f"Command timed out: `{cmd}`"
+        ok, res = record_use_case_validation(
+            tasks_dir=tasks_dir,
+            uc_id=uc_id,
+            verdict="fail",
+            summary=summary,
+            evidence=evidence,
+            actor=actor,
+            gaps=[f"Timeout after {timeout_seconds}s"],
+        )
+        res["exit_code"] = -1
+        res["elapsed_seconds"] = round(elapsed, 2)
+        res["command"] = cmd
+        return ok, res
+    except Exception as e:
+        return False, {"error": f"Failed to execute probe: {e}"}
+
+
+def run_validation_campaign(
+    tasks_dir: pathlib.Path,
+    timeout_seconds: int = 60,
+    actor_filter: str | None = None,
+    actor_name: str = "campaign-runner",
+) -> dict[str, Any]:
+    """Execute all active use cases, compute product functional readiness, and detect regressions."""
+    use_cases = discover_use_cases(tasks_dir)
+    if actor_filter:
+        use_cases = [u for u in use_cases if u.get("actor", "").lower() == actor_filter.lower()]
+
+    results: list[dict[str, Any]] = []
+    regressions: list[dict[str, Any]] = []
+
+    for uc in use_cases:
+        prev_verdict = (uc.get("last_verdict") or "").lower()
+        ok, res = validate_use_case_probe(tasks_dir, uc["id"], timeout_seconds=timeout_seconds, actor=actor_name)
+        res["title"] = uc["title"]
+        res["actor"] = uc["actor"]
+        res["previous_verdict"] = prev_verdict
+        new_verdict = (res.get("verdict") or "").lower()
+        if prev_verdict == "pass" and new_verdict == "fail":
+            regressions.append(res)
+        results.append(res)
+
+    total = len(results)
+    passed = sum(1 for r in results if r.get("verdict") == "pass")
+    failed = sum(1 for r in results if r.get("verdict") == "fail")
+    score_pct = round((passed / total * 100), 1) if total > 0 else 0.0
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    reports_dir = tasks_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    report_file = reports_dir / f"validation-campaign-{int(time.time())}.md"
+
+    report_lines = [
+        f"# Product Validation Campaign Report — {now_iso}",
+        "",
+        f"- **Readiness Score:** `{score_pct}%` ({passed}/{total} Use Cases Verified)",
+        f"- **Total Tested:** {total}",
+        f"- **Passed:** {passed}",
+        f"- **Failed:** {failed}",
+        f"- **Regressions Detected:** {len(regressions)}",
+        "",
+        "## Compliance Matrix by Use Case",
+        "",
+        "| ID | Title | Actor | Verdict | Command |",
+        "| :--- | :--- | :--- | :---: | :--- |",
+    ]
+    for r in results:
+        v_badge = "PASS" if r.get("verdict") == "pass" else ("FAIL" if r.get("verdict") == "fail" else "UNTESTED")
+        cmd_snippet = f"`{r.get('command')[:40]}...`" if r.get("command") else "-"
+        report_lines.append(f"| **{r['id']}** | {r['title']} | {r['actor']} | `{v_badge}` | {cmd_snippet} |")
+
+    if regressions:
+        report_lines.extend([
+            "",
+            "## Regressions Detected",
+            "",
+            "The following use cases previously passed but failed in this campaign:",
+            "",
+        ])
+        for reg in regressions:
+            report_lines.append(f"- **{reg['id']}**: {reg['title']} — {reg.get('summary')}")
+
+    report_content = "\n".join(report_lines) + "\n"
+    _atomic_write_text(report_file, report_content)
+
+    return {
+        "ok": True,
+        "timestamp": now_iso,
+        "readiness_score": score_pct,
+        "total": total,
+        "passed": passed,
+        "failed": failed,
+        "regressions_count": len(regressions),
+        "regressions": regressions,
+        "report_file": str(report_file),
+        "results": results,
+    }
+
+
 def parse_option_arg(opt: str) -> tuple[str, str, str | None]:
     opt = opt.strip()
     m = re.match(r"^(?:-\s+)?\*\*([A-Za-z0-9]+)\*\*\s+[—–-]\s+(.+?)(?::\s*(.*))?$", opt)
@@ -6141,6 +6307,46 @@ def cmd_use_cases_record_validation(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_use_cases_validate(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    timeout = getattr(args, "timeout", 60)
+    actor = getattr(args, "actor", "ai-validator")
+    ok, res = validate_use_case_probe(tasks_dir, args.uc_id, timeout_seconds=timeout, actor=actor)
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            v = res.get("verdict", "unknown").upper()
+            print(f"[{v}] {args.uc_id}: {res.get('summary')}")
+            if res.get("command"):
+                print(f"  Command: {res['command']}")
+            if res.get("exit_code") is not None:
+                print(f"  Exit code: {res['exit_code']} ({res.get('elapsed_seconds')}s)")
+        else:
+            print(f"[FAIL] {res.get('error')}")
+    return 0 if ok and res.get("verdict") == "pass" else 1
+
+
+def cmd_use_cases_campaign(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    timeout = getattr(args, "timeout", 60)
+    actor = getattr(args, "actor", "campaign-runner")
+    actor_filter = getattr(args, "filter_actor", None)
+    res = run_validation_campaign(tasks_dir, timeout_seconds=timeout, actor_filter=actor_filter, actor_name=actor)
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        print(f"Product Validation Campaign ({res['timestamp']}):")
+        print(f"  Readiness Score: {res['readiness_score']}% ({res['passed']}/{res['total']} verified)")
+        print(f"  Passed: {res['passed']}, Failed: {res['failed']}, Regressions: {res['regressions_count']}")
+        print(f"  Report: {res['report_file']}")
+        if res["regressions"]:
+            print("\n  REGRESSIONS:")
+            for reg in res["regressions"]:
+                print(f"    - {reg['id']}: {reg['title']}")
+    return 0 if res["failed"] == 0 else 1
+
+
 # ---------------------------------------------------------------------------
 # Inbox Notes (N###) Data Model, Operations & Commands
 # ---------------------------------------------------------------------------
@@ -8427,6 +8633,22 @@ def build_parser() -> argparse.ArgumentParser:
     uc_rec.add_argument("--tasks-dir", default="tasks")
     uc_rec.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     uc_rec.set_defaults(func=cmd_use_cases_record_validation)
+
+    uc_val = uc_sub.add_parser("validate", help="Run automated probe/validation on a use case")
+    uc_val.add_argument("uc_id", help="Use case ID (e.g. UC001)")
+    uc_val.add_argument("--timeout", type=int, default=60, help="Timeout in seconds")
+    uc_val.add_argument("--actor", default="automated-probe")
+    uc_val.add_argument("--tasks-dir", default="tasks")
+    uc_val.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_val.set_defaults(func=cmd_use_cases_validate)
+
+    uc_camp = uc_sub.add_parser("campaign", help="Run full product validation campaign across all use cases")
+    uc_camp.add_argument("--filter-actor", default=None, help="Filter by actor")
+    uc_camp.add_argument("--timeout", type=int, default=60, help="Timeout in seconds per probe")
+    uc_camp.add_argument("--actor", default="campaign-runner")
+    uc_camp.add_argument("--tasks-dir", default="tasks")
+    uc_camp.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_camp.set_defaults(func=cmd_use_cases_campaign)
 
     return ap
 
