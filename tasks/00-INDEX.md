@@ -83,7 +83,7 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 | T016 | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | delivered | claude | - |
 | T017 | P2 | [Apply Q002: remove the untracked project-scope skill copies in ai-orchestration](env-doctor/T017-apply-q002-remove-the-untracked-project-scope-skil.md) | delivered | claude | - |
 | T018 | P2 | [Q003 follow-up: precedence when orchestration-workflow and the generic orchestration skill coexist](env-doctor/T018-q003-follow-up-precedence-when-orchestration-workf.md) | in progress | claude | - |
-| T019 | P3 | [Apply Q005: per-skill diff of the gcube-jenkins, gcube-security-audit and frontend-design copies](env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md) | in progress | claude | - |
+| T019 | P3 | [Apply Q005: per-skill diff of the gcube-jenkins, gcube-security-audit and frontend-design copies](env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md) | waiting | claude | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -91,7 +91,9 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 <!-- ai-orch:generated decisions -->
 | Key | Question | Blocks | Decider | Recommended |
 | --- | --- | --- | --- | --- |
-| - | None. | - | - | - |
+| [Q006](questions/Q006-gcube-jenkins-should-the-gcube-developer-tools-plu.md) | gcube-jenkins: should the gcube-developer-tools plugin become the canonical copy, with the env examples ported into it? | T019 | owner | A |
+| [Q007](questions/Q007-gcube-security-audit-should-the-0-3-0-branch-be-me.md) | gcube-security-audit: should the 0.3.0 branch be merged and released so the plugin becomes the canonical copy? | T019 | owner | A |
+| [Q008](questions/Q008-frontend-design-should-third-party-skills-agentic.md) | frontend-design: should third-party-skills@agentic-coding-kit stay the canonical copy, with Kilo's copy kept in sync? | T019 | owner | A |
 <!-- /ai-orch:generated decisions -->
 
 ## Done

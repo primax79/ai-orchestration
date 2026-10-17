@@ -6,10 +6,10 @@
 - priority: P3
 - priority-reason: Owner answered Q005 with C; the duplicates keep showing in the Doctor until decided
 - next-up: no
-- state: in progress
+- state: waiting
 - executor: claude
 - depends-on: -
-- decider: -
+- decider: Q006, Q007, Q008
 - sources: -
 - paths: -
 - handoff: Read tasks/env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md, do the open steps, run the Verification, update the task and the registry.
