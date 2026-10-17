@@ -21,6 +21,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | in progress (done: 11.1–11.2, 11.5; next: 11.3–11.4, 11.6) | 06, 09.1 | M |
 | 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | open | 07, 08, 11 | L |
 | 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (done: 13.4; to verify: 13.1) | 06 | M |
+| 15 | 15 | [Use-Case Driven Specification, Task Definition & Product Validation](15-use-case-driven-validation/plan.md) | open | 01, 11 | L |
 
 ## Specs
 
@@ -36,6 +37,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [timeline-gantt](specs/timeline-gantt.md) | 10 |
 | [subtasks](specs/subtasks.md) | 11 (and 10.1 builds on 11.1) |
 | [events-and-triggers](specs/events-and-triggers.md) | 12 (supersedes 08.6) |
+| [use-case-management-and-ai-validation](specs/use-case-management-and-ai-validation.md) | 15 |
 
 ## Next up
 

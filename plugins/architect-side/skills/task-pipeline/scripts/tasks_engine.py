@@ -99,7 +99,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 }
 
 REQUIRED_SECTIONS: tuple[str, ...] = ("## Goal", "## Steps", "## Verification")
-RESERVED_DIRS: set[str] = {"_inbox", "_reviews", "specs", "done", "merged", "notes", "reviews", "questions"}
+RESERVED_DIRS: set[str] = {"_inbox", "_reviews", "specs", "done", "merged", "notes", "reviews", "questions", "use-cases"}
 
 QUESTION_HEADER_FIELDS: tuple[str, ...] = (
     "id",
