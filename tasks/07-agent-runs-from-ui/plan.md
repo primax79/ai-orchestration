@@ -31,7 +31,7 @@
 
 ### 07.2 - Run engine A: registry, locking, records, request validation, prompts, `options`/`preview`/`list`/`show`
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 07.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 07.1 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py` (new), `scripts/test_orchestration_runs.py` (new), `bin/ai-orch`
 - **Goal:** Spec §3 (resolution, modes, prompts, `T###`-only scope), §4 (`options`, `preview`, `list`, `show`), §5.1, §5.2 (lock, guards, monotonic records). No process spawning yet.
 - **Verification:** Tests:

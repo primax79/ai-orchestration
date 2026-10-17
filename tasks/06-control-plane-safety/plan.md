@@ -58,7 +58,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.3 - Doctor: plugin-aware inventory and conflicts (E5)
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 06.2 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 06.2 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_env.py`, `scripts/test_orchestration_env.py`
 - **Goal:** Implement spec §2.1 "Plugin-aware inventory":
   - Claude plugin skills from `~/.claude/plugins/installed_plugins.json`;
@@ -72,7 +72,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.4 - Doctor: MCP registration and status through the real config files (E3)
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 06.3 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 06.3 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_env.py`, `scripts/test_orchestration_env.py`
 - **Goal:** Implement spec §2.1 "MCP registration through the real configs":
   - Claude via `claude mcp add`;

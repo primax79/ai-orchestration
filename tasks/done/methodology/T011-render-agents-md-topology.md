@@ -5,14 +5,15 @@
 - category: methodology
 - priority: P1
 - priority-reason: An applied block steers every future session; a wrong block (wrong orchestrator, foreign tools, contradicting model rules) silently misleads agents
-- next-up: yes
-- state: delivered
+- next-up: no
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: ../../status/agents-md-generated-block-2026-10-16.md in the ai-coding-tools workspace (block found applied without explanation on 2026-10-16, reviewed and removed)
 - paths: plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py
 - handoff: Read tasks/methodology/T011-render-agents-md-topology.md, do the open steps, run the Verification, update the task and tasks/00-INDEX.md.
+- verifier: claude:orchestration
 
 ## Goal
 
