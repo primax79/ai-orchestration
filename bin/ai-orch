@@ -188,6 +188,30 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks new --from-note <id> --category <cat> --title <title> [--priority <P0-P3>] [--priority-reason <reason>] [--tasks-dir <dir>] [--json]",
                     "description": "Create a new emergent task from an inbox note under the task-write lock.",
                 },
+                "child": {
+                    "usage": "ai-orch tasks child add <parent> --title <title> [--kind <kind>] [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Add a child task under a container or convert an open leaf to a container.",
+                },
+                "expand": {
+                    "usage": "ai-orch tasks expand <id> [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Expand an inline block task into a folder with its own README.md.",
+                },
+                "collapse": {
+                    "usage": "ai-orch tasks collapse <id> [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Collapse an expanded folder task back into an inline block.",
+                },
+                "reopen": {
+                    "usage": "ai-orch tasks reopen <id> --reason <text> [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Reopen a terminal leaf task back to open.",
+                },
+                "set-deps": {
+                    "usage": "ai-orch tasks set-deps <id> [--add <id>...] [--remove <id>...] [--to <ids>] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Set dependencies for a task while preserving trailing free text.",
+                },
+                "set-labels": {
+                    "usage": "ai-orch tasks set-labels <id> [--add <label>...] [--remove <label>...] [--to <labels>] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Set labels for a task (removing inherited labels is refused).",
+                },
             },
         },
         "inbox": {

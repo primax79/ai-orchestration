@@ -5,17 +5,26 @@
 
 ---
 
-## 1. Unified Task Entities (`Initiative`, `InitiativeTask`, `EmergentTask`)
+## 1. Unified Task Entities (`Initiative`, `InitiativeTask`, `EmergentTask`, `N-level Task Tree`)
 
-Every work item in `tasks/` is represented by one of two task shapes sharing the **same state lifecycle, role profiles, and verification gate**:
+Every work item in `tasks/` is part of a first-class task hierarchy of arbitrary depth (specified formally in [`subtasks.md`](subtasks.md)):
+
+- **Roots:** Planned Initiatives (`NN`, always containers) and Emergent Tasks (`T###`, zero-padded 3+ digits, globally unique across active and `done/`). Microtasks (`tasks/micro/`) are roots only.
+- **Children:** Dotted IDs `<parent>.<n>` (`NN.T`, `NN.T.x`, `T###.x`, etc.) at any depth. Inside files, children are `### <id> - <title>` blocks; deeper nesting is expanded into `<id>-<slug>/README.md` folders holding child blocks under `## Subtasks`.
+- **Leaves vs Containers:** Only leaves are units of execution (runs, transitions, commits). Nodes with children are containers whose state is derived (S5 total function: empty container is `open`; all dropped is `dropped`; all done/dropped is `done` / `done with a caveat`; any in progress/delivered/bounced/verified is `in progress`; any blocked is `blocked`; any waiting is `waiting`; otherwise `open`). Container transitions are refused.
+- **Inheritance:** `Executor`, `Priority`, `Profile`, `Repo`, and `Paths` are inherited from the nearest ancestor setting them; `Labels` are the union of own and ancestor labels; `Depends on` is additive across ancestors.
+- **Dependencies & Questions:** Any node may be a dependency (container dependencies expand to all their leaf descendants; cycles on the expanded graph are refused). Blocking questions accept any leaf ID (`T###` or dotted leaf), refusing containers.
+- **Closed Placement:** Closed work lives apart from open work (blocks in `## Closed`, folders in `done/`). The logical tree includes open and archived nodes.
+
+Every work item shares the **same state lifecycle, role profiles, and verification gate**:
 
 1. **Emergent Task (`T###-<slug>.md` or `T###-<slug>/README.md`)**:
    - Lives under `tasks/<category>/` while active, and moves via `git mv` to `tasks/done/<category>/` when terminal (`done`, `done with a caveat`, `dropped`).
    - ID format: `T###` (zero-padded 3+ digits, globally unique across active and `done/`).
-2. **Planned Initiative (`tasks/NN-<slug>/`) & Initiative Task (`NN.T`)**:
+2. **Planned Initiative (`tasks/NN-<slug>/`) & Child Tasks (`NN.T`)**:
    - Driven by one or more `tasks/specs/<slug>.md` (`Drives` / `Derived from`).
-   - Packaged either **inline** inside `NN-<slug>/plan.md` or **expanded** as `NN-<slug>/NN.T-<name>.md`.
-   - When expanded (or tracked by `tasks_engine.py` / the UI), each `NN.T` task supports the exact same metadata fields and state transitions as `T###`.
+   - Packaged inline inside `NN-<slug>/plan.md` as `### NN.T - <title>` blocks or expanded as `NN-<slug>/NN.T-<name>/README.md`.
+   - Each child leaf task supports the exact same metadata fields and state transitions as `T###`. Container initiatives have derived states.
 
 ---
 

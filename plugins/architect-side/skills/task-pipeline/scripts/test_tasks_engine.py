@@ -1342,9 +1342,9 @@ Context.
     assert any("blocked task 'T999' not found" in e for e in errors)
 
     # Blocked task invalid format
-    _write_sample_question(q_file, blocks="08.1 (waiting)")
+    _write_sample_question(q_file, blocks="bad-id (waiting)")
     errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
-    assert any("invalid task ID '08.1' in blocks (must be format T###)" in e for e in errors)
+    assert any("invalid task ID 'bad-id' in blocks" in e for e in errors)
 
     # Question is open but task is not waiting
     _write_sample_task(tasks_dir / "features" / "T001-task.md", task_id="T001", category="features", state="in progress", decider="Q001")
@@ -3250,3 +3250,515 @@ def test_plan_task_depends_on_from_status_line(tmp_path: pathlib.Path) -> None:
     deps = {t["id"]: t["depends_on"] for i in te.discover_initiatives(tasks_dir) for t in i["tasks"]}
     assert deps["05.1"] == "-"
     assert deps["05.2"] == "05.1, 07.4, T012"
+# ---------------------------------------------------------------------------
+# Task 11.1: First-class Task Hierarchy (N levels) Tests
+# ---------------------------------------------------------------------------
+
+def test_depth_1_to_5_parsing_and_depth_warning(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "07-hierarchy"
+    init_dir.mkdir()
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        """# 07 - Hierarchy
+
+- **Goal:** Test depth parsing.
+
+## Tasks
+
+### 07.1 - Level 1 Block
+
+- **Status:** `open`
+- **Goal:** Level 1 goal.
+- **Expanded:** [07.1-level1/](07.1-level1/README.md)
+""",
+        encoding="utf-8",
+    )
+
+    # Level 1 folder
+    l1_dir = init_dir / "07.1-level1"
+    l1_dir.mkdir()
+    (l1_dir / "README.md").write_text(
+        """# 07.1 - Level 1 Block
+
+- **Goal:** Level 1 goal.
+
+## Subtasks
+
+### 07.1.1 - Level 2 Block
+
+- **Status:** `open`
+- **Goal:** Level 2 goal.
+- **Expanded:** [07.1.1-level2/](07.1.1-level2/README.md)
+""",
+        encoding="utf-8",
+    )
+
+    # Level 2 folder
+    l2_dir = l1_dir / "07.1.1-level2"
+    l2_dir.mkdir()
+    (l2_dir / "README.md").write_text(
+        """# 07.1.1 - Level 2 Block
+
+- **Goal:** Level 2 goal.
+
+## Subtasks
+
+### 07.1.1.1 - Level 3 Block
+
+- **Status:** `open`
+- **Goal:** Level 3 goal.
+- **Expanded:** [07.1.1.1-level3/](07.1.1.1-level3/README.md)
+""",
+        encoding="utf-8",
+    )
+
+    # Level 3 folder
+    l3_dir = l2_dir / "07.1.1.1-level3"
+    l3_dir.mkdir()
+    (l3_dir / "README.md").write_text(
+        """# 07.1.1.1 - Level 3 Block
+
+- **Goal:** Level 3 goal.
+
+## Subtasks
+
+### 07.1.1.1.1 - Level 4 Block
+
+- **Status:** `open`
+- **Goal:** Level 4 goal.
+- **Expanded:** [07.1.1.1.1-level4/](07.1.1.1.1-level4/README.md)
+""",
+        encoding="utf-8",
+    )
+
+    # Level 4 folder
+    l4_dir = l3_dir / "07.1.1.1.1-level4"
+    l4_dir.mkdir()
+    (l4_dir / "README.md").write_text(
+        """# 07.1.1.1.1 - Level 4 Block
+
+- **Goal:** Level 4 goal.
+
+## Subtasks
+
+### 07.1.1.1.1.1 - Level 5 Block
+
+- **Status:** `open`
+- **Goal:** Level 5 goal.
+""",
+        encoding="utf-8",
+    )
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert "07" in tree
+    assert tree["07"].depth == 0
+    assert tree["07.1"].depth == 1
+    assert tree["07.1.1"].depth == 2
+    assert tree["07.1.1.1"].depth == 3
+    assert tree["07.1.1.1.1"].depth == 4
+    assert tree["07.1.1.1.1.1"].depth == 5
+    assert tree["07.1.1.1.1.1"].is_leaf is True
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+    assert any("depth 5 > 4" in w for w in warnings)
+
+
+def test_every_s5_rule_incl_nested_derived_containers_and_empty_container() -> None:
+    # 1. No children -> open
+    assert te.derive_container_state([]) == "open"
+
+    # 2. Every child dropped -> dropped
+    assert te.derive_container_state(["dropped", "dropped"]) == "dropped"
+
+    # 3. Every child done, done with a caveat or dropped -> done, or done with caveat
+    assert te.derive_container_state(["done", "done", "dropped"]) == "done"
+    assert te.derive_container_state(["done", "done with a caveat: reason", "dropped"]) == "done with a caveat"
+
+    # 4. Any child past open (in progress, delivered, bounced, verified, done) -> in progress
+    assert te.derive_container_state(["done", "open"]) == "in progress"
+    assert te.derive_container_state(["in progress", "open"]) == "in progress"
+    assert te.derive_container_state(["delivered", "open"]) == "in progress"
+    assert te.derive_container_state(["bounced", "open"]) == "in progress"
+    assert te.derive_container_state(["verified", "open"]) == "in progress"
+
+    # 5. Any child blocked -> blocked
+    assert te.derive_container_state(["blocked", "open"]) == "blocked"
+
+    # 6. Any child waiting -> waiting
+    assert te.derive_container_state(["waiting", "open"]) == "waiting"
+
+    # 7. Otherwise -> open
+    assert te.derive_container_state(["open", "open"]) == "open"
+
+
+def test_s7_bullet_grammar_verbatim_fixtures_and_roundtrip() -> None:
+    fixtures_dir = pathlib.Path(__file__).parent / "fixtures" / "real-plans"
+    for plan_file in ("06-plan.md", "07-plan.md", "11-plan.md"):
+        path = fixtures_dir / plan_file
+        assert path.is_file(), f"Missing fixture {plan_file}"
+        text = path.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            line_clean = line.strip()
+            if line_clean.startswith("- **") or line_clean.startswith("* **"):
+                prefix, segs = te.parse_bullet_line(line)
+                reconstructed = te.serialize_bullet_segments(prefix, segs)
+                assert reconstructed == line, f"Roundtrip mismatch in {plan_file}:\nOriginal : {line}\nRebuilt  : {reconstructed}"
+
+    # Test update_depends_on_field preserves free text
+    assert te.update_depends_on_field("09.1 (same file)", ["09.1", "07.4"]) == "09.1, 07.4 (same file)"
+    assert te.update_depends_on_field("07.3, 08.1 — supervisor", ["07.3", "08.1", "06.10"]) == "07.3, 08.1, 06.10 — supervisor"
+    assert te.update_depends_on_field("-", ["01.1"]) == "01.1"
+
+
+def test_block_transition_leaves_rest_of_plan_byte_identical(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "11-subtasks"
+    init_dir.mkdir()
+    fixtures_dir = pathlib.Path(__file__).parent / "fixtures" / "real-plans"
+    plan_content = (fixtures_dir / "11-plan.md").read_text(encoding="utf-8")
+    target_plan = init_dir / "plan.md"
+    target_plan.write_text(plan_content, encoding="utf-8")
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert "11.1" in tree
+    initial_hash = tree["11.1"].task_hash
+
+    ok, res = te.transition_task(
+        tasks_dir=tasks_dir,
+        task_id="11.1",
+        new_state="in progress",
+        expect_task_hash=initial_hash,
+    )
+    assert ok is True
+    assert res["new_state"] == "in progress"
+
+    new_content = target_plan.read_text(encoding="utf-8")
+    assert "- **Status:** `in progress`" in new_content
+
+    # Every byte outside block 11.1 must be identical
+    m_old = re.search(r"### 11\.1\b.*?(?=### 11\.2)", plan_content, re.DOTALL)
+    m_new = re.search(r"### 11\.1\b.*?(?=### 11\.2)", new_content, re.DOTALL)
+    assert m_old is not None and m_new is not None
+
+    before_old = plan_content[:m_old.start()]
+    before_new = new_content[:m_new.start()]
+    assert before_old == before_new
+
+    after_old = plan_content[m_old.end():]
+    after_new = new_content[m_new.end():]
+    assert after_old == after_new
+
+
+def test_container_transition_refused(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "11-subtasks"
+    init_dir.mkdir()
+    fixtures_dir = pathlib.Path(__file__).parent / "fixtures" / "real-plans"
+    (init_dir / "plan.md").write_text((fixtures_dir / "11-plan.md").read_text(encoding="utf-8"), encoding="utf-8")
+
+    # Transitioning root initiative container 11
+    ok, res = te.transition_task(tasks_dir, "11", "in progress")
+    assert ok is False
+    assert res["error"] == "derived state; transition its leaves"
+
+
+def test_container_dependency_expansion_and_inherited_ancestor_deps_and_cycle_through_ancestor(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "07-agent-runs"
+    init_dir.mkdir()
+    (init_dir / "plan.md").write_text(
+        """# 07 - Agent Runs
+
+- **Goal:** Agent runs.
+
+## Tasks
+
+### 07.1 - Task 1
+
+- **Status:** `open`
+- **Goal:** Goal 1.
+
+### 07.2 - Task 2
+
+- **Status:** `open`
+- **Goal:** Goal 2.
+- **Depends on:** 07
+""",
+        encoding="utf-8",
+    )
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert "07" in tree
+    expanded_leaves = te.expand_dependency_to_leaves(tree, "07")
+    assert sorted(expanded_leaves) == ["07.1", "07.2"]
+
+    cycle_errors = te.check_dependency_cycles(tree)
+    assert any("depends on its ancestor 07 (cycle)" in ce for ce in cycle_errors)
+
+
+def test_s8_allocation_with_archived_children(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "07-agent-runs"
+    init_dir.mkdir()
+    (init_dir / "plan.md").write_text(
+        """# 07 - Agent Runs
+
+- **Goal:** Test.
+
+## Tasks
+
+### 07.1 - Task 1
+- **Status:** `open`
+- **Goal:** Goal 1.
+
+### 07.2 - Task 2
+- **Status:** `open`
+- **Goal:** Goal 2.
+
+## Closed
+
+### 07.3 - Old closed
+- **Status:** `done`
+- **Goal:** Goal 3.
+""",
+        encoding="utf-8",
+    )
+
+    done_dir = init_dir / "done"
+    done_dir.mkdir()
+    (done_dir / "07.4-archived").mkdir()
+
+    tree = te.discover_task_tree(tasks_dir)
+    next_id = te.allocate_child_id(tree, "07", tasks_dir)
+    assert next_id == "07.5"
+
+
+def test_s10_stale_plan_hash_refused(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "07-agent-runs"
+    init_dir.mkdir()
+    (init_dir / "plan.md").write_text(
+        """# 07 - Agent Runs
+
+- **Goal:** Test.
+
+## Tasks
+
+### 07.4 - Inline leaf
+- **Status:** `open`
+- **Goal:** Goal 4.
+""",
+        encoding="utf-8",
+    )
+
+    res = te.expand_node(tasks_dir, "07.4", expect_plan_hash="0000000000000000000000000000000000000000000000000000000000000000")
+    assert res["ok"] is False
+    assert "Plan hash mismatch" in res["error"]
+
+
+def test_s11_inheritance_sources_and_label_union(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "07-agent-runs"
+    init_dir.mkdir()
+    (init_dir / "plan.md").write_text(
+        """# 07 - Agent Runs
+
+- **Goal:** Test inheritance.
+- **Executor:** kilo · **Priority:** P1 · **Profile:** deep-reasoning · **Repo:** ai-orchestration/ · **Labels:** runs, engine
+
+## Tasks
+
+### 07.1 - Child Block
+- **Status:** `open` · **Priority:** P2 · **Labels:** ui
+- **Goal:** Child goal.
+""",
+        encoding="utf-8",
+    )
+
+    tree = te.discover_task_tree(tasks_dir)
+    child = tree["07.1"]
+
+    assert child.fields["executor"]["value"] == "kilo"
+    assert child.fields["executor"]["source"] == "inherited:07"
+
+    assert child.fields["priority"]["value"] == "P2"
+    assert child.fields["priority"]["source"] == "own"
+
+    assert child.fields["profile"]["value"] == "deep-reasoning"
+    assert child.fields["profile"]["source"] == "inherited:07"
+
+    assert child.fields["repo"]["value"] == "ai-orchestration/"
+    assert child.fields["repo"]["source"] == "inherited:07"
+
+    assert sorted(child.labels) == ["engine", "runs", "ui"]
+    assert child.label_sources["engine"] == "inherited:07"
+    assert child.label_sources["runs"] == "inherited:07"
+    assert child.label_sources["ui"] == "own"
+
+    res_rem = te.set_labels(tasks_dir, "07.1", remove_labels=["engine"])
+    assert res_rem["ok"] is False
+    assert "Cannot remove inherited label 'engine' (inherited from 07)" in res_rem["error"]
+
+
+def test_s12_add_child_to_running_container_allowed_and_to_inflight_leaf_refused(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "07-agent-runs"
+    init_dir.mkdir()
+    (init_dir / "plan.md").write_text(
+        """# 07 - Agent Runs
+
+- **Goal:** Test.
+
+## Tasks
+
+### 07.1 - Running Task
+- **Status:** `in progress`
+- **Goal:** Goal 1.
+
+### 07.2 - Open Leaf
+- **Status:** `open`
+- **Goal:** Goal 2.
+""",
+        encoding="utf-8",
+    )
+
+    res_add_init = te.child_add(tasks_dir, "07", title="Task 3")
+    assert res_add_init["ok"] is True
+    assert res_add_init["allocated_id"] == "07.3"
+
+    res_add_inflight = te.child_add(tasks_dir, "07.1", title="Subtask")
+    assert res_add_inflight["ok"] is False
+    assert "Cannot add child to in-flight leaf '07.1'" in res_add_inflight["error"]
+
+    res_add_open = te.child_add(tasks_dir, "07.2", title="Subtask of 2")
+    assert res_add_open["ok"] is True
+    assert res_add_open["allocated_id"] == "07.2.1"
+    assert "folder" in res_add_open
+
+
+def test_expand_collapse_roundtrip_byte_exact(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "07-agent-runs"
+    init_dir.mkdir()
+    original_plan = """# 07 - Agent Runs
+
+- **Goal:** Test.
+
+## Tasks
+
+### 07.4 - Run engine C: worktrees, verify, verdicts
+
+- **Status:** `done` (2026-10-16) · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 07.3 · **Repo:** `ai-orchestration/`
+- **Focus files:** `scripts/orchestration_runs.py`
+- **Goal:** Spec §5.4, §5.5, §5.6.
+- **Verification:**
+  - `pytest scripts/test_orchestration_runs.py` passes.
+"""
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(original_plan, encoding="utf-8")
+
+    res_exp = te.expand_node(tasks_dir, "07.4")
+    assert res_exp["ok"] is True
+    folder_path = pathlib.Path(res_exp["folder"])
+    assert folder_path.is_dir()
+    assert (folder_path / "README.md").is_file()
+
+    exp_plan_text = plan_file.read_text(encoding="utf-8")
+    assert "- **Expanded:** [07.4-run-engine-c-worktrees-verify-verdicts/](07.4-run-engine-c-worktrees-verify-verdicts/README.md)" in exp_plan_text
+
+    res_col = te.collapse_node(tasks_dir, "07.4")
+    assert res_col["ok"] is True
+    assert not folder_path.exists()
+
+    restored_plan_text = plan_file.read_text(encoding="utf-8")
+    assert restored_plan_text == original_plan
+
+
+def test_reopen_from_done_in_open_location(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "07-agent-runs"
+    init_dir.mkdir()
+    (init_dir / "plan.md").write_text(
+        """# 07 - Agent Runs
+
+- **Goal:** Test.
+
+## Tasks
+
+### 07.1 - Task 1
+- **Status:** `done` (2026-10-16)
+- **Goal:** Goal 1.
+""",
+        encoding="utf-8",
+    )
+
+    res = te.reopen_node(tasks_dir, "07.1", reason="Re-testing verification")
+    assert res["ok"] is True
+    assert res["new_state"] == "open"
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["07.1"].canonical_state == "open"
+
+
+def test_question_blocking_leaf_works_blocking_container_refused(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "07-agent-runs"
+    init_dir.mkdir()
+    (init_dir / "plan.md").write_text(
+        """# 07 - Agent Runs
+
+- **Goal:** Test.
+
+## Tasks
+
+### 07.4 - Leaf Task
+- **Status:** `open`
+- **Goal:** Goal 4.
+""",
+        encoding="utf-8",
+    )
+
+    # 1. Blocking container 07 is REFUSED
+    ok_cont, res_cont = te.ask_question(
+        tasks_dir,
+        question="Block container?",
+        context="Context.",
+        open_answer="yes",
+        blocks="07",
+    )
+    assert ok_cont is False
+    assert "Cannot block container '07': questions can only block leaf tasks." in res_cont["error"]
+
+    # 2. Blocking leaf 07.4 SUCCEEDS
+    ok_leaf, res_leaf = te.ask_question(
+        tasks_dir,
+        question="Block leaf?",
+        context="Context.",
+        open_answer="yes",
+        blocks="07.4",
+    )
+    assert ok_leaf is True
+    qid = res_leaf["id"]
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["07.4"].state == "waiting"
+
+    ok_ans, _ = te.answer_question(tasks_dir, qid, choice="open", text="Proceed")
+    assert ok_ans is True
+    tree_after = te.discover_task_tree(tasks_dir)
+    assert tree_after["07.4"].canonical_state == "open"
+
+

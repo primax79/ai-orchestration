@@ -146,20 +146,43 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
 """
 
-TASK_ID_RE = re.compile(r"^(?:T\d{3,}|\d{2,}\.\d+)$")
+TASK_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.\d+)*)$")
+TASK_NODE_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.\d+)*)$")
+CHILD_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)+|\d{2,}(?:\.\d+)+)$")
+ROOT_INITIATIVE_ID_RE = re.compile(r"^\d{2,}$")
 EMERGENT_ID_RE = re.compile(r"^T\d{3,}$")
 INITIATIVE_DIR_RE = re.compile(r"^(\d{2,})-(.+)$")
 HEADER_LINE_RE = re.compile(r"^-\s+([a-z][a-z0-9-]*):\s*(.*)$")
 INLINE_TASK_HEADING_RE = re.compile(r"^###\s+(\d{2,}\.\d+)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
 PLAN_TASK_DEPENDS_RE = re.compile(r"\*\*Depends on:\*\*\s*([^·]+)")
 PLAN_TASK_STATUS_RE = re.compile(r"^\s*[-*]\s+\*\*Status:\*\*\s*`([^`]+)`")
+INLINE_TASK_HEADING_RE = re.compile(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+)+)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
+INLINE_ANY_HEADING_RE = re.compile(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+)*)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
+EXPANDED_BULLET_RE = re.compile(r"^\s*[-*]\s+\*\*Expanded:\*\*\s*\[([^\]]+)\]\(([^)]+)\)", re.IGNORECASE)
+DEP_ID_RE = re.compile(r"\b((?:T\d{3,}|\d{2,})(?:\.\d+)*)\b")
+NODE_TYPES: set[str] = {"initiative", "container", "leaf", "microtask"}
+INHERITED_FIELDS: tuple[str, ...] = ("executor", "priority", "profile", "repo", "paths")
 
 
 def normalize_state(raw_state: str) -> str:
-    """Map parameterized state strings like 'done with a caveat: self-verified only'
-    or 'dropped: reason' to their canonical base state."""
-    s = raw_state.strip()
-    for base in ("done with a caveat", "waiting", "blocked", "dropped"):
+    """Map parameterized state strings like 'done with a caveat: self-verified only',
+    'dropped: reason', '`done` (2026-10-16)', or '`in progress`' to their canonical base state."""
+    s = raw_state.strip().strip("`").strip()
+    m_date = re.match(r"^(.+?)\s*\(\d{4}-\d{2}-\d{2}\)$", s)
+    if m_date:
+        s = m_date.group(1).strip().strip("`").strip()
+    for base in (
+        "done with a caveat",
+        "waiting",
+        "blocked",
+        "dropped",
+        "in progress",
+        "delivered",
+        "bounced",
+        "verified",
+        "done",
+        "open",
+    ):
         if s == base or s.startswith(base + ":") or s.startswith(base + " ("):
             return base
     return s
@@ -577,6 +600,1402 @@ def find_markdown_section(text: str, title: str, heading_prefix: str = "## ") ->
         if sec.title == title or sec.title.startswith(title):
             return sec
     return None
+
+
+# ---------------------------------------------------------------------------
+# Task Tree Model, S7 Bullet Grammar, S5 State & S11 Inheritance
+# ---------------------------------------------------------------------------
+
+def slugify(text: str) -> str:
+    s = text.lower()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"[\s_]+", "-", s)
+    return s.strip("-")
+
+
+@dataclass
+class BulletSegment:
+    raw_key: str | None
+    key: str
+    raw_value: str
+    clean_value: str
+
+
+def parse_bullet_line(line: str) -> tuple[str, list[BulletSegment]]:
+    """Parse a markdown list bullet into its prefix and segments separated by ' · '.
+    S7: A field bullet is '-' followed by one or more segments separated by ' · '.
+    A segment is '**Key:** value'. A literal ' · ' inside a value is written '\\·'.
+    """
+    m = re.match(r"^(\s*[-*]\s+)(.*)$", line)
+    if not m:
+        return "", []
+    prefix, body = m.group(1), m.group(2)
+    # Split by ' · ' where · is not escaped by backslash
+    raw_segments = re.split(r"(?<!\\)\s+·\s+", body)
+    segments: list[BulletSegment] = []
+    for raw_seg in raw_segments:
+        m_seg = re.match(r"^\*\*([^*:]+)(?:\*\*:|:\*\*)\s*(.*)$", raw_seg)
+        if m_seg:
+            raw_k = m_seg.group(1).strip()
+            norm_k = raw_k.lower().replace(" ", "_")
+            raw_v = m_seg.group(2)
+            clean_v = raw_v.replace(r"\·", " · ").strip()
+            if clean_v.startswith("`") and clean_v.endswith("`") and len(clean_v) >= 2:
+                clean_v = clean_v[1:-1]
+            segments.append(
+                BulletSegment(
+                    raw_key=raw_k,
+                    key=norm_k,
+                    raw_value=raw_v,
+                    clean_value=clean_v,
+                )
+            )
+        else:
+            clean_seg = raw_seg.replace(r"\·", " · ").strip()
+            segments.append(
+                BulletSegment(
+                    raw_key=None,
+                    key="",
+                    raw_value=raw_seg,
+                    clean_value=clean_seg,
+                )
+            )
+    return prefix, segments
+
+
+def serialize_bullet_segments(prefix: str, segments: list[BulletSegment]) -> str:
+    """Serialize segments back to bullet line preserving exact format."""
+    pieces = []
+    for seg in segments:
+        if seg.raw_key is not None:
+            if seg.raw_value:
+                pieces.append(f"**{seg.raw_key}:** {seg.raw_value}")
+            else:
+                pieces.append(f"**{seg.raw_key}:**")
+        else:
+            pieces.append(seg.raw_value)
+    return prefix + " · ".join(pieces)
+
+
+def parse_depends_on_field(raw_val: str) -> tuple[list[str], str]:
+    if not raw_val or raw_val.strip() == "-":
+        return [], ""
+    val = raw_val.strip()
+    m_list = list(DEP_ID_RE.finditer(val))
+    if not m_list:
+        return [], val
+
+    ids: list[str] = []
+    last_id_end = 0
+    for idx, m in enumerate(m_list):
+        span = m.span()
+        between = val[last_id_end:span[0]].strip(" ,\t`")
+        if idx > 0 and between and not between.startswith(","):
+            break
+        ids.append(m.group(1))
+        last_id_end = span[1]
+
+    free_text = val[last_id_end:].rstrip()
+    return ids, free_text
+
+
+def update_depends_on_field(raw_val: str, new_ids: list[str]) -> str:
+    _, free_text = parse_depends_on_field(raw_val)
+    ids_str = ", ".join(new_ids) if new_ids else "-"
+    if free_text:
+        if not free_text.startswith(" ") and ids_str != "-":
+            return f"{ids_str} {free_text}"
+        return f"{ids_str}{free_text}"
+    return ids_str
+
+
+def format_id_ranges(ids: list[str]) -> str:
+    """Format a list of dotted/task IDs into contiguous ranges using en-dash (–),
+    e.g. ['06.1'..'06.8', '06.10'] -> '06.1–06.8, 06.10'."""
+    if not ids:
+        return ""
+    prefix_items: dict[str, list[int]] = {}
+    other_items: list[str] = []
+    for tid in ids:
+        m = re.match(r"^(.+)\.(\d+)$", tid)
+        if m:
+            pfx, num = m.group(1), int(m.group(2))
+            prefix_items.setdefault(pfx, []).append(num)
+        else:
+            other_items.append(tid)
+
+    parts: list[str] = []
+    for pfx, nums in prefix_items.items():
+        nums = sorted(set(nums))
+        ranges: list[tuple[int, int]] = []
+        start = nums[0]
+        end = nums[0]
+        for n in nums[1:]:
+            if n == end + 1:
+                end = n
+            else:
+                ranges.append((start, end))
+                start = end = n
+        ranges.append((start, end))
+        for s, e in ranges:
+            if s == e:
+                parts.append(f"{pfx}.{s}")
+            else:
+                parts.append(f"{pfx}.{s}–{pfx}.{e}")
+    parts.extend(other_items)
+    return ", ".join(parts)
+
+
+def derive_container_state(child_states: list[str]) -> str:
+    """Evaluate S5 total function over child states:
+    1. no children -> open (with validator warning "empty container")
+    2. every child is dropped -> dropped
+    3. every child is done, done with a caveat or dropped -> done, or done with a caveat when at least one child is
+    4. any child is past open (in progress, delivered, bounced, verified, done, done with a caveat) -> in progress
+    5. any child is blocked -> blocked
+    6. any child is waiting -> waiting
+    7. otherwise -> open
+    """
+    if not child_states:
+        return "open"
+    canon_states = [normalize_state(st) for st in child_states]
+    if all(st == "dropped" for st in canon_states):
+        return "dropped"
+    if all(st in ("done", "done with a caveat", "dropped") for st in canon_states):
+        if any(st == "done with a caveat" for st in canon_states):
+            return "done with a caveat"
+        return "done"
+    if any(st in ("in progress", "delivered", "bounced", "verified", "done", "done with a caveat") for st in canon_states):
+        return "in progress"
+    if any(st == "blocked" for st in canon_states):
+        return "blocked"
+    if any(st == "waiting" for st in canon_states):
+        return "waiting"
+    return "open"
+
+
+@dataclass
+class TaskNode:
+    id: str
+    title: str
+    parent: str | None
+    depth: int
+    node_type: str  # "initiative" | "container" | "leaf" | "microtask"
+    is_leaf: bool
+    is_container: bool
+    children: list[str]
+    own_fields: dict[str, Any]
+    fields: dict[str, dict[str, Any]]
+    labels: list[str]
+    label_sources: dict[str, str]
+    depends_on: list[str]
+    expanded_depends_on: list[str]
+    own_depends_on: list[str]
+    depends_on_free_text: str
+    state: str
+    canonical_state: str
+    derived_state: str | None
+    leaves_done: int
+    leaves_total: int
+    file_path: str
+    rel_path: str
+    is_folder: bool
+    in_done: bool
+    in_closed_section: bool
+    task_hash: str
+    block_text: str | None = None
+    expanded_rel_path: str | None = None
+    priority: str = "P2"
+    priority_reason: str = ""
+    executor: str = "kilo"
+    handoff: str = ""
+    category: str = ""
+    slug: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "initiative_task" if "." in self.id and not self.id.startswith("T") else ("emergent" if self.id.startswith("T") else "initiative"),
+            "id": self.id,
+            "title": self.title,
+            "parent": self.parent,
+            "depth": self.depth,
+            "node_type": self.node_type,
+            "is_leaf": self.is_leaf,
+            "is_container": self.is_container,
+            "children": list(self.children),
+            "fields": self.fields,
+            "labels": list(self.labels),
+            "label_sources": dict(self.label_sources),
+            "depends_on": list(self.depends_on),
+            "expanded_depends_on": list(self.expanded_depends_on),
+            "state": self.state,
+            "canonical_state": self.canonical_state,
+            "derived_state": self.derived_state,
+            "leaves_done": self.leaves_done,
+            "leaves_total": self.leaves_total,
+            "file_path": self.file_path,
+            "rel_path": self.rel_path,
+            "is_folder": self.is_folder,
+            "in_done": self.in_done,
+            "in_closed_section": self.in_closed_section,
+            "bundle_sha256": self.task_hash,
+            "task_hash": self.task_hash,
+            "priority": self.priority,
+            "priority_reason": self.priority_reason,
+            "executor": self.executor,
+            "handoff": self.handoff,
+            "category": self.category,
+            "slug": self.slug,
+        }
+
+
+def rewrite_block_in_file(
+    file_path: pathlib.Path,
+    task_id: str,
+    new_status: str | None = None,
+    new_deps: list[str] | None = None,
+    new_labels: list[str] | None = None,
+    expect_task_hash: str | None = None,
+) -> tuple[str, str]:
+    text = file_path.read_text(encoding="utf-8")
+    heading_re = re.compile(
+        rf"^###\s+{re.escape(task_id)}\s+[—–-]\s+.*$",
+        re.MULTILINE,
+    )
+    m = heading_re.search(text)
+    if not m:
+        raise ValueError(f"Block for task '{task_id}' not found in {file_path}")
+
+    start_pos = m.start()
+    scanned_lines, _ = scan_markdown_blocks(text)
+    heading_line_num = text[:start_pos].count("\n") + 1
+    heading_sline_idx = next(
+        (i for i, sl in enumerate(scanned_lines) if sl.line_number == heading_line_num),
+        None,
+    )
+
+    end_pos = len(text)
+    if heading_sline_idx is not None:
+        for idx in range(heading_sline_idx + 1, len(scanned_lines)):
+            sl = scanned_lines[idx]
+            if not sl.is_fenced and (sl.text.startswith("### ") or sl.text.startswith("## ")):
+                end_pos = sum(len(sl2.text) + 1 for sl2 in scanned_lines[:idx])
+                break
+
+    old_block_text = text[start_pos:end_pos]
+    if expect_task_hash:
+        curr_h = hashlib.sha256(old_block_text.encode("utf-8")).hexdigest()
+        if curr_h.lower() != expect_task_hash.strip().lower():
+            raise ValueError(f"Task hash mismatch: expected {expect_task_hash}, actual {curr_h}")
+
+    lines = old_block_text.splitlines(keepends=True)
+    new_lines: list[str] = []
+
+    for line in lines:
+        line_clean = line.rstrip("\r\n")
+        line_ending = line[len(line_clean):]
+
+        if re.match(r"^\s*[-*]\s+", line_clean):
+            prefix, segments = parse_bullet_line(line_clean)
+            modified = False
+
+            if new_status is not None:
+                for seg in segments:
+                    if seg.key in ("status", "state"):
+                        if "`" in seg.raw_value:
+                            seg.raw_value = f"`{new_status}`"
+                        else:
+                            seg.raw_value = new_status
+                        modified = True
+
+            if new_deps is not None:
+                for seg in segments:
+                    if seg.key in ("depends_on", "depends"):
+                        seg.raw_value = update_depends_on_field(seg.raw_value, new_deps)
+                        modified = True
+
+            if new_labels is not None:
+                for seg in segments:
+                    if seg.key in ("labels", "label"):
+                        seg.raw_value = ", ".join(new_labels) if new_labels else "-"
+                        modified = True
+
+            if modified:
+                new_line_clean = serialize_bullet_segments(prefix, segments)
+                new_lines.append(new_line_clean + line_ending)
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+
+    new_block_text = "".join(new_lines)
+    new_text = text[:start_pos] + new_block_text + text[end_pos:]
+    _atomic_write_text(file_path, new_text, encoding="utf-8")
+    new_hash = hashlib.sha256(new_block_text.encode("utf-8")).hexdigest()
+    return new_block_text, new_hash
+
+
+def parse_child_blocks(
+    file_path: pathlib.Path,
+    parent_id: str,
+    parent_depth: int,
+    tasks_dir: pathlib.Path,
+    in_done: bool,
+    in_closed_section: bool,
+    parent_category: str = "",
+) -> list[TaskNode]:
+    """Parse child blocks ### <id> - <title> in file_path recursively."""
+    if not file_path.is_file():
+        return []
+
+    text = file_path.read_text(encoding="utf-8")
+    scanned_lines, _ = scan_markdown_blocks(text)
+    nodes: list[TaskNode] = []
+
+    block_indices: list[tuple[int, str, str, bool]] = []
+    current_closed = in_closed_section
+
+    for idx, sline in enumerate(scanned_lines):
+        if sline.is_fenced:
+            continue
+        if sline.text.startswith("## "):
+            m_sec = re.match(r"^##\s+(Closed\b.*)", sline.text, re.IGNORECASE)
+            current_closed = m_sec is not None
+        elif sline.text.startswith("### "):
+            m_head = re.match(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+)+)\s+[—–-]\s+(.+?)\s*$", sline.text)
+            if m_head:
+                cid = m_head.group(1)
+                ctitle = m_head.group(2).strip()
+                block_indices.append((idx, cid, ctitle, current_closed))
+
+    raw_lines = [sl.text for sl in scanned_lines]
+
+    for i, (start_idx, cid, ctitle, is_closed) in enumerate(block_indices):
+        end_idx = len(scanned_lines)
+        if i + 1 < len(block_indices):
+            end_idx = block_indices[i + 1][0]
+        else:
+            for next_idx in range(start_idx + 1, len(scanned_lines)):
+                sl = scanned_lines[next_idx]
+                if not sl.is_fenced and sl.text.startswith("## "):
+                    end_idx = next_idx
+                    break
+
+        block_lines = raw_lines[start_idx:end_idx]
+        block_text = "\n".join(block_lines) + "\n"
+        block_hash = hashlib.sha256(block_text.encode("utf-8")).hexdigest()
+
+        expanded_link: str | None = None
+        for bl in block_lines[1:]:
+            m_exp = EXPANDED_BULLET_RE.match(bl)
+            if m_exp:
+                expanded_link = m_exp.group(2)
+                break
+
+        if expanded_link:
+            target_readme = file_path.parent / expanded_link
+            rel_readme = target_readme.relative_to(tasks_dir).as_posix() if target_readme.is_relative_to(tasks_dir) else str(target_readme)
+            c_node = TaskNode(
+                id=cid,
+                title=ctitle,
+                parent=parent_id,
+                depth=parent_depth + 1,
+                node_type="container",
+                is_leaf=False,
+                is_container=True,
+                children=[],
+                own_fields={},
+                fields={},
+                labels=[],
+                label_sources={},
+                depends_on=[],
+                expanded_depends_on=[],
+                own_depends_on=[],
+                depends_on_free_text="",
+                state="open",
+                canonical_state="open",
+                derived_state="open",
+                leaves_done=0,
+                leaves_total=0,
+                file_path=str(target_readme),
+                rel_path=rel_readme,
+                is_folder=True,
+                in_done=in_done,
+                in_closed_section=is_closed,
+                task_hash=block_hash,
+                block_text=block_text,
+                expanded_rel_path=expanded_link,
+                category=parent_category,
+                slug=slugify(ctitle),
+            )
+            nodes.append(c_node)
+            if target_readme.is_file():
+                rtext = target_readme.read_text(encoding="utf-8")
+                r_scanned, _ = scan_markdown_blocks(rtext)
+                sub_own_fields: dict[str, Any] = {}
+                for r_sl in r_scanned:
+                    if r_sl.is_fenced or not r_sl.text.startswith("- "):
+                        continue
+                    _, segs = parse_bullet_line(r_sl.text)
+                    for seg in segs:
+                        if seg.key:
+                            sub_own_fields[seg.key] = seg.clean_value
+                c_node.own_fields = sub_own_fields
+                if "priority" in sub_own_fields:
+                    c_node.priority = sub_own_fields["priority"]
+                if "executor" in sub_own_fields:
+                    c_node.executor = sub_own_fields["executor"]
+
+                sub_children = parse_child_blocks(
+                    target_readme,
+                    parent_id=cid,
+                    parent_depth=parent_depth + 1,
+                    tasks_dir=tasks_dir,
+                    in_done=in_done,
+                    in_closed_section=is_closed,
+                    parent_category=parent_category,
+                )
+                nodes.extend(sub_children)
+        else:
+            own_fields: dict[str, Any] = {}
+            for bl in block_lines[1:]:
+                if not bl.strip().startswith("- ") and not bl.strip().startswith("* "):
+                    continue
+                _, segs = parse_bullet_line(bl)
+                for seg in segs:
+                    if seg.key:
+                        own_fields[seg.key] = seg.clean_value
+
+            raw_status = own_fields.get("status") or own_fields.get("state") or "open"
+            canon_st = normalize_state(raw_status)
+            deps_val = own_fields.get("depends_on") or own_fields.get("depends") or ""
+            parsed_deps, free_txt = parse_depends_on_field(deps_val)
+
+            leaf_node = TaskNode(
+                id=cid,
+                title=ctitle,
+                parent=parent_id,
+                depth=parent_depth + 1,
+                node_type="leaf",
+                is_leaf=True,
+                is_container=False,
+                children=[],
+                own_fields=own_fields,
+                fields={},
+                labels=[l.strip() for l in own_fields.get("labels", "").split(",") if l.strip()],
+                label_sources={},
+                depends_on=list(parsed_deps),
+                expanded_depends_on=list(parsed_deps),
+                own_depends_on=list(parsed_deps),
+                depends_on_free_text=free_txt,
+                state=raw_status,
+                canonical_state=canon_st,
+                derived_state=None,
+                leaves_done=1 if canon_st in ("done", "done with a caveat") else 0,
+                leaves_total=1,
+                file_path=str(file_path),
+                rel_path=file_path.relative_to(tasks_dir).as_posix(),
+                is_folder=False,
+                in_done=in_done,
+                in_closed_section=is_closed,
+                task_hash=block_hash,
+                block_text=block_text,
+                priority=own_fields.get("priority", "P2"),
+                priority_reason=own_fields.get("priority_reason", f"Task {cid}"),
+                executor=own_fields.get("executor", "kilo"),
+                handoff=own_fields.get("handoff", f"Work on task {cid} in {file_path.relative_to(tasks_dir).as_posix()}"),
+                category=parent_category,
+                slug=slugify(ctitle),
+            )
+            nodes.append(leaf_node)
+
+    return nodes
+
+
+def propagate_inheritance(tree: dict[str, TaskNode], node_id: str) -> None:
+    node = tree[node_id]
+    parent = tree.get(node.parent) if node.parent else None
+
+    # 1. Inherited fields: executor, priority, profile, repo, paths
+    for f in INHERITED_FIELDS:
+        own_val = node.own_fields.get(f)
+        if f == "paths" and not own_val:
+            own_val = node.own_fields.get("focus_files") or node.own_fields.get("focus_file")
+        if own_val is not None and own_val != "-" and own_val != "":
+            node.fields[f] = {"value": own_val, "source": "own"}
+        elif parent and f in parent.fields:
+            p_field = parent.fields[f]
+            anc_id = parent.id if p_field["source"] == "own" else p_field["source"].split(":", 1)[1]
+            node.fields[f] = {"value": p_field["value"], "source": f"inherited:{anc_id}"}
+        elif own_val is not None:
+            node.fields[f] = {"value": own_val, "source": "own"}
+
+    # 2. Labels: union of own and ancestor labels
+    own_labels = node.own_fields.get("labels", [])
+    if isinstance(own_labels, str):
+        own_labels = [l.strip() for l in own_labels.split(",") if l.strip()]
+    label_sources: dict[str, str] = {l: "own" for l in own_labels}
+    if parent:
+        for l, src in parent.label_sources.items():
+            if l not in label_sources:
+                anc_id = parent.id if src == "own" else src.split(":", 1)[1]
+                label_sources[l] = f"inherited:{anc_id}"
+    all_labels = sorted(label_sources.keys())
+    node.labels = all_labels
+    node.label_sources = label_sources
+    if all_labels:
+        primary_source = "own" if any(s == "own" for s in label_sources.values()) else (list(label_sources.values())[0] if label_sources else "own")
+        node.fields["labels"] = {"value": all_labels, "source": primary_source}
+
+    # 3. Depends on: additive
+    own_deps = list(node.own_depends_on)
+    inherited_deps = []
+    if parent:
+        for dep in parent.depends_on:
+            if dep not in own_deps and dep not in inherited_deps:
+                inherited_deps.append(dep)
+    node.depends_on = own_deps + inherited_deps
+    node.fields["depends_on"] = {
+        "value": node.depends_on,
+        "source": "own" if own_deps else (f"inherited:{parent.id}" if parent and inherited_deps else "own"),
+    }
+
+    # 4. Non-inherited fields: size, kind, decider, status, verifier, verification_mode, goal, handoff
+    for f in ("size", "kind", "decider", "status", "verifier", "verification_mode", "goal", "handoff"):
+        if f in node.own_fields:
+            node.fields[f] = {"value": node.own_fields[f], "source": "own"}
+
+    if "executor" in node.fields:
+        node.executor = node.fields["executor"]["value"]
+    if "priority" in node.fields:
+        node.priority = node.fields["priority"]["value"]
+    if "handoff" in node.fields:
+        node.handoff = node.fields["handoff"]["value"]
+
+    for cid in node.children:
+        if cid in tree:
+            propagate_inheritance(tree, cid)
+
+
+def evaluate_container_states(tree: dict[str, TaskNode], node_id: str) -> None:
+    node = tree[node_id]
+    for cid in node.children:
+        if cid in tree:
+            evaluate_container_states(tree, cid)
+
+    if node.is_leaf:
+        node.leaves_total = 1
+        node.leaves_done = 1 if node.canonical_state in ("done", "done with a caveat") else 0
+        node.derived_state = None
+    else:
+        child_nodes = [tree[cid] for cid in node.children if cid in tree]
+        child_states = [c.state for c in child_nodes]
+        derived = derive_container_state(child_states)
+        node.derived_state = derived
+        node.state = derived
+        node.canonical_state = normalize_state(derived)
+        node.leaves_total = sum(c.leaves_total for c in child_nodes)
+        node.leaves_done = sum(c.leaves_done for c in child_nodes)
+
+
+def expand_dependency_to_leaves(tree: dict[str, TaskNode], dep_id: str) -> list[str]:
+    if dep_id not in tree:
+        return [dep_id]
+    node = tree[dep_id]
+    if node.is_leaf:
+        return [dep_id]
+    leaves: list[str] = []
+    def _collect(n: TaskNode) -> None:
+        for cid in n.children:
+            if cid in tree:
+                c = tree[cid]
+                if c.is_leaf:
+                    leaves.append(c.id)
+                else:
+                    _collect(c)
+    _collect(node)
+    return leaves
+
+
+def check_dependency_cycles(tree: dict[str, TaskNode]) -> list[str]:
+    """Check for cycles on the expanded dependency graph (including ancestor/descendant deps)."""
+    errors: list[str] = []
+
+    for node in tree.values():
+        ancestors: set[str] = set()
+        curr = node.parent
+        while curr and curr in tree:
+            ancestors.add(curr)
+            curr = tree[curr].parent
+
+        descendants: set[str] = set()
+        def _get_desc(n: TaskNode):
+            for cid in n.children:
+                descendants.add(cid)
+                if cid in tree:
+                    _get_desc(tree[cid])
+        _get_desc(node)
+
+        for dep in node.own_depends_on:
+            if dep in ancestors:
+                errors.append(f"{node.rel_path}: task {node.id} depends on its ancestor {dep} (cycle).")
+            if dep in descendants:
+                errors.append(f"{node.rel_path}: task {node.id} depends on its descendant {dep} (cycle).")
+
+    expanded_graph: dict[str, set[str]] = {}
+    for node in tree.values():
+        expanded_deps: set[str] = set()
+        for dep in node.depends_on:
+            for leaf in expand_dependency_to_leaves(tree, dep):
+                expanded_deps.add(leaf)
+        expanded_graph[node.id] = expanded_deps
+
+    visited: dict[str, int] = {}
+    stack: list[str] = []
+
+    def dfs(u: str) -> None:
+        visited[u] = 1
+        stack.append(u)
+        for v in sorted(expanded_graph.get(u, set())):
+            if visited.get(v, 0) == 1:
+                cycle_start = stack.index(v)
+                cycle_path = " -> ".join(stack[cycle_start:] + [v])
+                errors.append(f"Cycle detected in dependencies: {cycle_path}")
+            elif visited.get(v, 0) == 0:
+                dfs(v)
+        stack.pop()
+        visited[u] = 2
+
+    for nid in sorted(tree.keys()):
+        if visited.get(nid, 0) == 0:
+            dfs(nid)
+
+    return errors
+
+
+def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
+    """Discover all tasks/nodes in the tasks hierarchy as a dictionary of id -> TaskNode."""
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    tree: dict[str, TaskNode] = {}
+    if not tasks_dir.is_dir():
+        return tree
+
+    # 1. Initiatives (active, done, merged)
+    initiative_dirs = []
+    for entry in sorted(tasks_dir.iterdir()):
+        if entry.is_dir() and INITIATIVE_DIR_RE.match(entry.name):
+            initiative_dirs.append((entry, False))
+
+    for loc in ("done", "merged"):
+        loc_dir = tasks_dir / loc
+        if loc_dir.is_dir():
+            for entry in sorted(loc_dir.iterdir()):
+                if entry.is_dir() and INITIATIVE_DIR_RE.match(entry.name):
+                    initiative_dirs.append((entry, True))
+
+    for entry, in_done in initiative_dirs:
+        m = INITIATIVE_DIR_RE.match(entry.name)
+        if not m:
+            continue
+        num, slug = m.group(1), m.group(2)
+        plan_path = entry / "plan.md"
+        if not plan_path.is_file():
+            continue
+
+        text = plan_path.read_text(encoding="utf-8")
+        h1_m = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+        raw_title = h1_m.group(1).strip() if h1_m else slug
+        t_clean = re.sub(rf"^{num}\s+[—–-]\s+", "", raw_title).strip()
+
+        scanned_lines, _ = scan_markdown_blocks(text)
+        init_own_fields: dict[str, Any] = {}
+        for sline in scanned_lines:
+            if sline.is_fenced:
+                continue
+            if sline.text.startswith("## ") or sline.text.startswith("### "):
+                break
+            if sline.text.startswith("- ") or sline.text.startswith("* "):
+                _, segs = parse_bullet_line(sline.text)
+                for seg in segs:
+                    if seg.key:
+                        init_own_fields[seg.key] = seg.clean_value
+
+        init_node = TaskNode(
+            id=num,
+            title=t_clean,
+            parent=None,
+            depth=0,
+            node_type="initiative",
+            is_leaf=False,
+            is_container=True,
+            children=[],
+            own_fields=init_own_fields,
+            fields={},
+            labels=[],
+            label_sources={},
+            depends_on=[],
+            expanded_depends_on=[],
+            own_depends_on=[],
+            depends_on_free_text="",
+            state="open",
+            canonical_state="open",
+            derived_state="open",
+            leaves_done=0,
+            leaves_total=0,
+            file_path=str(plan_path),
+            rel_path=plan_path.relative_to(tasks_dir).as_posix(),
+            is_folder=True,
+            in_done=in_done,
+            in_closed_section=False,
+            task_hash=_file_sha256(plan_path),
+            category=slug,
+            slug=slug,
+        )
+        tree[num] = init_node
+
+        children = parse_child_blocks(
+            plan_path,
+            parent_id=num,
+            parent_depth=0,
+            tasks_dir=tasks_dir,
+            in_done=in_done,
+            in_closed_section=False,
+            parent_category=slug,
+        )
+        for c in children:
+            tree[c.id] = c
+
+    # 2. Emergent Tasks
+    emergent_raw = discover_emergent_tasks(tasks_dir)
+    for et in emergent_raw:
+        tid = et["id"]
+        if not tid:
+            continue
+        fpath = pathlib.Path(et["file_path"])
+        is_folder = et.get("is_folder", False)
+        sub_nodes: list[TaskNode] = []
+        if is_folder and fpath.is_file():
+            sub_nodes = parse_child_blocks(
+                fpath,
+                parent_id=tid,
+                parent_depth=0,
+                tasks_dir=tasks_dir,
+                in_done=et.get("in_done", False),
+                in_closed_section=False,
+                parent_category=et.get("category", ""),
+            )
+
+        is_container = len(sub_nodes) > 0
+        is_leaf = not is_container
+
+        node = TaskNode(
+            id=tid,
+            title=et["title"],
+            parent=None,
+            depth=0,
+            node_type="container" if is_container else "leaf",
+            is_leaf=is_leaf,
+            is_container=is_container,
+            children=[],
+            own_fields=dict(et["headers"]),
+            fields={},
+            labels=[l.strip() for l in et.get("headers", {}).get("labels", "").split(",") if l.strip()],
+            label_sources={},
+            depends_on=list(et.get("depends_on", [])),
+            expanded_depends_on=list(et.get("depends_on", [])),
+            own_depends_on=list(et.get("depends_on", [])),
+            depends_on_free_text="",
+            state=et["state"],
+            canonical_state=et["canonical_state"],
+            derived_state=et["state"] if is_container else None,
+            leaves_done=1 if is_leaf and et["canonical_state"] in ("done", "done with a caveat") else 0,
+            leaves_total=1 if is_leaf else 0,
+            file_path=str(fpath),
+            rel_path=et["rel_path"],
+            is_folder=is_folder,
+            in_done=et.get("in_done", False),
+            in_closed_section=False,
+            task_hash=et["bundle_sha256"],
+            priority=et.get("priority", "P2"),
+            priority_reason=et.get("priority_reason", ""),
+            executor=et.get("executor", "kilo"),
+            handoff=et.get("handoff", ""),
+            category=et.get("category", ""),
+            slug=slugify(et["title"]),
+        )
+        tree[tid] = node
+        for sn in sub_nodes:
+            tree[sn.id] = sn
+
+    # 3. Microtasks
+    micro_dir = tasks_dir / "micro"
+    if micro_dir.is_dir():
+        for mf in sorted(micro_dir.glob("*.md")):
+            if mf.name == "README.md":
+                continue
+            m = re.match(r"^([A-Za-z0-9]+)-(.*)\.md$", mf.name)
+            if m:
+                mid, mslug = m.group(1), m.group(2)
+                if mid not in tree:
+                    tree[mid] = TaskNode(
+                        id=mid,
+                        title=mslug,
+                        parent=None,
+                        depth=0,
+                        node_type="microtask",
+                        is_leaf=True,
+                        is_container=False,
+                        children=[],
+                        own_fields={},
+                        fields={},
+                        labels=[],
+                        label_sources={},
+                        depends_on=[],
+                        expanded_depends_on=[],
+                        own_depends_on=[],
+                        depends_on_free_text="",
+                        state="open",
+                        canonical_state="open",
+                        derived_state=None,
+                        leaves_done=0,
+                        leaves_total=1,
+                        file_path=str(mf),
+                        rel_path=mf.relative_to(tasks_dir).as_posix(),
+                        is_folder=False,
+                        in_done=False,
+                        in_closed_section=False,
+                        task_hash=_file_sha256(mf),
+                    )
+
+    # 4. Connect children
+    for nid, node in tree.items():
+        if node.parent and node.parent in tree:
+            p_node = tree[node.parent]
+            if nid not in p_node.children:
+                p_node.children.append(nid)
+            p_node.is_leaf = False
+            p_node.is_container = True
+            if p_node.node_type != "initiative":
+                p_node.node_type = "container"
+
+    for node in tree.values():
+        def _child_sort_key(cid: str):
+            parts = cid.split(".")
+            try:
+                return [int(p) if p.isdigit() else p for p in parts]
+            except Exception:
+                return [cid]
+        node.children.sort(key=_child_sort_key)
+
+    # 5. Top-down inheritance
+    for root_id in [nid for nid, n in tree.items() if n.parent is None]:
+        propagate_inheritance(tree, root_id)
+
+    # 6. Bottom-up container evaluation
+    for root_id in [nid for nid, n in tree.items() if n.parent is None]:
+        evaluate_container_states(tree, root_id)
+
+    # 7. Expand dependencies to leaves
+    for node in tree.values():
+        exp_deps: set[str] = set()
+        for dep in node.depends_on:
+            for l in expand_dependency_to_leaves(tree, dep):
+                exp_deps.add(l)
+        node.expanded_depends_on = sorted(exp_deps)
+
+    return tree
+
+
+def allocate_child_id(tree: dict[str, TaskNode], parent_id: str, tasks_dir: pathlib.Path) -> str:
+    """Allocate the next child ID <parent>.<n> taking the maximum over:
+    - open children
+    - ## Closed blocks
+    - done/ folders
+    under the lock.
+    """
+    suffixes: list[int] = []
+    for node in tree.values():
+        if node.parent == parent_id:
+            m = re.match(rf"^{re.escape(parent_id)}\.(\d+)$", node.id)
+            if m:
+                suffixes.append(int(m.group(1)))
+
+    parent_node = tree.get(parent_id)
+    if parent_node and parent_node.file_path:
+        p_path = pathlib.Path(parent_node.file_path)
+        if p_path.is_file():
+            text = p_path.read_text(encoding="utf-8")
+            closed_sec = find_markdown_section(text, "Closed")
+            if closed_sec:
+                for line in closed_sec.lines:
+                    m = re.match(rf"^###\s+{re.escape(parent_id)}\.(\d+)\b", line.text)
+                    if m:
+                        suffixes.append(int(m.group(1)))
+
+        p_dir = p_path.parent
+        done_dir = p_dir / "done"
+        if done_dir.is_dir():
+            for child in done_dir.iterdir():
+                if child.is_dir():
+                    m = re.match(rf"^{re.escape(parent_id)}\.(\d+)-", child.name)
+                    if m:
+                        suffixes.append(int(m.group(1)))
+
+    next_num = max(suffixes) + 1 if suffixes else 1
+    return f"{parent_id}.{next_num}"
+
+
+def compute_operation_plan(operations: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+    """Compute S10 operation plan: every path with its before-hash and action.
+    Returns (plan, plan_hash) where plan_hash is SHA256 over canonical JSON.
+    """
+    plan = []
+    for op in operations:
+        plan.append({
+            "action": op.get("action", "modify"),
+            "before_hash": op.get("before_hash", ""),
+            "path": op["path"],
+        })
+    plan_sorted = sorted(plan, key=lambda x: (x["path"], x["action"]))
+    canonical = json.dumps(plan_sorted, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    plan_hash = hashlib.sha256(canonical).hexdigest()
+    return plan_sorted, plan_hash
+
+
+def child_add(
+    tasks_dir: pathlib.Path,
+    parent_id: str,
+    title: str,
+    kind: str = "feature",
+    dry_run: bool = False,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if parent_id not in tree:
+            return {"ok": False, "error": f"Parent node '{parent_id}' not found."}
+        parent = tree[parent_id]
+
+        operations: list[dict[str, Any]] = []
+        new_id = allocate_child_id(tree, parent_id, tasks_dir)
+
+        if parent.is_leaf:
+            if parent.canonical_state != "open":
+                return {
+                    "ok": False,
+                    "error": f"Cannot add child to in-flight leaf '{parent_id}' in state '{parent.state}'. Leaf must be in state 'open'.",
+                }
+            slug = slugify(parent.title)
+            parent_file = pathlib.Path(parent.file_path)
+
+            if parent.block_text is not None:
+                parent_dir = parent_file.parent
+                new_folder = parent_dir / f"{parent_id}-{slug}"
+                new_readme = new_folder / "README.md"
+
+                parent_before_hash = _file_sha256(parent_file)
+                operations.append({
+                    "action": "modify",
+                    "path": parent_file.relative_to(tasks_dir).as_posix(),
+                    "before_hash": parent_before_hash,
+                })
+                operations.append({
+                    "action": "create",
+                    "path": (new_readme.relative_to(tasks_dir) if new_readme.is_relative_to(tasks_dir) else new_readme).as_posix(),
+                    "before_hash": "",
+                })
+
+                plan, plan_hash = compute_operation_plan(operations)
+                if expect_plan_hash and expect_plan_hash != plan_hash:
+                    return {
+                        "ok": False,
+                        "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
+                        "plan_hash": plan_hash,
+                    }
+                if dry_run:
+                    return {
+                        "ok": True,
+                        "dry_run": True,
+                        "allocated_id": new_id,
+                        "plan": plan,
+                        "plan_hash": plan_hash,
+                    }
+
+                old_text = parent_file.read_text(encoding="utf-8")
+                block_lines = parent.block_text.splitlines()
+                filtered_lines = []
+                for bl in block_lines:
+                    if re.match(r"^\s*[-*]\s+\*\*(Status|State):\*\*", bl):
+                        continue
+                    filtered_lines.append(bl)
+                body_content = "\n".join(filtered_lines[1:]).strip()
+
+                rel_folder_link = f"{parent_id}-{slug}/"
+                rel_readme_link = f"{parent_id}-{slug}/README.md"
+                expanded_block = f"### {parent_id} - {parent.title}\n\n- **Expanded:** [{rel_folder_link}]({rel_readme_link})\n"
+                new_parent_text = old_text.replace(parent.block_text, expanded_block, 1)
+                _atomic_write_text(parent_file, new_parent_text)
+
+                readme_lines = [
+                    f"# {parent_id} - {parent.title}",
+                    "",
+                ]
+                if body_content:
+                    readme_lines.append(body_content)
+                    readme_lines.append("")
+                readme_lines.extend([
+                    "## Subtasks",
+                    "",
+                    f"### {new_id} - {title}",
+                    "",
+                    f"- **Status:** `open` · **Kind:** {kind}",
+                    f"- **Goal:** {title}",
+                    "",
+                ])
+                new_folder.mkdir(parents=True, exist_ok=True)
+                _atomic_write_text(new_readme, "\n".join(readme_lines))
+
+                return {
+                    "ok": True,
+                    "allocated_id": new_id,
+                    "plan_hash": plan_hash,
+                    "folder": str(new_folder),
+                }
+
+        else:
+            parent_file = pathlib.Path(parent.file_path)
+            parent_before_hash = _file_sha256(parent_file)
+            operations.append({
+                "action": "modify",
+                "path": parent_file.relative_to(tasks_dir).as_posix(),
+                "before_hash": parent_before_hash,
+            })
+            plan, plan_hash = compute_operation_plan(operations)
+            if expect_plan_hash and expect_plan_hash != plan_hash:
+                return {
+                    "ok": False,
+                    "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
+                    "plan_hash": plan_hash,
+                }
+            if dry_run:
+                return {
+                    "ok": True,
+                    "dry_run": True,
+                    "allocated_id": new_id,
+                    "plan": plan,
+                    "plan_hash": plan_hash,
+                }
+
+            child_block = (
+                f"\n### {new_id} - {title}\n\n"
+                f"- **Status:** `open` · **Kind:** {kind}\n"
+                f"- **Goal:** {title}\n"
+            )
+            old_text = parent_file.read_text(encoding="utf-8")
+            closed_m = re.search(r"^##\s+Closed\b", old_text, re.MULTILINE)
+            if closed_m:
+                new_text = old_text[:closed_m.start()] + child_block.lstrip() + "\n" + old_text[closed_m.start():]
+            else:
+                new_text = old_text.rstrip() + "\n" + child_block
+
+            _atomic_write_text(parent_file, new_text)
+            return {
+                "ok": True,
+                "allocated_id": new_id,
+                "plan_hash": plan_hash,
+            }
+
+
+def expand_node(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    dry_run: bool = False,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "error": f"Node '{node_id}' not found."}
+        node = tree[node_id]
+        if node.is_folder:
+            return {"ok": False, "error": f"Node '{node_id}' is already a folder."}
+        if node.block_text is None:
+            return {"ok": False, "error": f"Node '{node_id}' is not an inline block."}
+
+        parent_file = pathlib.Path(node.file_path)
+        slug = slugify(node.title)
+        folder = parent_file.parent / f"{node_id}-{slug}"
+        readme = folder / "README.md"
+
+        operations = [
+            {
+                "action": "modify",
+                "path": parent_file.relative_to(tasks_dir).as_posix(),
+                "before_hash": _file_sha256(parent_file),
+            },
+            {
+                "action": "create",
+                "path": (readme.relative_to(tasks_dir) if readme.is_relative_to(tasks_dir) else readme).as_posix(),
+                "before_hash": "",
+            },
+        ]
+        plan, plan_hash = compute_operation_plan(operations)
+        if expect_plan_hash and expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
+                "plan_hash": plan_hash,
+            }
+        if dry_run:
+            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash}
+
+        rel_folder = f"{node_id}-{slug}/"
+        rel_readme = f"{node_id}-{slug}/README.md"
+        expanded_block = f"### {node_id} - {node.title}\n\n- **Expanded:** [{rel_folder}]({rel_readme})\n"
+
+        old_parent_text = parent_file.read_text(encoding="utf-8")
+        new_parent_text = old_parent_text.replace(node.block_text, expanded_block, 1)
+
+        block_lines = node.block_text.splitlines()
+        bullet_lines = block_lines[1:]
+        body_text = "\n".join(bullet_lines).strip()
+
+        readme_text = f"# {node_id} - {node.title}\n\n{body_text}\n\n## Subtasks\n"
+
+        folder.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(readme, readme_text)
+        _atomic_write_text(parent_file, new_parent_text)
+
+        return {"ok": True, "plan_hash": plan_hash, "folder": str(folder)}
+
+
+def collapse_node(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    dry_run: bool = False,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "error": f"Node '{node_id}' not found."}
+        node = tree[node_id]
+        if not node.is_folder:
+            return {"ok": False, "error": f"Node '{node_id}' is not an expanded folder."}
+
+        for cid in node.children:
+            if cid in tree and tree[cid].is_folder:
+                return {
+                    "ok": False,
+                    "error": f"Cannot collapse '{node_id}': child '{cid}' is an expanded folder.",
+                }
+
+        folder = pathlib.Path(node.file_path).parent
+        readme = folder / "README.md"
+
+        if not node.parent or node.parent not in tree:
+            return {"ok": False, "error": f"Cannot collapse root node '{node_id}'."}
+        parent_node = tree[node.parent]
+        parent_file = pathlib.Path(parent_node.file_path)
+
+        operations = [
+            {
+                "action": "modify",
+                "path": parent_file.relative_to(tasks_dir).as_posix(),
+                "before_hash": _file_sha256(parent_file),
+            },
+            {
+                "action": "delete",
+                "path": readme.relative_to(tasks_dir).as_posix(),
+                "before_hash": _file_sha256(readme),
+            },
+        ]
+        plan, plan_hash = compute_operation_plan(operations)
+        if expect_plan_hash and expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
+                "plan_hash": plan_hash,
+            }
+        if dry_run:
+            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash}
+
+        readme_text = readme.read_text(encoding="utf-8")
+        lines = readme_text.splitlines()
+        h1_idx = next((i for i, ln in enumerate(lines) if ln.startswith("# ")), 0)
+        subtasks_idx = next((i for i, ln in enumerate(lines) if ln.startswith("## Subtasks")), len(lines))
+
+        node_bullets = "\n".join(lines[h1_idx + 1:subtasks_idx]).strip()
+
+        restored_block = f"### {node_id} - {node.title}\n\n{node_bullets}\n"
+
+        old_parent_text = parent_file.read_text(encoding="utf-8")
+        exp_pat = re.compile(
+            rf"^###\s+{re.escape(node_id)}\s+[—–-]\s+.*?\n\n-\s+\*\*Expanded:\*\*\s*\[[^\]]+\]\([^)]+\)\n?",
+            re.MULTILINE | re.DOTALL,
+        )
+        m = exp_pat.search(old_parent_text)
+        if not m:
+            return {"ok": False, "error": f"Could not find expanded block for '{node_id}' in {parent_file}"}
+
+        new_parent_text = old_parent_text[:m.start()] + restored_block + old_parent_text[m.end():]
+
+        shutil.rmtree(folder)
+        _atomic_write_text(parent_file, new_parent_text)
+
+        return {"ok": True, "plan_hash": plan_hash}
+
+
+def reopen_node(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    reason: str,
+    dry_run: bool = False,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "error": f"Task '{node_id}' not found."}
+        node = tree[node_id]
+        if not node.is_leaf:
+            return {"ok": False, "error": f"Cannot reopen container '{node_id}': only leaf tasks can be reopened."}
+        if node.canonical_state not in TERMINAL_STATES:
+            return {
+                "ok": False,
+                "error": f"Task '{node_id}' is in state '{node.state}' (not a terminal state).",
+            }
+        if node.in_done or node.in_closed_section:
+            return {
+                "ok": False,
+                "error": "not-implemented-until-11.4",
+            }
+
+        file_path = pathlib.Path(node.file_path)
+        operations = [
+            {
+                "action": "modify",
+                "path": file_path.relative_to(tasks_dir).as_posix(),
+                "before_hash": _file_sha256(file_path),
+            }
+        ]
+        plan, plan_hash = compute_operation_plan(operations)
+        if expect_plan_hash and expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
+                "plan_hash": plan_hash,
+            }
+        if dry_run:
+            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash}
+
+        if node.block_text is not None:
+            rewrite_block_in_file(file_path, node_id, new_status="open")
+        else:
+            update_task_state_in_file(file_path, "open")
+
+        return {"ok": True, "task_id": node_id, "new_state": "open", "plan_hash": plan_hash}
+
+
+def set_deps(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    add_ids: list[str] | None = None,
+    remove_ids: list[str] | None = None,
+    to_ids: list[str] | None = None,
+    expect_task_hash: str | None = None,
+) -> dict[str, Any]:
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "error": f"Task '{node_id}' not found."}
+        node = tree[node_id]
+
+        if expect_task_hash and expect_task_hash.lower() != node.task_hash.lower():
+            return {
+                "ok": False,
+                "error": f"Task hash mismatch: expected {expect_task_hash}, actual {node.task_hash}",
+            }
+
+        curr_deps = list(node.own_depends_on)
+        if to_ids is not None:
+            new_deps = list(to_ids)
+        else:
+            new_deps = list(curr_deps)
+            if add_ids:
+                for a in add_ids:
+                    if a not in new_deps:
+                        new_deps.append(a)
+            if remove_ids:
+                new_deps = [d for d in new_deps if d not in remove_ids]
+
+        old_own = node.own_depends_on
+        node.own_depends_on = new_deps
+        node.depends_on = new_deps + (tree[node.parent].depends_on if node.parent and node.parent in tree else [])
+        cycle_errors = check_dependency_cycles(tree)
+        node.own_depends_on = old_own
+        if cycle_errors:
+            return {"ok": False, "error": cycle_errors[0]}
+
+        file_path = pathlib.Path(node.file_path)
+        if node.block_text is not None:
+            _, new_block_hash = rewrite_block_in_file(file_path, node_id, new_deps=new_deps)
+            return {"ok": True, "task_id": node_id, "depends_on": new_deps, "task_hash": new_block_hash}
+        else:
+            text = file_path.read_text(encoding="utf-8")
+            deps_str = ", ".join(new_deps) if new_deps else "-"
+            new_text = re.sub(r"^-\s+depends-on:\s*.*$", f"- depends-on: {deps_str}", text, flags=re.MULTILINE)
+            _atomic_write_text(file_path, new_text)
+            return {"ok": True, "task_id": node_id, "depends_on": new_deps}
+
+
+def set_labels(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    add_labels: list[str] | None = None,
+    remove_labels: list[str] | None = None,
+    to_labels: list[str] | None = None,
+    expect_task_hash: str | None = None,
+) -> dict[str, Any]:
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "error": f"Task '{node_id}' not found."}
+        node = tree[node_id]
+
+        if expect_task_hash and expect_task_hash.lower() != node.task_hash.lower():
+            return {
+                "ok": False,
+                "error": f"Task hash mismatch: expected {expect_task_hash}, actual {node.task_hash}",
+            }
+
+        if remove_labels:
+            for rl in remove_labels:
+                if rl in node.label_sources and node.label_sources[rl].startswith("inherited:"):
+                    ancestor = node.label_sources[rl].split(":", 1)[1]
+                    return {
+                        "ok": False,
+                        "error": f"Cannot remove inherited label '{rl}' (inherited from {ancestor}).",
+                    }
+
+        curr_own = list(node.own_fields.get("labels", []))
+        if to_labels is not None:
+            new_own = list(to_labels)
+        else:
+            new_own = list(curr_own)
+            if add_labels:
+                for al in add_labels:
+                    if al not in new_own:
+                        new_own.append(al)
+            if remove_labels:
+                new_own = [l for l in new_own if l not in remove_labels]
+
+        file_path = pathlib.Path(node.file_path)
+        if node.block_text is not None:
+            _, new_block_hash = rewrite_block_in_file(file_path, node_id, new_labels=new_own)
+            return {"ok": True, "task_id": node_id, "labels": new_own, "task_hash": new_block_hash}
+        else:
+            return {"ok": True, "task_id": node_id, "labels": new_own}
 
 
 # ---------------------------------------------------------------------------
@@ -1027,157 +2446,57 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
     if not tasks_dir.is_dir():
         return initiatives
 
-    # Try parsing initiative statuses from 00-INDEX.md if present
-    index_path = tasks_dir / "00-INDEX.md"
-    index_statuses: dict[str, str] = {}
-    if index_path.is_file():
-        idx_text = index_path.read_text(encoding="utf-8")
-        for line in idx_text.splitlines():
-            m_idx = re.match(
-                r"^\|\s*\d+\s*\|\s*(\d{2,})\s*\|\s*\[([^\]]+)\]\(([^)]+)\)\s*\|\s*([^|]+)\|",
-                line,
-            )
-            if m_idx:
-                inum = m_idx.group(1)
-                st_col = m_idx.group(4).lower()
-                if "not merged" in st_col or "in progress" in st_col or "progress" in st_col:
-                    index_statuses[inum] = "in progress"
-                elif "merged" in st_col or "done" in st_col:
-                    index_statuses[inum] = "done"
-                else:
-                    index_statuses[inum] = "open"
+    tree = discover_task_tree(tasks_dir)
+    init_nodes = [n for n in tree.values() if n.node_type == "initiative"]
+    init_nodes.sort(key=lambda n: n.id)
 
-    search_roots: list[tuple[pathlib.Path, str]] = [
-        (tasks_dir, "active"),
-        (tasks_dir / "done", "done"),
-        (tasks_dir / "merged", "merged"),
-    ]
+    for n in init_nodes:
+        child_tasks = []
+        def _collect_tasks(cid: str):
+            if cid not in tree:
+                return
+            cn = tree[cid]
+            child_tasks.append({
+                "id": cn.id,
+                "title": cn.title,
+                "state": cn.state,
+                "canonical_state": cn.canonical_state,
+                "priority": cn.priority,
+                "priority_reason": cn.priority_reason,
+                "executor": cn.executor,
+                "handoff": cn.handoff,
+                "rel_path": cn.rel_path,
+                "file_path": cn.file_path,
+                "is_leaf": cn.is_leaf,
+                "bundle_sha256": cn.task_hash,
+                "task_hash": cn.task_hash,
+                "depends_on": cn.depends_on,
+                "expanded_depends_on": cn.expanded_depends_on,
+                "fields": cn.fields,
+                "labels": cn.labels,
+            })
+            for ccid in cn.children:
+                _collect_tasks(ccid)
 
-    for root, location in search_roots:
-        if not root.is_dir():
-            continue
-        for entry in sorted(root.iterdir()):
-            if not entry.is_dir():
-                continue
-            m = INITIATIVE_DIR_RE.match(entry.name)
-            if not m:
-                continue
-            num, slug = m.group(1), m.group(2)
-            plan_path = entry / "plan.md"
-            if not plan_path.is_file():
-                continue
-            text = plan_path.read_text(encoding="utf-8")
-            scanned_lines, _ = scan_markdown_blocks(text)
-            h1_match = next((sline.text[2:].strip() for sline in scanned_lines if not sline.is_fenced and sline.text.startswith("# ")), None)
-            title = h1_match if h1_match else entry.name
+        for cid in n.children:
+            _collect_tasks(cid)
 
-            # Determine initiative status
-            if location in ("merged", "done") or (entry / "summary.md").is_file():
-                init_status = "done"
-            elif num in index_statuses:
-                init_status = index_statuses[num]
-            else:
-                status_m = None
-                for sline in scanned_lines:
-                    if not sline.is_fenced:
-                        sm = re.search(r"^\s*>\s*\*\*Status:\*\*\s*([^\n·]+)", sline.text, re.IGNORECASE)
-                        if sm:
-                            status_m = sm
-                            break
-                if status_m:
-                    st_raw = status_m.group(1).lower()
-                    if "not merged" in st_raw or "in progress" in st_raw or "progress" in st_raw:
-                        init_status = "in progress"
-                    elif "done" in st_raw or "merged" in st_raw:
-                        init_status = "done"
-                    else:
-                        init_status = "open"
-                else:
-                    init_status = "open"
-
-            inline_tasks = []
-            for idx, sline in enumerate(scanned_lines):
-                if not sline.is_fenced:
-                    tm = INLINE_TASK_HEADING_RE.match(sline.text)
-                    if tm:
-                        # The task's own `- **Status:** `<state>`` line (within the next few
-                        # lines) wins over the initiative's state.
-                        task_state = init_status
-                        task_deps = "-"
-                        for nxt in scanned_lines[idx + 1 : idx + 6]:
-                            if nxt.is_fenced or INLINE_TASK_HEADING_RE.match(nxt.text):
-                                break
-                            sm = PLAN_TASK_STATUS_RE.match(nxt.text)
-                            if sm:
-                                cand = normalize_state(sm.group(1))
-                                if cand in CANONICAL_STATES:
-                                    task_state = cand
-                                dm = PLAN_TASK_DEPENDS_RE.search(nxt.text)
-                                if dm:
-                                    # Keep only task ids; the prose notes ("same file", lanes) stay in the plan
-                                    ids = re.findall(r"\b(?:\d{2,}\.\d+[a-z]?|T\d{3,})\b", dm.group(1))
-                                    task_deps = ", ".join(dict.fromkeys(ids)) or "-"
-                                break
-                        inline_tasks.append(
-                            {"id": tm.group(1), "title": tm.group(2).strip(), "state": task_state, "depends_on": task_deps}
-                        )
-
-            # Also check table tasks in plan.md (e.g. | **T1** | **Title**: desc |)
-            table_tasks = []
-            for sline in scanned_lines:
-                if not sline.is_fenced:
-                    tm = re.match(r"^\|\s*\*\*(T\w+|\d+\.\d+)\*\*\s*\|\s*(.+?)\s*\|", sline.text)
-                    if tm:
-                        sub_id, raw_content = tm.groups()
-                        title_m = re.match(r"^\*\*([^*]+)\*\*[:\s]*(.*)$", raw_content.strip())
-                        sub_title = title_m.group(1).strip() if title_m else raw_content.strip()
-                        # Check if log mentions this task as verified
-                        sub_state = init_status
-                        if init_status == "in progress":
-                            if re.search(rf"\b{re.escape(sub_id)}\b.*?\bverified\b", text, re.IGNORECASE):
-                                sub_state = "verified"
-                            elif re.search(rf"\b{re.escape(sub_id)}\b.*?\bdelivered\b", text, re.IGNORECASE):
-                                sub_state = "delivered"
-                            elif re.search(rf"\b{re.escape(sub_id)}\b.*?\bqueued\b", text, re.IGNORECASE):
-                                sub_state = "open"
-                        table_tasks.append(
-                            {
-                                "id": sub_id,
-                                "title": sub_title,
-                                "state": sub_state,
-                            }
-                        )
-
-            # Also check expanded NN.T-*.md files
-            expanded_tasks = []
-            for sub in sorted(entry.glob(f"{num}.*-*.md")):
-                sub_m = re.match(rf"^({re.escape(num)}\.\d+)-(.+)\.md$", sub.name)
-                if sub_m:
-                    expanded_tasks.append(
-                        {
-                            "id": sub_m.group(1),
-                            "title": sub_m.group(2),
-                            "rel_path": sub.relative_to(tasks_dir).as_posix(),
-                            "state": init_status,
-                        }
-                    )
-
-            chosen_tasks = expanded_tasks or inline_tasks or table_tasks
-
-            initiatives.append(
-                {
-                    "id": num,
-                    "slug": slug,
-                    "folder": entry.name,
-                    "title": title,
-                    "status": init_status,
-                    "location": location,
-                    "rel_path": plan_path.relative_to(tasks_dir).as_posix(),
-                    "has_summary": (entry / "summary.md").is_file(),
-                    "tasks": chosen_tasks,
-                    "bundle_sha256": _file_sha256(plan_path),
-                }
-            )
+        location = "done" if n.in_done else "active"
+        initiatives.append({
+            "id": n.id,
+            "slug": n.slug,
+            "folder": pathlib.Path(n.file_path).parent.name,
+            "title": n.title,
+            "status": n.derived_state or n.state,
+            "location": location,
+            "rel_path": n.rel_path,
+            "has_summary": (pathlib.Path(n.file_path).parent / "summary.md").is_file(),
+            "tasks": child_tasks,
+            "bundle_sha256": n.task_hash,
+            "leaves_done": n.leaves_done,
+            "leaves_total": n.leaves_total,
+        })
+    return initiatives
     return initiatives
 
 
@@ -1226,6 +2545,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
     errors: list[str] = []
     warnings: list[str] = []
 
+    tree = discover_task_tree(tasks_dir)
     emergent = discover_emergent_tasks(tasks_dir)
     initiatives = discover_initiatives(tasks_dir)
 
@@ -1253,6 +2573,44 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             else:
                 seen_ids[tid] = rel
             known_task_ids.add(tid)
+
+    for nid, node in tree.items():
+        rel = node.rel_path
+        if nid not in seen_ids:
+            seen_ids[nid] = rel
+        elif seen_ids[nid] != rel:
+            errors.append(f"{rel}: duplicate task id {nid!r} (already defined in {seen_ids[nid]}).")
+        known_task_ids.add(nid)
+
+        if node.depth > 4:
+            warnings.append(f"{rel}: node {nid} depth {node.depth} > 4 (consider turning this subtree into an initiative).")
+
+        if node.is_container and not node.children:
+            warnings.append(f"{rel}: empty container {nid} (no children).")
+
+        if node.block_text is not None:
+            if not node.in_done and not node.fields.get("goal") and not node.own_fields.get("goal"):
+                errors.append(f"{rel}: node {nid} missing required 'Goal'.")
+
+            if node.is_leaf:
+                if not node.fields.get("status") and not node.own_fields.get("status") and not node.fields.get("state") and not node.own_fields.get("state"):
+                    errors.append(f"{rel}: leaf node {nid} missing required 'Status'.")
+
+        for dep in node.own_depends_on:
+            if dep in tree and tree[dep].is_container and not tree[dep].children:
+                warnings.append(f"{rel}: node {nid} depends on empty container {dep!r} (dependency will never be satisfied).")
+
+    for ce in check_dependency_cycles(tree):
+        errors.append(ce)
+
+    for task in emergent:
+        tid = task["id"]
+        rel = task["rel_path"]
+        if not tid:
+            errors.append(f"{rel}: missing required 'id' header field.")
+        else:
+            if not EMERGENT_ID_RE.match(tid):
+                errors.append(f"{rel}: invalid emergent task id {tid!r} (expected format T###).")
 
         # Check filename starts with ID
         target_name = pathlib.Path(task["task_root"]).name
@@ -1574,18 +2932,20 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
 
             # Blocks & status consistency
             for tid, prior_st in q["blocks_parsed"]:
-                if not EMERGENT_ID_RE.match(tid):
-                    errors.append(f"{q_rel}: invalid task ID {tid!r} in blocks (must be format T###).")
-                elif tid not in emergent_map:
+                if not TASK_NODE_ID_RE.match(tid):
+                    errors.append(f"{q_rel}: invalid task ID {tid!r} in blocks.")
+                elif tid not in tree:
                     errors.append(f"{q_rel}: blocked task {tid!r} not found in tasks tree.")
+                elif not tree[tid].is_leaf:
+                    errors.append(f"{q_rel}: cannot block container {tid!r} (questions can only block leaf tasks).")
                 else:
-                    target_task = emergent_map[tid]
-                    target_st = target_task["canonical_state"]
-                    target_dec = target_task.get("decider", "")
+                    target_task = tree[tid]
+                    target_st = target_task.canonical_state
+                    target_dec = target_task.fields.get("decider", {}).get("value", "") or target_task.own_fields.get("decider", "")
                     if st == "open":
                         if target_st != "waiting":
                             errors.append(
-                                f"{q_rel}: question is 'open' but blocked task {tid!r} is in state {target_task['state']!r} (expected 'waiting')."
+                                f"{q_rel}: question is 'open' but blocked task {tid!r} is in state {target_task.state!r} (expected 'waiting')."
                             )
                         if qid and qid not in re.findall(r"Q\d{3,}", target_dec):
                             errors.append(
@@ -1595,7 +2955,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                         target_dec_qids = re.findall(r"Q\d{3,}", target_dec)
                         if target_st != "waiting" and qid in target_dec_qids:
                             errors.append(
-                                f"{q_rel}: question is resolved ({st}) and task {tid!r} is '{target_task['state']}', but task decider still references {qid}."
+                                f"{q_rel}: question is resolved ({st}) and task {tid!r} is '{target_task.state}', but task decider still references {qid}."
                             )
 
     return errors, warnings, emergent, initiatives
@@ -1871,6 +3231,129 @@ def transition_task(
                     "error": f"Invalid target state {new_state!r}. Allowed states: {sorted(CANONICAL_STATES)}.",
                 }
 
+            tree = discover_task_tree(tasks_dir)
+            if task_id not in tree:
+                return False, {
+                    "ok": False,
+                    "task_id": task_id,
+                    "error": f"Task {task_id!r} not found in {tasks_dir}.",
+                }
+
+            node = tree[task_id]
+            if not node.is_leaf:
+                return False, {
+                    "ok": False,
+                    "task_id": task_id,
+                    "error": "derived state; transition its leaves",
+                }
+
+            if node.block_text is not None:
+                current_hash = node.task_hash
+                if expect_task_hash is not None:
+                    if current_hash.lower() != expect_task_hash.strip().lower():
+                        return False, {
+                            "ok": False,
+                            "task_id": task_id,
+                            "error": "stale-task",
+                            "expected": expect_task_hash,
+                            "actual": current_hash,
+                        }
+
+                old_state = node.state
+                old_canon = node.canonical_state
+                new_canon = normalize_state(new_state)
+
+                if old_canon in ("open", "in progress") and new_canon in ("done", "done with a caveat", "verified"):
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": old_state,
+                        "new_state": new_state,
+                        "error": (
+                            f"Illegal transition '{old_state}' -> '{new_state}': "
+                            "no direct path from open/in progress to verified or done; task must pass through 'delivered' first."
+                        ),
+                    }
+
+                allowed = ALLOWED_TRANSITIONS.get(old_canon, set())
+                if new_canon not in allowed:
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": old_state,
+                        "new_state": new_state,
+                        "error": (
+                            f"Illegal transition '{old_state}' -> '{new_state}'. "
+                            f"Allowed target states from '{old_state}': {sorted(allowed)}."
+                        ),
+                    }
+
+                if old_canon == "delivered" and new_canon == "done":
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": old_state,
+                        "new_state": new_state,
+                        "error": (
+                            "Illegal transition 'delivered' -> 'done': delivered tasks must transition to 'verified' "
+                            "before 'done' (or to 'done with a caveat: ...' if unverified)."
+                        ),
+                    }
+
+                executor = node.executor or "kilo"
+                vmode = node.fields.get("verification_mode", {}).get("value") or node.own_fields.get("verification_mode")
+                if new_canon == "verified":
+                    if vmode == "self" and not verifier and (actor or "").lower() != "owner":
+                        return False, {
+                            "ok": False,
+                            "task_id": task_id,
+                            "old_state": old_state,
+                            "new_state": new_state,
+                            "error": (
+                                "Task has verification-mode='self' and no independent verifier or owner approval was supplied; "
+                                "transition to 'done with a caveat: self-verified only' instead of 'verified'."
+                            ),
+                        }
+                    if not _is_independent_verifier(executor, actor, verifier):
+                        return False, {
+                            "ok": False,
+                            "task_id": task_id,
+                            "old_state": old_state,
+                            "new_state": new_state,
+                            "error": (
+                                f"Independent verification guard failed: task executor is {executor!r}, "
+                                f"so transitioning 'delivered' -> 'verified' requires an independent verifier."
+                            ),
+                        }
+
+                if new_canon == "bounced" and not (reason and reason.strip()):
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": old_state,
+                        "new_state": new_state,
+                        "error": "Transitioning to 'bounced' requires --reason with the failing criterion / B1..Bn findings.",
+                    }
+
+                effective_state = new_state
+                if new_canon == "done with a caveat" and ":" not in new_state and reason:
+                    effective_state = f"done with a caveat: {reason.strip()}"
+                elif new_canon == "done with a caveat" and ":" not in new_state and vmode == "self":
+                    effective_state = "done with a caveat: self-verified only"
+
+                file_path = pathlib.Path(node.file_path)
+                _, new_h = rewrite_block_in_file(file_path, task_id, new_status=effective_state)
+                return True, {
+                    "ok": True,
+                    "task_id": task_id,
+                    "old_state": old_state,
+                    "new_state": effective_state,
+                    "file_path": str(file_path),
+                    "rel_path": node.rel_path,
+                    "task_hash": new_h,
+                    "bundle_sha256": new_h,
+                }
+
             emergent = discover_emergent_tasks(tasks_dir)
             target = next((t for t in emergent if t["id"] == task_id), None)
             if target is None and PLAN_TASK_ID_RE.match(task_id):
@@ -2143,6 +3626,22 @@ def _replace_generated_region(doc: str, section: str, new_content: str) -> str:
 def adopt_markers(existing_index: str) -> str:
     updated = existing_index
 
+    # 0. Initiatives
+    pat_init = re.compile(r"^##\s+Initiatives\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+    m_init = pat_init.search(updated)
+    if m_init:
+        sec = m_init.group(0)
+        if not _marker_pattern("initiatives").search(sec):
+            lines = sec.splitlines(keepends=True)
+            start_idx, end_idx = _find_table_range(lines)
+            if start_idx is not None and end_idx is not None:
+                tbl = "".join(lines[start_idx:end_idx + 1]).strip()
+                replacement = f"<!-- ai-orch:generated initiatives -->\n{tbl}\n<!-- /ai-orch:generated initiatives -->\n"
+                new_sec = "".join(lines[:start_idx]) + replacement + "".join(lines[end_idx + 1:])
+            else:
+                new_sec = sec.rstrip() + "\n\n<!-- ai-orch:generated initiatives -->\n<!-- /ai-orch:generated initiatives -->\n\n"
+            updated = updated[:m_init.start()] + new_sec + updated[m_init.end():]
+
     # 1. Next up
     pat_next = re.compile(r"^##\s+Next up\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
     m = pat_next.search(updated)
@@ -2305,6 +3804,85 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                     "Index has no generated-region markers (<!-- ai-orch:generated <section> -->). "
                     "Run with --adopt to wrap existing tables in markers."
                 )
+
+    tree = discover_task_tree(tasks_dir)
+    pat_init_sec = re.compile(r"^##\s+Initiatives\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+    m_init = pat_init_sec.search(existing_index)
+    if m_init:
+        init_sec_text = m_init.group(0)
+        m_init_marker = _marker_pattern("initiatives").search(init_sec_text)
+        has_init_marker = m_init_marker is not None
+        region_to_search = m_init_marker.group(1) if has_init_marker else init_sec_text
+
+        init_lines = []
+        for line in region_to_search.splitlines():
+            line_s = line.strip()
+            if not line_s.startswith("|"):
+                init_lines.append(line)
+                continue
+            cells = [c.strip() for c in line_s.strip("|").split("|")]
+            if not cells or cells[0] in ("Priority", "---") or cells[0].startswith("---"):
+                init_lines.append(line)
+                continue
+            if len(cells) >= 6:
+                init_num = cells[1]
+                if init_num in tree:
+                    init_node = tree[init_num]
+                    if init_node.children:
+                        derived_st = init_node.derived_state or init_node.state
+                        if derived_st == "done":
+                            new_status = "done"
+                        elif derived_st == "open":
+                            new_status = "open"
+                        else:
+                            leaf_nodes = []
+                            def _collect_leaves_rec(nid: str):
+                                if nid in tree:
+                                    n = tree[nid]
+                                    if n.is_leaf:
+                                        leaf_nodes.append(n)
+                                    for c in n.children:
+                                        _collect_leaves_rec(c)
+                            for c in init_node.children:
+                                _collect_leaves_rec(c)
+
+                            done_leaves = [l for l in leaf_nodes if l.canonical_state in ("done", "done with a caveat", "dropped")]
+                            running_leaves = [l for l in leaf_nodes if l.canonical_state in ("in progress", "delivered", "bounced", "verified")]
+                            open_leaves = [l for l in leaf_nodes if l.canonical_state == "open"]
+                            blocked_leaves = [l for l in leaf_nodes if l.canonical_state == "blocked"]
+                            waiting_leaves = [l for l in leaf_nodes if l.canonical_state == "waiting"]
+
+                            summary_parts = []
+                            if done_leaves:
+                                summary_parts.append(f"done: {format_id_ranges([l.id for l in done_leaves])}")
+                            if running_leaves:
+                                summary_parts.append(f"running: {format_id_ranges([l.id for l in running_leaves])}")
+                            elif open_leaves:
+                                summary_parts.append(f"next: {format_id_ranges([l.id for l in open_leaves])}")
+                            elif blocked_leaves:
+                                summary_parts.append(f"blocked: {format_id_ranges([l.id for l in blocked_leaves])}")
+                            elif waiting_leaves:
+                                summary_parts.append(f"waiting: {format_id_ranges([l.id for l in waiting_leaves])}")
+
+                            if summary_parts:
+                                new_status = f"{derived_st} ({'; '.join(summary_parts)})"
+                            else:
+                                new_status = derived_st
+                        cells[3] = new_status
+                        new_line = "| " + " | ".join(cells) + " |"
+                        init_lines.append(new_line)
+                    else:
+                        init_lines.append(line)
+                else:
+                    init_lines.append(line)
+            else:
+                init_lines.append(line)
+
+        new_region_content = "\n".join(init_lines)
+        if has_init_marker:
+            existing_index = _replace_generated_region(existing_index, "initiatives", new_region_content)
+        else:
+            existing_index = existing_index[:m_init.start()] + new_region_content + existing_index[m_init.end():]
 
     # 1. Next up section
     m_next = _marker_pattern("next-up").search(existing_index) if existing_index.strip() else None
@@ -2678,59 +4256,19 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
 def cmd_list(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    tree = discover_task_tree(tasks_dir)
     emergent = discover_emergent_tasks(tasks_dir)
     initiatives = discover_initiatives(tasks_dir)
 
-    all_tasks: list[dict[str, Any]] = list(emergent)
-    for init in initiatives:
-        init_st = init.get("status", "open")
-        for sub_t in init.get("tasks", []):
-            sub_id = sub_t["id"]
-            if not (sub_id.startswith(init["id"]) or sub_id.startswith("T") or sub_id.startswith(f"INIT-{init['id']}")):
-                sub_id = f"{init['id']}.{sub_id}"
-            all_tasks.append(
-                {
-                    "kind": "initiative_task",
-                    "id": sub_id,
-                    "title": sub_t["title"],
-                    "category": init.get("slug", init.get("folder", "initiative")),
-                    "priority": sub_t.get("priority", "P1"),
-                    "priority_reason": sub_t.get("priority_reason", f"Subtask of Initiative #{init['id']}"),
-                    "next_up": "yes" if init_st == "in progress" and sub_t.get("state") != "done" else "no",
-                    "state": sub_t.get("state", init_st),
-                    "executor": sub_t.get("executor", "kilo"),
-                    "depends_on": sub_t.get("depends_on", "-"),
-                    "handoff": sub_t.get("handoff", f"Work on task {sub_id} in {init.get('rel_path')}"),
-                    "file_path": str(tasks_dir / init["rel_path"]),
-                    "in_done": sub_t.get("state", init_st) == "done",
-                    "bundle_sha256": init.get("bundle_sha256") or _file_sha256(tasks_dir / init["rel_path"]),
-                }
-            )
-        if not init.get("tasks"):
-            all_tasks.append(
-                {
-                    "kind": "initiative",
-                    "id": f"INIT-{init['id']}",
-                    "title": init["title"],
-                    "category": init.get("slug", init.get("folder", "initiative")),
-                    "priority": "P1",
-                    "priority_reason": f"Initiative container #{init['id']}",
-                    "next_up": "yes" if init_st == "in progress" else "no",
-                    "state": init_st,
-                    "executor": "architect",
-                    "handoff": f"Review plan for Initiative #{init['id']} in {init.get('rel_path')}",
-                    "file_path": str(tasks_dir / init["rel_path"]),
-                    "in_done": init_st == "done",
-                    "bundle_sha256": init.get("bundle_sha256") or _file_sha256(tasks_dir / init["rel_path"]),
-                }
-            )
+    all_tasks: list[dict[str, Any]] = [node.to_dict() for node in tree.values()]
 
     payload = {
         "ok": True,
         "tasks_dir": str(tasks_dir),
+        "tree": {nid: node.to_dict() for nid, node in tree.items()},
+        "all_tasks": all_tasks,
         "emergent_tasks": emergent,
         "initiatives": initiatives,
-        "all_tasks": all_tasks,
     }
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
@@ -2738,7 +4276,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         print(f"Tasks dir  : {tasks_dir}")
         print(f"Initiatives: {len(initiatives)}")
         for init in initiatives:
-            print(f"  [{init['id']}] {init['title']} ({init['location']}, {len(init['tasks'])} tasks)")
+            print(f"  [{init['id']}] {init['title']} ({init['location']}, {len(init['tasks'])} tasks, state={init['status']})")
         print(f"Emergent   : {len(emergent)}")
         for t in emergent:
             loc = "done" if t["in_done"] else t["category"]
@@ -2799,6 +4337,135 @@ def cmd_transition(args: argparse.Namespace) -> int:
             else:
                 print(f"[FAIL] {err}", file=sys.stderr)
     return 0 if ok else 1
+
+
+def cmd_child_add(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    res = child_add(
+        tasks_dir=tasks_dir,
+        parent_id=args.parent,
+        title=args.title,
+        kind=getattr(args, "kind", "feature"),
+        dry_run=dry_run,
+        expect_plan_hash=expect_plan_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            action = "planned" if dry_run else "added"
+            print(f"[ok] {action} child task {res.get('allocated_id')} under {args.parent}")
+        else:
+            print(f"[FAIL] {res.get('error', 'child add failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_expand(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    res = expand_node(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        dry_run=dry_run,
+        expect_plan_hash=expect_plan_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            action = "planned expansion of" if dry_run else "expanded"
+            print(f"[ok] {action} {args.id} into folder")
+        else:
+            print(f"[FAIL] {res.get('error', 'expand failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_collapse(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    res = collapse_node(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        dry_run=dry_run,
+        expect_plan_hash=expect_plan_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            action = "planned collapse of" if dry_run else "collapsed"
+            print(f"[ok] {action} {args.id} back to block")
+        else:
+            print(f"[FAIL] {res.get('error', 'collapse failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_reopen(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    res = reopen_node(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        reason=args.reason,
+        dry_run=dry_run,
+        expect_plan_hash=expect_plan_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            action = "planned reopening of" if dry_run else "reopened"
+            print(f"[ok] {action} {args.id}")
+        else:
+            print(f"[FAIL] {res.get('error', 'reopen failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_set_deps(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    expect_task_hash = getattr(args, "expect_task_hash", None)
+    res = set_deps(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        add_ids=getattr(args, "add", None),
+        remove_ids=getattr(args, "remove", None),
+        to_ids=getattr(args, "to", None),
+        expect_task_hash=expect_task_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            print(f"[ok] updated dependencies for {args.id}: {res.get('depends_on')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'set-deps failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_set_labels(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    expect_task_hash = getattr(args, "expect_task_hash", None)
+    res = set_labels(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        add_labels=getattr(args, "add", None),
+        remove_labels=getattr(args, "remove", None),
+        to_labels=getattr(args, "to", None),
+        expect_task_hash=expect_task_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            print(f"[ok] updated labels for {args.id}: {res.get('labels')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'set-labels failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
 
 
 def cmd_sync_index(args: argparse.Namespace) -> int:
@@ -3296,22 +4963,25 @@ def ask_question(
 
                 # Parse blocks and check task states
                 # `-` means the question blocks no task (spec §2), e.g. a decision gating an initiative task
+                tree = discover_task_tree(tasks_dir)
                 blocks_list = [] if blocks.strip() == "-" else [b.strip() for b in blocks.split(",") if b.strip()]
                 for b in blocks_list:
-                    bm = re.match(r"^(T\d{3,})", b)
+                    bm = DEP_ID_RE.match(b.strip())
                     if not bm:
-                        return False, {"ok": False, "error": f"Invalid task ID {b!r} in blocks (must be T###)."}
+                        return False, {"ok": False, "error": f"Invalid task ID {b!r} in blocks."}
                     tid = bm.group(1)
-                    if tid not in emergent_map:
+                    if tid not in tree:
                         return False, {"ok": False, "error": f"Blocked task {tid!r} not found in tasks tree."}
-                    t = emergent_map[tid]
-                    cstate = t["canonical_state"]
+                    t = tree[tid]
+                    if not t.is_leaf:
+                        return False, {"ok": False, "error": f"Cannot block container '{tid}': questions can only block leaf tasks."}
+                    cstate = t.canonical_state
 
                     if cstate in TERMINAL_STATES:
                         return False, {"ok": False, "error": f"Cannot block task {tid!r} in terminal state '{cstate}'."}
                     if cstate in ("waiting", "blocked"):
-                        raw_dec = t.get("decider", "").strip()
-                        if cstate == "waiting" and re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", raw_dec):
+                        raw_dec = t.fields.get("decider", {}).get("value", "") or t.own_fields.get("decider", "")
+                        if cstate == "waiting" and re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", str(raw_dec).strip()):
                             tasks_to_update.append((t, "waiting", "APPEND"))
                             blocks_entries.append(f"{tid} (waiting)")
                         else:
@@ -3323,15 +4993,15 @@ def ask_question(
                         tasks_to_update.append((t, "waiting", "SET"))
                         blocks_entries.append(f"{tid} ({cstate})")
                     else:
-                        return False, {"ok": False, "error": f"Cannot block task {tid!r} in state '{t['state']}'."}
+                        return False, {"ok": False, "error": f"Cannot block task {tid!r} in state '{t.state}'."}
 
             created_files: list[pathlib.Path] = []
             modified_files: dict[pathlib.Path, str] = {}
             for t, _, _ in tasks_to_update:
-                tp = pathlib.Path(t["file_path"])
+                tp = pathlib.Path(t.file_path if hasattr(t, "file_path") else t["file_path"])
                 if tp not in modified_files:
                     modified_files[tp] = tp.read_text(encoding="utf-8")
-                if t["is_folder"]:
+                if getattr(t, "is_folder", False) or (isinstance(t, dict) and t.get("is_folder")):
                     pp = tp.parent / "PROGRESS.md"
                     if pp.is_file() and pp not in modified_files:
                         modified_files[pp] = pp.read_text(encoding="utf-8")
@@ -3393,20 +5063,26 @@ def ask_question(
 
                 # Update tasks
                 for t, new_st, dec_mode in tasks_to_update:
-                    tp = pathlib.Path(t["file_path"])
-                    if dec_mode == "SET":
-                        new_dec = q_id
+                    if hasattr(t, "block_text") and t.block_text is not None:
+                        rewrite_block_in_file(pathlib.Path(t.file_path), t.id, new_status=new_st)
                     else:
-                        new_dec = f"{t['decider']}, {q_id}"
-                    _update_task_file_headers_and_state(tp, new_st, decider=new_dec)
-                    _append_progress_log(
-                        t,
-                        t["state"],
-                        new_st,
-                        asked_by,
-                        verifier=None,
-                        reason=f"Blocked by question {q_id}",
-                    )
+                        tp = pathlib.Path(t.file_path if hasattr(t, "file_path") else t["file_path"])
+                        curr_dec = (t.fields.get("decider", {}).get("value", "") or t.own_fields.get("decider", "")) if hasattr(t, "own_fields") else t.get("decider", "")
+                        old_st = t.state if hasattr(t, "state") else t["state"]
+                        t_dict = t.to_dict() if hasattr(t, "to_dict") else t
+                        if dec_mode == "SET":
+                            new_dec = q_id
+                        else:
+                            new_dec = f"{curr_dec}, {q_id}" if curr_dec and curr_dec != "-" else q_id
+                        _update_task_file_headers_and_state(tp, new_st, decider=new_dec)
+                        _append_progress_log(
+                            t_dict,
+                            old_st,
+                            new_st,
+                            asked_by,
+                            verifier=None,
+                            reason=f"Blocked by question {q_id}",
+                        )
 
                 return True, {
                     "ok": True,
@@ -3515,7 +5191,15 @@ def answer_question(
                 q_status_map[question_id] = "answered"
 
                 unblocked: list[str] = []
+                tree = discover_task_tree(tasks_dir)
                 for tid, _ in target_q["blocks_parsed"]:
+                    if tid in tree:
+                        t_node = tree[tid]
+                        if t_node.block_text is not None:
+                            restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, [question_id])
+                            rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state)
+                            unblocked.append(tid)
+                            continue
                     if tid not in emergent_map:
                         continue
                     t = emergent_map[tid]
@@ -3639,7 +5323,15 @@ def withdraw_question(
                 q_status_map[question_id] = "withdrawn"
 
                 unblocked: list[str] = []
+                tree = discover_task_tree(tasks_dir)
                 for tid, _ in target_q["blocks_parsed"]:
+                    if tid in tree:
+                        t_node = tree[tid]
+                        if t_node.block_text is not None:
+                            restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, [question_id])
+                            rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state)
+                            unblocked.append(tid)
+                            continue
                     if tid not in emergent_map:
                         continue
                     t = emergent_map[tid]
@@ -5516,6 +7208,72 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_new.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_new.set_defaults(func=cmd_tasks_new)
+
+    # tasks child add
+    p_child = sub.add_parser("child", help="Structure commands: child tasks")
+    p_child.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_child.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    child_sub = p_child.add_subparsers(dest="child_cmd", required=True)
+
+    p_cadd = child_sub.add_parser("add", help="Add a child task under a parent")
+    p_cadd.add_argument("parent", help="Parent ID (e.g. '07' or '07.4')")
+    p_cadd.add_argument("--title", required=True, help="Child task title")
+    p_cadd.add_argument("--kind", default="feature", help="Child task kind")
+    p_cadd.add_argument("--dry-run", action="store_true", help="Compute plan without writing")
+    p_cadd.add_argument("--expect-plan-hash", default=None, help="Expected plan hash")
+    p_cadd.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_cadd.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_cadd.set_defaults(func=cmd_child_add)
+
+    # tasks expand
+    p_exp = sub.add_parser("expand", help="Expand an inline block into a folder")
+    p_exp.add_argument("id", help="Node ID to expand")
+    p_exp.add_argument("--dry-run", action="store_true", help="Compute plan without writing")
+    p_exp.add_argument("--expect-plan-hash", default=None, help="Expected plan hash")
+    p_exp.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_exp.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_exp.set_defaults(func=cmd_expand)
+
+    # tasks collapse
+    p_col = sub.add_parser("collapse", help="Collapse an expanded folder back into an inline block")
+    p_col.add_argument("id", help="Node ID to collapse")
+    p_col.add_argument("--dry-run", action="store_true", help="Compute plan without writing")
+    p_col.add_argument("--expect-plan-hash", default=None, help="Expected plan hash")
+    p_col.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_col.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_col.set_defaults(func=cmd_collapse)
+
+    # tasks reopen
+    p_reop_task = sub.add_parser("reopen", help="Reopen a terminal leaf task back to open")
+    p_reop_task.add_argument("id", help="Node ID to reopen")
+    p_reop_task.add_argument("--reason", required=True, help="Reason for reopening")
+    p_reop_task.add_argument("--dry-run", action="store_true", help="Compute plan without writing")
+    p_reop_task.add_argument("--expect-plan-hash", default=None, help="Expected plan hash")
+    p_reop_task.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_reop_task.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_reop_task.set_defaults(func=cmd_reopen)
+
+    # tasks set-deps
+    p_sd = sub.add_parser("set-deps", help="Set dependencies for a task")
+    p_sd.add_argument("id", help="Node ID")
+    p_sd.add_argument("--add", nargs="*", default=None, help="Add dependency IDs")
+    p_sd.add_argument("--remove", nargs="*", default=None, help="Remove dependency IDs")
+    p_sd.add_argument("--to", nargs="*", default=None, help="Set exact dependency IDs")
+    p_sd.add_argument("--expect-task-hash", default=None, help="Expected task block hash")
+    p_sd.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_sd.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_sd.set_defaults(func=cmd_set_deps)
+
+    # tasks set-labels
+    p_sl = sub.add_parser("set-labels", help="Set labels for a task")
+    p_sl.add_argument("id", help="Node ID")
+    p_sl.add_argument("--add", nargs="*", default=None, help="Add labels")
+    p_sl.add_argument("--remove", nargs="*", default=None, help="Remove labels")
+    p_sl.add_argument("--to", nargs="*", default=None, help="Set exact labels")
+    p_sl.add_argument("--expect-task-hash", default=None, help="Expected task block hash")
+    p_sl.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_sl.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_sl.set_defaults(func=cmd_set_labels)
 
     return ap
 
