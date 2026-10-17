@@ -3738,3 +3738,22 @@ def test_triage_missing_or_invalid_block_records_invalid_status(sample_workspace
 
 
 
+
+
+def test_codex_triage_passes_only_images_with_dash_i():
+    import orchestration_runs as orr
+
+    argv = orr.build_adapter_argv(
+        tool="codex",
+        tool_cfg={"headless": {}},
+        mode="triage",
+        cwd=".",
+        model="gpt-5-codex",
+        variant=None,
+        effort=None,
+        session_id=None,
+        prompt_file="p.md",
+        attachment_paths=["n/attachments/01-shot.PNG", "n/attachments/02-app.log", "n/attachments/03-spec.pdf"],
+    )
+    pairs = [argv[i + 1] for i, a in enumerate(argv) if a == "-i"]
+    assert pairs == ["n/attachments/01-shot.PNG"]

@@ -1667,8 +1667,11 @@ def build_adapter_argv(
         if effort:
             argv.extend(["-c", f"model_reasoning_effort={effort}"])
         if attachment_paths:
+            # `-i` takes images only; text/PDF attachments are listed in the prompt
+            # and read by the agent with its own (read-only) tools.
             for att in attachment_paths:
-                argv.extend(["-i", att])
+                if att.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+                    argv.extend(["-i", att])
         argv.append("-")
         return argv
 
