@@ -8,7 +8,7 @@
 
 ### 13.1 - P1-a: stop the no-op "Resolve" loop
 
-- **Status:** `open` · **Size:** S · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
+- **Status:** `in progress` (2026-10-17; claude; kilo, worktree task/13.1-doctor-fixable) · **Size:** S · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
 - **Goal:**
   - each conflict carries `fixable: true|false`;
   - the UI shows red and "Resolve…" only when the plan contains executable actions;

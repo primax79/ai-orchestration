@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Reduces Phase 5 Architect context consumption by returning structured pass/fail check verdicts instead of full log dumps
 - next-up: yes
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
