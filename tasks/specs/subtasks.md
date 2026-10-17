@@ -1,22 +1,45 @@
-# Spec: First-class subtasks (parent → child), for initiatives and for emergent tasks
+# Spec: First-class task hierarchy (N levels, parent → children)
 
-- **Status:** ready (2026-10-17)
+- **Status:** ready (2026-10-17). Revised the same day: N levels instead of two, on owner request.
 - **Drives:** initiative [11](../11-subtasks/plan.md)
-- **Restores:** the model of [`task-and-state-model`](task-and-state-model.md) §1. Initiative tasks (`NN.T`) were meant to carry "the exact same metadata fields and state transitions as `T###`", and [`orchestration-extension-spec`](orchestration-extension-spec.md) planned an "Initiative → NN.T subtasks" tree and a "Task & Subtask" detail view. The engine never implemented either: `NN.T` inherit the initiative state and carry no metadata. Agent runs (spec 07 §1) are restricted to `T###` because of this.
+- **Restores and generalizes:** the original `macroplan-authoring` model (agentic-coding-kit, 2026-08-05): initiative → tasks `NN.T` ("one task = one commit") → sub-steps inline. That model is also in [`task-and-state-model`](task-and-state-model.md) §1, where `NN.T` carry "the exact same metadata fields and state transitions as `T###`", and in the "Initiative → NN.T subtasks" tree of [`orchestration-extension-spec`](orchestration-extension-spec.md). The engine never implemented it: `NN.T` inherit the initiative state and carry no metadata, and agent runs (spec 07 §1) are restricted to `T###` because of this.
 
-## 1. Model: two levels, one task format
+## 1. Model: a tree of any depth, three rules
 
-| Parent | Children (subtasks) | Where the children live |
-| --- | --- | --- |
-| Initiative `NN` (a container; it cannot be executed or transitioned) | `NN.T` | `### NN.T - <title>` blocks in `NN-<slug>/plan.md`, or expanded files `NN-<slug>/NN.T-<name>.md` (existing convention) |
-| Emergent task `T###` (a folder task) | `T###.N` | `### T###.N - <title>` blocks in the task's `README.md`, under a `## Subtasks` section |
+Every task is a node. A node may have children.
 
-- **Depth is two levels.** Children have no children of their own. Work that needs more depth becomes an initiative.
-- **Microtasks** (spec 10 §5) are leaves. They are never parents. A microtask may be referenced from a parent's `## Subtasks` section only by id, as a dependency, not as a child.
+- **Roots** are initiatives (`NN`) and emergent tasks (`T###`).
+- **Children** use dotted ids: `07.4`, `07.4.2`, `T014.1`, `T014.1.3`.
+- Initiatives are always containers.
 
-## 2. Child format (the same for `NN.T` and `T###.N`)
+**Rule 1 — only leaves are executed.**
 
-A heading followed by bullets, as already used in `plan.md`:
+- A leaf is the unit of work: one task = one commit. Runs, `delivered`, `verified` and bounces apply to leaves only.
+- A node with children is a **container**. Its state is **derived** and cannot be transitioned by hand:
+  - `done` when every child is `done`, `done with a caveat` or `dropped`, and at least one child is not dropped;
+  - `dropped` when every child is dropped;
+  - `blocked` or `waiting` when any child is, and none is `in progress`;
+  - `in progress` when any child is past `open`;
+  - otherwise `open`.
+
+**Rule 2 — a dependency on a container means "all of its leaves are closed".**
+
+- Any node can be a dependency.
+- A leaf is ready when every dependency (expanded to leaves) is closed, **and** every dependency of its ancestors is closed too: dependencies are inherited downwards.
+
+**Rule 3 — one level of blocks per file; deeper means a folder.**
+
+- Inside a file, children are `### <id> - <title>` blocks. Initiatives keep them in `plan.md`; folder tasks keep them in `README.md` under `## Subtasks`.
+- A child that needs children of its own is **expanded** into a folder named `<id>-<slug>/`, with a `README.md` holding its own fields and its children as blocks. The block in the parent file is reduced to a link line.
+- Markdown never nests task headings below `###`.
+
+**Depth:** unlimited. `tasks validate` warns beyond depth 4, which suggests turning the subtree into an initiative.
+
+**Microtasks** (spec 10 §5) are always leaves. They may sit at any level as children, in the reduced format.
+
+## 2. Node format (the same at every level)
+
+A block is a heading followed by bullets, as already used in `plan.md`:
 
 ```markdown
 ### 07.4 - Run engine C: worktrees, verify, verdicts
@@ -30,48 +53,57 @@ A heading followed by bullets, as already used in `plan.md`:
 ```
 
 - **Recognised keys:** `Status` (with an optional date in parentheses), `Executor`, `Priority`, `Size`, `Kind`, `Labels`, `Depends on`, `Profile`, `Verification mode`, `Verifier`, `Decider`, `Focus files`/`Paths`, `Goal`, `Steps`, `Verification`, `Handoff`, `Repo`.
-- Several keys may share one bullet, separated by `·` (the existing style). Unknown keys are kept verbatim.
-- **Required:** `Status` and `Goal`. Every other field falls back to the parent's value (`Executor`, `Priority`, `Profile`, `Labels` are inherited) or to the default.
-- **Expanded form:** an `NN.T-<name>.md` file uses the same keys as a normal `T###` header (`- key: value`). When both forms exist, the expanded file wins and the block is reduced to a link.
+- Several keys may share a bullet, separated by `·`. Unknown keys are kept verbatim.
+- **Required:** `Goal`, and `Status` for leaves only (container status is derived and never written).
+- **Inheritance:** `Executor`, `Priority`, `Profile`, `Labels`, `Repo` and `Paths` are inherited from the nearest ancestor that sets them. The engine reports which values are inherited.
+- **Folder form:** a folder node's `README.md` uses the same keys as a `T###` header (`- key: value`). For emergent roots this is the existing header.
 
 ## 3. Engine
 
-**Parsing:** one shared parser for child blocks. It is fence-aware (the scanner from 08.1). Every child becomes a node with the same fields as a `T###`, and the result says which values are inherited.
+**Parsing:** one recursive, fence-aware parser (built on the scanner from 08.1). Every node gets: `id`, `parent`, `depth`, `is_leaf`, its fields with their inherited/own source, `derived_state` for containers, and `leaves_done/leaves_total`.
 
-**Transitions:** `tasks transition 07.4 delivered` works on child blocks and on expanded files.
+**Transitions (leaves only):**
 
-- The same state machine applies.
-- The same lock and `--expect-task-hash` apply; the hash covers the block text for a block, or the file.
-- The same blocking-question linkage applies (spec 08: `blocks` now accepts `NN.T` and `T###.N`; this overrides 08 Q1).
-- A block is rewritten in place: only its bullets change, and every other byte of the plan or README is preserved.
+- They work on blocks and on folder nodes, with the same state machine, lock and `--expect-task-hash`. The hash covers the block text or the folder bundle.
+- A block is rewritten in place; every other byte of the file is preserved.
+- A transition on a container is refused, with "derived state; transition its leaves".
 
-**Roll-up:**
+**Dependencies:**
 
-- **Initiative status** (the Initiatives table in `00-INDEX.md`, a generated cell) is derived:
-  - `done` when every child is done, dropped or `done with a caveat`;
-  - `in progress` when any child is past `open`;
-  - otherwise `open`.
-  - The summary `done: 06.1–06.7; running: 06.8` is generated, not hand-edited.
-- **A `T###` parent with subtasks:**
-  - its state may not move to `delivered` or `done` while a child is open: the transition is refused and the open children are listed;
-  - `tasks list` shows `children_done/children_total`.
+- `depends-on` accepts any node id.
+- Readiness and columns (spec 10) expand containers to their leaves and add the inherited ancestor dependencies.
+- Cycles are refused across the expanded graph, including a node that depends on one of its own ancestors or descendants.
 
-**Ids:** `NN.T` and `T###.N` are unique by construction. `tasks subtask add T014 --title …` allocates the next `N` under the lock.
+**Structure commands** (all under the lock, with `--dry-run` and the hash):
 
-**Everything that took `T###` now takes child ids too:** `tasks graph`, the priority/size/dependency/kind/labels commands of spec 10, runs (spec 07: lifts the `T###`-only restriction; a run on a child uses the child's fields with the parent's inheritance), and the inbox `tasks new --from-note --parent ID`.
+| Command | Effect |
+| --- | --- |
+| `tasks child add PARENT --title T [--kind …]` | Allocates the next id under the parent. A leaf parent turns into a container: its `Status` bullet is removed and its `Goal` kept. The command is refused if the parent is past `open`, because a leaf already in flight cannot become a container. |
+| `tasks expand ID` | Block → folder. |
+| `tasks collapse ID` | Folder → block; only for nodes whose children are all leaves stored as blocks. |
+| `tasks move ID --to NEW_PARENT` | Re-parents a node: renumbers its ids, rewrites every `depends-on` that points into the moved subtree, and refuses when this would create a cycle. |
+
+**Index:** the Initiatives status cells and their progress (`done: 06.1–06.7; running: 06.8`) are generated from the tree, not hand-edited.
+
+**Everything that took `T###` now takes any node id:**
+
+- `tasks graph`, and spec 10's priority, size, dependency, kind and label commands: on containers they are set and inherited, but they do not change the derived state;
+- blocking questions (`blocks` accepts any id; this overrides spec 08 Q1);
+- runs (spec 07): leaves only, and the prompt includes the context of the whole ancestor chain;
+- the inbox: `tasks new --from-note --parent ID`.
 
 ## 4. UI
 
 - **Backlog "Tree" view:**
-  - initiatives and folder tasks, each with its children;
-  - progress bars from the roll-up;
-  - expand and collapse;
-  - children have the same cards as tasks.
-- **Detail for a child:** the same modal as for a task. It shows the inherited fields, marked as inherited, and offers "set here".
-- **Kanban and Timeline (spec 10):** children appear as cards in their own right, with a parent badge. "Group by parent" is available.
-- **"Add subtask"** on any initiative or folder task.
+  - collapsible at any depth;
+  - containers show a progress bar (`leaves_done/leaves_total`) and their derived state;
+  - "Add child" on any node; "Expand to folder" and "Move" in the node menu.
+- **Detail modal:** the same for every node. It shows inherited fields as inherited, with "set here". Containers offer no transition buttons.
+- **Kanban:** leaves only, each with a breadcrumb of its ancestors.
+- **Timeline (spec 10):** leaves are the cards. Containers are optional swimlanes ("group by ancestor at depth N"). Arrows to a container are drawn to its swimlane.
 
 ## 5. Migration
 
-- Existing `plan.md` files already use the block form. Their `Status` bullets become authoritative: today the initiative status in the index is hand-written.
-- The first `sync-index` after the change regenerates the Initiatives status cells. The preview shows the diff, as for every apply.
+- Existing `plan.md` files are already depth-1 blocks under initiatives. Their `Status` bullets become authoritative.
+- The first `sync-index` regenerates the Initiatives status cells; the preview shows the diff before apply.
+- Existing folder tasks with `## Steps` stay as they are. Steps are not nodes; they become nodes only when the owner converts them with `tasks child add`.
