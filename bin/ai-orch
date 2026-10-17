@@ -39,6 +39,7 @@ TASKS_ENGINE_SCRIPT = (
 )
 ORCH_ENV_SCRIPT = REPO_ROOT / "scripts" / "orchestration_env.py"
 ORCH_RUNS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_runs.py"
+ORCH_EVENTS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_events.py"
 
 CLI_DESCRIPTION: dict[str, Any] = {
     "name": "ai-orch",
@@ -355,6 +356,28 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
             },
         },
+        "events": {
+            "script": str(ORCH_EVENTS_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch events <subcommand> [options] [--json]",
+            "subcommands": {
+                "tail": {
+                    "usage": "ai-orch events tail [--since <seq>] [--limit <n>] [--type <type>...] [--session <id>] [--follow] [--workspace <dir>] [--json]",
+                    "description": "Tail the append-only event log through the chunk manifest.",
+                },
+                "emit": {
+                    "usage": "ai-orch events emit <type> [--payload <json>] [--source <source>] [--correlation-id <id>] [--subject <subject>] [--workspace <dir>] [--json]",
+                    "description": "Emit an event to the outbox event store under the exclusive event lock.",
+                },
+                "stats": {
+                    "usage": "ai-orch events stats [--workspace <dir>] [--json]",
+                    "description": "Display statistics about the event store (counts, sequence range, chunks, counter).",
+                },
+                "reconcile": {
+                    "usage": "ai-orch events reconcile [--workspace <dir>] [--json]",
+                    "description": "Reconcile counter vs chunks and recover truncated lines under the event lock.",
+                },
+            },
+        },
     },
 }
 
@@ -416,6 +439,10 @@ def main() -> int:
 
     if group == "run":
         proc = subprocess.run([sys.executable, str(ORCH_RUNS_SCRIPT), *rest], check=False)
+        return proc.returncode
+
+    if group == "events":
+        proc = subprocess.run([sys.executable, str(ORCH_EVENTS_SCRIPT), *rest], check=False)
         return proc.returncode
 
     if group == "render-agents-md":
