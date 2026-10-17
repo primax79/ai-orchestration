@@ -1171,7 +1171,8 @@ def test_no_duplicate_conflict_entries_and_plan_paths(tmp_path: pathlib.Path) ->
                 seen_keys.add(key)
 
             tcs = [sc for sc in scs if sc["kind"] == "trigger-conflict"]
-            assert len(tcs) == 1
+            expected_tcs = 1 if scope == "global" else 0
+            assert len(tcs) == expected_tcs
 
     # 2. Verify plan has no duplicate paths
     rc = run_env(["resolve-conflicts", "--dry-run", "--workspace", str(fake_ws)], fake_home)
@@ -1471,5 +1472,180 @@ def test_claude_fallback_refused_while_process_running(tmp_path: pathlib.Path, m
     assert claude_json.is_file()
     data = json.loads(claude_json.read_text())
     assert "kilo-mcp" in data["mcpServers"]
+
+
+# ---------------------------------------------------------------------------
+# Task 13.1: Doctor fixable flag, advice-only plans, project scope deduplication
+# ---------------------------------------------------------------------------
+
+def test_doctor_fixable_finding_carries_flag_and_actions(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Install generic and bound skills globally in claude
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+    run_env(["install-skills", "--assistants", "claude", "--repo", "kilo-mcp"], fake_home)
+
+    # 1. Status inspection: conflict carries fixable=True, actions non-empty, scope='global'
+    st = run_env(["status"], fake_home)
+    scs = st["environments"]["claude"]["global"]["structured_conflicts"]
+    assert len(scs) == 1
+    sc = scs[0]
+    assert sc["kind"] == "trigger-conflict"
+    assert sc["scope"] == "global"
+    assert sc["fixable"] is True
+    assert sc["actionable"] is True
+    assert len(sc["actions"]) == 1
+    assert sc["actions"][0]["action"] == "trash"
+    assert sc["actions"][0]["path"].endswith("orchestration-workflow")
+    assert sc["advice"] == []
+
+    # 2. Dry-run resolution: plan contains executable actions, applied=0, resolved_count=1
+    rc_dry = run_env(["resolve-conflicts", "--dry-run"], fake_home)
+    assert rc_dry["ok"] is True
+    assert rc_dry["dry_run"] is True
+    assert len(rc_dry["actions"]) == 1
+    assert rc_dry["actions"][0]["action"] == "trash"
+    assert rc_dry["advice"] == []
+    assert rc_dry["applied"] == 0
+    assert rc_dry["resolved_count"] == 1
+    assert rc_dry["resolved"] == []
+
+    # 3. Apply resolution: executing plan performs action, returns applied=1, resolved_count=1
+    rc_apply = run_env(["resolve-conflicts", "--apply"], fake_home)
+    assert rc_apply["ok"] is True
+    assert rc_apply["applied"] == 1
+    assert rc_apply["resolved_count"] == 1
+    assert len(rc_apply["resolved"]) == 1
+    assert rc_apply["resolved"][0]["assistant"] == "claude"
+    assert rc_apply["resolved"][0]["removed"] == "orchestration-workflow"
+    assert rc_apply["resolved"][0]["kept"] == "kilo-mcp-orchestrator"
+
+    # Confirmed resolved in status
+    st_after = run_env(["status"], fake_home)
+    assert st_after["environments"]["claude"]["global"]["structured_conflicts"] == []
+
+
+def test_doctor_advice_only_finding_carries_flag_and_apply_is_noop(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Set up two plugins in cache creating a trigger conflict with NO standalone copy
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_generic = plugins_cache / "ai-orchestration" / "architect-side" / "0.3.0" / "skills"
+    (p_generic / "orchestration-workflow").mkdir(parents=True)
+    (p_generic / "orchestration-workflow" / "SKILL.md").write_text("# Plugin Generic\n")
+
+    p_bound = plugins_cache / "kilo-mcp" / "architect-side" / "0.2.2" / "skills"
+    (p_bound / "kilo-mcp-orchestrator").mkdir(parents=True)
+    (p_bound / "kilo-mcp-orchestrator" / "SKILL.md").write_text("# Plugin Bound\n")
+
+    reg = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    reg.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_generic.parent),
+                }
+            ],
+            "architect-side@kilo-mcp": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_bound.parent),
+                }
+            ]
+        }
+    }))
+
+    # 1. Status inspection: conflict carries fixable=False, actions=[], advice has guidance
+    st = run_env(["status"], fake_home)
+    scs = st["environments"]["claude"]["global"]["structured_conflicts"]
+    assert len(scs) == 1
+    sc = scs[0]
+    assert sc["kind"] == "trigger-conflict"
+    assert sc["scope"] == "global"
+    assert sc["fixable"] is False
+    assert sc["actionable"] is False
+    assert sc["actions"] == []
+    assert len(sc["advice"]) == 1
+    assert "disable plugin" in sc["advice"][0]
+
+    # 2. Dry-run resolution: explicitly states actions=[] and advice=[...]
+    rc_dry = run_env(["resolve-conflicts", "--dry-run"], fake_home)
+    assert rc_dry["ok"] is True
+    assert rc_dry["dry_run"] is True
+    assert rc_dry["actions"] == []
+    assert len(rc_dry["advice"]) == 1
+    assert "disable plugin" in rc_dry["advice"][0]
+    assert rc_dry["applied"] == 0
+    assert rc_dry["resolved_count"] == 0
+
+    # 3. Apply resolution: advice-only plan is a no-op returning ok=True, applied=0
+    rc_apply = run_env(["resolve-conflicts", "--apply"], fake_home)
+    assert rc_apply["ok"] is True
+    assert rc_apply["applied"] == 0
+    assert rc_apply["resolved_count"] == 0
+    assert rc_apply["actions"] == []
+    assert len(rc_apply["advice"]) == 1
+    assert rc_apply["resolved"] == []
+
+    # Plugin directories remain untouched
+    assert (p_generic / "orchestration-workflow" / "SKILL.md").is_file()
+    assert (p_bound / "kilo-mcp-orchestrator" / "SKILL.md").is_file()
+
+
+def test_doctor_project_scope_does_not_repeat_global_findings(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_ws = tmp_path / "project"
+    fake_home.mkdir()
+    fake_ws.mkdir()
+
+    # Install global trigger conflict in claude
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+    run_env(["install-skills", "--assistants", "claude", "--repo", "kilo-mcp"], fake_home)
+
+    # 1. Status with project workspace:
+    # Finding appears in global section (scope="global"), but is NOT repeated in project section
+    st = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    global_scs = st["environments"]["claude"]["global"]["structured_conflicts"]
+    assert len(global_scs) == 1
+    assert global_scs[0]["kind"] == "trigger-conflict"
+    assert global_scs[0]["scope"] == "global"
+
+    project_scs = st["environments"]["claude"]["project"]["structured_conflicts"]
+    assert project_scs == []
+    assert st["environments"]["claude"]["project"]["conflicts"] == []
+
+    # 2. Add a project-specific skill that duplicates a global skill
+    proj_skills = fake_ws / ".claude" / "skills" / "project-dup-skill"
+    proj_skills.mkdir(parents=True)
+    (proj_skills / "SKILL.md").write_text("# Project Copy\n")
+
+    global_skills = fake_home / ".claude" / "skills" / "project-dup-skill"
+    global_skills.mkdir(parents=True)
+    (global_skills / "SKILL.md").write_text("# Global Copy\n")
+
+    st2 = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+
+    # Global scope does not scan project workspace, so it does not see the duplicate
+    g_scs2 = st2["environments"]["claude"]["global"]["structured_conflicts"]
+    assert len(g_scs2) == 1
+    assert g_scs2[0]["kind"] == "trigger-conflict"
+
+    # Project scope sees the duplicate because it involves a project-scope entry!
+    p_scs2 = st2["environments"]["claude"]["project"]["structured_conflicts"]
+    assert len(p_scs2) == 1
+    assert p_scs2[0]["kind"] == "duplicate-name"
+    assert p_scs2[0]["names"] == ["project-dup-skill"]
+    assert p_scs2[0]["scope"] == "project"
+    assert p_scs2[0]["fixable"] is False
+    assert p_scs2[0]["actions"] == []
+    assert len(p_scs2[0]["advice"]) == 1
+    # Global trigger-conflict is STILL NOT repeated in project scope
+    assert not any(sc["kind"] == "trigger-conflict" for sc in p_scs2)
+
 
 
