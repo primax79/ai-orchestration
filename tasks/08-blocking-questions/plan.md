@@ -43,7 +43,7 @@
 
 ### 08.3 - UI backend: question endpoints
 
-- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 08.1, 06.7 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 08.1, 06.7 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Add these endpoints, as thin async wrappers:
   - `GET /api/questions?status&blocks`
@@ -57,7 +57,7 @@
 
 ### 08.4 - Frontend: Decisions tab, navbar badge, task-modal Questions section, ask form
 
-- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 08.3, 06.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 08.3, 06.8 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Spec §5, except "Answer and resume run".
 - **Verification:**
@@ -66,7 +66,7 @@
 
 ### 08.5 - VS Code: "Decisions Waiting" tree from question files
 
-- **Status:** `delivered` (2026-10-17; merged; awaiting live check in an Extension Development Host) · **Profile:** `bulk-execution` · **Depends on:** 08.4, 06.9 · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-17; merged; awaiting live check in an Extension Development Host) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 08.4, 06.9 · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/views/*decision*`, `src/views/dashboard-panel.ts`, `dist-webview/**`
 - **Goal:** Spec §5 "VS Code".
 - **Verification:**
@@ -75,7 +75,7 @@
 
 ### 08.6 - "Answer and resume run"
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 08.4, 07.7 · **Repo:** `ai-orchestration-ui/` (+ `ai-orchestration/` if the supervisor's question-block filing from 07.3 needs a follow-up)
+- **Status:** `open` · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 08.4, 07.7 · **Repo:** `ai-orchestration-ui/` (+ `ai-orchestration/` if the supervisor's question-block filing from 07.3 needs a follow-up)
 - **Focus files:** `frontend/src/**`, `backend/server.py`
 - **Goal:**
   - spec §5 "Answer and resume run";

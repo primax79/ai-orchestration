@@ -4409,3 +4409,439 @@ def test_use_cases_validate_probe_and_campaign(tmp_path: pathlib.Path) -> None:
     assert pc["readiness_score"] == 50.0
     assert pathlib.Path(pc["report_file"]).is_file()
 
+
+# ===========================================================================
+# Initiative 10: Timeline, Gantt, and Graph Tests
+# ===========================================================================
+
+def test_child_blocks_parsing_every_form_and_inherited_priorities(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    init_dir = tasks_dir / "01-test-init"
+    init_dir.mkdir()
+    plan_content = """# 01 - Test Initiative
+
+- **Priority:** P1
+
+## Waves
+
+### 01.1 - First task (inherits priority and default size)
+
+- **Status:** `open`
+- **Goal:** G1
+
+### 01.2 - Second task (own priority and size inline)
+
+- **Status:** `open` · **Priority:** P0 · **Size:** L
+- **Goal:** G2
+
+### 01.3 - Third task (separate bullets, size and free-text deps)
+
+- **Status:** `in progress`
+- **Priority:** P3
+- **Size:** XS
+- **Depends on:** 01.1 (first task) — needs DB schema
+- **Goal:** G3
+"""
+    (init_dir / "plan.md").write_text(plan_content, encoding="utf-8")
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert "01.1" in tree
+    assert "01.2" in tree
+    assert "01.3" in tree
+
+    t1 = tree["01.1"]
+    assert t1.priority == "P1"
+    assert t1.priority_source == "inherited:01"
+    assert t1.size == "M"
+    assert t1.size_source == "default"
+
+    t2 = tree["01.2"]
+    assert t2.priority == "P0"
+    assert t2.priority_source == "own"
+    assert t2.size == "L"
+    assert t2.size_source == "own"
+
+    t3 = tree["01.3"]
+    assert t3.priority == "P3"
+    assert t3.priority_source == "own"
+    assert t3.size == "XS"
+    assert t3.size_source == "own"
+    assert t3.depends_on == ["01.1"]
+    assert t3.depends_on_free_text.strip() == "(first task) — needs DB schema"
+
+
+def test_tasks_graph_columns_ready_queue_and_mermaid(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    init_dir = tasks_dir / "01-graph-init"
+    init_dir.mkdir()
+    plan_content = """# 01 - Graph Initiative
+
+- **Priority:** P2
+
+### 01.1 - Base task (done)
+
+- **Status:** `done`
+- **Goal:** Base
+
+### 01.2 - Task depending on done task (ready in col 0)
+
+- **Status:** `open` · **Priority:** P2 · **Depends on:** 01.1
+- **Goal:** Ready 1
+
+### 01.3 - Independent task with P0 priority (ready in col 0)
+
+- **Status:** `open` · **Priority:** P0
+- **Goal:** Ready 2
+
+### 01.4 - Second step task (in col 1)
+
+- **Status:** `open` · **Priority:** P1 · **Depends on:** 01.2, 01.3
+- **Goal:** Col 1 task
+
+### 01.5 - Third step task (in col 2)
+
+- **Status:** `open` · **Priority:** P2 · **Depends on:** 01.4
+- **Goal:** Col 2 task
+"""
+    (init_dir / "plan.md").write_text(plan_content, encoding="utf-8")
+
+    res = run_cli("graph", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+
+    columns = data["columns"]
+    # 01.1 is done, not in columns
+    assert "01.1" not in columns
+    assert columns["01.2"] == 0
+    assert columns["01.3"] == 0
+    assert columns["01.4"] == 1
+    assert columns["01.5"] == 2
+
+    # Ready queue: 01.3 (P0) before 01.2 (P2)
+    ready = data["ready_queue"]
+    assert ready == ["01.3", "01.2"]
+
+    # Mermaid
+    res_m = run_cli("graph", "--tasks-dir", str(tasks_dir), "--mermaid")
+    assert res_m.returncode == 0
+    mermaid = res_m.stdout
+    assert "flowchart LR" in mermaid
+    assert "subgraph" in mermaid
+    assert "node_01_2 --> node_01_4" in mermaid
+    assert "node_01_3 --> node_01_4" in mermaid
+    assert "node_01_4 --> node_01_5" in mermaid
+    assert "classDef p0" in mermaid
+    assert "class node_01_3 p0" in mermaid
+
+
+def test_set_deps_refuses_cycle_and_names_it(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    init_dir = tasks_dir / "01-cycle-init"
+    init_dir.mkdir()
+    plan_content = """# 01 - Cycle Init
+
+### 01.1 - Task A
+
+- **Status:** `open`
+- **Goal:** A
+
+### 01.2 - Task B
+
+- **Status:** `open` · **Depends on:** 01.1
+- **Goal:** B
+
+### 01.3 - Task C
+
+- **Status:** `open` · **Depends on:** 01.2
+- **Goal:** C
+"""
+    (init_dir / "plan.md").write_text(plan_content, encoding="utf-8")
+
+    # Creating cycle: make 01.1 depend on 01.3
+    res = run_cli("set-deps", "01.1", "01.3", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode != 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is False
+    assert "Cycle detected in dependencies" in data["error"]
+    assert "01.1" in data["error"] and "01.2" in data["error"] and "01.3" in data["error"]
+
+    # Self-cycle: make 01.1 depend on 01.1
+    res_self = run_cli("set-deps", "01.1", "01.1", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_self.returncode != 0
+    data_self = json.loads(res_self.stdout)
+    assert data_self["ok"] is False
+    assert "Cycle detected in dependencies" in data_self["error"]
+
+
+def test_set_deps_keeps_free_text_and_checks_unknown_id(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    init_dir = tasks_dir / "01-text-init"
+    init_dir.mkdir()
+    plan_content = """# 01 - Text Init
+
+### 01.1 - Dependency 1
+
+- **Status:** `open`
+- **Goal:** D1
+
+### 01.2 - Dependency 2
+
+- **Status:** `open`
+- **Goal:** D2
+
+### 01.3 - Target task
+
+- **Status:** `open` · **Depends on:** 01.1 (runs lane) — needs the real CLIs
+- **Goal:** T
+"""
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(plan_content, encoding="utf-8")
+
+    # Unknown ID refused
+    res_unk = run_cli("set-deps", "01.3", "01.1, 99.99", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_unk.returncode != 0
+    data_unk = json.loads(res_unk.stdout)
+    assert data_unk["ok"] is False
+    assert "Unknown task id '99.99' in dependencies." in data_unk["error"]
+
+    # Update dependencies to 01.1, 01.2, free text kept
+    res = run_cli("set-deps", "01.3", "01.1, 01.2", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    assert data["depends_on"] == ["01.1", "01.2"]
+
+    new_content = plan_file.read_text(encoding="utf-8")
+    assert "01.1, 01.2 (runs lane) — needs the real CLIs" in new_content
+
+
+def test_set_priority_and_set_size_on_emergent_and_block_tasks(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # 1. Emergent task T001
+    cat_dir = tasks_dir / "features"
+    cat_dir.mkdir()
+    t001_file = cat_dir / "T001-sample-task.md"
+    t001_content = """# T001: Sample task
+
+- id: T001
+- title: Sample task
+- category: features
+- priority: P2
+- priority-reason: Normal priority
+- next-up: no
+- state: open
+- executor: kilo
+- depends-on: -
+- decider: -
+- sources: -
+- paths: -
+- handoff: Work on T001
+
+## Goal
+Do something.
+
+## Steps
+1. Step.
+
+## Verification
+echo ok
+"""
+    t001_file.write_text(t001_content, encoding="utf-8")
+
+    # Set priority on T001
+    res_sp_em = run_cli("set-priority", "T001", "P0", "--reason", "Urgent bug", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sp_em.returncode == 0
+    assert json.loads(res_sp_em.stdout)["ok"] is True
+    t001_text = t001_file.read_text(encoding="utf-8")
+    assert "- priority: P0" in t001_text
+    assert "- priority-reason: Urgent bug" in t001_text
+
+    # Set size on T001
+    res_ss_em = run_cli("set-size", "T001", "XL", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_ss_em.returncode == 0
+    assert json.loads(res_ss_em.stdout)["ok"] is True
+    t001_text2 = t001_file.read_text(encoding="utf-8")
+    assert "- size: XL" in t001_text2
+
+    # 2. Block task in plan.md
+    init_dir = tasks_dir / "02-block-init"
+    init_dir.mkdir()
+    plan_file = init_dir / "plan.md"
+    plan_content = """# 02 - Block Init
+
+### 02.1 - First block task
+
+- **Status:** `open`
+- **Goal:** G1
+"""
+    plan_file.write_text(plan_content, encoding="utf-8")
+
+    # Set priority on block task
+    res_sp_bl = run_cli("set-priority", "02.1", "P1", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sp_bl.returncode == 0
+    assert json.loads(res_sp_bl.stdout)["ok"] is True
+    plan_text = plan_file.read_text(encoding="utf-8")
+    assert "**Priority:** P1" in plan_text
+
+    # Set size on block task
+    res_ss_bl = run_cli("set-size", "02.1", "L", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_ss_bl.returncode == 0
+    assert json.loads(res_ss_bl.stdout)["ok"] is True
+    plan_text2 = plan_file.read_text(encoding="utf-8")
+    assert "**Size:** L" in plan_text2
+
+
+def test_heaviest_chain_and_totals_follow_sizes(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    init_dir = tasks_dir / "03-chains-init"
+    init_dir.mkdir()
+    # Chain 1: 03.1 (S=2) -> 03.2 (S=2) -> 03.3 (S=2) = total weight 6
+    # Chain 2: 03.4 (L=5) -> 03.5 (XL=8) = total weight 13
+    plan_content = """# 03 - Chains Init
+
+### 03.1 - C1 Step 1
+
+- **Status:** `open` · **Size:** S
+- **Goal:** C1.1
+
+### 03.2 - C1 Step 2
+
+- **Status:** `open` · **Size:** S · **Depends on:** 03.1
+- **Goal:** C1.2
+
+### 03.3 - C1 Step 3
+
+- **Status:** `open` · **Size:** S · **Depends on:** 03.2
+- **Goal:** C1.3
+
+### 03.4 - C2 Step 1
+
+- **Status:** `open` · **Size:** L
+- **Goal:** C2.1
+
+### 03.5 - C2 Step 2
+
+- **Status:** `open` · **Size:** XL · **Depends on:** 03.4
+- **Goal:** C2.2
+"""
+    (init_dir / "plan.md").write_text(plan_content, encoding="utf-8")
+
+    res = run_cli("graph", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+
+    assert data["heaviest_chain"] == ["03.4", "03.5"]
+    assert data["longest_chain"] == ["03.4", "03.5"]
+    assert data["heaviest_chain_weight"] == 13
+
+    totals = data["totals"]
+    assert totals["by_size"]["S"] == 3
+    assert totals["by_size"]["L"] == 1
+    assert totals["by_size"]["XL"] == 1
+    assert "3 S" in totals["overall"]
+    assert "1 L" in totals["overall"]
+    assert "1 XL" in totals["overall"]
+    assert totals["total_open"] == 5
+
+
+def test_stale_hash_is_refused(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    init_dir = tasks_dir / "04-hash-init"
+    init_dir.mkdir()
+    plan_content = """# 04 - Hash Init
+
+### 04.1 - Task
+
+- **Status:** `open`
+- **Goal:** G
+"""
+    (init_dir / "plan.md").write_text(plan_content, encoding="utf-8")
+
+    wrong_hash = "deadbeef" * 8
+    # set-priority with stale hash
+    res_sp = run_cli("set-priority", "04.1", "P0", "--expect-task-hash", wrong_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sp.returncode != 0
+    assert "Task hash mismatch" in json.loads(res_sp.stdout)["error"]
+
+    # set-size with stale hash
+    res_ss = run_cli("set-size", "04.1", "L", "--expect-task-hash", wrong_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_ss.returncode != 0
+    assert "Task hash mismatch" in json.loads(res_ss.stdout)["error"]
+
+    # set-deps with stale hash
+    res_sd = run_cli("set-deps", "04.1", "--to", "", "--expect-task-hash", wrong_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sd.returncode != 0
+    assert "Task hash mismatch" in json.loads(res_sd.stdout)["error"]
+
+
+def test_dry_run_writes_nothing(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    init_dir = tasks_dir / "05-dry-init"
+    init_dir.mkdir()
+    plan_file = init_dir / "plan.md"
+    original_plan = """# 05 - Dry Run Init
+
+### 05.1 - Task A
+
+- **Status:** `open`
+- **Goal:** GA
+
+### 05.2 - Task B
+
+- **Status:** `open`
+- **Goal:** GB
+"""
+    plan_file.write_text(original_plan, encoding="utf-8")
+
+    # dry-run set-priority
+    res_sp = run_cli("set-priority", "05.1", "P0", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sp.returncode == 0
+    sp_data = json.loads(res_sp.stdout)
+    assert sp_data["ok"] is True
+    assert sp_data["dry_run"] is True
+    assert "diff" in sp_data and len(sp_data["diff"]) > 0
+    assert plan_file.read_text(encoding="utf-8") == original_plan
+
+    # dry-run set-size
+    res_ss = run_cli("set-size", "05.1", "XL", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_ss.returncode == 0
+    ss_data = json.loads(res_ss.stdout)
+    assert ss_data["ok"] is True
+    assert ss_data["dry_run"] is True
+    assert "diff" in ss_data and len(ss_data["diff"]) > 0
+    assert plan_file.read_text(encoding="utf-8") == original_plan
+
+    # dry-run set-deps
+    res_sd = run_cli("set-deps", "05.2", "05.1", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sd.returncode == 0
+    sd_data = json.loads(res_sd.stdout)
+    assert sd_data["ok"] is True
+    assert sd_data["dry_run"] is True
+    assert "diff" in sd_data and len(sd_data["diff"]) > 0
+    assert plan_file.read_text(encoding="utf-8") == original_plan
+

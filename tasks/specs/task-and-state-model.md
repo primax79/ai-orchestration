@@ -56,6 +56,7 @@ Permitted by `task-pipeline` ("A project that needs extra fields lists them in `
 - `profile`: `deep-reasoning` \| `orchestration` \| `bulk-execution` \| `exploration` (selects the model/variant from `orchestration.toml` for the chosen `executor`, whether executed natively in the same framework or via MCP).
 - `verification-mode`: `self` \| `independent-session` \| `cross-agent` \| `panel` \| `owner` (overrides `[verification].default_mode` in `orchestration.toml`: `independent-session` uses a fresh context-blind subagent/worktree in the *same* framework; `cross-agent` uses a *different* framework/engine; `panel` runs multiple reviewers; `owner` requires human approval).
 - `verifier`: `-` \| `<tool>:<profile>` \| `blind-subagent:<profile>` \| `owner` \| `panel(<tool>:<profile>, ...)` (records who is assigned or performed the independent verification).
+- `size`: `XS` \| `S` \| `M` \| `L` \| `XL` (relative task weight for scheduling/timeline: XS=1, S=2, M=3, L=5, XL=8; defaults to M for standard tasks, XS for microtasks).
 - `branch`: Git branch name of the isolated worktree assigned to this task (e.g. `feat/08-t1-app-shell` or `kilo/t012-scraper`).
 - `worktree`: Relative or absolute physical filesystem path to the active worktree checkout (e.g. `.kilo/worktrees/08-t1-app-shell`).
 - `run-id`: Unique identifier of the executing run or background MCP task handle (e.g. `ctask_123` or `ses_abc`).

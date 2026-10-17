@@ -204,9 +204,21 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks reopen <id> --reason <text> [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
                     "description": "Reopen a terminal leaf task back to open.",
                 },
+                "graph": {
+                    "usage": "ai-orch tasks graph [--tasks-dir <dir>] [--mermaid] [--json]",
+                    "description": "Compute abstract timeline dependency graph with columns, ready queue, heaviest chain, and Mermaid flowchart.",
+                },
+                "set-priority": {
+                    "usage": "ai-orch tasks set-priority <id> <P0-P3> [--reason <text>] [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Set priority for a task (rewrites header on T###, updates/creates bullet on NN.T).",
+                },
+                "set-size": {
+                    "usage": "ai-orch tasks set-size <id> <XS|S|M|L|XL> [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Set size for a task (rewrites header on T###, updates/creates bullet on NN.T).",
+                },
                 "set-deps": {
-                    "usage": "ai-orch tasks set-deps <id> [--add <id>...] [--remove <id>...] [--to <ids>] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
-                    "description": "Set dependencies for a task while preserving trailing free text.",
+                    "usage": "ai-orch tasks set-deps <id> [deps...] [--add <id>...] [--remove <id>...] [--to <ids>] [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Set dependencies for a task while preserving trailing free text (cycle and unknown ID checks).",
                 },
                 "set-labels": {
                     "usage": "ai-orch tasks set-labels <id> [--add <label>...] [--remove <label>...] [--to <labels>] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",

@@ -54,12 +54,16 @@ OPTIONAL_EXTENSION_FIELDS: tuple[str, ...] = (
     "profile",
     "verification-mode",
     "verifier",
+    "size",
     "branch",
     "worktree",
     "run-id",
     "use-cases",
     "use_cases",
 )
+
+VALID_SIZES: set[str] = {"XS", "S", "M", "L", "XL"}
+SIZE_WEIGHTS: dict[str, int] = {"XS": 1, "S": 2, "M": 3, "L": 5, "XL": 8}
 
 ALL_ALLOWED_HEADER_FIELDS: set[str] = set(CORE_HEADER_FIELDS) | set(OPTIONAL_EXTENSION_FIELDS)
 
@@ -169,7 +173,7 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
 - **Ids:** `T###`, unique across `done/` too; reserve the id by creating the file immediately.
 - **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
-- **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`, `branch`, `worktree`, `run-id`.
+- **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`, `size`, `branch`, `worktree`, `run-id`.
 - **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
 - **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
@@ -837,6 +841,25 @@ def derive_container_state(child_states: list[str]) -> str:
     return "open"
 
 
+def _natural_sort_key(s: str) -> list[tuple[int, int | str]]:
+    parts = re.split(r"(\d+)", s)
+    return [(0, int(p)) if p.isdigit() else (1, p) for p in parts if p]
+
+
+def _normalize_id_list(raw_ids: list[str] | str | None) -> list[str]:
+    if raw_ids is None:
+        return []
+    if isinstance(raw_ids, str):
+        raw_ids = [raw_ids]
+    result: list[str] = []
+    for item in raw_ids:
+        for part in re.split(r"[\s,]+", item.strip()):
+            p = part.strip()
+            if p and p != "-":
+                result.append(p)
+    return result
+
+
 @dataclass
 class TaskNode:
     id: str
@@ -869,7 +892,10 @@ class TaskNode:
     block_text: str | None = None
     expanded_rel_path: str | None = None
     priority: str = "P2"
+    priority_source: str = "default"
     priority_reason: str = ""
+    size: str = "M"
+    size_source: str = "default"
     executor: str = "kilo"
     handoff: str = ""
     category: str = ""
@@ -904,7 +930,10 @@ class TaskNode:
             "bundle_sha256": self.task_hash,
             "task_hash": self.task_hash,
             "priority": self.priority,
+            "priority_source": self.priority_source,
             "priority_reason": self.priority_reason,
+            "size": self.size,
+            "size_source": self.size_source,
             "executor": self.executor,
             "handoff": self.handoff,
             "category": self.category,
@@ -918,9 +947,13 @@ def rewrite_block_in_file(
     new_status: str | None = None,
     new_deps: list[str] | None = None,
     new_labels: list[str] | None = None,
+    new_priority: str | None = None,
+    new_size: str | None = None,
     expect_task_hash: str | None = None,
     status_note: str | None = None,
-) -> tuple[str, str]:
+    dry_run: bool = False,
+    return_diff: bool = False,
+) -> tuple[str, str] | tuple[str, str, str]:
     """Rewrite one `### id - title` block in place; every other byte of the file is preserved.
 
     A new status replaces the Status value (code span kept) and its parenthesised note, which
@@ -958,7 +991,12 @@ def rewrite_block_in_file(
             raise ValueError(f"Task hash mismatch: expected {expect_task_hash}, actual {curr_h}")
 
     lines = old_block_text.splitlines(keepends=True)
-    new_lines: list[str] = []
+    priority_updated = False
+    size_updated = False
+    deps_updated = False
+    status_line_idx: int | None = None
+
+    parsed_lines: list[tuple[str, list[BulletSegment], str, bool, str]] = []
 
     for line in lines:
         line_clean = line.rstrip("\r\n")
@@ -966,7 +1004,9 @@ def rewrite_block_in_file(
 
         if re.match(r"^\s*[-*]\s+", line_clean):
             prefix, segments = parse_bullet_line(line_clean)
-            modified = False
+            has_status = any(seg.key in ("status", "state") for seg in segments)
+            if has_status and status_line_idx is None:
+                status_line_idx = len(parsed_lines)
 
             if new_status is not None:
                 for seg in segments:
@@ -978,32 +1018,100 @@ def rewrite_block_in_file(
                         if status_note:
                             new_raw += f" ({status_note})"
                         seg.raw_value = new_raw
-                        modified = True
+                        seg.clean_value = new_status
 
             if new_deps is not None:
                 for seg in segments:
                     if seg.key in ("depends_on", "depends"):
                         seg.raw_value = update_depends_on_field(seg.raw_value, new_deps)
-                        modified = True
+                        seg.clean_value = seg.raw_value
+                        deps_updated = True
 
             if new_labels is not None:
                 for seg in segments:
                     if seg.key in ("labels", "label"):
                         seg.raw_value = ", ".join(new_labels) if new_labels else "-"
-                        modified = True
+                        seg.clean_value = seg.raw_value
 
-            if modified:
-                new_line_clean = serialize_bullet_segments(prefix, segments)
-                new_lines.append(new_line_clean + line_ending)
-            else:
-                new_lines.append(line)
+            if new_priority is not None:
+                for seg in segments:
+                    if seg.key in ("priority",):
+                        seg.raw_value = new_priority
+                        seg.clean_value = new_priority
+                        priority_updated = True
+
+            if new_size is not None:
+                for seg in segments:
+                    if seg.key in ("size",):
+                        seg.raw_value = new_size
+                        seg.clean_value = new_size
+                        size_updated = True
+
+            parsed_lines.append((prefix, segments, line_ending, True, line))
         else:
-            new_lines.append(line)
+            parsed_lines.append(("", [], line, False, line))
+
+    # If priority, size, or deps were not present in existing segments, insert them into the Status bullet
+    if status_line_idx is None:
+        for idx, (pfx, segs, le, is_b, orig) in enumerate(parsed_lines):
+            if is_b:
+                status_line_idx = idx
+                break
+
+    if status_line_idx is not None:
+        prefix, segments, line_ending, is_b, orig = parsed_lines[status_line_idx]
+
+        status_pos = None
+        for i, seg in enumerate(segments):
+            if seg.key in ("status", "state"):
+                status_pos = i
+                break
+        insert_idx = (status_pos + 1) if status_pos is not None else len(segments)
+
+        if new_size is not None and not size_updated:
+            new_seg = BulletSegment(raw_key="Size", key="size", raw_value=new_size, clean_value=new_size)
+            segments.insert(insert_idx, new_seg)
+            insert_idx += 1
+            size_updated = True
+
+        if new_priority is not None and not priority_updated:
+            new_seg = BulletSegment(raw_key="Priority", key="priority", raw_value=new_priority, clean_value=new_priority)
+            segments.insert(insert_idx, new_seg)
+            insert_idx += 1
+            priority_updated = True
+
+        if new_deps is not None and not deps_updated:
+            deps_val = update_depends_on_field("", new_deps)
+            new_seg = BulletSegment(raw_key="Depends on", key="depends_on", raw_value=deps_val, clean_value=deps_val)
+            segments.append(new_seg)
+            deps_updated = True
+
+        parsed_lines[status_line_idx] = (prefix, segments, line_ending, is_b, orig)
+
+    new_lines: list[str] = []
+    for prefix, segments, line_ending, is_b, orig in parsed_lines:
+        if is_b:
+            new_lines.append(serialize_bullet_segments(prefix, segments) + line_ending)
+        else:
+            new_lines.append(orig)
 
     new_block_text = "".join(new_lines)
     new_text = text[:start_pos] + new_block_text + text[end_pos:]
-    _atomic_write_text(file_path, new_text, encoding="utf-8")
+
+    diff_lines = list(difflib.unified_diff(
+        text.splitlines(keepends=True),
+        new_text.splitlines(keepends=True),
+        fromfile=str(file_path),
+        tofile=str(file_path) if not dry_run else f"{file_path} (dry-run)",
+    ))
+    diff_str = "".join(diff_lines)
+
+    if not dry_run:
+        _atomic_write_text(file_path, new_text, encoding="utf-8")
     new_hash = hashlib.sha256(new_block_text.encode("utf-8")).hexdigest()
+
+    if return_diff:
+        return new_block_text, new_hash, diff_str
     return new_block_text, new_hash
 
 
@@ -1157,6 +1265,16 @@ def parse_child_blocks(
             deps_val = own_fields.get("depends_on") or own_fields.get("depends") or ""
             parsed_deps, free_txt = parse_depends_on_field(deps_val)
 
+            size_val = own_fields.get("size")
+            if size_val and size_val.strip().upper() in VALID_SIZES:
+                leaf_size = size_val.strip().upper()
+                leaf_size_source = "own"
+            else:
+                leaf_size = "M"
+                leaf_size_source = "default"
+            p_val = own_fields.get("priority")
+            p_src = "own" if p_val else "default"
+
             leaf_node = TaskNode(
                 id=cid,
                 title=ctitle,
@@ -1186,8 +1304,11 @@ def parse_child_blocks(
                 in_closed_section=is_closed,
                 task_hash=block_hash,
                 block_text=block_text,
-                priority=own_fields.get("priority", "P2"),
+                priority=p_val or "P2",
+                priority_source=p_src,
                 priority_reason=own_fields.get("priority_reason", f"Task {cid}"),
+                size=leaf_size,
+                size_source=leaf_size_source,
                 executor=own_fields.get("executor", "kilo"),
                 handoff=own_fields.get("handoff", f"Work on task {cid} in {file_path.relative_to(tasks_dir).as_posix()}"),
                 category=parent_category,
@@ -1202,6 +1323,13 @@ def propagate_inheritance(tree: dict[str, TaskNode], node_id: str) -> None:
     node = tree[node_id]
     parent = tree.get(node.parent) if node.parent else None
 
+    # Priority default for root initiatives if not set
+    if parent is None and node.node_type == "initiative":
+        if "priority" in node.own_fields and node.own_fields["priority"]:
+            node.fields["priority"] = {"value": node.own_fields["priority"], "source": "own"}
+        else:
+            node.fields["priority"] = {"value": "P2", "source": "default"}
+
     # 1. Inherited fields: executor, priority, profile, repo, paths
     for f in INHERITED_FIELDS:
         own_val = node.own_fields.get(f)
@@ -1211,10 +1339,12 @@ def propagate_inheritance(tree: dict[str, TaskNode], node_id: str) -> None:
             node.fields[f] = {"value": own_val, "source": "own"}
         elif parent and f in parent.fields:
             p_field = parent.fields[f]
-            anc_id = parent.id if p_field["source"] == "own" else p_field["source"].split(":", 1)[1]
+            anc_id = parent.id if p_field["source"] in ("own", "default") else p_field["source"].split(":", 1)[1]
             node.fields[f] = {"value": p_field["value"], "source": f"inherited:{anc_id}"}
         elif own_val is not None:
             node.fields[f] = {"value": own_val, "source": "own"}
+        elif f == "priority":
+            node.fields[f] = {"value": "P2", "source": "default"}
 
     # 2. Labels: union of own and ancestor labels
     own_labels = node.own_fields.get("labels", [])
@@ -1246,15 +1376,34 @@ def propagate_inheritance(tree: dict[str, TaskNode], node_id: str) -> None:
         "source": "own" if own_deps else (f"inherited:{parent.id}" if parent and inherited_deps else "own"),
     }
 
-    # 4. Non-inherited fields: size, kind, decider, status, verifier, verification_mode, goal, handoff
-    for f in ("size", "kind", "decider", "status", "verifier", "verification_mode", "goal", "handoff"):
+    # 4. Non-inherited fields: kind, decider, status, verifier, verification_mode, goal, handoff
+    for f in ("kind", "decider", "status", "verifier", "verification_mode", "goal", "handoff"):
         if f in node.own_fields:
             node.fields[f] = {"value": node.own_fields[f], "source": "own"}
+
+    # Size (non-inherited; defaults to XS for microtask, M for others)
+    if "size" in node.own_fields and node.own_fields["size"]:
+        s_val = str(node.own_fields["size"]).strip().upper()
+        if s_val in VALID_SIZES:
+            node.size = s_val
+            node.size_source = "own"
+            node.fields["size"] = {"value": s_val, "source": "own"}
+        else:
+            default_s = "XS" if node.node_type == "microtask" else "M"
+            node.size = default_s
+            node.size_source = "default"
+            node.fields["size"] = {"value": default_s, "source": "default"}
+    else:
+        default_s = "XS" if node.node_type == "microtask" else "M"
+        node.size = default_s
+        node.size_source = "default"
+        node.fields["size"] = {"value": default_s, "source": "default"}
 
     if "executor" in node.fields:
         node.executor = node.fields["executor"]["value"]
     if "priority" in node.fields:
         node.priority = node.fields["priority"]["value"]
+        node.priority_source = node.fields["priority"]["source"]
     if "handoff" in node.fields:
         node.handoff = node.fields["handoff"]["value"]
 
@@ -1434,6 +1583,10 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             in_done=in_done,
             in_closed_section=False,
             task_hash=_file_sha256(plan_path),
+            priority=init_own_fields.get("priority", "P2"),
+            priority_source="own" if "priority" in init_own_fields else "default",
+            size="M",
+            size_source="default",
             category=slug,
             slug=slug,
         )
@@ -1474,6 +1627,14 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
         is_container = len(sub_nodes) > 0
         is_leaf = not is_container
 
+        et_size = et.get("headers", {}).get("size")
+        if et_size and et_size.strip().upper() in VALID_SIZES:
+            node_size = et_size.strip().upper()
+            node_size_source = "own"
+        else:
+            node_size = "M"
+            node_size_source = "default"
+
         node = TaskNode(
             id=tid,
             title=et["title"],
@@ -1503,7 +1664,10 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             in_closed_section=False,
             task_hash=et["bundle_sha256"],
             priority=et.get("priority", "P2"),
+            priority_source="own" if et.get("headers", {}).get("priority") else "default",
             priority_reason=et.get("priority_reason", ""),
+            size=node_size,
+            size_source=node_size_source,
             executor=et.get("executor", "kilo"),
             handoff=et.get("handoff", ""),
             category=et.get("category", ""),
@@ -1551,6 +1715,8 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                         in_done=False,
                         in_closed_section=False,
                         task_hash=_file_sha256(mf),
+                        size="XS",
+                        size_source="default",
                     )
 
     # 4. Connect children
@@ -1987,13 +2153,159 @@ def reopen_node(
         return {"ok": True, "task_id": node_id, "new_state": "open", "plan_hash": plan_hash}
 
 
+def set_priority(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    priority: str,
+    reason: str | None = None,
+    dry_run: bool = False,
+    expect_task_hash: str | None = None,
+) -> dict[str, Any]:
+    priority = priority.strip().upper()
+    if priority not in PRIORITIES:
+        return {"ok": False, "error": f"Invalid priority '{priority}' (expected one of {', '.join(sorted(PRIORITIES))})."}
+
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "error": f"Task '{node_id}' not found."}
+        node = tree[node_id]
+
+        if expect_task_hash and expect_task_hash.strip().lower() != node.task_hash.strip().lower():
+            return {
+                "ok": False,
+                "error": f"Task hash mismatch: expected {expect_task_hash}, actual {node.task_hash}",
+            }
+
+        file_path = pathlib.Path(node.file_path)
+        if node.block_text is not None:
+            _, new_block_hash, diff_str = rewrite_block_in_file(
+                file_path,
+                node_id,
+                new_priority=priority,
+                expect_task_hash=expect_task_hash,
+                dry_run=dry_run,
+                return_diff=True,
+            )
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "priority": priority,
+                "task_hash": new_block_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+        else:
+            old_text = file_path.read_text(encoding="utf-8")
+            new_text = re.sub(r"^-\s+priority:\s*.*$", f"- priority: {priority}", old_text, flags=re.MULTILINE)
+            if reason is not None:
+                new_text = re.sub(r"^-\s+priority-reason:\s*.*$", f"- priority-reason: {reason}", new_text, flags=re.MULTILINE)
+            diff_lines = list(difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=str(file_path),
+                tofile=str(file_path) if not dry_run else f"{file_path} (dry-run)",
+            ))
+            diff_str = "".join(diff_lines)
+            if not dry_run:
+                _atomic_write_text(file_path, new_text, encoding="utf-8")
+                new_hash = _file_sha256(file_path)
+            else:
+                new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "priority": priority,
+                "task_hash": new_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+
+
+def set_size(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    size: str,
+    dry_run: bool = False,
+    expect_task_hash: str | None = None,
+) -> dict[str, Any]:
+    size = size.strip().upper()
+    if size not in VALID_SIZES:
+        return {"ok": False, "error": f"Invalid size '{size}' (expected one of {', '.join(sorted(VALID_SIZES))})."}
+
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "error": f"Task '{node_id}' not found."}
+        node = tree[node_id]
+
+        if expect_task_hash and expect_task_hash.strip().lower() != node.task_hash.strip().lower():
+            return {
+                "ok": False,
+                "error": f"Task hash mismatch: expected {expect_task_hash}, actual {node.task_hash}",
+            }
+
+        file_path = pathlib.Path(node.file_path)
+        if node.block_text is not None:
+            _, new_block_hash, diff_str = rewrite_block_in_file(
+                file_path,
+                node_id,
+                new_size=size,
+                expect_task_hash=expect_task_hash,
+                dry_run=dry_run,
+                return_diff=True,
+            )
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "size": size,
+                "task_hash": new_block_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+        else:
+            old_text = file_path.read_text(encoding="utf-8")
+            if re.search(r"^-\s+size:\s*.*$", old_text, flags=re.MULTILINE):
+                new_text = re.sub(r"^-\s+size:\s*.*$", f"- size: {size}", old_text, flags=re.MULTILINE)
+            else:
+                for anchor in (r"^-\s+verifier:\s*.*$", r"^-\s+verification-mode:\s*.*$", r"^-\s+profile:\s*.*$", r"^-\s+handoff:\s*.*$"):
+                    m = re.search(anchor, old_text, flags=re.MULTILINE)
+                    if m:
+                        ins_pos = m.end()
+                        new_text = old_text[:ins_pos] + f"\n- size: {size}" + old_text[ins_pos:]
+                        break
+                else:
+                    new_text = old_text.replace("\n\n", f"\n- size: {size}\n\n", 1)
+            diff_lines = list(difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=str(file_path),
+                tofile=str(file_path) if not dry_run else f"{file_path} (dry-run)",
+            ))
+            diff_str = "".join(diff_lines)
+            if not dry_run:
+                _atomic_write_text(file_path, new_text, encoding="utf-8")
+                new_hash = _file_sha256(file_path)
+            else:
+                new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "size": size,
+                "task_hash": new_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+
+
 def set_deps(
     tasks_dir: pathlib.Path,
     node_id: str,
-    add_ids: list[str] | None = None,
-    remove_ids: list[str] | None = None,
-    to_ids: list[str] | None = None,
+    add_ids: list[str] | str | None = None,
+    remove_ids: list[str] | str | None = None,
+    to_ids: list[str] | str | None = None,
     expect_task_hash: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     with task_write_lock(tasks_dir):
         tree = discover_task_tree(tasks_dir)
@@ -2001,42 +2313,87 @@ def set_deps(
             return {"ok": False, "error": f"Task '{node_id}' not found."}
         node = tree[node_id]
 
-        if expect_task_hash and expect_task_hash.lower() != node.task_hash.lower():
+        if expect_task_hash and expect_task_hash.strip().lower() != node.task_hash.strip().lower():
             return {
                 "ok": False,
                 "error": f"Task hash mismatch: expected {expect_task_hash}, actual {node.task_hash}",
             }
 
+        add_norm = _normalize_id_list(add_ids)
+        remove_norm = _normalize_id_list(remove_ids)
+        to_norm = _normalize_id_list(to_ids) if to_ids is not None else None
+
         curr_deps = list(node.own_depends_on)
-        if to_ids is not None:
-            new_deps = list(to_ids)
+        if to_norm is not None:
+            new_deps = list(to_norm)
         else:
             new_deps = list(curr_deps)
-            if add_ids:
-                for a in add_ids:
+            if add_norm:
+                for a in add_norm:
                     if a not in new_deps:
                         new_deps.append(a)
-            if remove_ids:
-                new_deps = [d for d in new_deps if d not in remove_ids]
+            if remove_norm:
+                new_deps = [d for d in new_deps if d not in remove_norm]
 
+        # Unknown ID check
+        for d in new_deps:
+            if d not in tree:
+                return {"ok": False, "error": f"Unknown task id '{d}' in dependencies."}
+
+        # Cycle check
         old_own = node.own_depends_on
+        old_dep = node.depends_on
         node.own_depends_on = new_deps
-        node.depends_on = new_deps + (tree[node.parent].depends_on if node.parent and node.parent in tree else [])
+        parent_deps = tree[node.parent].depends_on if node.parent and node.parent in tree else []
+        node.depends_on = new_deps + parent_deps
         cycle_errors = check_dependency_cycles(tree)
         node.own_depends_on = old_own
+        node.depends_on = old_dep
         if cycle_errors:
             return {"ok": False, "error": cycle_errors[0]}
 
         file_path = pathlib.Path(node.file_path)
         if node.block_text is not None:
-            _, new_block_hash = rewrite_block_in_file(file_path, node_id, new_deps=new_deps)
-            return {"ok": True, "task_id": node_id, "depends_on": new_deps, "task_hash": new_block_hash}
+            _, new_block_hash, diff_str = rewrite_block_in_file(
+                file_path,
+                node_id,
+                new_deps=new_deps,
+                expect_task_hash=expect_task_hash,
+                dry_run=dry_run,
+                return_diff=True,
+            )
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "depends_on": new_deps,
+                "task_hash": new_block_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
         else:
-            text = file_path.read_text(encoding="utf-8")
+            old_text = file_path.read_text(encoding="utf-8")
             deps_str = ", ".join(new_deps) if new_deps else "-"
-            new_text = re.sub(r"^-\s+depends-on:\s*.*$", f"- depends-on: {deps_str}", text, flags=re.MULTILINE)
-            _atomic_write_text(file_path, new_text)
-            return {"ok": True, "task_id": node_id, "depends_on": new_deps}
+            new_text = re.sub(r"^-\s+depends-on:\s*.*$", f"- depends-on: {deps_str}", old_text, flags=re.MULTILINE)
+            diff_lines = list(difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=str(file_path),
+                tofile=str(file_path) if not dry_run else f"{file_path} (dry-run)",
+            ))
+            diff_str = "".join(diff_lines)
+            if not dry_run:
+                _atomic_write_text(file_path, new_text, encoding="utf-8")
+                new_hash = _file_sha256(file_path)
+            else:
+                new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "depends_on": new_deps,
+                "task_hash": new_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
 
 
 def set_labels(
@@ -3184,8 +3541,16 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                         errors.append(f"{rel}: leaf node {nid} missing required 'Status'.")
 
         for dep in node.own_depends_on:
-            if dep in tree and tree[dep].is_container and not tree[dep].children:
+            if dep not in tree:
+                warnings.append(f"{rel}: node {nid} depends on unknown id {dep!r}.")
+            elif tree[dep].is_container and not tree[dep].children:
                 warnings.append(f"{rel}: node {nid} depends on empty container {dep!r} (dependency will never be satisfied).")
+
+        if node.block_text is not None:
+            if "size" in node.own_fields and node.own_fields["size"]:
+                s_val = str(node.own_fields["size"]).strip().upper()
+                if s_val not in VALID_SIZES:
+                    warnings.append(f"{rel}: non-canonical size {node.own_fields['size']!r} on node {nid} (expected one of {sorted(VALID_SIZES)}).")
 
     for ce in check_dependency_cycles(tree):
         errors.append(ce)
@@ -3275,6 +3640,10 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 f"{rel}: invalid verification-mode {task['verification_mode']!r} "
                 f"(expected one of {sorted(VERIFICATION_MODES)})."
             )
+        if "size" in task.get("headers", {}) and task["headers"]["size"] and task["headers"]["size"] != "-":
+            s_val = task["headers"]["size"].strip().upper()
+            if s_val not in VALID_SIZES:
+                errors.append(f"{rel}: invalid size {task['headers']['size']!r} (expected one of {sorted(VALID_SIZES)}).")
 
         # Legacy decider warning
         raw_dec = task.get("decider", "").strip()
@@ -4835,6 +5204,274 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
 
 # ---------------------------------------------------------------------------
+# Timeline / Dependency Graph (Spec 10)
+# ---------------------------------------------------------------------------
+
+def compute_tasks_graph(tasks_dir: pathlib.Path) -> dict[str, Any]:
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    tree = discover_task_tree(tasks_dir)
+
+    # 1. Identify leaf/microtask nodes
+    leaf_nodes: list[TaskNode] = []
+    for nid in sorted(tree.keys(), key=_natural_sort_key):
+        n = tree[nid]
+        if n.is_leaf or n.node_type == "microtask":
+            leaf_nodes.append(n)
+
+    # 2. Map groups: initiative or category
+    def _get_group(node: TaskNode) -> str:
+        curr: TaskNode | None = node
+        while curr:
+            if curr.node_type == "initiative":
+                return curr.id
+            if curr.parent and curr.parent in tree:
+                curr = tree[curr.parent]
+            else:
+                break
+        if node.category:
+            return node.category
+        if "." in node.id:
+            return node.id.split(".")[0]
+        return "emergent"
+
+    # 3. Columns calculation for open leaves
+    open_leaves = [n for n in leaf_nodes if n.canonical_state not in TERMINAL_STATES]
+    open_set = {n.id for n in open_leaves}
+
+    blocked_by_map: dict[str, list[str]] = {}
+    for n in leaf_nodes:
+        if n.id in open_set:
+            blocked = [
+                d for d in n.expanded_depends_on
+                if d in tree and tree[d].canonical_state not in TERMINAL_STATES
+            ]
+            blocked_by_map[n.id] = sorted(blocked, key=_natural_sort_key)
+        else:
+            blocked_by_map[n.id] = []
+
+    col_memo: dict[str, int] = {}
+    visiting: set[str] = set()
+
+    def _col_for(nid: str) -> int:
+        if nid in col_memo:
+            return col_memo[nid]
+        if nid in visiting:
+            return 0
+        visiting.add(nid)
+        deps = blocked_by_map.get(nid, [])
+        if not deps:
+            c = 0
+        else:
+            c = 1 + max(_col_for(d) for d in deps if d in open_set)
+        visiting.remove(nid)
+        col_memo[nid] = c
+        return c
+
+    columns: dict[str, int] = {}
+    for n in open_leaves:
+        columns[n.id] = _col_for(n.id)
+
+    # 4. Ready queue: column-0 tasks sorted by priority, then next-up: yes first, then id
+    col0_nodes = [n for n in open_leaves if columns.get(n.id) == 0]
+
+    def _ready_sort_key(n: TaskNode):
+        p_rank = PRIORITY_SORT_KEY.get(n.priority, 2)
+        next_up_val = n.own_fields.get("next_up") or n.own_fields.get("next-up") or "no"
+        nu_rank = 0 if next_up_val == "yes" else 1
+        return (p_rank, nu_rank, _natural_sort_key(n.id))
+
+    col0_nodes.sort(key=_ready_sort_key)
+    ready_queue = [n.id for n in col0_nodes]
+
+    # 5. Heaviest chain: DAG longest path with vertex weights
+    dp_weight: dict[str, int] = {}
+    dp_path: dict[str, list[str]] = {}
+
+    topo_order = sorted(open_leaves, key=lambda n: (columns[n.id], _natural_sort_key(n.id)))
+
+    for n in topo_order:
+        w = SIZE_WEIGHTS.get(n.size.upper(), 3)
+        deps = [d for d in blocked_by_map.get(n.id, []) if d in open_set]
+        if not deps:
+            dp_weight[n.id] = w
+            dp_path[n.id] = [n.id]
+        else:
+            best_pred = max(
+                deps,
+                key=lambda d: (
+                    dp_weight.get(d, 0),
+                    -PRIORITY_SORT_KEY.get(tree[d].priority, 2),
+                    _natural_sort_key(d),
+                ),
+            )
+            dp_weight[n.id] = dp_weight[best_pred] + w
+            dp_path[n.id] = dp_path[best_pred] + [n.id]
+
+    heaviest_chain: list[str] = []
+    heaviest_chain_weight = 0
+    if topo_order:
+        best_end = max(
+            topo_order,
+            key=lambda n: (
+                dp_weight.get(n.id, 0),
+                columns[n.id],
+                -PRIORITY_SORT_KEY.get(n.priority, 2),
+                _natural_sort_key(n.id),
+            ),
+        )
+        heaviest_chain = dp_path.get(best_end.id, [])
+        heaviest_chain_weight = dp_weight.get(best_end.id, 0)
+
+    # 6. Edges: dependencies between leaf nodes
+    edges: list[dict[str, str]] = []
+    seen_edges: set[tuple[str, str]] = set()
+    for n in leaf_nodes:
+        for dep in n.expanded_depends_on:
+            if dep in tree and tree[dep].is_leaf:
+                edge_pair = (dep, n.id)
+                if edge_pair not in seen_edges:
+                    seen_edges.add(edge_pair)
+                    edges.append({
+                        "from": dep,
+                        "to": n.id,
+                        "source": dep,
+                        "target": n.id,
+                    })
+    edges.sort(key=lambda e: (_natural_sort_key(e["from"]), _natural_sort_key(e["to"])))
+
+    # 7. Totals: per state, per size, per group, overall
+    by_state: dict[str, int] = {}
+    for n in leaf_nodes:
+        by_state[n.canonical_state] = by_state.get(n.canonical_state, 0) + 1
+
+    by_size: dict[str, int] = {"XS": 0, "S": 0, "M": 0, "L": 0, "XL": 0}
+    by_group: dict[str, dict[str, Any]] = {}
+
+    for n in leaf_nodes:
+        grp = _get_group(n)
+        if grp not in by_group:
+            by_group[grp] = {
+                "id": grp,
+                "by_size": {"XS": 0, "S": 0, "M": 0, "L": 0, "XL": 0},
+                "by_state": {},
+                "total_open": 0,
+                "total_leaves": 0,
+            }
+        g_info = by_group[grp]
+        g_info["total_leaves"] += 1
+        g_info["by_state"][n.canonical_state] = g_info["by_state"].get(n.canonical_state, 0) + 1
+
+        if n.id in open_set:
+            s = n.size.upper() if n.size.upper() in VALID_SIZES else "M"
+            by_size[s] = by_size.get(s, 0) + 1
+            g_info["by_size"][s] = g_info["by_size"].get(s, 0) + 1
+            g_info["total_open"] += 1
+
+    overall_parts = [f"{by_size[s]} {s}" for s in ("XS", "S", "M", "L", "XL") if by_size.get(s, 0) > 0]
+    overall_str = ", ".join(overall_parts) if overall_parts else "0 M"
+
+    totals = {
+        "overall": overall_str,
+        "by_state": by_state,
+        "by_size": by_size,
+        "by_group": by_group,
+        "total_open": len(open_leaves),
+        "total_leaves": len(leaf_nodes),
+        **by_state,
+        **by_size,
+    }
+
+    # 8. Node dicts
+    nodes_list: list[dict[str, Any]] = []
+    for n in leaf_nodes:
+        is_open = n.id in open_set
+        col = columns.get(n.id) if is_open else None
+        nodes_list.append({
+            "id": n.id,
+            "node_type": n.node_type,
+            "kind": n.own_fields.get("kind") or ("initiative_task" if "." in n.id and not n.id.startswith("T") else ("emergent" if n.id.startswith("T") else "initiative")),
+            "title": n.title,
+            "group": _get_group(n),
+            "state": n.state,
+            "canonical_state": n.canonical_state,
+            "priority": n.priority,
+            "priority_source": n.priority_source,
+            "size": n.size,
+            "size_source": n.size_source,
+            "depends_on": list(n.depends_on),
+            "expanded_depends_on": list(n.expanded_depends_on),
+            "column": col,
+            "blocked_by": blocked_by_map.get(n.id, []),
+            "next_up": n.own_fields.get("next_up") or n.own_fields.get("next-up") or "no",
+            "executor": n.executor,
+        })
+
+    return {
+        "ok": True,
+        "tasks_dir": str(tasks_dir),
+        "nodes": nodes_list,
+        "nodes_by_id": {n["id"]: n for n in nodes_list},
+        "edges": edges,
+        "columns": columns,
+        "ready_queue": ready_queue,
+        "longest_chain": heaviest_chain,
+        "heaviest_chain": heaviest_chain,
+        "heaviest_chain_weight": heaviest_chain_weight,
+        "totals": totals,
+    }
+
+
+def render_mermaid_graph(graph_data: dict[str, Any], tasks_dir: pathlib.Path | None = None) -> str:
+    lines = ["flowchart LR"]
+    nodes = graph_data.get("nodes", [])
+    edges = graph_data.get("edges", [])
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for n in nodes:
+        grp = n.get("group", "emergent")
+        groups.setdefault(grp, []).append(n)
+
+    for grp_id in sorted(groups.keys(), key=_natural_sort_key):
+        grp_nodes = groups[grp_id]
+        safe_grp_id = f"subgraph_{re.sub(r'[^a-zA-Z0-9_]', '_', grp_id)}"
+        grp_title = grp_id
+        if tasks_dir:
+            for parent_dir in (tasks_dir, tasks_dir / "done"):
+                if parent_dir.is_dir():
+                    for init_dir in parent_dir.iterdir():
+                        if init_dir.is_dir() and init_dir.name.startswith(f"{grp_id}-"):
+                            grp_title = init_dir.name
+                            break
+                    if grp_title != grp_id:
+                        break
+        lines.append(f'  subgraph {safe_grp_id} ["{grp_title}"]')
+        for n in sorted(grp_nodes, key=lambda x: _natural_sort_key(x["id"])):
+            safe_node_id = f"node_{re.sub(r'[^a-zA-Z0-9_]', '_', n['id'])}"
+            clean_title = n["title"].replace('"', "'")
+            prio = n.get("priority", "P2")
+            sz = n.get("size", "M")
+            lines.append(f'    {safe_node_id}["{n["id"]} ({prio}, {sz}) - {clean_title}"]')
+        lines.append("  end")
+
+    for e in edges:
+        s_id = f"node_{re.sub(r'[^a-zA-Z0-9_]', '_', e['from'])}"
+        t_id = f"node_{re.sub(r'[^a-zA-Z0-9_]', '_', e['to'])}"
+        lines.append(f"  {s_id} --> {t_id}")
+
+    lines.append("  classDef p0 fill:#ff4d4f,stroke:#d9363e,color:#fff;")
+    lines.append("  classDef p1 fill:#ffa940,stroke:#d46b08,color:#fff;")
+    lines.append("  classDef p2 fill:#4096ff,stroke:#0958d9,color:#fff;")
+    lines.append("  classDef p3 fill:#91caff,stroke:#1677ff,color:#000;")
+    for n in nodes:
+        safe_node_id = f"node_{re.sub(r'[^a-zA-Z0-9_]', '_', n['id'])}"
+        p = n.get("priority", "P2").lower()
+        if p in ("p0", "p1", "p2", "p3"):
+            lines.append(f"  class {safe_node_id} {p};")
+
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
 # CLI Subcommands
 # ---------------------------------------------------------------------------
 
@@ -4846,7 +5483,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
     tree_dicts = {nid: node.to_dict() for nid, node in tree.items()}
     tree_keys = ("parent", "depth", "node_type", "is_leaf", "is_container", "derived_state", "leaves_done",
-                 "leaves_total", "labels", "fields", "expanded_depends_on", "children")
+                 "leaves_total", "labels", "fields", "expanded_depends_on", "children", "size", "size_source", "priority_source")
 
     # Emergent roots keep their full header dict (the UI reads sources/paths/next-up...), plus tree info.
     all_tasks: list[dict[str, Any]] = []
@@ -5096,24 +5733,138 @@ def cmd_reopen(args: argparse.Namespace) -> int:
     return 0 if res.get("ok") else 1
 
 
-def cmd_set_deps(args: argparse.Namespace) -> int:
+def cmd_graph(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    graph_data = compute_tasks_graph(tasks_dir)
+    if getattr(args, "mermaid", False):
+        print(render_mermaid_graph(graph_data, tasks_dir=tasks_dir), end="")
+    elif getattr(args, "json", False):
+        print(json.dumps(graph_data, indent=2))
+    else:
+        totals = graph_data["totals"]
+        print(f"Tasks Graph ({tasks_dir.name}/)")
+        print("=" * (len(tasks_dir.name) + 14))
+        print(f"Totals: {totals['overall']} ({totals['total_open']} open leaves, {totals['total_leaves']} total)")
+        st_parts = [f"{v} {k}" for k, v in sorted(totals["by_state"].items())]
+        print(f"States: {', '.join(st_parts)}")
+        print("\nReady Queue (Column 0):")
+        nodes_by_id = graph_data["nodes_by_id"]
+        for idx, qid in enumerate(graph_data["ready_queue"], 1):
+            n = nodes_by_id.get(qid, {})
+            print(f"  {idx}. [{n.get('priority', 'P2')}] {qid} - {n.get('title', '')} (size: {n.get('size', 'M')})")
+        print("\nColumns:")
+        col_groups: dict[int, list[str]] = {}
+        for nid, col in sorted(graph_data["columns"].items(), key=lambda x: (x[1], _natural_sort_key(x[0]))):
+            col_groups.setdefault(col, []).append(nid)
+        for col in sorted(col_groups.keys()):
+            tasks_str = ", ".join(col_groups[col])
+            print(f"  Col {col}: {tasks_str}")
+        print("\nHeaviest Chain:")
+        if graph_data["heaviest_chain"]:
+            chain_parts = [f"{cid} ({nodes_by_id.get(cid, {}).get('size', 'M')})" for cid in graph_data["heaviest_chain"]]
+            print(f"  {' -> '.join(chain_parts)} (total weight: {graph_data['heaviest_chain_weight']})")
+        else:
+            print("  (empty)")
+    return 0
+
+
+def cmd_set_priority(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
     expect_task_hash = getattr(args, "expect_task_hash", None)
-    res = set_deps(
+    res = set_priority(
         tasks_dir=tasks_dir,
         node_id=args.id,
-        add_ids=getattr(args, "add", None),
-        remove_ids=getattr(args, "remove", None),
-        to_ids=getattr(args, "to", None),
+        priority=args.priority,
+        reason=getattr(args, "reason", None),
+        dry_run=dry_run,
         expect_task_hash=expect_task_hash,
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
-        if res.get("ok"):
-            print(f"[ok] updated dependencies for {args.id}: {res.get('depends_on')}")
+        if dry_run:
+            if res.get("ok"):
+                diff = res.get("diff", "")
+                if diff:
+                    print(diff, end="")
+                else:
+                    print(f"[dry-run] no changes for {args.id}")
+            else:
+                print(f"[FAIL] {res.get('error', 'set-priority failed')}", file=sys.stderr)
         else:
-            print(f"[FAIL] {res.get('error', 'set-deps failed')}", file=sys.stderr)
+            if res.get("ok"):
+                print(f"[ok] updated priority for {args.id}: {res.get('priority')}")
+            else:
+                print(f"[FAIL] {res.get('error', 'set-priority failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_set_size(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    expect_task_hash = getattr(args, "expect_task_hash", None)
+    res = set_size(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        size=args.size,
+        dry_run=dry_run,
+        expect_task_hash=expect_task_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if dry_run:
+            if res.get("ok"):
+                diff = res.get("diff", "")
+                if diff:
+                    print(diff, end="")
+                else:
+                    print(f"[dry-run] no changes for {args.id}")
+            else:
+                print(f"[FAIL] {res.get('error', 'set-size failed')}", file=sys.stderr)
+        else:
+            if res.get("ok"):
+                print(f"[ok] updated size for {args.id}: {res.get('size')}")
+            else:
+                print(f"[FAIL] {res.get('error', 'set-size failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_set_deps(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    expect_task_hash = getattr(args, "expect_task_hash", None)
+    pos_deps = getattr(args, "deps", None)
+    to_ids = getattr(args, "to", None)
+    if to_ids is None and pos_deps:
+        to_ids = pos_deps
+    res = set_deps(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        add_ids=getattr(args, "add", None),
+        remove_ids=getattr(args, "remove", None),
+        to_ids=to_ids,
+        expect_task_hash=expect_task_hash,
+        dry_run=dry_run,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if dry_run:
+            if res.get("ok"):
+                diff = res.get("diff", "")
+                if diff:
+                    print(diff, end="")
+                else:
+                    print(f"[dry-run] no changes for {args.id}")
+            else:
+                print(f"[FAIL] {res.get('error', 'set-deps failed')}", file=sys.stderr)
+        else:
+            if res.get("ok"):
+                print(f"[ok] updated dependencies for {args.id}: {res.get('depends_on')}")
+            else:
+                print(f"[FAIL] {res.get('error', 'set-deps failed')}", file=sys.stderr)
     return 0 if res.get("ok") else 1
 
 
@@ -8567,13 +9318,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_reop_task.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_reop_task.set_defaults(func=cmd_reopen)
 
+    # tasks graph
+    p_graph = sub.add_parser("graph", help="Compute abstract timeline dependency graph")
+    p_graph.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_graph.add_argument("--mermaid", action="store_true", default=False, help="Output Mermaid flowchart")
+    p_graph.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_graph.set_defaults(func=cmd_graph)
+
+    # tasks set-priority
+    p_sp = sub.add_parser("set-priority", help="Set priority for a task")
+    p_sp.add_argument("id", help="Node ID")
+    p_sp.add_argument("priority", help="Priority (P0, P1, P2, P3)")
+    p_sp.add_argument("--reason", default=None, help="Priority reason (for emergent tasks)")
+    p_sp.add_argument("--dry-run", action="store_true", help="Print diff without writing")
+    p_sp.add_argument("--expect-task-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task block/file hash")
+    p_sp.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_sp.set_defaults(func=cmd_set_priority)
+
+    # tasks set-size
+    p_ss = sub.add_parser("set-size", help="Set size for a task")
+    p_ss.add_argument("id", help="Node ID")
+    p_ss.add_argument("size", help="Size (XS, S, M, L, XL)")
+    p_ss.add_argument("--dry-run", action="store_true", help="Print diff without writing")
+    p_ss.add_argument("--expect-task-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task block/file hash")
+    p_ss.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_ss.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_ss.set_defaults(func=cmd_set_size)
+
     # tasks set-deps
     p_sd = sub.add_parser("set-deps", help="Set dependencies for a task")
     p_sd.add_argument("id", help="Node ID")
+    p_sd.add_argument("deps", nargs="*", default=None, help="Dependency IDs (e.g. '06.8, 07.4')")
     p_sd.add_argument("--add", nargs="*", default=None, help="Add dependency IDs")
     p_sd.add_argument("--remove", nargs="*", default=None, help="Remove dependency IDs")
     p_sd.add_argument("--to", nargs="*", default=None, help="Set exact dependency IDs")
-    p_sd.add_argument("--expect-task-hash", default=None, help="Expected task block hash")
+    p_sd.add_argument("--dry-run", action="store_true", help="Print diff without writing")
+    p_sd.add_argument("--expect-task-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task block hash")
     p_sd.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_sd.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_sd.set_defaults(func=cmd_set_deps)

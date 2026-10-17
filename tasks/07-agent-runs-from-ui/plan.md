@@ -56,7 +56,7 @@
 
 ### 07.4 - Run engine C: worktree isolation, verify target, verdict parsing and `apply-verdict`, continue invariants, `cleanup`
 
-- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 07.3 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 07.3 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:** Spec §5.4, §5.5, §5.6, and `run cleanup`.
 - **Verification:** Tests in temp git repos:
@@ -72,7 +72,7 @@
 
 ### 07.5 - Live capture with the real CLIs: session ids, Final Report, verdict, continue; flag table correction
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Executor:** `self` (orchestrator: needs the real CLIs and auth) · **Depends on:** 07.4 · **Repo:** `ai-orchestration/`
+- **Status:** `open` · **Size:** M · **Profile:** `deep-reasoning` · **Executor:** `self` (orchestrator: needs the real CLIs and auth) · **Depends on:** 07.4 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/fixtures/runs/{claude,kilo,codex}-*.jsonl` (new), `scripts/test_orchestration_runs.py`, `tasks/specs/agent-runs-from-ui.md` (§5.7 table)
 - **Goal:** In a scratch git repo with a one-step task, do per tool:
   - one `execute`, one `--continue` and one `verify`;
@@ -83,7 +83,7 @@
 
 ### 07.6 - UI backend: run and config endpoints
 
-- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 07.4, 06.7 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 07.4, 06.7 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Spec §6.
 - **Verification:**
@@ -92,7 +92,7 @@
 
 ### 07.7 - Frontend: Run dialog with live preview, task runs panel, Runs tab
 
-- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Spec §7, except the Config tab.
 - **Verification:**
@@ -106,14 +106,14 @@
 
 ### 07.8 - Frontend: Config tab editing (routing and profile/model matrix)
 
-- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/components/OrchestrationConfigurator.tsx`, `frontend/src/api.ts`, `frontend/src/types.ts`, `frontend/dist/**`
 - **Goal:** Spec §7 "Config tab".
 - **Verification:** Live: edit routing and one profile in project scope; the `.ai-orchestration.local.toml` diff shows only those values.
 
 ### 07.9 - VS Code: run handlers and run watcher
 
-- **Status:** `delivered` (2026-10-17; claude; vscode 0.2.6: run handlers mirror the web backend; live check by the owner pending) · **Profile:** `bulk-execution` · **Depends on:** 07.7, 07.8, 06.9 · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-17; claude; vscode 0.2.6: run handlers mirror the web backend; live check by the owner pending) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.7, 07.8, 06.9 · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/views/dashboard-panel.ts`, `src/extension.ts`, `dist-webview/**`
 - **Goal:** Spec §8.
 - **Verification:**
@@ -150,7 +150,7 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
 
 ### 07.10 - Core: run supervisor files blocking questions (R14, spec 08 Q8)
 
-- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 08.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Size:** S · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 08.1 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:**
   - At the end of a run, parse ` ```ai-orch-question ` blocks from the **final** assistant message.
