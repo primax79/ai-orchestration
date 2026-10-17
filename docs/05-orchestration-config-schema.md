@@ -82,7 +82,7 @@ cli_command = "codex"
 #   prompt_via: "stdin" | "file"- How the prompt payload is fed into the process
 #   permission_mode: str        - Tool-specific permission level (e.g. "acceptEdits")
 #   sandbox: str                - Sandbox isolation mode (e.g. "workspace-write")
-#   allowed_tools: list[str]    - Tool allowlist for the process
+#   allowed_tools: list[str] | table - Tool allowlist for the process: single list or table of modes (execute, verify, orchestrate)
 #
 # Allowed placeholders inside argv / resume_argv:
 #   {cwd}, {model}, {variant}, {effort}, {session_id}, {permission_mode}, {sandbox}, {prompt_file}
@@ -106,6 +106,13 @@ argv = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--sessio
 resume_argv = ["claude", "-p", "--resume", "{session_id}", "--output-format", "stream-json", "--verbose", "--permission-mode", "{permission_mode}", "--permission-prompts", "none"]
 prompt_via = "stdin"
 permission_mode = "acceptEdits"
+# allowed_tools may be a single list across all modes:
+# allowed_tools = ["Read", "Edit", "Write", "Bash"]
+# or a per-mode table:
+# [tools.claude.headless.allowed_tools]
+# execute = ["Read", "Edit", "Write", "Bash(git status:*)"]
+# verify = ["Read", "Glob", "Grep", "Bash(pytest:*)"]
+# orchestrate = ["Read", "Edit", "Write", "mcp__kilo-mcp__*"]
 
 [tools.codex.headless]
 argv = ["codex", "exec", "--json", "-C", "{cwd}", "-m", "{model}", "-s", "{sandbox}", "-"]

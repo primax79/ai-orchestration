@@ -50,6 +50,7 @@ HEADLESS_ALLOWED_KEYS = {
     "sandbox",
     "allowed_tools",
 }
+HEADLESS_ALLOWED_TOOLS_MODES = {"execute", "verify", "orchestrate"}
 ALLOWED_PLACEHOLDERS = {
     "cwd",
     "model",
@@ -655,9 +656,25 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
 
                 if "allowed_tools" in headless:
                     at = headless["allowed_tools"]
-                    if not isinstance(at, list) or not all(isinstance(x, str) for x in at):
+                    if isinstance(at, list):
+                        if not all(isinstance(x, str) for x in at):
+                            errors.append(
+                                f"Tool '{tname}' headless 'allowed_tools' must be a list of strings."
+                            )
+                    elif isinstance(at, dict):
+                        for mk, mv in at.items():
+                            if mk not in HEADLESS_ALLOWED_TOOLS_MODES:
+                                errors.append(
+                                    f"Tool '{tname}' headless 'allowed_tools' has unknown mode {mk!r} "
+                                    f"(allowed: {sorted(HEADLESS_ALLOWED_TOOLS_MODES)})."
+                                )
+                            if not isinstance(mv, list) or not all(isinstance(x, str) for x in mv):
+                                errors.append(
+                                    f"Tool '{tname}' headless 'allowed_tools.{mk}' must be a list of strings."
+                                )
+                    else:
                         errors.append(
-                            f"Tool '{tname}' headless 'allowed_tools' must be a list of strings."
+                            f"Tool '{tname}' headless 'allowed_tools' must be a list of strings or a table with keys {sorted(HEADLESS_ALLOWED_TOOLS_MODES)}."
                         )
 
         if not tcfg.get("enabled", True):

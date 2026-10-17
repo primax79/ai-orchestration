@@ -58,6 +58,9 @@ from orchestration_runs import (
     get_process_start_time,
     is_process_alive,
     kill_process_group,
+    resolve_claude_allowed_tools,
+    check_claude_allowed_tools,
+    DEFAULT_CLAUDE_ALLOWED_TOOLS,
 )
 
 SCRIPT = pathlib.Path(__file__).resolve().parent / "orchestration_runs.py"
@@ -1399,17 +1402,162 @@ def test_expect_plan_hash_mismatch_and_requested_by(sample_workspace: pathlib.Pa
     subprocess.run([str(BIN_AI_ORCH), "run", "cancel", run_id, "--workspace", str(sample_workspace)], check=True)
 
 
-def test_claude_without_allowed_tools_refused(sample_workspace: pathlib.Path):
+def test_resolve_claude_allowed_tools_precedence():
+    # 1. Built-in defaults per mode
+    exec_tools, exec_src = resolve_claude_allowed_tools({}, "execute")
+    assert exec_src == "default"
+    assert exec_tools == DEFAULT_CLAUDE_ALLOWED_TOOLS["execute"]
+    assert "Read" in exec_tools
+    assert "Edit" in exec_tools
+    assert "Write" in exec_tools
+    assert "mcp__kilo-mcp__*" not in exec_tools
+
+    ver_tools, ver_src = resolve_claude_allowed_tools({}, "verify")
+    assert ver_src == "default"
+    assert ver_tools == DEFAULT_CLAUDE_ALLOWED_TOOLS["verify"]
+    assert "Read" in ver_tools
+    assert "Edit" not in ver_tools
+    assert "Write" not in ver_tools
+    assert "mcp__kilo-mcp__*" not in ver_tools
+
+    orch_tools, orch_src = resolve_claude_allowed_tools({}, "orchestrate")
+    assert orch_src == "default"
+    assert orch_tools == DEFAULT_CLAUDE_ALLOWED_TOOLS["orchestrate"]
+    assert "Read" in orch_tools
+    assert "Edit" in orch_tools
+    assert "Write" in orch_tools
+    assert "mcp__kilo-mcp__*" in orch_tools
+
+    # 2. Config single list overrides default for all modes
+    single_cfg = {"allowed_tools": ["Bash", "Read"]}
+    tools, src = resolve_claude_allowed_tools(single_cfg, "execute")
+    assert src == "config:all"
+    assert tools == ["Bash", "Read"]
+
+    tools, src = resolve_claude_allowed_tools(single_cfg, "verify")
+    assert src == "config:all"
+    assert tools == ["Bash", "Read"]
+
+    # 3. Config per-mode overrides both single list and default
+    per_mode_cfg = {
+        "allowed_tools": {
+            "execute": ["EditOnly"],
+            "verify": ["ReadOnly"],
+        }
+    }
+    tools, src = resolve_claude_allowed_tools(per_mode_cfg, "execute")
+    assert src == "config:execute"
+    assert tools == ["EditOnly"]
+
+    tools, src = resolve_claude_allowed_tools(per_mode_cfg, "verify")
+    assert src == "config:verify"
+    assert tools == ["ReadOnly"]
+
+    # Mode not in per-mode table falls back to default
+    tools, src = resolve_claude_allowed_tools(per_mode_cfg, "orchestrate")
+    assert src == "default"
+    assert tools == DEFAULT_CLAUDE_ALLOWED_TOOLS["orchestrate"]
+
+    # 4. Check function
+    ok, err = check_claude_allowed_tools({}, "execute")
+    assert ok is True
+    assert err is None
+
+    ok, err = check_claude_allowed_tools({"allowed_tools": []}, "execute")
+    assert ok is False
+    assert "non-empty 'allowed_tools'" in (err or "")
+
+
+def test_claude_allowed_tools_defaults_and_preview(sample_workspace: pathlib.Path):
     proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
     orig_cfg = proj_cfg.read_text(encoding="utf-8")
 
-    # 1. Claude without allowed_tools
+    # 1. Default applied per mode when config has none
+    # Check preview for execute mode
+    cmd_prev_exec = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--tool",
+        "claude",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_exec = subprocess.run(cmd_prev_exec, capture_output=True, text=True, check=True)
+    data_exec = json.loads(res_exec.stdout)
+    assert data_exec["ok"] is True
+    assert data_exec["allowed_tools_source"] == "default"
+    assert "Read" in data_exec["allowed_tools"]
+    assert "Edit" in data_exec["allowed_tools"]
+    assert "Write" in data_exec["allowed_tools"]
+    assert "mcp__kilo-mcp__*" not in data_exec["allowed_tools"]
+    assert any("--allowedTools" in arg for arg in data_exec["argv_display"])
+    assert not any("--dangerously" in arg for arg in data_exec["argv_display"])
+
+    # Check preview for verify mode (minus Edit and Write)
+    # Set task to delivered for verify mode
+    task_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    orig_task_text = task_file.read_text(encoding="utf-8")
+    task_file.write_text(orig_task_text.replace("state: open", "state: delivered"), encoding="utf-8")
+
+    cmd_prev_ver = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--task",
+        "T007",
+        "--mode",
+        "verify",
+        "--tool",
+        "claude",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_ver = subprocess.run(cmd_prev_ver, capture_output=True, text=True, check=True)
+    data_ver = json.loads(res_ver.stdout)
+    assert data_ver["ok"] is True
+    assert data_ver["allowed_tools_source"] == "default"
+    assert "Read" in data_ver["allowed_tools"]
+    assert "Edit" not in data_ver["allowed_tools"]
+    assert "Write" not in data_ver["allowed_tools"]
+    assert "mcp__kilo-mcp__*" not in data_ver["allowed_tools"]
+
+    # Check preview for orchestrate mode (includes mcp__kilo-mcp__*)
+    cmd_prev_orch = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--task",
+        "T007",
+        "--mode",
+        "orchestrate",
+        "--tool",
+        "claude",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_orch = subprocess.run(cmd_prev_orch, capture_output=True, text=True, check=True)
+    data_orch = json.loads(res_orch.stdout)
+    assert data_orch["ok"] is True
+    assert data_orch["allowed_tools_source"] == "default"
+    assert "Read" in data_orch["allowed_tools"]
+    assert "Edit" in data_orch["allowed_tools"]
+    assert "Write" in data_orch["allowed_tools"]
+    assert "mcp__kilo-mcp__*" in data_orch["allowed_tools"]
+
+    # Claude with default allowed_tools launches successfully without missing-allowed-tools refusal
     proj_cfg.write_text(
         orig_cfg + f'\n[tools.claude.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--sleep", "0"]\n',
         encoding="utf-8",
     )
-
-    cmd_claude = [
+    cmd_start = [
         str(BIN_AI_ORCH),
         "run",
         "start",
@@ -1423,23 +1571,113 @@ def test_claude_without_allowed_tools_refused(sample_workspace: pathlib.Path):
         str(sample_workspace),
         "--json",
     ]
-    res_no_at = subprocess.run(cmd_claude, capture_output=True, text=True, check=False)
-    assert res_no_at.returncode != 0
-    data_no_at = json.loads(res_no_at.stdout)
-    assert data_no_at["ok"] is False
-    assert data_no_at["reason"] == "missing-allowed-tools"
+    res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    data_start = json.loads(res_start.stdout)
+    assert data_start["ok"] is True
+    assert data_start["status"] == "starting"
 
-    # 2. Claude with allowed_tools succeeds
+
+def test_claude_allowed_tools_overrides_and_empty_refusal(sample_workspace: pathlib.Path):
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+
+    cmd_prev_exec = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--tool",
+        "claude",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+
+    # 1. Per-mode override
     proj_cfg.write_text(
-        orig_cfg + f'\n[tools.claude.headless]\nallowed_tools = ["Bash", "Read"]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--sleep", "0"]\n',
+        orig_cfg + '\n[tools.claude.headless.allowed_tools]\nexecute = ["Read", "CustomTool"]\n',
         encoding="utf-8",
     )
+    res_exec = subprocess.run(cmd_prev_exec, capture_output=True, text=True, check=True)
+    data_exec = json.loads(res_exec.stdout)
+    assert data_exec["allowed_tools"] == ["Read", "CustomTool"]
+    assert data_exec["allowed_tools_source"] == "config:execute"
 
-    res_ok = subprocess.run(cmd_claude, capture_output=True, text=True, check=True)
-    data_ok = json.loads(res_ok.stdout)
-    assert data_ok["ok"] is True
-    run_id = data_ok["run_id"]
-    assert data_ok["status"] == "starting"
+    # Orchestrate mode in same config falls back to default
+    cmd_prev_orch = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--task",
+        "T007",
+        "--mode",
+        "orchestrate",
+        "--tool",
+        "claude",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_orch = subprocess.run(cmd_prev_orch, capture_output=True, text=True, check=True)
+    data_orch = json.loads(res_orch.stdout)
+    assert data_orch["allowed_tools_source"] == "default"
+
+    # 2. Single-list override
+    proj_cfg.write_text(
+        orig_cfg + '\n[tools.claude.headless]\nallowed_tools = ["ToolA", "ToolB"]\n',
+        encoding="utf-8",
+    )
+    res_single = subprocess.run(cmd_prev_exec, capture_output=True, text=True, check=True)
+    data_single = json.loads(res_single.stdout)
+    assert data_single["allowed_tools"] == ["ToolA", "ToolB"]
+    assert data_single["allowed_tools_source"] == "config:all"
+
+    # 3. Empty list refused
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.claude.headless]\nallowed_tools = []\nargv = ["{sys.executable}", "{STUB_AGENT}", "--sleep", "0"]\n',
+        encoding="utf-8",
+    )
+    # Preview shows empty list, config:all, and warning
+    res_empty_prev = subprocess.run(cmd_prev_exec, capture_output=True, text=True, check=True)
+    data_empty_prev = json.loads(res_empty_prev.stdout)
+    assert data_empty_prev["allowed_tools"] == []
+    assert data_empty_prev["allowed_tools_source"] == "config:all"
+    assert any("empty" in w for w in data_empty_prev["warnings"])
+
+    # Start refused with missing-allowed-tools
+    cmd_start_exec = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--tool",
+        "claude",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_empty_start = subprocess.run(cmd_start_exec, capture_output=True, text=True, check=False)
+    assert res_empty_start.returncode != 0
+    data_empty_start = json.loads(res_empty_start.stdout)
+    assert data_empty_start["ok"] is False
+    assert data_empty_start["reason"] == "missing-allowed-tools"
+
+    # Per-mode empty list also refused
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.claude.headless.allowed_tools]\nexecute = []\n[tools.claude.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--sleep", "0"]\n',
+        encoding="utf-8",
+    )
+    res_pm_empty = subprocess.run(cmd_start_exec, capture_output=True, text=True, check=False)
+    assert res_pm_empty.returncode != 0
+    data_pm_empty = json.loads(res_pm_empty.stdout)
+    assert data_pm_empty["ok"] is False
+    assert data_pm_empty["reason"] == "missing-allowed-tools"
 
 
 def test_execute_start_moves_task_to_in_progress(sample_workspace: pathlib.Path):

@@ -500,6 +500,106 @@ def test_headless_schema_validation(tmp_path: pathlib.Path) -> None:
     assert any("prompt_via" in e for e in errors)
 
 
+def test_headless_allowed_tools_validation() -> None:
+    # 1. Valid single list
+    cfg_single = {
+        "tools": {
+            "claude": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+                "headless": {
+                    "allowed_tools": ["Read", "Edit", "Bash(git status:*)"],
+                },
+            }
+        }
+    }
+    errors, _ = oc.validate_config(cfg_single)
+    assert errors == []
+
+    # 2. Valid per-mode table
+    cfg_table = {
+        "tools": {
+            "claude": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+                "headless": {
+                    "allowed_tools": {
+                        "execute": ["Read", "Edit", "Write"],
+                        "verify": ["Read", "Glob"],
+                        "orchestrate": ["Read", "mcp__kilo-mcp__*"],
+                    },
+                },
+            }
+        }
+    }
+    errors, _ = oc.validate_config(cfg_table)
+    assert errors == []
+
+    # 3. Reject non-string in single list
+    cfg_non_str_list = {
+        "tools": {
+            "claude": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+                "headless": {
+                    "allowed_tools": ["Read", 123],
+                },
+            }
+        }
+    }
+    errors, _ = oc.validate_config(cfg_non_str_list)
+    assert any("allowed_tools" in e and "list of strings" in e for e in errors)
+
+    # 4. Reject non-string in per-mode table
+    cfg_non_str_table = {
+        "tools": {
+            "claude": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+                "headless": {
+                    "allowed_tools": {
+                        "execute": ["Read", 456],
+                    },
+                },
+            }
+        }
+    }
+    errors, _ = oc.validate_config(cfg_non_str_table)
+    assert any("allowed_tools.execute" in e and "list of strings" in e for e in errors)
+
+    # 5. Reject unknown mode in table
+    cfg_unknown_mode = {
+        "tools": {
+            "claude": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+                "headless": {
+                    "allowed_tools": {
+                        "bad_mode": ["Read"],
+                    },
+                },
+            }
+        }
+    }
+    errors, _ = oc.validate_config(cfg_unknown_mode)
+    assert any("unknown mode 'bad_mode'" in e for e in errors)
+
+    # 6. Reject non-list non-dict allowed_tools
+    cfg_scalar = {
+        "tools": {
+            "claude": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+                "headless": {
+                    "allowed_tools": "not-a-list",
+                },
+            }
+        }
+    }
+    errors, _ = oc.validate_config(cfg_scalar)
+    assert any("allowed_tools" in e for e in errors)
+
+
 def test_rendered_agents_md_block_names_real_project_config_path(tmp_path: pathlib.Path) -> None:
     workspace = tmp_path / "my_project"
     workspace.mkdir()

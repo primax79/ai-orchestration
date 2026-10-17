@@ -252,13 +252,89 @@ def expand_secret_env_vars(argv: list[str]) -> list[str]:
     return expanded
 
 
+DEFAULT_CLAUDE_ALLOWED_TOOLS: dict[str, list[str]] = {
+    "execute": [
+        "Read",
+        "Edit",
+        "Write",
+        "Glob",
+        "Grep",
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git add:*)",
+        "Bash(git commit:*)",
+        "Bash(git log:*)",
+        "Bash(pytest:*)",
+        "Bash(python -m pytest:*)",
+        "Bash(uv run:*)",
+        "Bash(npm test:*)",
+        "Bash(npm run build:*)",
+    ],
+    "verify": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git add:*)",
+        "Bash(git commit:*)",
+        "Bash(git log:*)",
+        "Bash(pytest:*)",
+        "Bash(python -m pytest:*)",
+        "Bash(uv run:*)",
+        "Bash(npm test:*)",
+        "Bash(npm run build:*)",
+    ],
+    "orchestrate": [
+        "Read",
+        "Edit",
+        "Write",
+        "Glob",
+        "Grep",
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git add:*)",
+        "Bash(git commit:*)",
+        "Bash(git log:*)",
+        "Bash(pytest:*)",
+        "Bash(python -m pytest:*)",
+        "Bash(uv run:*)",
+        "Bash(npm test:*)",
+        "Bash(npm run build:*)",
+        "mcp__kilo-mcp__*",
+    ],
+}
+
+
+def resolve_claude_allowed_tools(
+    headless_cfg: dict[str, Any],
+    mode: str,
+) -> tuple[list[str], str]:
+    """Resolve effective allowed_tools and source for Claude under the given mode.
+
+    Precedence:
+      1. Config per-mode: [tools.claude.headless.allowed_tools] <mode> = [...]
+      2. Config single list: [tools.claude.headless] allowed_tools = [...]
+      3. Built-in default per mode
+
+    Returns (effective_list, source) where source is 'config:<mode>', 'config:all', or 'default'.
+    """
+    raw_at = headless_cfg.get("allowed_tools")
+    if isinstance(raw_at, dict) and mode in raw_at and isinstance(raw_at[mode], list):
+        return list(raw_at[mode]), f"config:{mode}"
+    if isinstance(raw_at, list):
+        return list(raw_at), "config:all"
+    default_list = DEFAULT_CLAUDE_ALLOWED_TOOLS.get(mode)
+    if default_list is not None:
+        return list(default_list), "default"
+    return [], "default"
+
+
 def check_claude_allowed_tools(headless_cfg: dict[str, Any], mode: str) -> tuple[bool, str | None]:
-    """R11 — Claude requires configured allowed_tools for the mode."""
-    at = headless_cfg.get("allowed_tools")
-    if isinstance(at, dict):
-        at = at.get(mode)
-    if not at or not isinstance(at, list) or len(at) == 0:
-        return False, f"Claude requires 'allowed_tools' to be configured under [tools.claude.headless] for mode '{mode}' (no default permission policy)"
+    """Claude requires a non-empty effective allowed_tools list for the mode."""
+    tools, _ = resolve_claude_allowed_tools(headless_cfg, mode)
+    if not tools:
+        return False, f"Claude requires a non-empty 'allowed_tools' for mode '{mode}' under [tools.claude.headless]"
     return True, None
 
 
@@ -1402,8 +1478,8 @@ def build_adapter_argv(
                 "--permission-prompts",
                 "none",
             ])
-            allowed_tools = headless.get("allowed_tools")
-            if allowed_tools and isinstance(allowed_tools, list):
+            allowed_tools, _ = resolve_claude_allowed_tools(headless, mode)
+            if allowed_tools:
                 argv.extend(["--allowedTools", ",".join(allowed_tools)])
             return argv
 
@@ -1463,8 +1539,8 @@ def build_adapter_argv(
             "--permission-prompts",
             "none",
         ])
-        allowed_tools = headless.get("allowed_tools")
-        if allowed_tools and isinstance(allowed_tools, list):
+        allowed_tools, _ = resolve_claude_allowed_tools(headless, mode)
+        if allowed_tools:
             argv.extend(["--allowedTools", ",".join(allowed_tools)])
         return argv
 
@@ -2300,14 +2376,17 @@ def validate_run_request(
             )
 
     headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
+    allowed_tools: list[str] | None = None
+    allowed_tools_source: str | None = None
     if tool == "claude":
         pm = headless_cfg.get("permission_mode")
         if pm in ("bypassPermissions", "--dangerously-skip-permissions"):
             warnings.append(f"Tool 'claude' has elevated permission mode '{pm}'.")
+        allowed_tools, allowed_tools_source = resolve_claude_allowed_tools(headless_cfg, mode)
         ok_at, _ = check_claude_allowed_tools(headless_cfg, mode)
         if not ok_at:
             warnings.append(
-                f"Claude has no configured 'allowed_tools' for mode '{mode}' under [tools.claude.headless]; launch will be refused until configured."
+                f"Claude has empty 'allowed_tools' for mode '{mode}' under [tools.claude.headless]; launch will be refused."
             )
     elif tool == "codex":
         sb = headless_cfg.get("sandbox")
@@ -2387,6 +2466,8 @@ def validate_run_request(
         "repo_head": repo_head,
         "plan_hash": plan_hash,
         "warnings": warnings,
+        "allowed_tools": allowed_tools,
+        "allowed_tools_source": allowed_tools_source,
         "verification_mode": "independent-session" if (mode == "verify" and args.allow_same_tool and ((task.get("executor") and tool.lower() == task.get("executor", "").lower()) or (target_run_tool and tool.lower() == target_run_tool.lower()))) else (vmode if mode == "verify" else None),
     }
     return True, None, data
@@ -2409,6 +2490,8 @@ def cmd_preview(args: argparse.Namespace) -> int:
         "planned_branch": data["planned_branch"],  # type: ignore
         "warnings": data["warnings"],  # type: ignore
         "plan_hash": data["plan_hash"],  # type: ignore
+        "allowed_tools": data.get("allowed_tools"),  # type: ignore
+        "allowed_tools_source": data.get("allowed_tools_source"),  # type: ignore
     }
 
     if args.json:
@@ -2421,6 +2504,9 @@ def cmd_preview(args: argparse.Namespace) -> int:
         print(f"Planned Branch  : {data['planned_branch'] or 'none'}")  # type: ignore
         print(f"Planned Worktree: {data['planned_worktree'] or 'none'}")  # type: ignore
         print(f"Plan Hash       : {data['plan_hash']}")  # type: ignore
+        if data.get("allowed_tools") is not None:  # type: ignore
+            tools_str = ", ".join(data["allowed_tools"]) if data["allowed_tools"] else "none"  # type: ignore
+            print(f"Allowed Tools   : {tools_str} (source: {data.get('allowed_tools_source')})")  # type: ignore
         if data["warnings"]:  # type: ignore
             print("\nWarnings:")
             for w in data["warnings"]:  # type: ignore
@@ -2511,6 +2597,13 @@ def cmd_start(args: argparse.Namespace) -> int:
             gpath = getattr(args, "global_config", None)
             merged_cfg, _ = resolve_config(gpath, ws)
             tool_cfg = merged_cfg.get("tools", {}).get(tool, {})
+            if tool == "claude":
+                headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
+                ok_at, at_err = check_claude_allowed_tools(headless_cfg, source_record["mode"])
+                if not ok_at:
+                    print_error(args.json, "missing-allowed-tools", at_err or "Missing allowed_tools for Claude")
+                    return 1
+
             resume_raw_argv = build_adapter_argv(
                 tool=tool,
                 tool_cfg=tool_cfg,
