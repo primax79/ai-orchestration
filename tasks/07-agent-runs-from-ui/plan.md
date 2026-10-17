@@ -163,4 +163,4 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
 
 | Key | Question | Blocks | Decider |
 | --- | --- | --- | --- |
-| R11 | Which Bash/MCP allow-list should headless Claude runs get by default, per mode (execute, orchestrate, verify)? To be converted into the first `Q###` question once 08.1 lands. | 07.3 default, 07.5 | owner |
+| R11 | Filed as [Q001](../questions/Q001-which-permission-policy-should-headless-claude-run.md). | 07.3 default, 07.5 | owner |

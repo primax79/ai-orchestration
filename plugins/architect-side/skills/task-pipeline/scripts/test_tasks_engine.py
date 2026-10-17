@@ -2392,3 +2392,20 @@ End of context.
 
     errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
     assert errors == []
+
+
+def test_questions_ask_with_no_blocked_task(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+    res = run_cli(
+        "questions", "ask", "--tasks-dir", str(tasks_dir),
+        "--question", "Which default should we use?", "--context", "Some context.",
+        "--option", "A=One: first", "--option", "B=Two: second",
+        "--recommended", "A", "--open-answer", "no", "--blocks", "-", "--json",
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    qfile = next((tasks_dir / "questions").glob("Q001-*.md"))
+    assert "- blocks: -\n" in qfile.read_text(encoding="utf-8")
+    val = run_cli("validate", "--tasks-dir", str(tasks_dir))
+    assert val.returncode == 0, val.stdout + val.stderr

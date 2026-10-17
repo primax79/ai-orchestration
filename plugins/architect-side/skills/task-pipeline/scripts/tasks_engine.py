@@ -746,7 +746,7 @@ def format_question_content(
         f"- id: {id}",
         f"- question: {question}",
         f"- status: {status}",
-        f"- blocks: {blocks}",
+        f"- blocks: {blocks.strip() or '-'}",
         f"- decider: {decider}",
         f"- asked-by: {asked_by}",
         f"- asked: {asked}",
@@ -3136,7 +3136,8 @@ def ask_question(
                         return False, {"ok": False, "error": f"recommended option {recommended!r} not found in options {opt_labels}."}
 
                 # Parse blocks and check task states
-                blocks_list = [b.strip() for b in blocks.split(",") if b.strip()]
+                # `-` means the question blocks no task (spec §2), e.g. a decision gating an initiative task
+                blocks_list = [] if blocks.strip() == "-" else [b.strip() for b in blocks.split(",") if b.strip()]
                 for b in blocks_list:
                     bm = re.match(r"^(T\d{3,})", b)
                     if not bm:

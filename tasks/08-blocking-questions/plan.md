@@ -15,7 +15,7 @@
 
 ### 08.1 - Engine: question files, validator, `ai-orch questions list|show|ask|answer|withdraw`, Decisions region from open questions
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 06.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 06.1 · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../scripts/test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md` (add the question model section)
 - **Goal:** Spec §2 and §3 completely:
   - the format and the validator;
