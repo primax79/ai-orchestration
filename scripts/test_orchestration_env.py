@@ -1970,5 +1970,285 @@ def test_stale_plugin_disabled_plugin_not_reported(tmp_path: pathlib.Path) -> No
     assert st["environments"]["claude"]["global"]["stale_plugins"] == []
 
 
+# ---------------------------------------------------------------------------
+# Task 13.5: History-aware legacy classification and standalone duplicates (P2-a, P2-d)
+# ---------------------------------------------------------------------------
+
+def _setup_mock_source_repo_with_history(fake_home: pathlib.Path, skill_name: str = "demo-legacy-skill") -> tuple[pathlib.Path, list[str]]:
+    """Create a mock git repository in ~/.ai-orchestration/repos/ai-orchestration with 3 commits of a skill."""
+    repo = fake_home / ".ai-orchestration" / "repos" / "ai-orchestration"
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test User"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+
+    skill_dir = repo / "plugins" / "architect-side" / "skills" / skill_name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+
+    # Commit 1
+    (skill_dir / "SKILL.md").write_text("# Demo Legacy Skill v1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "Commit 1"], check=True, capture_output=True)
+    c1_sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+    # Commit 2
+    (skill_dir / "SKILL.md").write_text("# Demo Legacy Skill v2\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "Commit 2"], check=True, capture_output=True)
+    c2_sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+    # Commit 3 (HEAD)
+    (skill_dir / "SKILL.md").write_text("# Demo Legacy Skill v3 (HEAD)\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "Commit 3"], check=True, capture_output=True)
+    c3_sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+    return repo, [c1_sha, c2_sha, c3_sha]
+
+
+def test_history_aware_legacy_outdated_classification_and_update(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    repo, shas = _setup_mock_source_repo_with_history(fake_home, "demo-legacy-skill")
+
+    # Install a standalone copy with content matching Commit 1 (without receipt)
+    claude_skills = fake_home / ".claude" / "skills"
+    installed_dir = claude_skills / "demo-legacy-skill"
+    installed_dir.mkdir(parents=True)
+    (installed_dir / "SKILL.md").write_text("# Demo Legacy Skill v1\n")
+
+    # 1. Status: classified as outdated-legacy, fixable=True, action=update
+    st = run_env(["status"], fake_home)
+    c_skills = st["environments"]["claude"]["global"]["skills"]
+    assert c_skills["demo-legacy-skill"]["state"] == "outdated-legacy"
+
+    scs = st["environments"]["claude"]["global"]["structured_conflicts"]
+    outdated_scs = [sc for sc in scs if sc["kind"] == "outdated-legacy" and sc["names"] == ["demo-legacy-skill"]]
+    assert len(outdated_scs) == 1
+    sc = outdated_scs[0]
+    assert sc["fixable"] is True
+    assert sc["actionable"] is True
+    assert len(sc["actions"]) == 1
+    action = sc["actions"][0]
+    assert action["action"] == "update"
+    assert action["path"] == str(installed_dir)
+    assert action["current_state"] == "outdated-legacy"
+    assert sc["advice"] == []
+
+    # 2. Dry-run resolution: dry_run=True, applied=0, disk unmodified
+    rc_dry = run_env(["resolve-conflicts", "--dry-run"], fake_home)
+    assert rc_dry["ok"] is True
+    assert rc_dry["dry_run"] is True
+    assert rc_dry["applied"] == 0
+    assert rc_dry["resolved_count"] == 1
+    assert len(rc_dry["actions"]) == 1
+    assert rc_dry["actions"][0]["action"] == "update"
+    assert (installed_dir / "SKILL.md").read_text() == "# Demo Legacy Skill v1\n"
+    assert not (installed_dir / ".ai-orch-source.json").exists()
+
+    # 3. Apply resolution: updates skill, writes receipt, trashes old copy
+    rc_apply = run_env(["resolve-conflicts", "--apply"], fake_home)
+    assert rc_apply["ok"] is True
+    assert rc_apply["applied"] == 1
+    assert rc_apply["resolved_count"] == 1
+    assert rc_apply["resolved"][0]["action"] == "update"
+    assert rc_apply["resolved"][0]["skill"] == "demo-legacy-skill"
+
+    # Disk has current version (Commit 3) and receipt
+    assert (installed_dir / "SKILL.md").read_text() == "# Demo Legacy Skill v3 (HEAD)\n"
+    assert (installed_dir / ".ai-orch-source.json").is_file()
+    receipt = json.loads((installed_dir / ".ai-orch-source.json").read_text(encoding="utf-8"))
+    assert receipt["repo"] == "ai-orchestration"
+    assert receipt["name"] == "demo-legacy-skill"
+
+    # Old version was moved to centralized trash
+    trash_base = fake_home / ".config" / "ai-orchestration" / "trash" / "claude" / "global"
+    trashed = list(trash_base.glob("*/skills/demo-legacy-skill/SKILL.md"))
+    assert len(trashed) >= 1
+    assert trashed[0].read_text() == "# Demo Legacy Skill v1\n"
+
+    # Next status check: up-to-date and no conflicts
+    st2 = run_env(["status"], fake_home)
+    assert st2["environments"]["claude"]["global"]["skills"]["demo-legacy-skill"]["state"] == "up-to-date"
+    assert st2["environments"]["claude"]["global"]["structured_conflicts"] == []
+
+
+def test_history_aware_legacy_adopt_and_foreign_classification(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    _setup_mock_source_repo_with_history(fake_home, "demo-legacy-skill")
+
+    claude_skills = fake_home / ".claude" / "skills"
+    installed_dir = claude_skills / "demo-legacy-skill"
+    installed_dir.mkdir(parents=True)
+
+    # 1. Test up-to-date-legacy: content matching HEAD but no receipt
+    (installed_dir / "SKILL.md").write_text("# Demo Legacy Skill v3 (HEAD)\n")
+
+    st = run_env(["status"], fake_home)
+    assert st["environments"]["claude"]["global"]["skills"]["demo-legacy-skill"]["state"] == "up-to-date-legacy"
+    scs = st["environments"]["claude"]["global"]["structured_conflicts"]
+    adopt_scs = [sc for sc in scs if sc["kind"] == "up-to-date-legacy" and sc["names"] == ["demo-legacy-skill"]]
+    assert len(adopt_scs) == 1
+    assert adopt_scs[0]["fixable"] is True
+    assert adopt_scs[0]["actions"][0]["action"] == "adopt"
+
+    # Dry-run writes nothing
+    rc_dry = run_env(["resolve-conflicts", "--dry-run"], fake_home)
+    assert rc_dry["ok"] is True
+    assert rc_dry["applied"] == 0
+    assert not (installed_dir / ".ai-orch-source.json").exists()
+
+    # Apply adopts and writes receipt
+    rc_apply = run_env(["resolve-conflicts", "--apply"], fake_home)
+    assert rc_apply["ok"] is True
+    assert rc_apply["applied"] == 1
+    assert rc_apply["resolved"][0]["action"] == "adopt"
+    assert (installed_dir / ".ai-orch-source.json").is_file()
+
+    st2 = run_env(["status"], fake_home)
+    assert st2["environments"]["claude"]["global"]["skills"]["demo-legacy-skill"]["state"] == "up-to-date"
+    assert st2["environments"]["claude"]["global"]["structured_conflicts"] == []
+
+    # 2. Test foreign: modified content that does not match any git history commit
+    (installed_dir / ".ai-orch-source.json").unlink()
+    (installed_dir / "SKILL.md").write_text("# Modified Content Completely Foreign\n")
+
+    st3 = run_env(["status"], fake_home)
+    assert st3["environments"]["claude"]["global"]["skills"]["demo-legacy-skill"]["state"] == "foreign"
+    foreign_scs = [sc for sc in st3["environments"]["claude"]["global"]["structured_conflicts"] if sc["kind"] == "foreign"]
+    assert len(foreign_scs) == 1
+    assert foreign_scs[0]["fixable"] is False
+    assert foreign_scs[0]["actions"] == []
+    assert len(foreign_scs[0]["advice"]) == 1
+
+    # Apply is no-op (advice only)
+    rc_apply_foreign = run_env(["resolve-conflicts", "--apply"], fake_home)
+    assert rc_apply_foreign["ok"] is True
+    assert rc_apply_foreign["applied"] == 0
+    assert rc_apply_foreign["actions"] == []
+    assert len(rc_apply_foreign["advice"]) == 1
+    assert (installed_dir / "SKILL.md").read_text() == "# Modified Content Completely Foreign\n"
+
+
+def test_standalone_only_duplicates_p2d_resolution(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_ws = tmp_path / "project"
+    fake_home.mkdir()
+    fake_ws.mkdir()
+
+    _setup_mock_source_repo_with_history(fake_home, "demo-dup-skill")
+
+    global_skill = fake_home / ".claude" / "skills" / "demo-dup-skill"
+    project_skill = fake_ws / ".claude" / "skills" / "demo-dup-skill"
+    global_skill.mkdir(parents=True)
+    project_skill.mkdir(parents=True)
+
+    # Case A: One copy matches current source (HEAD), the other is outdated-legacy (Commit 1)
+    # Project copy is HEAD, global copy is Commit 1
+    project_skill_md = project_skill / "SKILL.md"
+    global_skill_md = global_skill / "SKILL.md"
+    project_skill_md.write_text("# Demo Legacy Skill v3 (HEAD)\n")
+    global_skill_md.write_text("# Demo Legacy Skill v1\n")
+
+    st = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    p_scs = st["environments"]["claude"]["project"]["structured_conflicts"]
+    dup_scs = [sc for sc in p_scs if sc["kind"] == "duplicate-name" and sc["names"] == ["demo-dup-skill"]]
+    assert len(dup_scs) == 1
+    dup_sc = dup_scs[0]
+    assert dup_sc["fixable"] is True
+    assert dup_sc["actionable"] is True
+    assert len(dup_sc["actions"]) == 1
+    assert dup_sc["actions"][0]["action"] == "trash"
+    assert dup_sc["actions"][0]["path"] == str(global_skill)
+
+    # Dry-run: writes nothing
+    rc_dry = run_env(["resolve-conflicts", "--workspace", str(fake_ws), "--dry-run"], fake_home)
+    assert rc_dry["ok"] is True
+    assert rc_dry["dry_run"] is True
+    assert rc_dry["applied"] == 0
+    assert global_skill.exists()
+    assert project_skill.exists()
+
+    # Apply: trashes global copy, keeps project copy
+    rc_apply = run_env(["resolve-conflicts", "--workspace", str(fake_ws), "--apply"], fake_home)
+    assert rc_apply["ok"] is True
+    assert rc_apply["applied"] >= 1
+    assert not global_skill.exists()
+    assert project_skill.exists()
+    assert project_skill_md.read_text() == "# Demo Legacy Skill v3 (HEAD)\n"
+
+    # Case B: Both copies differ from every source version -> advice only
+    global_skill.mkdir(parents=True)
+    global_skill_md.write_text("# Foreign Global Edit\n")
+    project_skill_md.write_text("# Foreign Project Edit\n")
+
+    st2 = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    p_scs2 = st2["environments"]["claude"]["project"]["structured_conflicts"]
+    dup_scs2 = [sc for sc in p_scs2 if sc["kind"] == "duplicate-name" and sc["names"] == ["demo-dup-skill"]]
+    assert len(dup_scs2) == 1
+    dup_sc2 = dup_scs2[0]
+    assert dup_sc2["fixable"] is False
+    assert dup_sc2["actionable"] is False
+    assert dup_sc2["actions"] == []
+    assert len(dup_sc2["advice"]) == 1
+
+    rc_apply2 = run_env(["resolve-conflicts", "--workspace", str(fake_ws), "--apply"], fake_home)
+    assert rc_apply2["ok"] is True
+    assert rc_apply2["applied"] == 0
+    assert global_skill.exists()
+    assert project_skill.exists()
+
+    # Case C: Both copies identical (both Commit 1, neither HEAD) -> fixable, keeps global by default
+    global_skill_md.write_text("# Demo Legacy Skill v1\n")
+    project_skill_md.write_text("# Demo Legacy Skill v1\n")
+
+    st3 = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    p_scs3 = st3["environments"]["claude"]["project"]["structured_conflicts"]
+    dup_scs3 = [sc for sc in p_scs3 if sc["kind"] == "duplicate-name" and sc["names"] == ["demo-dup-skill"]]
+    assert len(dup_scs3) == 1
+    dup_sc3 = dup_scs3[0]
+    assert dup_sc3["fixable"] is True
+    assert dup_sc3["actions"][0]["action"] == "trash"
+    assert dup_sc3["actions"][0]["path"] == str(project_skill)
+
+    rc_apply3 = run_env(["resolve-conflicts", "--workspace", str(fake_ws), "--apply"], fake_home)
+    assert rc_apply3["ok"] is True
+    assert rc_apply3["applied"] >= 1
+    assert global_skill.exists()
+    assert not project_skill.exists()
+
+    # Case D: Both copies match HEAD, with keep_scope = "project" in orchestration.toml
+    project_skill.mkdir(parents=True)
+    project_skill_md.write_text("# Demo Legacy Skill v3 (HEAD)\n")
+    global_skill_md.write_text("# Demo Legacy Skill v3 (HEAD)\n")
+
+    cfg_dir = fake_home / ".config" / "ai-orchestration"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "orchestration.toml").write_text(
+        '[env.conflicts]\nkeep_scope = "project"\n',
+        encoding="utf-8",
+    )
+
+    st4 = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    p_scs4 = st4["environments"]["claude"]["project"]["structured_conflicts"]
+    dup_scs4 = [sc for sc in p_scs4 if sc["kind"] == "duplicate-name" and sc["names"] == ["demo-dup-skill"]]
+    assert len(dup_scs4) == 1
+    dup_sc4 = dup_scs4[0]
+    assert dup_sc4["fixable"] is True
+    assert dup_sc4["actions"][0]["action"] == "trash"
+    assert dup_sc4["actions"][0]["path"] == str(global_skill)
+
+    rc_apply4 = run_env(["resolve-conflicts", "--workspace", str(fake_ws), "--apply"], fake_home)
+    assert rc_apply4["ok"] is True
+    assert rc_apply4["applied"] >= 1
+    assert not global_skill.exists()
+    assert project_skill.exists()
+
+
+
+
 
 

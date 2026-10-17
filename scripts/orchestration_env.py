@@ -16,6 +16,7 @@ import contextlib
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -24,6 +25,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 try:
     import tomllib
@@ -104,6 +106,157 @@ def compute_target_hash(target_path: pathlib.Path) -> str | None:
             return hashlib.sha256(target_path.read_bytes()).hexdigest()
     except Exception:
         return None
+    return None
+
+
+# In-memory caches for git history lookups across skill directories per run
+_SKILL_HISTORY_CACHE: dict[tuple[str, str], dict[str, str]] = {}
+_SKILL_COMMITS_CACHE: dict[tuple[str, str], list[str]] = {}
+
+
+def clear_skill_history_cache() -> None:
+    """Clear in-memory git history hash caches (useful between test runs)."""
+    _SKILL_HISTORY_CACHE.clear()
+    _SKILL_COMMITS_CACHE.clear()
+
+
+def get_git_repo_root(path: pathlib.Path) -> pathlib.Path | None:
+    """Find the root git repository directory containing `path`."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return pathlib.Path(res.stdout.strip()).resolve()
+    except Exception:
+        pass
+    for p in [path] + list(path.parents):
+        if (p / ".git").exists():
+            return p.resolve()
+    return None
+
+
+def compute_git_skill_hash(repo_root: pathlib.Path, commit_sha: str, rel_skill_dir: str) -> str | None:
+    """Deterministic SHA-256 over files in a skill directory at a specific git commit.
+
+    Uses `git archive` to reconstruct the exact directory tree without touching disk.
+    Matches hash_directory() exactly:
+      - Ignores .ai-orch-source.json, index.json, *.pyc, and hidden files/dirs
+      - Preserves directory-first traversal order
+      - Returns first 16 hex chars of sha256
+    """
+    res = subprocess.run(
+        ["git", "-C", str(repo_root), "archive", "--format=tar", f"{commit_sha}:{rel_skill_dir}"],
+        capture_output=True,
+        check=False,
+    )
+    if res.returncode != 0 or not res.stdout:
+        return None
+    try:
+        tar = tarfile.open(fileobj=io.BytesIO(res.stdout))
+    except Exception:
+        return None
+
+    dir_files: dict[str, list[tuple[str, tarfile.TarInfo, str]]] = {}
+    dir_subdirs: dict[str, set[str]] = {}
+
+    for m in tar.getmembers():
+        if not m.isfile():
+            continue
+        path = m.name
+        path_parts = path.split("/")
+        if any(p.startswith(".") or p == "__pycache__" for p in path_parts[:-1]):
+            continue
+        fname = path_parts[-1]
+        if fname.startswith(".") or fname.endswith(".pyc") or fname in ("index.json", ".ai-orch-source.json"):
+            continue
+        d = "/".join(path_parts[:-1])
+        dir_files.setdefault(d, []).append((fname, m, path))
+        for i in range(len(path_parts) - 1):
+            parent = "/".join(path_parts[:i])
+            sub = path_parts[i]
+            if not sub.startswith(".") and sub != "__pycache__":
+                dir_subdirs.setdefault(parent, set()).add(sub)
+
+    ordered_files: list[tuple[str, tarfile.TarInfo]] = []
+
+    def walk_dir(d: str) -> None:
+        for fname, m, rel in sorted(dir_files.get(d, []), key=lambda x: x[0]):
+            ordered_files.append((rel, m))
+        for sub in sorted(dir_subdirs.get(d, set())):
+            walk_dir(f"{d}/{sub}" if d else sub)
+
+    walk_dir("")
+
+    h = hashlib.sha256()
+    for path, m in ordered_files:
+        f = tar.extractfile(m)
+        content = f.read() if f else b""
+        h.update(path.encode("utf-8") + b"\0")
+        h.update(content + b"\0")
+
+    return h.hexdigest()[:16]
+
+
+def find_historical_skill_match(
+    inst_hash: str,
+    matching_entries: list[dict[str, Any]],
+    home: pathlib.Path | None = None,
+    max_commits: int = 200,
+) -> tuple[str, str] | None:
+    """Check if inst_hash matches any earlier commit of the skill in its source repository.
+
+    Returns (repo_name, catalog_hash) or None.
+    Caches historical commit hashes per run.
+    """
+    if not inst_hash:
+        return None
+
+    for entry in matching_entries:
+        skill_dir = pathlib.Path(entry["path"]).resolve()
+        repo_root = get_git_repo_root(skill_dir)
+        if not repo_root:
+            continue
+        try:
+            rel_skill_dir = skill_dir.relative_to(repo_root).as_posix()
+        except ValueError:
+            continue
+
+        cache_key = (str(repo_root), rel_skill_dir)
+        if cache_key not in _SKILL_COMMITS_CACHE:
+            try:
+                res = subprocess.run(
+                    ["git", "-C", str(repo_root), "log", "-n", str(max_commits), "--format=%H", "--", rel_skill_dir],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    _SKILL_COMMITS_CACHE[cache_key] = [c for c in res.stdout.strip().split() if c]
+                else:
+                    _SKILL_COMMITS_CACHE[cache_key] = []
+            except Exception:
+                _SKILL_COMMITS_CACHE[cache_key] = []
+            _SKILL_HISTORY_CACHE[cache_key] = {}
+
+        # Check already computed hashes for this skill directory
+        if inst_hash in _SKILL_HISTORY_CACHE[cache_key].values():
+            return (entry["repo"], entry["hash"])
+
+        # Compute hashes on-demand for remaining commits
+        commits = _SKILL_COMMITS_CACHE[cache_key]
+        for commit_sha in commits:
+            if commit_sha in _SKILL_HISTORY_CACHE[cache_key]:
+                continue
+            ch = compute_git_skill_hash(repo_root, commit_sha, rel_skill_dir)
+            if ch:
+                _SKILL_HISTORY_CACHE[cache_key][commit_sha] = ch
+                if ch == inst_hash:
+                    return (entry["repo"], entry["hash"])
+
     return None
 
 
@@ -389,10 +542,12 @@ def detect_skill_state(
     States:
       - 'obsolete-renamed-><target>': skill name is in OBSOLETE_SKILL_RENAMES
       - 'unmanaged': skill name does not match any skill in catalog
-      - 'up-to-date': matches a catalog skill by content hash or symlink target
+      - 'up-to-date': matches a catalog skill by content hash or symlink target (with receipt or direct catalog symlink)
+      - 'up-to-date-legacy': matches current catalog source by content hash, but has no receipt
+      - 'outdated-legacy': matches an earlier commit in source git history, but has no receipt
       - 'modified-or-outdated': name in catalog, content differs or not symlink to catalog,
                                 but was installed by this tool (.ai-orch-source.json or symlink into known repo)
-      - 'foreign': name in catalog, but content differs/not catalog symlink AND not installed by this tool
+      - 'foreign': name in catalog, but content differs/not catalog symlink AND not in source git history
     """
     sname = child.name
     if sname in OBSOLETE_SKILL_RENAMES:
@@ -434,10 +589,16 @@ def detect_skill_state(
         except Exception:
             return ("modified-or-outdated", None, None)
 
-    # No receipt: check if hash matches any catalog entry (legacy copies)
+    # No receipt: check if hash matches any catalog entry (legacy copies matching current source)
     for entry in matching_entries:
         if inst_hash and inst_hash == entry["hash"]:
-            return ("up-to-date", entry["repo"], entry["hash"])
+            return ("up-to-date-legacy", entry["repo"], entry["hash"])
+
+    # No receipt: check if hash matches any earlier commit in source git history
+    hist_match = find_historical_skill_match(inst_hash, matching_entries, home=home)
+    if hist_match:
+        hist_repo, hist_cat_hash = hist_match
+        return ("outdated-legacy", hist_repo, hist_cat_hash)
 
     # Link mode into known source repo
     if child.is_symlink():
@@ -451,7 +612,7 @@ def detect_skill_state(
         except Exception:
             pass
 
-    # Neither marker nor symlink to known repo and no catalog hash match
+    # Neither marker nor symlink to known repo and no catalog or historical hash match
     return ("foreign", None, None)
 
 
@@ -569,6 +730,7 @@ def load_conflict_policy(
         "kilo": keep_cfg.get("kilo", default_policy["kilo"]),
         "claude": keep_cfg.get("claude", default_policy["claude"]),
         "codex": keep_cfg.get("codex", default_policy["codex"]),
+        "keep_scope": str(cfg.get("env", {}).get("conflicts", {}).get("keep_scope", "global")),
     }
 
 
@@ -1548,21 +1710,196 @@ def plan_for_conflict(
 
         elif len(standalone_entries) >= 2 and not plugin_entries:
             skill_name = sc.get("names", [""])[0] or (standalone_entries[0].get("name", ""))
-            s_paths = [se.get("path") for se in standalone_entries if se.get("path")]
-            if not any(sp in seen for sp in s_paths):
-                for sp in s_paths:
-                    seen.add(sp)
-                target_path_str = s_paths[0]
-                target_path = pathlib.Path(target_path_str)
-                p_item = {
-                    "action": "advise",
-                    "path": target_path_str,
-                    "reason": f"duplicate standalone skill '{skill_name}' across scopes: review and remove one manually",
-                    "current_state": "conflict",
-                    "before_sha256": compute_target_hash(target_path),
-                    "after_sha256": None,
-                }
-                p_items.append(p_item)
+            cat_entries = [entry for entry in catalog.values() if entry.get("name") == skill_name]
+            cat_hashes = [e["hash"] for e in cat_entries if e.get("hash")]
+
+            entry_info: list[dict[str, Any]] = []
+            for se in standalone_entries:
+                sp_str = se.get("path")
+                if not sp_str:
+                    continue
+                sp = pathlib.Path(sp_str)
+                s_hash = compute_target_hash(sp)
+                s_state = se.get("state")
+                is_current = s_state in ("up-to-date", "up-to-date-legacy") or bool(s_hash and s_hash in cat_hashes)
+                is_outdated_legacy = s_state == "outdated-legacy"
+                entry_info.append({
+                    "entry": se,
+                    "path": sp,
+                    "path_str": sp_str,
+                    "hash": s_hash,
+                    "state": s_state,
+                    "is_current": is_current,
+                    "is_outdated_legacy": is_outdated_legacy,
+                    "scope": se.get("scope", scope),
+                })
+
+            current_items = [item for item in entry_info if item["is_current"]]
+            other_items = [item for item in entry_info if not item["is_current"]]
+
+            # Rule P2-d:
+            # When one copy matches the current source and the others are outdated-legacy/identical:
+            # keep the current one and trash the others (fixable).
+            # When all copies are identical to each other (even if not current):
+            # keep one per keep_scope and trash the others (fixable).
+            # Otherwise (differing contents not matching the rule): advice only.
+            all_identical = (
+                len(entry_info) >= 2
+                and len(set(it["hash"] for it in entry_info if it["hash"])) == 1
+            )
+            has_current_and_legacy_or_identical = (
+                len(current_items) >= 1
+                and all(
+                    item["is_outdated_legacy"]
+                    or (item["hash"] and item["hash"] in cat_hashes)
+                    or any(item["hash"] == c["hash"] for c in current_items)
+                    for item in other_items
+                )
+            )
+
+            is_fixable_p2d = has_current_and_legacy_or_identical or all_identical
+
+            if is_fixable_p2d:
+                keep_scope = policy.get("keep_scope", "global")
+                if len(current_items) == 1:
+                    keeper = current_items[0]
+                    to_trash = other_items
+                elif len(current_items) > 1:
+                    if keep_scope == "project":
+                        keeper = next((it for it in current_items if it["scope"] == "project"), current_items[0])
+                    else:
+                        keeper = next((it for it in current_items if it["scope"] == "global"), current_items[0])
+                    to_trash = [it for it in current_items if it is not keeper] + other_items
+                else:
+                    if keep_scope == "project":
+                        keeper = next((it for it in entry_info if it["scope"] == "project"), entry_info[0])
+                    else:
+                        keeper = next((it for it in entry_info if it["scope"] == "global"), entry_info[0])
+                    to_trash = [it for it in entry_info if it is not keeper]
+
+                for item in to_trash:
+                    if item["path_str"] not in seen:
+                        seen.add(item["path_str"])
+                        keep_desc = "current" if keeper in current_items else "identical"
+                        p_item = {
+                            "action": "trash",
+                            "path": item["path_str"],
+                            "reason": f"duplicate standalone skill '{skill_name}': keep {keep_desc} copy in {keeper['scope']}, trash {item['scope']} copy",
+                            "current_state": "conflict",
+                            "before_sha256": item["hash"],
+                            "after_sha256": None,
+                        }
+                        p_items.append(p_item)
+                        c_items.append({
+                            "action": "trash",
+                            "assistant": assistant,
+                            "scope": item["scope"],
+                            "removed": skill_name,
+                            "kept": f"{keeper['scope']} copy",
+                            "path": item["path"],
+                            "reason": p_item["reason"],
+                        })
+            else:
+                target_path_str = entry_info[0]["path_str"] if entry_info else ""
+                if target_path_str and target_path_str not in seen:
+                    seen.add(target_path_str)
+                    target_path = pathlib.Path(target_path_str)
+                    p_item = {
+                        "action": "advise",
+                        "path": target_path_str,
+                        "reason": f"duplicate standalone skill '{skill_name}' across scopes with differing contents: review and remove one manually",
+                        "current_state": "conflict",
+                        "before_sha256": compute_target_hash(target_path),
+                        "after_sha256": None,
+                    }
+                    p_items.append(p_item)
+
+    elif kind == "outdated-legacy":
+        entry = entries[0] if entries else {}
+        sp_str = entry.get("path")
+        if sp_str and sp_str not in seen:
+            seen.add(sp_str)
+            target_path = pathlib.Path(sp_str)
+            sname = sc.get("names", [""])[0] or target_path.name
+            cat_entry = next((e for e in catalog.values() if e.get("name") == sname), None)
+            src_dir = pathlib.Path(cat_entry["path"]) if cat_entry else None
+            repo_name = cat_entry.get("repo", "catalog") if cat_entry else "catalog"
+            plugin_name = cat_entry.get("plugin", "") if cat_entry else ""
+            cat_hash = cat_entry.get("hash") if cat_entry else None
+            inst_hash = compute_target_hash(target_path)
+            p_item = {
+                "action": "update",
+                "path": sp_str,
+                "reason": f"Update outdated legacy skill '{sname}' to current version from {repo_name}",
+                "current_state": "outdated-legacy",
+                "before_sha256": inst_hash,
+                "after_sha256": cat_hash,
+            }
+            p_items.append(p_item)
+            if src_dir and src_dir.is_dir():
+                c_items.append({
+                    "action": "update",
+                    "assistant": assistant,
+                    "scope": entry.get("scope", scope),
+                    "skill": sname,
+                    "repo": repo_name,
+                    "plugin": plugin_name,
+                    "src": src_dir,
+                    "path": target_path,
+                    "reason": p_item["reason"],
+                })
+
+    elif kind == "up-to-date-legacy":
+        entry = entries[0] if entries else {}
+        sp_str = entry.get("path")
+        if sp_str and sp_str not in seen:
+            seen.add(sp_str)
+            target_path = pathlib.Path(sp_str)
+            sname = sc.get("names", [""])[0] or target_path.name
+            cat_entry = next((e for e in catalog.values() if e.get("name") == sname), None)
+            src_dir = pathlib.Path(cat_entry["path"]) if cat_entry else None
+            repo_name = cat_entry.get("repo", "catalog") if cat_entry else "catalog"
+            plugin_name = cat_entry.get("plugin", "") if cat_entry else ""
+            cat_hash = cat_entry.get("hash") if cat_entry else None
+            inst_hash = compute_target_hash(target_path)
+            p_item = {
+                "action": "adopt",
+                "path": sp_str,
+                "reason": f"Adopt up-to-date legacy skill '{sname}' matching current source and write receipt",
+                "current_state": "up-to-date-legacy",
+                "before_sha256": inst_hash,
+                "after_sha256": cat_hash or inst_hash,
+            }
+            p_items.append(p_item)
+            c_items.append({
+                "action": "adopt",
+                "assistant": assistant,
+                "scope": entry.get("scope", scope),
+                "skill": sname,
+                "repo": repo_name,
+                "plugin": plugin_name,
+                "src": src_dir or target_path,
+                "path": target_path,
+                "reason": p_item["reason"],
+            })
+
+    elif kind == "foreign":
+        entry = entries[0] if entries else {}
+        sp_str = entry.get("path")
+        if sp_str and sp_str not in seen:
+            seen.add(sp_str)
+            target_path = pathlib.Path(sp_str)
+            sname = sc.get("names", [""])[0] or target_path.name
+            inst_hash = compute_target_hash(target_path)
+            p_item = {
+                "action": "advise",
+                "path": sp_str,
+                "reason": f"Foreign skill '{sname}' does not match any source repository history: review or remove manually",
+                "current_state": "foreign",
+                "before_sha256": inst_hash,
+                "after_sha256": None,
+            }
+            p_items.append(p_item)
 
     elif kind == "stale-plugin-copy":
         target_path_str = sc.get("install_path") or (sc.get("entries", [{}])[0].get("path") if sc.get("entries") else "")
@@ -1715,9 +2052,9 @@ def inspect_environment(
                     }
 
             # Conflicts computed over the UNION of enabled entries:
-            # per assistant+scope view; for Claude project view = standalone global + standalone project + enabled plugins
-            if assistant == "claude" and scope == "project":
-                global_entries = environments["claude"].get("global", {}).get("skill_entries", [])
+            # per assistant+scope view; project view = standalone global + standalone project + enabled plugins
+            if scope == "project":
+                global_entries = environments[assistant].get("global", {}).get("skill_entries", [])
                 standalone_global = [e for e in global_entries if e["origin"] == "standalone" and e["enabled"]]
                 enabled_for_conflicts = [e for e in skill_entries if e["enabled"]] + standalone_global
             else:
@@ -1853,6 +2190,58 @@ def inspect_environment(
                             global_conflict_keys.setdefault(assistant, set()).add(key)
                         origins_str = ", ".join(sorted({e["origin"] for e in unique_entries}))
                         conflicts.append(f"Duplicate skill '{name}' found across origins: {origins_str}")
+
+                elif len(unique_entries) == 1:
+                    e = unique_entries[0]
+                    e_state = e.get("state")
+                    if e.get("origin") == "standalone" and e_state in ("outdated-legacy", "up-to-date-legacy", "foreign"):
+                        # If a project workspace is active and we are inspecting global scope,
+                        # do not treat as an isolated skill if it also exists in project scope (cross-scope duplicate)
+                        if scope == "global" and ws is not None:
+                            p_dir = assistant_skills_dir(assistant, "project", ws, h) / name
+                            if (p_dir / "SKILL.md").is_file():
+                                continue
+
+                        names = [name]
+                        key = (e_state, tuple(sorted(names)))
+
+                        is_global_location = not is_project_entry(e, ws)
+                        already_in_global = key in global_conflict_keys.get(assistant, set())
+
+                        if not (scope == "project" and is_global_location and already_in_global):
+                            p_items, _ = plan_for_conflict(
+                                sc={
+                                    "kind": e_state,
+                                    "names": names,
+                                    "entries": unique_entries,
+                                    "scope": scope,
+                                },
+                                assistant=assistant,
+                                scope=scope,
+                                policy=policy,
+                                catalog=catalog,
+                            )
+                            actions = [item for item in p_items if item["action"] != "advise"]
+                            advice: list[str] = []
+                            for item in p_items:
+                                if item["action"] == "advise":
+                                    r = item.get("reason", "")
+                                    if r and r not in advice:
+                                        advice.append(r)
+                            is_fixable = len(actions) > 0
+
+                            structured_conflicts_map[key] = {
+                                "kind": e_state,
+                                "names": names,
+                                "entries": unique_entries,
+                                "scope": scope,
+                                "fixable": is_fixable,
+                                "actionable": is_fixable,
+                                "actions": actions,
+                                "advice": advice,
+                            }
+                            if scope == "global":
+                                global_conflict_keys.setdefault(assistant, set()).add(key)
 
             if assistant == "claude":
                 stale_plugins = discover_stale_claude_plugins(h, ws, scope=scope)
@@ -2501,7 +2890,7 @@ def resolve_conflicts(
     """
     h = home or get_home_dir()
     ws = workspace.resolve() if workspace else None
-    scopes_to_check = ["global"] + (["project"] if ws else [])
+    scopes_to_check = (["project"] if ws else []) + ["global"]
     policy = load_conflict_policy(h, ws)
 
     def _build_plan() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2583,24 +2972,87 @@ def resolve_conflicts(
             }
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        resolved: list[dict[str, str]] = []
+        resolved: list[dict[str, Any]] = []
         for item in conflict_items:
-            trash_path(
-                item["path"],
-                assistant=item["assistant"],
-                scope=item["scope"],
-                kind="skills",
-                reason=item["reason"],
-                workspace=ws,
-                home=h,
-                timestamp=ts,
-            )
-            resolved.append({
-                "assistant": item["assistant"],
-                "scope": item["scope"],
-                "removed": item["removed"],
-                "kept": item["kept"],
-            })
+            action = item.get("action", "trash")
+            if action == "trash":
+                trash_path(
+                    item["path"],
+                    assistant=item["assistant"],
+                    scope=item["scope"],
+                    kind="skills",
+                    reason=item["reason"],
+                    workspace=ws,
+                    home=h,
+                    timestamp=ts,
+                )
+                resolved.append({
+                    "assistant": item["assistant"],
+                    "scope": item["scope"],
+                    "removed": item.get("removed", item.get("skill", "")),
+                    "kept": item.get("kept", ""),
+                    "action": "trash",
+                })
+            elif action == "adopt":
+                target_dir = pathlib.Path(item["path"])
+                src_dir = pathlib.Path(item["src"]) if item.get("src") else target_dir
+                src_hash = hash_directory(src_dir) if src_dir.is_dir() else None
+                marker_data = {
+                    "repo": item["repo"],
+                    "plugin": item["plugin"],
+                    "name": item["skill"],
+                    "source_hash": src_hash or compute_target_hash(target_dir),
+                    "installed_at": datetime.now(timezone.utc).isoformat(),
+                    "mode": "copy",
+                }
+                (target_dir / ".ai-orch-source.json").write_text(
+                    json.dumps(marker_data, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                resolved.append({
+                    "assistant": item["assistant"],
+                    "scope": item["scope"],
+                    "skill": item["skill"],
+                    "action": "adopt",
+                })
+            elif action == "update":
+                target_dir = pathlib.Path(item["path"])
+                src_dir = pathlib.Path(item["src"])
+                trash_path(
+                    target_dir,
+                    assistant=item["assistant"],
+                    scope=item["scope"],
+                    kind="skills",
+                    reason=item["reason"],
+                    workspace=ws,
+                    home=h,
+                    timestamp=ts,
+                )
+                target_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(
+                    src_dir,
+                    target_dir,
+                    dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
+                )
+                marker_data = {
+                    "repo": item["repo"],
+                    "plugin": item["plugin"],
+                    "name": item["skill"],
+                    "source_hash": hash_directory(src_dir),
+                    "installed_at": datetime.now(timezone.utc).isoformat(),
+                    "mode": "copy",
+                }
+                (target_dir / ".ai-orch-source.json").write_text(
+                    json.dumps(marker_data, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                resolved.append({
+                    "assistant": item["assistant"],
+                    "scope": item["scope"],
+                    "skill": item["skill"],
+                    "action": "update",
+                })
 
         return {
             "ok": True,
@@ -3125,7 +3577,12 @@ def cmd_resolve_conflicts(args: argparse.Namespace) -> int:
         else:
             if res.get("applied", 0) > 0:
                 for r in res["resolved"]:
-                    print(f"[ok] Resolved conflict in {r['assistant']} ({r['scope']}): removed '{r['removed']}', kept '{r['kept']}'.")
+                    if r.get("action") == "update":
+                        print(f"[ok] Updated legacy skill '{r['skill']}' in {r['assistant']} ({r['scope']}).")
+                    elif r.get("action") == "adopt":
+                        print(f"[ok] Adopted legacy skill '{r['skill']}' in {r['assistant']} ({r['scope']}) (wrote receipt).")
+                    else:
+                        print(f"[ok] Resolved conflict in {r['assistant']} ({r['scope']}): removed '{r.get('removed', '')}', kept '{r.get('kept', '')}'.")
             elif res.get("advice"):
                 print("[ok] No actionable conflicts to resolve (advice only):")
                 for adv in res["advice"]:
