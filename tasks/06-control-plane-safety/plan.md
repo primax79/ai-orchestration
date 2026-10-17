@@ -184,12 +184,12 @@ The spec now opens with §0 "Amendments after review 2" (A1–A12). These change
 Backend, frontend and `vscode-ai-orchestration` files are shared by the three initiatives. Their tasks run **in this order and never in parallel within a lane**:
 
 - **Backend** (`ai-orchestration-ui/backend/*`): 06.5 → 06.7 → 07.6 → 08.3
-- **Frontend** (`ai-orchestration-ui/frontend/**`): 06.8 → 07.7 → 07.8 → 08.4 → 08.6
-- **VS Code** (`vscode-ai-orchestration/**`): 06.9 → 07.9 → 08.5
+- **Frontend** (`ai-orchestration-ui/frontend/**`): 06.8 → 08.4 → 10.2 → 07.7 → 07.8 → 09.3 → 08.6 → 09.5
+- **VS Code** (`vscode-ai-orchestration/**`): 06.9 → 08.5 → 07.9 → 09.6 → 10.3
 
 Core lanes:
 
-- **`tasks_engine.py`:** 06.1 → 06.10 → 08.1
+- **`tasks_engine.py`:** 06.1 → 06.10 → 08.1 → 09.1 → 10.1
 - **`orchestration_env.py`:** 06.2 → 06.3 → 06.4
 - **`orchestration_config.py`:** 07.1 → 06.6
 - **`orchestration_runs.py`:** 07.2 → 07.3 → 07.4 → 07.5 → 07.10

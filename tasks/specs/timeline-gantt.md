@@ -1,68 +1,69 @@
-# Spec: Timeline (Gantt) view with dependencies
+# Spec: Abstract timeline — dependencies and priorities
 
-- **Status:** ready (2026-10-17)
+- **Status:** ready (2026-10-17), revised the same day after owner feedback: no dates and no estimates; dependency management and priority management only.
 - **Drives:** initiative [10](../10-timeline-gantt/plan.md)
-- **Origin:** owner request (2026-10-17): a Gantt chart with dependencies, in the UI. A hand-written Mermaid snapshot exists in [`../gantt.md`](../gantt.md). This spec replaces it with one generated from the task data.
 
 ## 1. Goal
 
-The UI shows every task of the workspace as a bar on a time axis, with **arrows for dependencies**. Each bar is coloured by state and grouped by initiative or category.
+In the UI, the owner sees and manages **what comes before what**, and **what matters most**. Nothing is shown in hours or dates.
 
-- Done tasks sit on their real dates.
-- Open tasks are scheduled after their dependencies, using an estimate.
-- The critical path is highlighted.
-- Clicking a bar opens the task.
+- **Columns are steps.** A task sits in the column right after the latest of its open dependencies. Column 0 holds the tasks that are **ready now**: every dependency is done.
+- **Arrows are dependencies.** They can be added and removed from the UI. Every change is validated: unknown ids are refused, and so are cycles.
+- **Priority** (`P0`–`P3`) orders the tasks inside each column and sets the **Ready queue**: the ready tasks sorted by priority. Priorities are edited from the UI.
+- Done tasks are hidden by default. They can be shown greyed out in a "Done" column on the left.
 
-## 2. Data (engine): `ai-orch tasks graph --json`
+## 2. Data (engine)
 
-A read-only command in `tasks_engine.py` that returns `{nodes, edges, lanes, critical_path, generated_at}`.
+### 2.1 Reading: `ai-orch tasks graph --json [--mermaid]`
+
+A read-only command in `tasks_engine.py`.
 
 **Nodes:**
 
-- **Emergent tasks (`T###`):** taken from their headers (`state`, `depends-on`, `executor`, `priority`).
+- **Emergent tasks (`T###`):** from their headers (`state`, `priority`, `priority-reason`, `depends-on`, `executor`, `next-up`).
 - **Initiative tasks (`NN.T`):** parsed from each `NN-<slug>/plan.md` `### NN.T - <title>` block. From that block's bullets:
-  - `**Status:**` gives the state and, optionally, a date in parentheses: `done (2026-10-16)`;
-  - `**Depends on:**` gives the dependencies: a list of `NN.T`/`T###` ids, and plain text after the ids is ignored;
-  - `**Estimate:**` is optional: `30m`, `2h`, `1d`, where `1d` = 8 working hours;
-  - `**Lane:**` is optional: a free label.
-- **Initiatives:** `NN` nodes as group headers, with derived start and end dates.
+  - `**Status:**` gives the state;
+  - `**Depends on:**` gives the dependencies: `NN.T`/`T###` ids, and plain text around the ids is ignored;
+  - `**Priority:**` is optional: `P0`–`P3`. Without it, the task takes the initiative's position: the `Priority` column of the Initiatives table, mapped to P1 for the first two initiatives in that table, P2 for the next two, and P3 for the rest. The UI shows this as an inherited value.
 
-**Edges:**
+**Output:** `{nodes, edges, columns, ready_queue, longest_chain}`.
 
-- `{from, to, kind: "depends"|"lane"}`.
-- Lane edges are derived when two consecutive tasks share a `**Lane:**` value and appear in that order in the plan files.
+- Each node: `id`, `kind` (`emergent`/`initiative_task`), `title`, `group` (initiative `NN` or the category), `state`, `priority` (with `priority_source`: `own` or `inherited`), `depends_on`, `column`, `blocked_by` (the open dependencies).
+- `columns`: the step index for every open task (0 = ready).
+- `ready_queue`: the column-0 tasks sorted by priority, then `next-up: yes` first, then id.
+- `longest_chain`: the longest chain of open tasks by count, highlighted in the UI.
+- `--mermaid`: a `flowchart LR` with one subgraph per column and nodes coloured by priority. It replaces any hand-written graph.
 
-**Dates:**
+**Validation (`tasks validate`):** a dependency on an unknown id → warning; a dependency cycle → error.
 
-- **Done tasks:** `start = end - estimate`, where `end` is the date given in `Status`. If that date is missing, use the git date of the commit that set the task to done, else the file's mtime.
-- **Active tasks** (`in progress`, `delivered`): start = the date of the transition, when known, else now.
-- **Open tasks:** earliest start = max(now, end of every dependency); default estimate 1h.
-- The schedule ignores calendars and parallelism limits, except that tasks in the same lane are serialized.
+### 2.2 Writing (all under the task-write lock, atomic, with hash preconditions — spec 06 A9)
 
-**Other outputs:**
+| Command | Effect |
+| --- | --- |
+| `tasks set-priority ID P# [--reason TEXT] [--expect-hash H]` | **`T###`:** rewrites `priority` and, when given, `priority-reason`. **`NN.T`:** writes or updates the `**Priority:**` bullet in the plan. |
+| `tasks set-deps ID --add ID... --remove ID... [--expect-hash H]` | **`T###`:** rewrites `depends-on`. **`NN.T`:** rewrites the ids of the `**Depends on:**` bullet and keeps its trailing free text. Refused when it would create a cycle (the error names the cycle) or reference an unknown id. |
 
-- `critical_path`: the longest chain by duration among the tasks that are not done.
-- **Validation (`tasks validate`):**
-  - a dependency on an unknown id → warning;
-  - a dependency cycle → error.
+The hash covers the task bundle for `T###`, or the plan file for `NN.T`. Every command supports `--dry-run`, which returns the diff and the hash.
 
-## 3. UI
+## 3. UI — "Timeline" tab
 
-- **A "Timeline" tab.**
-  - An SVG Gantt, built with no new runtime dependency: a React component with plain SVG.
-  - Time axis with zoom (hours, days, weeks) and a today marker.
-  - Rows grouped by initiative; emergent tasks are grouped by category.
-  - Bars coloured by state, with the same palette as the Kanban.
-  - **Dependency arrows** drawn as elbow connectors from the end of one bar to the start of the next. Lane edges are dashed.
-  - The critical path is outlined.
-  - Hovering a bar shows a tooltip (id, title, state, estimate, dependencies).
-  - Clicking a bar opens the existing task modal for `T###`, or a read-only plan excerpt for `NN.T`.
-  - Filters: initiative, state, "hide done".
+- **Layout.**
+  - Columns left to right: the optional Done column, Ready (0), then 1, 2, …
+  - Cards grouped by initiative or category through a colour band and the id prefix, sorted by priority inside each column.
+  - **Arrows are SVG elbow connectors** from each dependency to its dependent, drawn over the card grid. The `longest_chain` is outlined.
+- **Cards** show the id, a short title, a state chip and a priority chip. Clicking a card opens the task: the existing modal for `T###`, a read-only plan excerpt for `NN.T`.
+- **Ready queue panel** (right side): the column-0 tasks by priority. This is "what to start next".
+- **Priority management.** The priority chip is a dropdown (P0–P3), with an optional reason field. Changes go through preview → confirm → apply (spec 06 pattern). When the task inherits its priority, a "set own priority" action creates the bullet.
+- **Dependency management.**
+  - "Add dependency" on a card opens a picker of the other open tasks; ids that would create a cycle are shown disabled, with the reason.
+  - Clicking an arrow offers "Remove dependency".
+  - Both go through preview → confirm.
+- **Filters:** initiative or category, state, "show done", "only the chain of the selected task" (its ancestors and descendants).
 - **Live updates:** the tab reloads on `changed` events for `tasks`.
 - **Safe rendering:** titles are rendered as text (spec 06 A12).
-- **VS Code:** the same component in the webview, with no extra handler beyond `getGraph`.
+- **VS Code:** the same component in the webview. The handlers are `getGraph`, `setPriority` and `setDeps`, each with preview.
 
 ## 4. Out of scope
 
-- Editing dates or dependencies by dragging. The view is read-only; the plans stay the source of truth.
-- Resource levelling beyond lanes.
+- Dates, estimates and calendars.
+- Reordering by drag. Priority and dependencies are the only ordering inputs.
