@@ -75,6 +75,7 @@ Unifies `macroplan-authoring` and `orchestration-methodology` into a single stat
 flowchart TB
     OPEN["open"]
     INPROG["in progress"]
+    PAUSED["paused<br/>(intentionally put on hold)"]
     WAIT["waiting<br/>(external question)"]
     BLOCK["blocked<br/>(unresolved blocker)"]
     DELIV["delivered<br/>(verification pending)"]
@@ -83,6 +84,8 @@ flowchart TB
     DONE["done / done with a caveat<br/>(merged + moved to tasks/done/)"]
 
     OPEN -->|"start"| INPROG
+    OPEN <-->|"pause / unpause"| PAUSED
+    INPROG <-->|"pause / resume"| PAUSED
     INPROG <--> WAIT
     INPROG <--> BLOCK
     INPROG -->|"commits + self-check + Final Report"| DELIV

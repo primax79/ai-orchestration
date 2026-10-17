@@ -70,6 +70,7 @@ VERIFICATION_MODES: set[str] = {"self", "independent-session", "cross-agent", "p
 CANONICAL_STATES: set[str] = {
     "open",
     "in progress",
+    "paused",
     "waiting",
     "blocked",
     "delivered",
@@ -84,12 +85,13 @@ TERMINAL_STATES: set[str] = {"done", "done with a caveat", "dropped"}
 
 # Legal state transitions (canonical base state -> allowed target canonical base states)
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-    "open": {"in progress", "waiting", "blocked", "dropped"},
-    "in progress": {"waiting", "blocked", "delivered", "dropped"},
-    "waiting": {"in progress", "blocked", "open", "dropped"},
-    "blocked": {"in progress", "waiting", "open", "dropped"},
+    "open": {"in progress", "waiting", "blocked", "paused", "dropped"},
+    "in progress": {"waiting", "blocked", "paused", "delivered", "dropped"},
+    "paused": {"in progress", "open", "waiting", "blocked", "dropped"},
+    "waiting": {"in progress", "blocked", "paused", "open", "dropped"},
+    "blocked": {"in progress", "waiting", "paused", "open", "dropped"},
     "delivered": {"verified", "bounced", "done with a caveat", "dropped"},
-    "bounced": {"in progress", "waiting", "blocked", "dropped"},
+    "bounced": {"in progress", "waiting", "blocked", "paused", "dropped"},
     "verified": {"done", "done with a caveat", "bounced", "dropped"},
     "done": set(),
     "done with a caveat": set(),
@@ -151,7 +153,7 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Ids:** `T###`, unique across `done/` too; reserve the id by creating the file immediately.
 - **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
 - **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`, `branch`, `worktree`, `run-id`.
-- **States:** `open`, `in progress`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
 - **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
 - **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
