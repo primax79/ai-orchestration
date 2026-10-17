@@ -67,6 +67,7 @@ if str(ORCH_CONFIG_DIR) not in sys.path:
 try:
     from tasks_engine import (
         discover_emergent_tasks,
+        discover_initiatives,
         task_bundle_sha256,
         normalize_state,
         transition_task,
@@ -76,6 +77,7 @@ try:
     )
 except ImportError:
     discover_emergent_tasks = None  # type: ignore
+    discover_initiatives = None  # type: ignore
     task_bundle_sha256 = None  # type: ignore
     normalize_state = None  # type: ignore
     transition_task = None  # type: ignore
@@ -3094,7 +3096,15 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             if tasks_dir.is_dir() and discover_emergent_tasks and transition_task:
                 all_tasks = discover_emergent_tasks(tasks_dir)
                 t = next((x for x in all_tasks if x["id"] == record["task_id"]), None)
-                if t and t.get("canonical_state") in ("open", "bounced"):
+                state = t.get("canonical_state") if t else None
+                if t is None and discover_initiatives:
+                    # Initiative task NN.T: state comes from its Status line in plan.md
+                    for init in discover_initiatives(tasks_dir):
+                        sub = next((x for x in init.get("tasks", []) if x["id"] == record["task_id"]), None)
+                        if sub:
+                            state = sub.get("state")
+                            break
+                if state in ("open", "bounced"):
                     ok, trans_res = transition_task(
                         tasks_dir=tasks_dir,
                         task_id=record["task_id"],

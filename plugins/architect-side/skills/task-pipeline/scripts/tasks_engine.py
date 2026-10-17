@@ -1759,6 +1759,81 @@ def _move_task_to_done(task_info: dict[str, Any], tasks_dir: pathlib.Path) -> pa
     return dest_root / "README.md" if task_info["is_folder"] else dest_root
 
 
+PLAN_TASK_ID_RE = re.compile(r"^\d{2,}\.\d+$")
+
+
+def _transition_plan_task(
+    tasks_dir: pathlib.Path,
+    task_id: str,
+    new_state: str,
+    actor: str | None,
+    reason: str | None,
+    expect_task_hash: str | None,
+) -> tuple[bool, dict[str, Any]] | None:
+    """Transition an initiative task `NN.T` by rewriting its `- **Status:**` line in plan.md.
+
+    Returns None when no plan defines `task_id` (the caller reports not-found).
+    Must be called with the task-write lock held.
+    """
+    for init in discover_initiatives(tasks_dir):
+        rel = init.get("rel_path") or ""
+        if not rel.endswith("plan.md"):
+            continue
+        plan_path = tasks_dir / rel
+        try:
+            text = plan_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        lines = text.split("\n")
+        head_idx = next(
+            (i for i, ln in enumerate(lines)
+             if (m := INLINE_TASK_HEADING_RE.match(ln)) and m.group(1) == task_id),
+            None,
+        )
+        if head_idx is None:
+            continue
+        status_idx = None
+        for j in range(head_idx + 1, min(head_idx + 6, len(lines))):
+            if INLINE_TASK_HEADING_RE.match(lines[j]):
+                break
+            if PLAN_TASK_STATUS_RE.match(lines[j]):
+                status_idx = j
+                break
+        if status_idx is None:
+            return False, {"ok": False, "task_id": task_id, "error": f"{rel}: task {task_id} has no '- **Status:** `state`' line."}
+        current_hash = _file_sha256(plan_path)
+        if expect_task_hash is not None and current_hash.lower() != expect_task_hash.strip().lower():
+            return False, {"ok": False, "task_id": task_id, "error": "stale-task", "expected": expect_task_hash, "actual": current_hash}
+        old_canon = normalize_state(PLAN_TASK_STATUS_RE.match(lines[status_idx]).group(1))
+        new_canon = normalize_state(new_state)
+        if old_canon != new_canon and new_canon not in ALLOWED_TRANSITIONS.get(old_canon, set()):
+            allowed = sorted(ALLOWED_TRANSITIONS.get(old_canon, set()))
+            return False, {"ok": False, "task_id": task_id, "error": f"Illegal transition {old_canon!r} -> {new_canon!r} (allowed: {allowed})."}
+        note_parts = [datetime.date.today().isoformat()]
+        if actor:
+            note_parts.append(actor.strip())
+        if reason:
+            note_parts.append(reason.strip())
+        # Replace the state token and its parenthesised note, keep the rest of the line.
+        lines[status_idx] = re.sub(
+            r"(\*\*Status:\*\*\s*)`[^`]*`(?:\s*\([^)]*\))?",
+            lambda m: f"{m.group(1)}`{new_canon}` ({'; '.join(note_parts)})",
+            lines[status_idx],
+            count=1,
+        )
+        _atomic_write_text(plan_path, "\n".join(lines))
+        return True, {
+            "ok": True,
+            "task_id": task_id,
+            "kind": "initiative_task",
+            "file_path": str(plan_path),
+            "old_state": old_canon,
+            "new_state": new_canon,
+            "task_hash": _file_sha256(plan_path),
+        }
+    return None
+
+
 def transition_task(
     tasks_dir: pathlib.Path,
     task_id: str,
@@ -1789,6 +1864,10 @@ def transition_task(
 
             emergent = discover_emergent_tasks(tasks_dir)
             target = next((t for t in emergent if t["id"] == task_id), None)
+            if target is None and PLAN_TASK_ID_RE.match(task_id):
+                plan_res = _transition_plan_task(tasks_dir, task_id, new_state, actor, reason, expect_task_hash)
+                if plan_res is not None:
+                    return plan_res
             if target is None:
                 return False, {
                     "ok": False,

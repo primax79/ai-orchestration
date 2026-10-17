@@ -26,7 +26,7 @@
 
 ### 09.3 - Frontend: Inbox tab, editor with paste and drag-drop images, manual "Convert to task"
 
-- **Status:** `in progress` (2026-10-17; Kilo, worktree `task/09.3-inbox-tab`) · **Profile:** `bulk-execution` · **Depends on:** 09.2, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `delivered` (2026-10-17; claude; Kilo committed 841fcbe with Final Report; orchestrator review pending) · **Profile:** `bulk-execution` · **Depends on:** 09.2, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Spec §5, except "Process with…".
 - **Verification:**

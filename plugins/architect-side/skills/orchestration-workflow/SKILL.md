@@ -439,6 +439,19 @@ requires independent verification (or explicit owner sign-off). Publish this
 state in `tasks/00-INDEX.md` (via `tasks_engine.py`) whenever work spans
 multiple tasks or sessions.
 
+**The state follows the work, at the moment it happens** (owner rule, 2026-10-17: "chi è assegnato deve finire in progress"). Every step below is an `ai-orch tasks transition <id> <state> --actor <you> --reason "..."`, which works for emergent `T###` and plan `NN.T` tasks alike:
+
+| When | Transition |
+| --- | --- |
+| You assign/dispatch a task (`kilo_implement`, a subagent, `ai-orch run start`, or you start it yourself) | `open`/`bounced` → `in progress`, **before** the executor starts; reason names the executor and the branch/worktree |
+| The executor committed and returned its Final Report | `in progress` → `delivered` (reason: commit + "review pending") |
+| Your review passes and it is merged | `delivered` → `verified` (independent check or owner approval) → `done` |
+| Review fails | `delivered` → `bounced`, then `in progress` again when re-dispatched |
+| The run died or you cancelled it, work kept on a branch | stays `in progress`; reason records where the work is |
+| You abandon it | `waiting`/`blocked` with the reason, or `dropped` |
+
+A task being worked on while still `open`, or finished while still `in progress`, is a bookkeeping bug: fix it before anything else. `ai-orch run start` performs the dispatch transition itself; for every other way of dispatching, you do.
+
 Remember: if the Executor exposes semantic codebase search as a standing
 capability, it's useful for your own exploration and Q&A too - use it even
 when you are not delegating anything.

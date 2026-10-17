@@ -3212,3 +3212,27 @@ def test_tasks_new_without_note(tmp_path: pathlib.Path) -> None:
     assert "- id: T001" in text and "- paths: src/x.py" in text and "Make it work." in text
     errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
     assert errors == []
+
+
+def test_transition_plan_task_rewrites_its_status_line(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    init = tasks_dir / "05-sample"
+    init.mkdir(parents=True)
+    plan = init / "plan.md"
+    plan.write_text(
+        "# 05 - Sample\n\n## Tasks\n\n"
+        "### 05.1 - First\n\n- **Status:** `open` · **Profile:** `bulk-execution`\n\n"
+        "### 05.2 - Second\n- **Status:** `open`\n",
+        encoding="utf-8",
+    )
+    ok, res = te.transition_task(tasks_dir, "05.1", "in progress", actor="claude", reason="dispatched to kilo")
+    assert ok, res
+    text = plan.read_text(encoding="utf-8")
+    assert "- **Status:** `in progress` (" in text and "dispatched to kilo) · **Profile:** `bulk-execution`" in text
+    assert "### 05.2 - Second\n- **Status:** `open`" in text
+    ok, res = te.transition_task(tasks_dir, "05.1", "done")
+    assert not ok and "Illegal transition" in res["error"]
+    ok, res = te.transition_task(tasks_dir, "05.1", "delivered", expect_task_hash="0" * 64)
+    assert not ok and res["error"] == "stale-task"
+    ok, res = te.transition_task(tasks_dir, "05.9", "in progress")
+    assert not ok and "not found" in res["error"]
