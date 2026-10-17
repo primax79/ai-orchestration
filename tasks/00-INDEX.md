@@ -13,7 +13,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 3 | 03 | [Configuration & Task Management Skill + Python Scripts (`orchestration_config.py`, `tasks_engine.py`)](03-skill-and-script-engine/plan.md) | done | 02 | M |
 | 4 | 04 | [Orchestration Methodology & Skill Refinements (Review Tier 2)](04-methodology-refinements/plan.md) | partial (`T003`–`T005` done; `T006` open) | 01 | M |
 | 5 | 05 | [Standalone CLI (`ai-orch`), From-Scratch Installer & Extension Control Plane](05-cli-and-ui-handoff/plan.md) | done | 02, 03 | L |
-| 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](06-control-plane-safety/plan.md) | in progress (done: 06.1–06.6, 06.10; next: 06.7) | 05 | L |
+| 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](06-control-plane-safety/plan.md) | in progress (done: 06.1–06.7, 06.10; running: 06.8) | 05 | L |
 | 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | in progress (done: 07.1–07.3; next: 07.4) | 05, 06 | L |
 | 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1, 08.2; next: 08.3) | 06 | M |
 | 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | open | 06 (07 for agent triage) | M |
@@ -58,7 +58,7 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | --- | --- | --- | --- | --- | --- |
 | T008 | P1 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](server-and-bindings/T008-claude-mcp-phase1-spike.md) | open | claude | - |
 | T007 | P2 | [Structured verification gate tool in kilo-mcp](server-and-bindings/T007-verification-gate-tool.md) | open | kilo | - |
-| T012 | P2 | [kilo-mcp: detect kilo run processes that hang after finishing](server-and-bindings/T012-kilo-run-hangs-after-completion.md) | open | kilo | - |
+| T012 | P2 | [kilo-mcp: detect kilo run processes that hang after finishing](server-and-bindings/T012-kilo-run-hangs-after-completion.md) | verified | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting

@@ -6,13 +6,14 @@
 - priority: P2
 - priority-reason: Hung tasks report "running" for hours, hide completed work and keep processes alive; the orchestrator only noticed from log mtimes
 - next-up: no
-- state: open
+- state: verified
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: session 2026-10-17: tasks b7d26daa26b6, c7b5f7011bdf, b3cccdf3051e, ae7733625e86 committed and wrote their Final Report around 00:33–00:47, but their `kilo run` processes stayed alive and idle until cancelled at 10:10
 - paths: ../kilo-mcp/server.py
 - handoff: Read tasks/server-and-bindings/T012-kilo-run-hangs-after-completion.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: claude:orchestration
 
 ## Goal
 

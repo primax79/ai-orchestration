@@ -116,7 +116,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.7 - UI backend: preview/apply endpoints; transitions no longer write the index (U2, U3)
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 06.1, 06.2, 06.5, 06.6 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 06.1, 06.2, 06.5, 06.6 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Implement spec §2.3:
   - "Transitions no longer write the index";
