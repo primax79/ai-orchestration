@@ -6,7 +6,7 @@
 
 ### 11.1 - Engine: recursive node parser, inheritance, leaf-only transitions, derived container state, container dependencies, structure commands (`child add`, `expand`, `collapse`, `reopen`; no `move`, spec S1)
 
-- **Status:** `open` · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 09.1 (same file) · **Note:** the biggest engine task so far; review in two passes (parser and state first, structure commands second) · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-17; Kilo run interrupted, work saved as WIP 55e725a on `task/11.1-task-tree`, under review) · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 09.1 (same file) · **Note:** the biggest engine task so far; review in two passes (parser and state first, structure commands second) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md`, `tasks/specs/blocking-questions.md` (`blocks` accepts child ids)
 - **Goal:** Spec §1–§3 and §5:
   - the three rules at any depth;

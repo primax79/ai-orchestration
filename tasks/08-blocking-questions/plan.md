@@ -95,7 +95,7 @@ The spec now opens with §0 "Amendments after review 2" (Q1–Q10). These change
 
 ### 08.7 - VS Code: toast for new questions and a status-bar badge
 
-- **Status:** `open` · **Size:** S · **Depends on:** 08.5 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-17; merged in vscode-ai-orchestration 0.2.0+, installed; awaiting the owner's live check) · **Size:** S · **Depends on:** 08.5 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
 - **Origin:** owner request (2026-10-17).
 - **Goal:**
   - A new open question (an id not seen before) shows a VS Code notification (`showInformationMessage`) with its short text and the actions "Open" (reveals the dashboard on the Decisions tab and that question, or at least the tab) and "Later".
