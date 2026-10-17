@@ -113,7 +113,7 @@
 
 ### 07.9 - VS Code: run handlers and run watcher
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 07.7, 07.8, 06.9 · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-17; claude; vscode 0.2.6: run handlers mirror the web backend; live check by the owner pending) · **Profile:** `bulk-execution` · **Depends on:** 07.7, 07.8, 06.9 · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/views/dashboard-panel.ts`, `src/extension.ts`, `dist-webview/**`
 - **Goal:** Spec §8.
 - **Verification:**
