@@ -18,6 +18,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1, 08.2; next: 08.3) | 06 | M |
 | 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | open | 06 (07 for agent triage) | M |
 | 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | open | 06, 09.1 | S |
+| 11 | 11 | [First-class subtasks (parent → child)](11-subtasks/plan.md) | open | 06, 09.1 | M |
 
 ## Specs
 
@@ -31,6 +32,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [blocking-questions](specs/blocking-questions.md) | 08 |
 | [inbox-notes](specs/inbox-notes.md) | 09 |
 | [timeline-gantt](specs/timeline-gantt.md) | 10 |
+| [subtasks](specs/subtasks.md) | 11 (and 10.1 builds on 11.1) |
 
 ## Next up
 
@@ -100,6 +102,7 @@ flowchart TB
     I08["08: Blocking questions (open)"]
     I09["09: Inbox notes and screenshots to tasks (open)"]
     I10["10: Abstract timeline, dependencies and priorities (open)"]
+    I11["11: First-class subtasks (open)"]
     MCP["T001, T002 (done) / T007, T008 (open): Standalone MCP Servers (kilo-mcp & claude-mcp)"]
 
     I01 --> I02 --> I03 --> I05 --> I06
@@ -107,6 +110,8 @@ flowchart TB
     I06 --> I08
     I06 --> I09
     I06 --> I10
+    I06 --> I11
+    I11 --> I10
     I07 -.->|agent triage| I09
     I08 -.->|answer and resume| I07
     I01 --> I04
