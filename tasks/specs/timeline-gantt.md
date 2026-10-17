@@ -3,6 +3,16 @@
 - **Status:** ready (2026-10-17), revised the same day after owner feedback: no dates and no estimates; dependency management, priority management, and task size (small / medium / long).
 - **Drives:** initiative [10](../10-timeline-gantt/plan.md)
 
+## 0. Amendments after the Codex review (2026-10-17; normative)
+
+- **G1 — field names in the graph JSON (§2.1).** The structural field is `node_type` (`initiative`, `container`, `leaf`, `microtask`). `kind` is reserved for the classification of §6.
+- **G2 — canonical header extension order (§2, §5, §6).**
+  - Full tasks: after the 13 core fields, the optional extensions come in this order: `profile`, `verification-mode`, `verifier`, `size`, `kind`, `labels`.
+  - Microtasks: the schema is selected by location (category `micro`) and has its own closed order: `id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`.
+  - 10.4 also updates `CANONICAL_TASKS_AGENTS_MD` in the engine, the repo's `tasks/AGENTS.md` and the task-pipeline `SKILL.md`.
+- **G3 — initiative priority is explicit (§2.1, overrides the ordinal mapping).** An initiative's `plan.md` may carry `- **Priority:** P#` under its title, defaulting to `P2`. Its `NN.T` children inherit it (spec 11 S11). The execution-order column of the index has no effect on priority.
+- **G4 — tree semantics come from spec 11 (§2, §5).** Columns and the ready queue are computed on **leaves and microtasks** only. Containers appear as swimlanes, and dependencies on containers are expanded to their leaves (spec 11 S9).
+
 ## 1. Goal
 
 In the UI, the owner sees and manages **what comes before what**, and **what matters most**. Nothing is shown in hours or dates.

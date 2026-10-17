@@ -189,7 +189,7 @@ Backend, frontend and `vscode-ai-orchestration` files are shared by the three in
 
 Core lanes:
 
-- **`tasks_engine.py`:** 06.1 → 06.10 → 08.1 → 09.1 → 11.1 → 10.1 → 10.4
+- **`tasks_engine.py`:** 06.1 → 06.10 → 08.1 → 09.1 → 11.1 → 11.4 → 10.1 → 10.4
 - **`orchestration_env.py`:** 06.2 → 06.3 → 06.4
 - **`orchestration_config.py`:** 07.1 → 06.6
-- **`orchestration_runs.py`:** 07.2 → 07.3 → 07.4 → 07.10 → 11.2 → 07.11 → 07.5
+- **`orchestration_runs.py`:** 07.2 → 07.3 → 07.4 → 07.10 → 11.2 → 07.11 → 07.5 → 09.4

@@ -4,7 +4,7 @@
 
 ## Tasks (One Task = One Commit)
 
-### 11.1 - Engine: recursive node parser, inheritance, leaf-only transitions, derived container state, container dependencies, structure commands (`child add`, `expand`, `collapse`, `move`)
+### 11.1 - Engine: recursive node parser, inheritance, leaf-only transitions, derived container state, container dependencies, structure commands (`child add`, `expand`, `collapse`, `reopen`; no `move`, spec S1)
 
 - **Status:** `open` · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 09.1 (same file) · **Note:** the biggest engine task so far; review in two passes (parser and state first, structure commands second) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md`, `tasks/specs/blocking-questions.md` (`blocks` accepts child ids)
@@ -25,7 +25,7 @@
     - cycles through ancestors are refused;
     - `child add` turns a leaf into a container and is refused when the leaf is in flight;
     - `expand`/`collapse` round-trip;
-    - `move` renumbers and rewrites dependencies;
+    - every S5 derived-state rule, the S7 bullet grammar on fixtures copied from the real plans, S8 allocation across archived children, S10 operation hashes, and S11 inheritance per field;
     - a question blocking `07.4`.
   - Live: `tasks list --json` on this repo shows every 06–11 child with its real state.
   - Live: `sync-index --check` shows the generated initiative status cells; the preview diff is reviewed before apply.
