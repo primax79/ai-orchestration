@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Red runs mask real regressions; seen during 07.12, 09.4 and the 11.1 merge
 - next-up: no
-- state: in progress
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -

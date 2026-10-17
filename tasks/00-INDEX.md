@@ -72,7 +72,6 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T015 | P3 | [Navbar labels wrap on narrow widths](micro/T015-navbar-narrow-width.md) | verified | kilo | - |
-| T020 | P2 | [Flaky run-engine tests under load](micro/T020-flaky-run-engine-tests-under-load.md) | in progress | kilo | - |
 
 ### env-doctor
 
@@ -112,6 +111,7 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 | T006 | [Extract incident narratives to references/incidents.md (progressive disclosure)](done/methodology/T006-incidents-progressive-disclosure.md) | done | 2026-10-17 |
 | T007 | [Structured verification gate tool in kilo-mcp](done/server-and-bindings/T007-verification-gate-tool.md) | done | 2026-10-17 |
 | T008 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](done/server-and-bindings/T008-claude-mcp-phase1-spike.md) | done | 2026-10-17 |
+| T020 | [Flaky run-engine tests under load](done/micro/T020-flaky-run-engine-tests-under-load.md) | done | 2026-10-17 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph
