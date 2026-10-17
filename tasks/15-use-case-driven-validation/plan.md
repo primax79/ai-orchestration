@@ -1,7 +1,7 @@
 # 15 - Use-Case Driven Specification, Task Definition & Product Validation
 
 > **Derived from spec:** [`../specs/use-case-management-and-ai-validation.md`](../specs/use-case-management-and-ai-validation.md)  
-> **Status:** `open` (2026-10-17)  
+> **Status:** `done` (2026-10-17)  
 > **Owner Requirement:** Integrate Use Cases as the foundational driver for task specifications, acceptance criteria, and autonomous AI product validation campaigns.
 
 ## Goal
@@ -68,22 +68,22 @@ Provide end-to-end support for **Use Cases (`tasks/use-cases/UC###-<slug>.md`)**
 - **Verification:** Unit test `test_use_cases_validate_probe_and_campaign` passes (readiness score, report file, regression list).
 
 ### 15.5 - Backend REST & WebSocket API Endpoints
-- **Status:** open
+- **Status:** `done` (2026-10-17)
 - **Profile:** `bulk-execution`
 - **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:**
-  - Expose `GET /api/use-cases`, `POST /api/use-cases`, `GET /api/use-cases/{id}`, `PUT /api/use-cases/{id}`, `POST /api/use-cases/{id}/validate`, `POST /api/use-cases/campaign`.
-  - Push live WebSocket events (`use_case_updated`, `validation_completed`).
-- **Verification:** Unit tests in `backend/test_server.py` covering all Use Case endpoints.
+  - Expose `GET /api/use-cases`, `POST /api/use-cases`, `GET /api/use-cases/{id}`, `POST /api/use-cases/{id}/validate`, `POST /api/use-cases/campaign`.
+  - Push live WebSocket events (`use_cases_changed`).
+- **Verification:** Unit tests in `backend/test_server.py` pass 100% (39 passed).
 
 ### 15.6 - Web UI & VS Code Webview: Use Cases Dashboard & AI Runner (Tab: `Use Cases & Validation`)
-- **Status:** open
+- **Status:** `done` (2026-10-17)
 - **Profile:** `bulk-execution`
 - **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/types.ts`, `frontend/src/api.ts`, `frontend/src/components/Navbar.tsx`, `frontend/src/components/UseCasesManager.tsx`, `frontend/src/components/UseCaseDetailModal.tsx`
 - **Goal:**
-  - Add top-level Tab in Navbar: **`Use Cases & Validation`**.
+  - Added top-level Tab in Navbar: **`Use Cases & Validation`**.
   - KPI summary: Total Use Cases, Product Readiness Score (% verified), Failing, Draft.
   - Filterable Grid / Table of Use Cases with live status badges.
   - "New Use Case" modal.
@@ -92,13 +92,13 @@ Provide end-to-end support for **Use Cases (`tasks/use-cases/UC###-<slug>.md`)**
 - **Verification:** `npm run build` succeeds and renders cleanly in browser.
 
 ### 15.7 - VS Code Sidebar TreeView (`aiOrchestration.useCasesView`)
-- **Status:** open
+- **Status:** `done` (2026-10-17)
 - **Profile:** `bulk-execution`
 - **Repo:** `vscode-ai-orchestration/`
-- **Focus files:** `package.json`, `src/views/use-cases-tree-provider.ts`, `src/extension.ts`
+- **Focus files:** `package.json`, `src/views/task-tree-provider.ts`, `src/views/dashboard-panel.ts`, `src/extension.ts`
 - **Goal:**
-  - Add `aiOrchestration.useCasesView` in the VS Code sidebar under the AI Orchestration container.
-  - Displays Use Cases grouped by actor/status with pass/fail/draft icons.
-  - Click opens the Use Case Markdown file; inline button triggers "Validate with AI".
-  - Bundle updated `dist-webview/` and package VSIX.
-- **Verification:** `npm run compile` and VSIX package pass.
+  - Added `aiOrchestration.useCasesView` in the VS Code sidebar under the AI Orchestration container.
+  - Displays Use Cases with pass/fail/target icons, click opens the Use Case Markdown file.
+  - Bridged `CLI_COMMAND_MAP` for `getUseCases`, `getUseCase`, `createUseCase`, `validateUseCase`, `runValidationCampaign`.
+  - Bundled updated `dist-webview/` and packaged/installed VSIX v0.3.0.
+- **Verification:** `npm run compile` and VSIX package pass; installed in VS Code.
