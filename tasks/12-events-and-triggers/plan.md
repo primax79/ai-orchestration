@@ -15,7 +15,7 @@
 
 ### 12.11 - Core: event store (outbox, counter, chunk manifest, reconciliation, `events tail`)
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.11-event-store) · **Size:** L · **Depends on:** 10.4 (`tasks_engine.py` lane end) · **Repo:** `ai-orchestration/` (new module `scripts/orchestration_events.py`)
+- **Status:** `done` (2026-10-18; claude; merged) · **Size:** L · **Depends on:** 10.4 (`tasks_engine.py` lane end) · **Repo:** `ai-orchestration/` (new module `scripts/orchestration_events.py`)
 - **Goal:** E1, E13 and §1 reading.
 
 ### 12.12 - Emit events from `tasks_engine.py`
@@ -27,6 +27,7 @@
 
 - **Status:** `open` · **Size:** L · **Depends on:** 12.11, 07.11 (runs lane end)
 - **Goal:** E1 and E4.
+- **Also (from the 12.11 review):** `events tail --session S` (spec §1 line 128) was not implemented in 12.11; add it here, where events start carrying the session.
 
 ### 12.14 - Emit events from `orchestration_config.py`; config writes under a lock
 
