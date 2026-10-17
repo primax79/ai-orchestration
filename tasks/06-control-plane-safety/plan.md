@@ -140,7 +140,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.9 - VS Code bridge: complete handler map, non-zero rejection, `dist-webview` sync, no hard-coded paths, multi-root choice (V1, V2)
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 06.8 · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-17; merged; awaiting live check in an Extension Development Host) · **Profile:** `bulk-execution` · **Depends on:** 06.8 · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/cli-client.ts`, `src/views/dashboard-panel.ts`, `src/extension.ts`, `package.json`, `esbuild.config.mjs`, `dist-webview/**`
 - **Goal:** Implement spec §2.5.
 - **Verification:**
