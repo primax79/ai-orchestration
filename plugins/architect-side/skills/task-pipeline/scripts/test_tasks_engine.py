@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -2896,4 +2897,257 @@ def test_ai_orch_inbox_and_tasks_new_integration(tmp_path: pathlib.Path) -> None
     )
     assert res_new.returncode == 0, res_new.stdout + res_new.stderr
     assert json.loads(res_new.stdout)["id"] == "T001"
+
+
+def test_inbox_moves_rewrite_task_sources_lifecycle(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # 1. Add note N001
+    res_add = run_cli(
+        "inbox", "add",
+        "--title", "Auth token rotation",
+        "--kind", "idea",
+        "--body", "Implement auth token rotation.\n\nMore details here.",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_add.returncode == 0
+    note_id = json.loads(res_add.stdout)["id"]
+
+    # 2. Create task T001 from note
+    res_new = run_cli(
+        "new",
+        "--from-note", note_id,
+        "--category", "features",
+        "--title", "Auth token rotation",
+        "--priority", "P1",
+        "--priority-reason", "Security compliance requirement",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_new.returncode == 0, res_new.stdout + res_new.stderr
+    t1_data = json.loads(res_new.stdout)
+    assert t1_data["sources"].startswith("_inbox/to-analyze/")
+    assert (tasks_dir / t1_data["sources"]).is_file()
+
+    # 3. Resolve note -> task sources points to analyzed/ and tasks validate ok
+    res_res = run_cli(
+        "inbox", "resolve", note_id,
+        "--produced", "T001",
+        "--by", "owner",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_res.returncode == 0, res_res.stdout + res_res.stderr
+    res_data = json.loads(res_res.stdout)
+    assert res_data["ok"] is True
+    assert res_data["sources_updated"] == ["T001"]
+
+    task_file = tasks_dir / t1_data["rel_path"]
+    parsed_t1 = te.parse_emergent_task_file(task_file, tasks_dir)
+    assert parsed_t1["sources"].startswith("_inbox/analyzed/")
+    assert parsed_t1["sources"].endswith("/note.md")
+    assert (tasks_dir / parsed_t1["sources"]).is_file()
+
+    # tasks validate ok
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0, res_val.stdout + res_val.stderr
+    assert json.loads(res_val.stdout)["ok"] is True
+
+    # 4. Reopen note -> moves back to to-analyze/ and task sources updated back
+    res_reop = run_cli(
+        "inbox", "reopen", note_id,
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_reop.returncode == 0, res_reop.stdout + res_reop.stderr
+    reop_data = json.loads(res_reop.stdout)
+    assert reop_data["ok"] is True
+    assert reop_data["sources_updated"] == ["T001"]
+
+    parsed_t1_reop = te.parse_emergent_task_file(task_file, tasks_dir)
+    assert parsed_t1_reop["sources"].startswith("_inbox/to-analyze/")
+    assert (tasks_dir / parsed_t1_reop["sources"]).is_file()
+
+    res_val2 = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val2.returncode == 0, res_val2.stdout + res_val2.stderr
+    assert json.loads(res_val2.stdout)["ok"] is True
+
+    # 5. Discard path -> moves to analyzed/ and task sources updated
+    res_disc = run_cli(
+        "inbox", "discard", note_id,
+        "--reason", "Superseded by alternate design",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_disc.returncode == 0, res_disc.stdout + res_disc.stderr
+    disc_data = json.loads(res_disc.stdout)
+    assert disc_data["ok"] is True
+    assert disc_data["sources_updated"] == ["T001"]
+
+    parsed_t1_disc = te.parse_emergent_task_file(task_file, tasks_dir)
+    assert parsed_t1_disc["sources"].startswith("_inbox/analyzed/")
+    assert (tasks_dir / parsed_t1_disc["sources"]).is_file()
+
+    res_val3 = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val3.returncode == 0, res_val3.stdout + res_val3.stderr
+    assert json.loads(res_val3.stdout)["ok"] is True
+
+
+def test_inbox_resolve_updates_task_in_done(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # 1. Add note N001
+    res_add = run_cli(
+        "inbox", "add",
+        "--title", "Archived Feature",
+        "--body", "Description of archived feature.",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_add.returncode == 0
+    note_id = json.loads(res_add.stdout)["id"]
+
+    # 2. Create task T001
+    res_new = run_cli(
+        "new",
+        "--from-note", note_id,
+        "--category", "features",
+        "--title", "Archived Feature",
+        "--priority", "P2",
+        "--priority-reason", "Historical task",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_new.returncode == 0
+    t1_data = json.loads(res_new.stdout)
+    assert t1_data["sources"].startswith("_inbox/to-analyze/")
+
+    # 3. Transition T001 to done (open -> in progress -> delivered -> verified -> done)
+    run_cli("transition", "T001", "in progress", "--actor", "kilo", "--tasks-dir", str(tasks_dir), "--json")
+    run_cli("transition", "T001", "delivered", "--actor", "kilo", "--tasks-dir", str(tasks_dir), "--json")
+    run_cli("transition", "T001", "verified", "--actor", "owner", "--verifier", "owner", "--tasks-dir", str(tasks_dir), "--json")
+    res_done = run_cli("transition", "T001", "done", "--actor", "owner", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_done.returncode == 0
+    done_data = json.loads(res_done.stdout)
+    assert done_data["rel_path"].startswith("done/")
+
+    done_task_file = tasks_dir / done_data["rel_path"]
+    assert done_task_file.is_file()
+
+    # 4. Resolve note N001 -> task in done/ must be updated
+    res_res = run_cli(
+        "inbox", "resolve", note_id,
+        "--produced", "T001",
+        "--by", "owner",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_res.returncode == 0, res_res.stdout + res_res.stderr
+    res_data = json.loads(res_res.stdout)
+    assert "T001" in res_data["sources_updated"]
+
+    parsed_done = te.parse_emergent_task_file(done_task_file, tasks_dir, in_done=True)
+    assert parsed_done["sources"].startswith("_inbox/analyzed/")
+    assert (tasks_dir / parsed_done["sources"]).is_file()
+
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0, res_val.stdout + res_val.stderr
+    assert json.loads(res_val.stdout)["ok"] is True
+
+
+def test_inbox_resolve_rollback_on_failure(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # 1. Add note N001
+    res_add = run_cli(
+        "inbox", "add",
+        "--title", "Rollback note",
+        "--body", "Testing atomic rollback.\n\nBody paragraph.",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_add.returncode == 0
+    note_id = json.loads(res_add.stdout)["id"]
+    note_folder_name = json.loads(res_add.stdout)["folder"]
+
+    # 2. Create tasks T001 and T002
+    res_t1 = run_cli(
+        "new",
+        "--from-note", note_id,
+        "--category", "features",
+        "--title", "Task one",
+        "--priority", "P1",
+        "--priority-reason", "Reason 1",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_t1.returncode == 0
+    t1_rel = json.loads(res_t1.stdout)["rel_path"]
+
+    res_t2 = run_cli(
+        "new",
+        "--from-note", note_id,
+        "--category", "features",
+        "--title", "Task two",
+        "--priority", "P2",
+        "--priority-reason", "Reason 2",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_t2.returncode == 0
+    t2_rel = json.loads(res_t2.stdout)["rel_path"]
+
+    t1_file = tasks_dir / t1_rel
+    t2_file = tasks_dir / t2_rel
+    orig_t1_content = t1_file.read_text(encoding="utf-8")
+    orig_t2_content = t2_file.read_text(encoding="utf-8")
+    orig_note_file = tasks_dir / "_inbox" / "to-analyze" / note_folder_name / "note.md"
+    orig_note_content = orig_note_file.read_text(encoding="utf-8")
+
+    # 3. Monkeypatch _atomic_write_text to fail when writing T002
+    orig_atomic_write = te._atomic_write_text
+
+    def failing_write(path: pathlib.Path, content: str, encoding: str = "utf-8") -> None:
+        if "T002" in str(path):
+            raise OSError("Simulated disk error while writing T002")
+        orig_atomic_write(path, content, encoding=encoding)
+
+    monkeypatch.setattr(te, "_atomic_write_text", failing_write)
+
+    # 4. Resolve should fail
+    ok, res = te.inbox_resolve(tasks_dir, note_id, produced="T001, T002")
+    assert ok is False
+    assert "Simulated disk error" in res["error"]
+
+    # 5. Verify complete rollback
+    # Note folder must be back in to-analyze/ and NOT in analyzed/
+    assert (tasks_dir / "_inbox" / "to-analyze" / note_folder_name / "note.md").is_file()
+    assert not (tasks_dir / "_inbox" / "analyzed" / note_folder_name).exists()
+    assert orig_note_file.read_text(encoding="utf-8") == orig_note_content
+
+    # T001 must have been rolled back to original content
+    assert t1_file.read_text(encoding="utf-8") == orig_t1_content
+    assert t2_file.read_text(encoding="utf-8") == orig_t2_content
+
+    parsed_t1 = te.parse_emergent_task_file(t1_file, tasks_dir)
+    assert parsed_t1["sources"].startswith("_inbox/to-analyze/")
+
+    # 6. Also test rollback when os.replace fails
+    def failing_replace(src, dst):
+        raise OSError("Simulated os.replace failure")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    monkeypatch.undo()  # restore _atomic_write_text
+    monkeypatch.setattr(os, "replace", failing_replace)
+
+    ok_replace, res_replace = te.inbox_resolve(tasks_dir, note_id, produced="T001, T002")
+    assert ok_replace is False
+    assert (tasks_dir / "_inbox" / "to-analyze" / note_folder_name / "note.md").is_file()
+    assert not (tasks_dir / "_inbox" / "analyzed" / note_folder_name).exists()
+    assert orig_note_file.read_text(encoding="utf-8") == orig_note_content
+
 

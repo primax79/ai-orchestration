@@ -4389,6 +4389,212 @@ def inbox_detach(
         return False, {"ok": False, "error": str(e)}
 
 
+def _rewrite_sources_value(
+    sources_val: str,
+    old_folder_rel: str,
+    new_folder_rel: str,
+    legacy_rel: str | None = None,
+) -> tuple[str, bool]:
+    val = sources_val
+    changed = False
+
+    if legacy_rel and legacy_rel in val:
+        legacy_pat = re.compile(
+            rf"(^|[\s,;\[\(\"\'])(?:tasks/)?{re.escape(legacy_rel)}(?=[\s,;\)\]\"\']|$)"
+        )
+        new_val = legacy_pat.sub(
+            lambda m: f"{m.group(1)}{new_folder_rel}/note.md", val
+        )
+        if new_val != val:
+            val = new_val
+            changed = True
+
+    pat = re.compile(
+        rf"(^|[\s,;\[\(\"\'])(?:tasks/)?{re.escape(old_folder_rel)}((?:/[^\s,;\)\]\"\']*)?)(?=[\s,;\)\]\"\']|$)"
+    )
+
+    def _repl(m: re.Match[str]) -> str:
+        lead = m.group(1)
+        tail = m.group(2)
+        return f"{lead}{new_folder_rel}{tail}"
+
+    new_val = pat.sub(_repl, val)
+    if new_val != val:
+        val = new_val
+        changed = True
+
+    return val, changed
+
+
+def _rewrite_task_sources(
+    content: str,
+    old_folder_rel: str,
+    new_folder_rel: str,
+    legacy_rel: str | None = None,
+) -> tuple[str, bool]:
+    raw_lines = content.splitlines()
+    scanned_lines, _ = scan_markdown_blocks(content)
+
+    h1_idx: int | None = None
+    for idx, sline in enumerate(scanned_lines):
+        if not sline.is_fenced and sline.text.startswith("# "):
+            h1_idx = idx
+            break
+
+    if h1_idx is None:
+        return content, False
+
+    scan_start = h1_idx + 1
+    while scan_start < len(scanned_lines) and not scanned_lines[scan_start].text.strip():
+        scan_start += 1
+
+    idx = scan_start
+    sources_idx: int | None = None
+    old_val = ""
+
+    while idx < len(scanned_lines):
+        sline = scanned_lines[idx]
+        if sline.is_fenced:
+            break
+        m = HEADER_LINE_RE.match(sline.text)
+        if not m:
+            break
+        k, v = m.group(1), m.group(2).strip()
+        if k == "sources":
+            sources_idx = idx
+            old_val = v
+            break
+        idx += 1
+
+    if sources_idx is None:
+        return content, False
+
+    new_val, changed = _rewrite_sources_value(
+        old_val,
+        old_folder_rel=old_folder_rel,
+        new_folder_rel=new_folder_rel,
+        legacy_rel=legacy_rel,
+    )
+    if not changed:
+        return content, False
+
+    raw_lines[sources_idx] = f"- sources: {new_val}"
+    new_content = "\n".join(raw_lines)
+    if content.endswith("\r\n"):
+        new_content += "\r\n"
+    elif content.endswith("\n"):
+        new_content += "\n"
+    return new_content, True
+
+
+def _move_note_folder_and_rewrite_sources(
+    tasks_dir: pathlib.Path,
+    folder_path: pathlib.Path,
+    dst_dir: pathlib.Path,
+    new_note_content: str,
+    produced_hint: str | None = None,
+    legacy_info: tuple[pathlib.Path, str, str] | None = None,
+) -> tuple[pathlib.Path, list[str]]:
+    folder_name = folder_path.name
+    dst_folder = dst_dir / folder_name
+    old_folder_rel = folder_path.relative_to(tasks_dir).as_posix()
+    new_folder_rel = dst_folder.relative_to(tasks_dir).as_posix()
+    legacy_rel = legacy_info[2] if legacy_info else None
+
+    note_file = folder_path / "note.md"
+    original_note_content = note_file.read_text(encoding="utf-8") if note_file.is_file() else ""
+
+    produced_ids: list[str] = []
+    if produced_hint and produced_hint.strip() and produced_hint.strip() != "-":
+        produced_ids = re.findall(r"T\d{3,}", produced_hint)
+
+    all_emergent = discover_emergent_tasks(tasks_dir)
+    task_map = {t["id"]: t for t in all_emergent if t.get("id")}
+
+    ordered_tasks: list[dict[str, Any]] = []
+    seen_tids: set[str] = set()
+
+    for pid in produced_ids:
+        if pid in task_map and pid not in seen_tids:
+            ordered_tasks.append(task_map[pid])
+            seen_tids.add(pid)
+
+    for t in all_emergent:
+        tid = t.get("id")
+        if tid and tid in seen_tids:
+            continue
+        ordered_tasks.append(t)
+        if tid:
+            seen_tids.add(tid)
+
+    tasks_to_update: list[tuple[str, pathlib.Path, str, str]] = []
+    for t in ordered_tasks:
+        tfile = pathlib.Path(t["file_path"])
+        try:
+            task_text = tfile.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        new_task_text, changed = _rewrite_task_sources(
+            task_text,
+            old_folder_rel=old_folder_rel,
+            new_folder_rel=new_folder_rel,
+            legacy_rel=legacy_rel,
+        )
+        if changed:
+            tasks_to_update.append((t.get("id", ""), tfile, task_text, new_task_text))
+
+    written_tasks: list[tuple[pathlib.Path, str]] = []
+    note_md_written = False
+    folder_moved = False
+
+    try:
+        _atomic_write_text(note_file, new_note_content)
+        note_md_written = True
+
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        os.replace(folder_path, dst_folder)
+        folder_moved = True
+
+        for tid, tfile, orig_text, new_text in tasks_to_update:
+            _atomic_write_text(tfile, new_text)
+            written_tasks.append((tfile, orig_text))
+
+    except BaseException as e:
+        for tfile, orig_text in written_tasks:
+            try:
+                tfile.write_text(orig_text, encoding="utf-8")
+            except Exception:
+                pass
+
+        if folder_moved:
+            try:
+                if dst_folder.exists() and not folder_path.exists():
+                    os.replace(dst_folder, folder_path)
+                    folder_moved = False
+            except Exception:
+                pass
+
+        if note_md_written:
+            target_note_file = (folder_path if not folder_moved else dst_folder) / "note.md"
+            try:
+                target_note_file.write_text(original_note_content, encoding="utf-8")
+            except Exception:
+                pass
+
+        if legacy_info:
+            leg_file, leg_text, _ = legacy_info
+            try:
+                if folder_path.exists():
+                    shutil.rmtree(folder_path)
+                leg_file.write_text(leg_text, encoding="utf-8")
+            except Exception:
+                pass
+
+        raise e
+
+    return dst_folder, [tid for tid, _, _, _ in tasks_to_update if tid]
+
+
 def inbox_resolve(
     tasks_dir: pathlib.Path,
     target: str,
@@ -4415,7 +4621,12 @@ def inbox_resolve(
             if note["in_analyzed"]:
                 return False, {"ok": False, "error": f"Note {note['id']} is already in analyzed/."}
 
+            legacy_info = None
             if note["legacy"]:
+                leg_file = pathlib.Path(note["file_path"])
+                leg_text = leg_file.read_text(encoding="utf-8")
+                leg_rel = note["rel_path"]
+                legacy_info = (leg_file, leg_text, leg_rel)
                 note = convert_legacy_note_to_folder(tasks_dir, note)
 
             folder_path = pathlib.Path(note["folder_path"])
@@ -4432,13 +4643,16 @@ def inbox_resolve(
                 processed_by=by.strip() or "owner",
                 body=note["body"],
             )
-            note_file = folder_path / "note.md"
-            _atomic_write_text(note_file, content)
 
             analyzed_dir = tasks_dir / "_inbox" / "analyzed"
-            analyzed_dir.mkdir(parents=True, exist_ok=True)
-            dst_folder = analyzed_dir / folder_path.name
-            os.replace(folder_path, dst_folder)
+            dst_folder, updated_task_ids = _move_note_folder_and_rewrite_sources(
+                tasks_dir=tasks_dir,
+                folder_path=folder_path,
+                dst_dir=analyzed_dir,
+                new_note_content=content,
+                produced_hint=produced.strip(),
+                legacy_info=legacy_info,
+            )
 
             updated = parse_note_folder(dst_folder, tasks_dir, in_analyzed=True)
             return True, {
@@ -4449,6 +4663,7 @@ def inbox_resolve(
                 "processed_by": updated["processed_by"],
                 "folder": dst_folder.name,
                 "rel_path": updated["rel_path"],
+                "sources_updated": updated_task_ids,
             }
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
@@ -4479,7 +4694,12 @@ def inbox_discard(
             if note["in_analyzed"]:
                 return False, {"ok": False, "error": f"Note {note['id']} is already in analyzed/."}
 
+            legacy_info = None
             if note["legacy"]:
+                leg_file = pathlib.Path(note["file_path"])
+                leg_text = leg_file.read_text(encoding="utf-8")
+                leg_rel = note["rel_path"]
+                legacy_info = (leg_file, leg_text, leg_rel)
                 note = convert_legacy_note_to_folder(tasks_dir, note)
 
             folder_path = pathlib.Path(note["folder_path"])
@@ -4502,13 +4722,16 @@ def inbox_discard(
                 processed_by=note["processed_by"],
                 body=body,
             )
-            note_file = folder_path / "note.md"
-            _atomic_write_text(note_file, content)
 
             analyzed_dir = tasks_dir / "_inbox" / "analyzed"
-            analyzed_dir.mkdir(parents=True, exist_ok=True)
-            dst_folder = analyzed_dir / folder_path.name
-            os.replace(folder_path, dst_folder)
+            dst_folder, updated_task_ids = _move_note_folder_and_rewrite_sources(
+                tasks_dir=tasks_dir,
+                folder_path=folder_path,
+                dst_dir=analyzed_dir,
+                new_note_content=content,
+                produced_hint=note.get("produced"),
+                legacy_info=legacy_info,
+            )
 
             updated = parse_note_folder(dst_folder, tasks_dir, in_analyzed=True)
             return True, {
@@ -4518,6 +4741,7 @@ def inbox_discard(
                 "reason": reason.strip(),
                 "folder": dst_folder.name,
                 "rel_path": updated["rel_path"],
+                "sources_updated": updated_task_ids,
             }
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
@@ -4558,13 +4782,15 @@ def inbox_reopen(
                 processed_by=note["processed_by"],
                 body=note["body"],
             )
-            note_file = folder_path / "note.md"
-            _atomic_write_text(note_file, content)
 
             to_analyze_dir = tasks_dir / "_inbox" / "to-analyze"
-            to_analyze_dir.mkdir(parents=True, exist_ok=True)
-            dst_folder = to_analyze_dir / folder_path.name
-            os.replace(folder_path, dst_folder)
+            dst_folder, updated_task_ids = _move_note_folder_and_rewrite_sources(
+                tasks_dir=tasks_dir,
+                folder_path=folder_path,
+                dst_dir=to_analyze_dir,
+                new_note_content=content,
+                produced_hint=note.get("produced"),
+            )
 
             updated = parse_note_folder(dst_folder, tasks_dir, in_analyzed=False)
             return True, {
@@ -4573,6 +4799,7 @@ def inbox_reopen(
                 "status": "ready",
                 "folder": dst_folder.name,
                 "rel_path": updated["rel_path"],
+                "sources_updated": updated_task_ids,
             }
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
