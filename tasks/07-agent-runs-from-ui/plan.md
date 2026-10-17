@@ -92,7 +92,7 @@
 
 ### 07.7 - Frontend: Run dialog with live preview, task runs panel, Runs tab
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Spec §7, except the Config tab.
 - **Verification:**
