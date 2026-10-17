@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Owner's open answer to Q003: are they incompatible or only worded so; wants a priority rule or prompt-level guidance
 - next-up: no
-- state: open
+- state: in progress
 - executor: claude
 - depends-on: -
 - decider: -

@@ -6,7 +6,7 @@
 - priority: P3
 - priority-reason: Owner answered Q005 with C; the duplicates keep showing in the Doctor until decided
 - next-up: no
-- state: open
+- state: in progress
 - executor: claude
 - depends-on: -
 - decider: -

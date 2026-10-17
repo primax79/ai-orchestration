@@ -6,13 +6,15 @@
 - priority: P2
 - priority-reason: Owner answered Q002 with A; the stale copies shadow the released skills in this repo
 - next-up: no
-- state: open
+- state: delivered
 - executor: claude
 - depends-on: -
 - decider: -
 - sources: -
 - paths: -
 - handoff: Read tasks/env-doctor/T017-apply-q002-remove-the-untracked-project-scope-skil.md, do the open steps, run the Verification, update the task and the registry.
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
