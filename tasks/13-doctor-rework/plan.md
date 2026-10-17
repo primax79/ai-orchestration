@@ -8,7 +8,7 @@
 
 ### 13.1 - P1-a: stop the no-op "Resolve" loop
 
-- **Status:** `verified` (2026-10-17; claude; live: Doctor shows one Resolve (the single fixable finding) and the rest as advice) · **Size:** S · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-18; claude; verified and merged; T012 active since the kilo-mcp server restart) · **Size:** S · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
 - **Goal:**
   - each conflict carries `fixable: true|false`;
   - the UI shows red and "Resolve…" only when the plan contains executable actions;

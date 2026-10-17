@@ -6,7 +6,7 @@
 - priority: P3
 - priority-reason: Cosmetic, but the VS Code Simple Browser and side panels are narrow by default
 - next-up: no
-- state: verified
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -

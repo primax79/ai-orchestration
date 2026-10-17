@@ -26,7 +26,7 @@
 
 ### 09.3 - Frontend: Inbox tab, editor with paste and drag-drop images, manual "Convert to task"
 
-- **Status:** `verified` (2026-10-17; claude; orchestrator review (SafeMarkdown escapes, CSP blocks remote images) + live check of the Inbox tab; merged into ai-orchestration-ui main) · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 09.2, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-18; claude; verified and merged; T012 active since the kilo-mcp server restart) · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 09.2, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Spec §5, except "Process with…".
 - **Verification:**

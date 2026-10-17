@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Hung tasks report "running" for hours, hide completed work and keep processes alive; the orchestrator only noticed from log mtimes
 - next-up: no
-- state: verified
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
