@@ -22,11 +22,15 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from typing import Any
+import uuid
 
 try:
     import fcntl
@@ -65,11 +69,13 @@ try:
         discover_emergent_tasks,
         task_bundle_sha256,
         normalize_state,
+        transition_task,
     )
 except ImportError:
     discover_emergent_tasks = None  # type: ignore
     task_bundle_sha256 = None  # type: ignore
     normalize_state = None  # type: ignore
+    transition_task = None  # type: ignore
 
 try:
     from orchestration_config import (
@@ -131,6 +137,232 @@ DEFAULT_MODE_PER_STATE: dict[str, str | None] = {
     "done with a caveat": None,
     "dropped": None,
 }
+
+DEFAULT_LOG_CHUNK_SIZE = int(os.environ.get("AI_ORCH_LOG_CHUNK_SIZE", 10 * 1024 * 1024))
+
+
+# ---------------------------------------------------------------------------
+# Process Identity and Group Kill Helpers (R2, R9, R13)
+# ---------------------------------------------------------------------------
+
+def get_process_start_time(pid: int) -> str | None:
+    """Retrieve process start time via `ps -o lstart= -p <pid>` in ISO format."""
+    if pid <= 0:
+        return None
+    try:
+        res = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            return None
+        out = (res.stdout or "").strip()
+        if not out:
+            return None
+        parts = out.split()
+        if len(parts) >= 5:
+            cleaned = " ".join(parts[:5])
+            try:
+                dt = datetime.datetime.strptime(cleaned, "%a %b %d %H:%M:%S %Y")
+                return dt.isoformat()
+            except ValueError:
+                pass
+        return out
+    except Exception:
+        return None
+
+
+def is_process_alive(pid: int, expected_start_time: str | None = None) -> bool:
+    """Check if process is alive and optionally verify start time (PID reuse check)."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    if expected_start_time is not None:
+        cur_start = get_process_start_time(pid)
+        return cur_start is not None and cur_start == expected_start_time
+    return True
+
+
+def kill_process_group(
+    pgid: int,
+    leader_pid: int | None = None,
+    expected_leader_start_time: str | None = None,
+    timeout: float = 10.0,
+) -> bool:
+    """Send SIGTERM to process group after verifying leader start time, then SIGKILL if needed."""
+    if pgid <= 0:
+        return False
+
+    if leader_pid is not None and expected_leader_start_time is not None:
+        cur_start = get_process_start_time(leader_pid)
+        if cur_start is None or cur_start != expected_leader_start_time:
+            # PID reused or leader died with wrong start time: do NOT kill!
+            return False
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
+        return True  # already dead
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except OSError:
+            return True
+        time.sleep(0.1)
+
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
+        pass
+    return True
+
+
+def expand_secret_env_vars(argv: list[str]) -> list[str]:
+    """Expand {env:VAR_NAME} placeholders from os.environ at spawn time (R13)."""
+    expanded: list[str] = []
+    for arg in argv:
+        new_arg = re.sub(
+            r"\{env:([A-Za-z0-9_]+)\}",
+            lambda m: os.environ.get(m.group(1), ""),
+            arg,
+        )
+        expanded.append(new_arg)
+    return expanded
+
+
+def check_claude_allowed_tools(headless_cfg: dict[str, Any], mode: str) -> tuple[bool, str | None]:
+    """R11 — Claude requires configured allowed_tools for the mode."""
+    at = headless_cfg.get("allowed_tools")
+    if isinstance(at, dict):
+        at = at.get(mode)
+    if not at or not isinstance(at, list) or len(at) == 0:
+        return False, f"Claude requires 'allowed_tools' to be configured under [tools.claude.headless] for mode '{mode}' (no default permission policy)"
+    return True, None
+
+
+def read_log_chunks(
+    run_dir: pathlib.Path,
+    since_offset: int = 0,
+) -> tuple[int, int, bytes]:
+    """Read bytes from events chunk files starting at since_offset.
+    
+    Returns (first_available_offset, next_offset, data_bytes).
+    """
+    manifest_path = run_dir / "chunks.json"
+    manifest: list[dict[str, Any]] = []
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = []
+
+    chunk_files = sorted(run_dir.glob("events.*.jsonl"))
+    if not chunk_files:
+        legacy = run_dir / "events.jsonl"
+        if legacy.is_file():
+            chunk_files = [legacy]
+
+    if not chunk_files:
+        return 0, 0, b""
+
+    chunk_map: list[dict[str, Any]] = []
+    if manifest:
+        man_by_fn = {m["file"]: m for m in manifest if isinstance(m, dict) and "file" in m}
+        for f in chunk_files:
+            if f.name in man_by_fn:
+                m = man_by_fn[f.name]
+                chunk_map.append({
+                    "file": f,
+                    "start_offset": m.get("start_offset", 0),
+                    "size": f.stat().st_size,
+                })
+            else:
+                prev_end = chunk_map[-1]["start_offset"] + chunk_map[-1]["size"] if chunk_map else 0
+                chunk_map.append({
+                    "file": f,
+                    "start_offset": prev_end,
+                    "size": f.stat().st_size,
+                })
+    else:
+        cur_off = 0
+        for f in chunk_files:
+            sz = f.stat().st_size
+            chunk_map.append({
+                "file": f,
+                "start_offset": cur_off,
+                "size": sz,
+            })
+            cur_off += sz
+
+    first_available_offset = chunk_map[0]["start_offset"]
+    last_chunk = chunk_map[-1]
+    next_offset = last_chunk["start_offset"] + last_chunk["size"]
+
+    target_start = max(since_offset, first_available_offset)
+    if target_start >= next_offset:
+        return first_available_offset, next_offset, b""
+
+    out_bytes = bytearray()
+    for entry in chunk_map:
+        c_start = entry["start_offset"]
+        c_size = entry["size"]
+        c_end = c_start + c_size
+        if target_start < c_end:
+            skip = max(0, target_start - c_start)
+            try:
+                with open(entry["file"], "rb") as f:
+                    if skip > 0:
+                        f.seek(skip)
+                    out_bytes.extend(f.read())
+            except OSError:
+                pass
+
+    return first_available_offset, next_offset, bytes(out_bytes)
+
+
+def parse_log_events(data_bytes: bytes) -> list[dict[str, Any]]:
+    """Parse JSON lines from stdout events into structured summary events."""
+    events: list[dict[str, Any]] = []
+    text = data_bytes.decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        try:
+            obj = json.loads(trimmed)
+            if isinstance(obj, dict):
+                evt: dict[str, Any] = {"raw": obj}
+                content = None
+                if "content" in obj:
+                    content = obj["content"]
+                elif "text" in obj:
+                    content = obj["text"]
+                elif "delta" in obj and isinstance(obj["delta"], dict) and "text" in obj["delta"]:
+                    content = obj["delta"]["text"]
+
+                if content is not None:
+                    evt["text"] = str(content)
+
+                if "tool" in obj or "tool_use" in obj or obj.get("type") in ("tool_use", "tool_call"):
+                    evt["tool_call"] = obj.get("tool") or obj.get("tool_use") or obj.get("name") or obj
+
+                if "error" in obj or obj.get("type") == "error":
+                    evt["error"] = obj.get("error") or obj.get("message") or obj
+
+                evt["type"] = obj.get("type") or obj.get("role") or "event"
+                events.append(evt)
+                continue
+        except json.JSONDecodeError:
+            pass
+        events.append({"type": "text", "text": trimmed})
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -1014,9 +1246,14 @@ def compute_plan_hash(
 # Registry & Concurrency Locking (Spec §5.1, §5.2)
 # ---------------------------------------------------------------------------
 
+_RUN_LOCK_COUNTS: dict[str, int] = {}
+_RUN_LOCK_FDS: dict[str, int] = {}
+
+
 @contextlib.contextmanager
 def run_lock(workspace: pathlib.Path):
-    """Exclusive fcntl.flock on <workspace>/.ai-orchestration/runs/.lock."""
+    """Exclusive fcntl.flock on <workspace>/.ai-orchestration/runs/.lock (re-entrant within process)."""
+    global _RUN_LOCK_COUNTS, _RUN_LOCK_FDS
     runs_dir = workspace / ".ai-orchestration" / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -1025,12 +1262,29 @@ def run_lock(workspace: pathlib.Path):
         pass
 
     lock_file = runs_dir / ".lock"
+    lock_key = str(lock_file.resolve())
+
+    count = _RUN_LOCK_COUNTS.get(lock_key, 0)
+    if count > 0:
+        _RUN_LOCK_COUNTS[lock_key] = count + 1
+        try:
+            yield
+        finally:
+            _RUN_LOCK_COUNTS[lock_key] -= 1
+            if _RUN_LOCK_COUNTS[lock_key] == 0:
+                _RUN_LOCK_COUNTS.pop(lock_key, None)
+        return
+
     fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         if fcntl is not None:
             fcntl.flock(fd, fcntl.LOCK_EX)
+        _RUN_LOCK_COUNTS[lock_key] = 1
+        _RUN_LOCK_FDS[lock_key] = fd
         yield
     finally:
+        _RUN_LOCK_COUNTS.pop(lock_key, None)
+        _RUN_LOCK_FDS.pop(lock_key, None)
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -1055,7 +1309,58 @@ def validate_run_id(run_id: str) -> bool:
 
 
 def reconcile(record: dict[str, Any], workspace: pathlib.Path | None = None) -> dict[str, Any]:
-    """Reconciliation hook called on read (Spec §5.3, stubbed for 07.2)."""
+    """Reconciliation hook called on read (Spec §5.3, R2)."""
+    status = record.get("status")
+    if status not in ACTIVE_STATES:
+        return record
+
+    ws = workspace or (pathlib.Path(record["workspace"]) if record.get("workspace") else None)
+    sup = record.get("supervisor", {})
+    sup_pid = sup.get("pid")
+    sup_start = sup.get("start_time")
+
+    is_lost = False
+
+    if sup_pid is None:
+        started_at = record.get("started_at")
+        if started_at:
+            try:
+                started_str = started_at.replace("Z", "+00:00")
+                dt = datetime.datetime.fromisoformat(started_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                now = datetime.datetime.now(datetime.timezone.utc)
+                if (now - dt).total_seconds() > 60:
+                    is_lost = True
+            except Exception:
+                pass
+    else:
+        cur_sup_start = get_process_start_time(sup_pid)
+        if cur_sup_start is None or cur_sup_start != sup_start:
+            is_lost = True
+
+    if is_lost:
+        record["status"] = "lost"
+        record["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        agent = record.get("agent", {})
+        agent_pid = agent.get("pid")
+        agent_pgid = agent.get("pgid")
+        agent_start = agent.get("start_time")
+        if agent_pid and agent_pgid and agent_start:
+            kill_process_group(
+                pgid=agent_pgid,
+                leader_pid=agent_pid,
+                expected_leader_start_time=agent_start,
+                timeout=0.2,
+            )
+
+        if ws:
+            try:
+                save_run_record(ws, record)
+            except Exception:
+                pass
+
     return record
 
 
@@ -1145,6 +1450,8 @@ def save_run_record(workspace: pathlib.Path, record: dict[str, Any]) -> None:
                     raise ValueError(
                         f"Monotonic guard: cannot overwrite terminal status '{ex_st}' with '{new_st}'"
                     )
+                if ex_st in ("cancelled", "lost") and new_st in ("succeeded", "failed"):
+                    record["status"] = ex_st
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -1385,40 +1692,37 @@ def cmd_options(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_preview(args: argparse.Namespace) -> int:
+def validate_run_request(
+    args: argparse.Namespace,
+) -> tuple[bool, tuple[str, str] | None, dict[str, Any] | None]:
+    """Validate launch request fields and return computed plan parameters."""
     plat_err = check_platform()
     if plat_err:
-        print_error(args.json, plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)")
-        return 1
+        return False, (plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)"), None
 
     task_id = args.task
     valid_task, task_err = check_task_id(task_id)
     if not valid_task:
         reason = "initiative-tasks-not-supported" if "Initiative" in (task_err or "") else "invalid-task-id"
-        print_error(args.json, reason, task_err or "Invalid task ID")
-        return 1
+        return False, (reason, task_err or "Invalid task ID"), None
 
     ws = pathlib.Path(args.workspace or ".").resolve()
     tasks_dir = ws / "tasks"
     if not tasks_dir.is_dir():
-        print_error(args.json, "tasks-dir-not-found", f"Tasks directory not found at {tasks_dir}")
-        return 1
+        return False, ("tasks-dir-not-found", f"Tasks directory not found at {tasks_dir}"), None
 
     if discover_emergent_tasks is None:
-        print_error(args.json, "engine-missing", "tasks_engine module could not be imported")
-        return 1
+        return False, ("engine-missing", "tasks_engine module could not be imported"), None
 
     all_tasks = discover_emergent_tasks(tasks_dir)
     task = next((t for t in all_tasks if t["id"] == task_id), None)
     if not task:
-        print_error(args.json, "task-not-found", f"Task '{task_id}' not found in tasks directory")
-        return 1
+        return False, ("task-not-found", f"Task '{task_id}' not found in tasks directory"), None
 
     canonical_state = task.get("canonical_state", "open")
     mode = args.mode or get_default_mode_for_state(canonical_state)
     if not mode:
-        print_error(args.json, "no-modes-allowed", f"No run modes allowed for task in state '{canonical_state}'")
-        return 1
+        return False, ("no-modes-allowed", f"No run modes allowed for task in state '{canonical_state}'"), None
 
     all_runs = list_run_records(ws, task_id=task_id)
     has_existing_run = any(r.get("task_id") == task_id for r in all_runs)
@@ -1426,8 +1730,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
         canonical_state, mode, has_existing_run=has_existing_run
     )
     if not mode_valid:
-        print_error(args.json, "invalid-mode-for-state", mode_err or "Invalid mode for task state")
-        return 1
+        return False, ("invalid-mode-for-state", mode_err or "Invalid mode for task state"), None
 
     gpath = getattr(args, "global_config", None)
     merged_cfg, _ = resolve_config(gpath, ws)
@@ -1437,8 +1740,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
 
     target_repo, _, repo_err = resolve_target_repo(ws, task.get("paths"))
     if repo_err:
-        print_error(args.json, "multi-repo-paths", repo_err)
-        return 1
+        return False, ("multi-repo-paths", repo_err), None
     if not target_repo:
         target_repo = ws
 
@@ -1461,15 +1763,16 @@ def cmd_preview(args: argparse.Namespace) -> int:
         elif target_run_id != "none":
             matched_run = next((r for r in all_runs if r.get("run_id") == target_run_id), None)
             if not matched_run:
-                print_error(args.json, "target-run-not-found", f"Target run '{target_run_id}' not found")
-                return 1
+                return False, ("target-run-not-found", f"Target run '{target_run_id}' not found"), None
             if matched_run.get("status") != "succeeded":
-                print_error(
-                    args.json,
-                    "target-run-not-succeeded",
-                    f"Target run '{target_run_id}' status is '{matched_run.get('status')}', must be 'succeeded'",
+                return (
+                    False,
+                    (
+                        "target-run-not-succeeded",
+                        f"Target run '{target_run_id}' status is '{matched_run.get('status')}', must be 'succeeded'",
+                    ),
+                    None,
                 )
-                return 1
             target_run_tool = matched_run.get("tool")
             target_commit = matched_run.get("final_commit")
 
@@ -1487,8 +1790,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
         target_run_tool=target_run_tool,
     )
     if not tool:
-        print_error(args.json, "tool-resolution-failed", "Could not resolve a suitable tool for this request")
-        return 1
+        return False, ("tool-resolution-failed", "Could not resolve a suitable tool for this request"), None
 
     indep_valid, indep_err = check_independence_guard(
         mode=mode,
@@ -1498,15 +1800,13 @@ def cmd_preview(args: argparse.Namespace) -> int:
         allow_same_tool=args.allow_same_tool,
     )
     if not indep_valid:
-        print_error(args.json, "independence-violation", indep_err or "Independence guard violation")
-        return 1
+        return False, ("independence-violation", indep_err or "Independence guard violation"), None
 
     tool_cfg = merged_cfg.get("tools", {}).get(tool, {})
     avail, _, avail_err = check_tool_availability(tool, tool_cfg)
     if not avail:
         reason = "tool-disabled" if "disabled" in (avail_err or "") else "tool-not-installed"
-        print_error(args.json, reason, avail_err or f"Tool '{tool}' is not available")
-        return 1
+        return False, (reason, avail_err or f"Tool '{tool}' is not available"), None
 
     profile = resolve_profile(
         mode=mode,
@@ -1527,8 +1827,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
         merged_cfg=merged_cfg,
     )
     if not model:
-        print_error(args.json, "model-not-configured", f"No model configured for tool '{tool}' profile '{profile}'")
-        return 1
+        return False, ("model-not-configured", f"No model configured for tool '{tool}' profile '{profile}'"), None
 
     isolation = args.isolation or ("worktree" if mode == "execute" else "none")
 
@@ -1551,13 +1850,15 @@ def cmd_preview(args: argparse.Namespace) -> int:
     active_runs = [r for r in all_runs if r.get("status") in ACTIVE_STATES]
     task_act_valid, task_act_err = check_same_task_active(task_id, active_runs, force=args.force)
     if not task_act_valid:
-        print_error(args.json, "same-task-active", task_act_err or "Task already has an active run")
-        return 1
+        return False, ("same-task-active", task_act_err or "Task already has an active run"), None
 
     cwd_act_valid, cwd_act_err = check_same_cwd_active(cwd, isolation, active_runs)
     if not cwd_act_valid:
-        print_error(args.json, "same-cwd-active", cwd_act_err or "Working directory already has an active run with isolation 'none'")
-        return 1
+        return (
+            False,
+            ("same-cwd-active", cwd_act_err or "Working directory already has an active run with isolation 'none'"),
+            None,
+        )
 
     warnings: list[str] = []
     if mode == "verify" and args.allow_same_tool:
@@ -1573,11 +1874,16 @@ def cmd_preview(args: argparse.Namespace) -> int:
                 f"Target repository has uncommitted changes that will not be present in the worktree ({len(dirty_files)} dirty files)."
             )
 
-    headless_cfg = tool_cfg.get("headless", {})
+    headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
     if tool == "claude":
         pm = headless_cfg.get("permission_mode")
         if pm in ("bypassPermissions", "--dangerously-skip-permissions"):
             warnings.append(f"Tool 'claude' has elevated permission mode '{pm}'.")
+        ok_at, _ = check_claude_allowed_tools(headless_cfg, mode)
+        if not ok_at:
+            warnings.append(
+                f"Claude has no configured 'allowed_tools' for mode '{mode}' under [tools.claude.headless]; launch will be refused until configured."
+            )
     elif tool == "codex":
         sb = headless_cfg.get("sandbox")
         if sb in ("danger-full-access", "read-write-full"):
@@ -1624,32 +1930,579 @@ def cmd_preview(args: argparse.Namespace) -> int:
         effective_config=merged_cfg,
     )
 
-    payload = {
-        "ok": True,
+    data = {
+        "task_id": task_id,
+        "task": task,
+        "canonical_state": canonical_state,
+        "mode": mode,
+        "ws": ws,
+        "merged_cfg": merged_cfg,
+        "project_cfg": project_cfg,
+        "global_cfg": global_cfg,
+        "target_repo": target_repo,
+        "target_run_id": target_run_id,
+        "target_run_tool": target_run_tool,
+        "target_commit": target_commit,
+        "tool": tool,
+        "tool_cfg": tool_cfg,
+        "profile": profile,
+        "model": model,
+        "variant": variant,
+        "effort": effort,
+        "isolation": isolation,
+        "cwd": cwd,
+        "planned_branch": planned_branch,
+        "planned_worktree": planned_worktree,
         "prompt": prompt,
         "prompt_sha256": prompt_sha256,
+        "raw_argv": raw_argv,
         "argv_display": argv_display,
-        "cwd": cwd,
-        "planned_worktree": planned_worktree,
-        "planned_branch": planned_branch,
-        "warnings": warnings,
+        "canonical_request": canonical_request,
+        "bundle_hash": bundle_hash,
+        "repo_head": repo_head,
         "plan_hash": plan_hash,
+        "warnings": warnings,
+    }
+    return True, None, data
+
+
+def cmd_preview(args: argparse.Namespace) -> int:
+    ok, err_info, data = validate_run_request(args)
+    if not ok:
+        reason, err_msg = err_info  # type: ignore
+        print_error(args.json, reason, err_msg)
+        return 1
+
+    payload = {
+        "ok": True,
+        "prompt": data["prompt"],  # type: ignore
+        "prompt_sha256": data["prompt_sha256"],  # type: ignore
+        "argv_display": data["argv_display"],  # type: ignore
+        "cwd": data["cwd"],  # type: ignore
+        "planned_worktree": data["planned_worktree"],  # type: ignore
+        "planned_branch": data["planned_branch"],  # type: ignore
+        "warnings": data["warnings"],  # type: ignore
+        "plan_hash": data["plan_hash"],  # type: ignore
     }
 
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
-        print(f"Mode            : {mode}")
-        print(f"Tool / Profile  : {tool} / {profile}")
-        print(f"Model           : {model}")
-        print(f"Working Dir     : {cwd}")
-        print(f"Planned Branch  : {planned_branch or 'none'}")
-        print(f"Planned Worktree: {planned_worktree or 'none'}")
-        print(f"Plan Hash       : {plan_hash}")
-        if warnings:
+        print(f"Mode            : {data['mode']}")  # type: ignore
+        print(f"Tool / Profile  : {data['tool']} / {data['profile']}")  # type: ignore
+        print(f"Model           : {data['model']}")  # type: ignore
+        print(f"Working Dir     : {data['cwd']}")  # type: ignore
+        print(f"Planned Branch  : {data['planned_branch'] or 'none'}")  # type: ignore
+        print(f"Planned Worktree: {data['planned_worktree'] or 'none'}")  # type: ignore
+        print(f"Plan Hash       : {data['plan_hash']}")  # type: ignore
+        if data["warnings"]:  # type: ignore
             print("\nWarnings:")
-            for w in warnings:
+            for w in data["warnings"]:  # type: ignore
                 print(f"  [WARN] {w}")
+    return 0
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    plat_err = check_platform()
+    if plat_err:
+        print_error(args.json, plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)")
+        return 1
+
+    req_by = getattr(args, "requested_by", "cli") or "cli"
+    if req_by in ("ui", "vscode") and not getattr(args, "expect_plan_hash", None):
+        print_error(
+            args.json,
+            "missing-plan-hash",
+            "--expect-plan-hash is required when requested by ui or vscode (R1)",
+        )
+        return 1
+
+    ok, err_info, data = validate_run_request(args)
+    if not ok:
+        reason, err_msg = err_info  # type: ignore
+        print_error(args.json, reason, err_msg)
+        return 1
+
+    # Worktree isolation check (07.3 scope: execute with worktree not implemented yet)
+    if data["mode"] == "execute" and data["isolation"] != "none":  # type: ignore
+        print_error(
+            args.json,
+            "not-implemented-yet",
+            "Worktree isolation is not implemented yet in 07.3; specify --isolation none",
+        )
+        return 1
+
+    # Claude allowed_tools check (R11)
+    if data["tool"] == "claude":  # type: ignore
+        tool_cfg = data["merged_cfg"].get("tools", {}).get("claude", {})  # type: ignore
+        headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
+        ok_at, at_err = check_claude_allowed_tools(headless_cfg, data["mode"])  # type: ignore
+        if not ok_at:
+            print_error(args.json, "missing-allowed-tools", at_err or "Missing allowed_tools for Claude")
+            return 1
+
+    expect_hash = getattr(args, "expect_plan_hash", None)
+    if expect_hash:
+        if expect_hash.strip().lower() != data["plan_hash"].lower():  # type: ignore
+            print_error(
+                args.json,
+                "plan-hash-mismatch",
+                f"Plan hash mismatch: expected {expect_hash}, computed {data['plan_hash']}",  # type: ignore
+            )
+            return 1
+
+    ws = data["ws"]  # type: ignore
+    task_id = data["task_id"]  # type: ignore
+
+    with run_lock(ws):
+        all_runs = list_run_records(ws, task_id=task_id)
+        active_runs = [r for r in all_runs if r.get("status") in ACTIVE_STATES]
+
+        task_act_ok, task_act_err = check_same_task_active(task_id, active_runs, force=args.force)
+        if not task_act_ok:
+            print_error(args.json, "same-task-active", task_act_err or "Task already has an active run")
+            return 1
+
+        cwd_act_ok, cwd_act_err = check_same_cwd_active(data["cwd"], data["isolation"], active_runs)  # type: ignore
+        if not cwd_act_ok:
+            print_error(
+                args.json,
+                "same-cwd-active",
+                cwd_act_err or "Working directory already has an active run with isolation 'none'",
+            )
+            return 1
+
+        ex_ok, ex_err = ensure_git_exclude(data["target_repo"])  # type: ignore
+        if not ex_ok:
+            print_error(args.json, "git-exclude-failed", ex_err or "Could not ensure .ai-orchestration/ is ignored")
+            return 1
+
+        run_id = generate_run_id(task_id, data["tool"])  # type: ignore
+        run_dir = ws / ".ai-orchestration" / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(run_dir, 0o700)
+        except OSError:
+            pass
+
+        prompt_path = run_dir / "prompt.md"
+        prompt_path.write_text(data["prompt"], encoding="utf-8")  # type: ignore
+        try:
+            os.chmod(prompt_path, 0o600)
+        except OSError:
+            pass
+
+        session_id = str(uuid.uuid4()) if data["tool"] == "claude" else None  # type: ignore
+
+        record = create_run_record(
+            run_id=run_id,
+            task_id=task_id,
+            mode=data["mode"],  # type: ignore
+            tool=data["tool"],  # type: ignore
+            profile=data["profile"],  # type: ignore
+            model=data["model"],  # type: ignore
+            variant=data["variant"],  # type: ignore
+            effort=data["effort"],  # type: ignore
+            requested_by=req_by,
+            workspace=str(ws),
+            cwd=data["cwd"],  # type: ignore
+            isolation=data["isolation"],  # type: ignore
+            task_bundle_sha256=data["bundle_hash"],  # type: ignore
+            argv_display=data["argv_display"],  # type: ignore
+            plan_hash=data["plan_hash"],  # type: ignore
+            worktree_path=data["planned_worktree"],  # type: ignore
+            branch=data["planned_branch"],  # type: ignore
+            target_run=data["target_run_id"],  # type: ignore
+            target_commit=data["target_commit"],  # type: ignore
+        )
+        if session_id:
+            record["session_id"] = session_id
+
+        save_run_record(ws, record)
+
+        sup_cmd = [
+            sys.executable,
+            str(pathlib.Path(__file__).resolve()),
+            "_supervise",
+            str(run_dir),
+        ]
+        gpath = getattr(args, "global_config", None)
+        if gpath:
+            sup_cmd.extend(["--global-config", str(gpath)])
+
+        subprocess.Popen(
+            sup_cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+
+    if args.json:
+        print(json.dumps({"ok": True, "run_id": run_id, "status": "starting", "plan_hash": data["plan_hash"]}, indent=2))  # type: ignore
+    else:
+        print(f"Run {run_id} started (status: starting).")
+    return 0
+
+
+def cmd_supervise(args: argparse.Namespace) -> int:
+    run_dir = pathlib.Path(args.run_dir).resolve()
+    run_file = run_dir / "run.json"
+    if not run_file.is_file():
+        return 1
+    try:
+        record = json.loads(run_file.read_text(encoding="utf-8"))
+    except Exception:
+        return 1
+
+    workspace = pathlib.Path(record["workspace"])
+
+    # 1. Record supervisor identity FIRST (Instruction 2)
+    my_pid = os.getpid()
+    my_start_time = get_process_start_time(my_pid)
+    record["supervisor"] = {"pid": my_pid, "start_time": my_start_time}
+    save_run_record(workspace, record)
+
+    # 2. Prepare adapter argv
+    gpath = getattr(args, "global_config", None)
+    merged_cfg, _ = resolve_config(gpath, workspace)
+    tool_cfg = merged_cfg.get("tools", {}).get(record["tool"], {})
+    headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
+
+    session_id = record.get("session_id")
+    if not session_id and record["tool"] == "claude":
+        session_id = str(uuid.uuid4())
+        record["session_id"] = session_id
+
+    prompt_path = run_dir / "prompt.md"
+    raw_argv = build_adapter_argv(
+        tool=record["tool"],
+        tool_cfg=tool_cfg,
+        mode=record["mode"],
+        cwd=record["cwd"],
+        model=record["model"],
+        variant=record.get("variant"),
+        effort=record.get("effort"),
+        session_id=session_id or "{session_id}",
+        prompt_file=str(prompt_path),
+    )
+
+    prompt_via = headless_cfg.get("prompt_via")
+    if not prompt_via:
+        if record["tool"] == "kilo" or ("{prompt_file}" in headless_cfg.get("argv", [])):
+            prompt_via = "file"
+        else:
+            prompt_via = "stdin"
+
+    expanded_argv = expand_secret_env_vars(raw_argv)
+    prompt_text = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else ""
+
+    cwd_path = pathlib.Path(record["cwd"])
+    cwd_path.mkdir(parents=True, exist_ok=True)
+
+    # 3. Spawn agent process in new process group (Instruction 2)
+    try:
+        proc = subprocess.Popen(
+            expanded_argv,
+            stdin=subprocess.PIPE if prompt_via == "stdin" else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(cwd_path),
+            start_new_session=True,
+        )
+    except Exception as e:
+        record["status"] = "failed"
+        record["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        record["exit_code"] = 1
+        with open(run_dir / "stderr.log", "a", encoding="utf-8") as f:
+            f.write(f"Failed to spawn agent: {e}\n")
+        save_run_record(workspace, record)
+        return 1
+
+    # 4. Record agent identity and set status to running (Instruction 2)
+    agent_pid = proc.pid
+    try:
+        agent_pgid = os.getpgid(proc.pid)
+    except OSError:
+        agent_pgid = proc.pid
+    agent_start_time = get_process_start_time(agent_pid)
+    record["agent"] = {"pid": agent_pid, "pgid": agent_pgid, "start_time": agent_start_time}
+    record["status"] = "running"
+    save_run_record(workspace, record)
+
+    # 5. Write prompt to stdin if prompt_via == "stdin"
+    if prompt_via == "stdin" and proc.stdin:
+        try:
+            proc.stdin.write(prompt_text.encode("utf-8"))
+            proc.stdin.flush()
+            proc.stdin.close()
+        except Exception:
+            pass
+
+    # 6. Execute mode: transition task to "in progress" (Instruction 2)
+    if record.get("mode") == "execute":
+        try:
+            tasks_dir = workspace / "tasks"
+            if tasks_dir.is_dir() and discover_emergent_tasks and transition_task:
+                all_tasks = discover_emergent_tasks(tasks_dir)
+                t = next((x for x in all_tasks if x["id"] == record["task_id"]), None)
+                if t and t.get("canonical_state") in ("open", "bounced"):
+                    ok, trans_res = transition_task(
+                        tasks_dir=tasks_dir,
+                        task_id=record["task_id"],
+                        new_state="in progress",
+                        actor=record.get("tool"),
+                    )
+                    if not ok:
+                        record["task_transition_error"] = trans_res.get("error") or str(trans_res)
+                        save_run_record(workspace, record)
+        except Exception as e:
+            record["task_transition_error"] = str(e)
+            save_run_record(workspace, record)
+
+    # 7. Stream stdout and stderr
+    stderr_log = run_dir / "stderr.log"
+
+    def stream_stderr():
+        try:
+            with open(stderr_log, "ab", buffering=0) as f:
+                try:
+                    os.chmod(stderr_log, 0o600)
+                except OSError:
+                    pass
+                while True:
+                    chunk = proc.stderr.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        except Exception:
+            pass
+
+    t_err = threading.Thread(target=stream_stderr, daemon=True)
+    t_err.start()
+
+    max_chunk_size = DEFAULT_LOG_CHUNK_SIZE
+    chunk_manifest_path = run_dir / "chunks.json"
+    manifest: list[dict[str, Any]] = []
+
+    def stream_stdout():
+        chunk_idx = 0
+        current_offset = 0
+        chunk_start_offset = 0
+        cur_fn = f"events.{chunk_idx:03d}.jsonl"
+        cur_path = run_dir / cur_fn
+        cur_file = open(cur_path, "ab", buffering=0)
+        try:
+            os.chmod(cur_path, 0o600)
+        except OSError:
+            pass
+        chunk_written = 0
+
+        def rotate():
+            nonlocal chunk_idx, current_offset, chunk_start_offset, cur_fn, cur_path, cur_file, chunk_written
+            cur_file.close()
+            manifest.append({
+                "chunk": chunk_idx,
+                "file": cur_fn,
+                "start_offset": chunk_start_offset,
+                "end_offset": current_offset,
+            })
+            chunk_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+            chunk_idx += 1
+            chunk_start_offset = current_offset
+            chunk_written = 0
+            cur_fn = f"events.{chunk_idx:03d}.jsonl"
+            cur_path = run_dir / cur_fn
+            cur_file = open(cur_path, "ab", buffering=0)
+            try:
+                os.chmod(cur_path, 0o600)
+            except OSError:
+                pass
+
+        try:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+
+                if chunk_written > 0 and (chunk_written + len(line) > max_chunk_size):
+                    rotate()
+
+                cur_file.write(line)
+                chunk_written += len(line)
+                current_offset += len(line)
+
+            cur_file.close()
+            manifest.append({
+                "chunk": chunk_idx,
+                "file": cur_fn,
+                "start_offset": chunk_start_offset,
+                "end_offset": current_offset,
+            })
+            chunk_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        except Exception:
+            if cur_file:
+                cur_file.close()
+
+    t_out = threading.Thread(target=stream_stdout, daemon=True)
+    t_out.start()
+
+    # Wait for process exit
+    exit_code = proc.wait()
+    t_out.join(timeout=5.0)
+    t_err.join(timeout=5.0)
+
+    # 8. Completion handling
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    cur_record = load_run_record(workspace, record["run_id"])
+    if cur_record and cur_record.get("status") in TERMINAL_STATES:
+        final_status = cur_record["status"]
+    else:
+        final_status = "succeeded" if exit_code == 0 else "failed"
+
+    record["status"] = final_status
+    record["exit_code"] = exit_code
+    record["ended_at"] = now_iso
+
+    save_run_record(workspace, record)
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    plat_err = check_platform()
+    if plat_err:
+        print_error(args.json, plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)")
+        return 1
+
+    run_id = args.run_id
+    if not validate_run_id(run_id):
+        print_error(args.json, "invalid-run-id", f"Invalid run_id format '{run_id}'")
+        return 1
+
+    ws = pathlib.Path(args.workspace or ".").resolve()
+    run_dir = ws / ".ai-orchestration" / "runs" / run_id
+    if not run_dir.is_dir():
+        print_error(args.json, "not-found", f"Run '{run_id}' not found")
+        return 1
+
+    since_offset = getattr(args, "since_offset", 0) or 0
+    first_avail, next_offset, data_bytes = read_log_chunks(run_dir, since_offset=since_offset)
+
+    tail_n = getattr(args, "tail", None)
+
+    if getattr(args, "raw", False):
+        raw_text = data_bytes.decode("utf-8", errors="replace")
+        raw_lines = raw_text.splitlines()
+        if tail_n is not None and tail_n > 0:
+            raw_lines = raw_lines[-tail_n:]
+        final_raw = "\n".join(raw_lines)
+        if args.json:
+            print(json.dumps({
+                "ok": True,
+                "run_id": run_id,
+                "first_available_offset": first_avail,
+                "next_offset": next_offset,
+                "raw": final_raw,
+            }, indent=2))
+        else:
+            if final_raw:
+                print(final_raw)
+        return 0
+
+    events = parse_log_events(data_bytes)
+    if tail_n is not None and tail_n > 0:
+        events = events[-tail_n:]
+
+    if args.json:
+        print(json.dumps({
+            "ok": True,
+            "run_id": run_id,
+            "first_available_offset": first_avail,
+            "next_offset": next_offset,
+            "events": events,
+        }, indent=2))
+    else:
+        for evt in events:
+            if "text" in evt:
+                print(evt["text"])
+            elif "tool_call" in evt:
+                print(f"[TOOL] {evt['tool_call']}")
+            elif "error" in evt:
+                print(f"[ERROR] {evt['error']}")
+            else:
+                print(json.dumps(evt.get("raw", evt)))
+    return 0
+
+
+def cmd_cancel(args: argparse.Namespace) -> int:
+    plat_err = check_platform()
+    if plat_err:
+        print_error(args.json, plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)")
+        return 1
+
+    run_id = args.run_id
+    if not validate_run_id(run_id):
+        print_error(args.json, "invalid-run-id", f"Invalid run_id format '{run_id}'")
+        return 1
+
+    ws = pathlib.Path(args.workspace or ".").resolve()
+    with run_lock(ws):
+        run_file = ws / ".ai-orchestration" / "runs" / run_id / "run.json"
+        if not run_file.is_file():
+            print_error(args.json, "not-found", f"Run '{run_id}' not found")
+            return 1
+
+        try:
+            record = json.loads(run_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            print_error(args.json, "record-corrupt", f"Failed to load run record: {e}")
+            return 1
+
+        status = record.get("status")
+        if status in TERMINAL_STATES:
+            if status == "cancelled":
+                if args.json:
+                    print(json.dumps({"ok": True, "run_id": run_id, "status": "cancelled", "message": "Run is already cancelled"}, indent=2))
+                else:
+                    print(f"Run {run_id} is already cancelled.")
+                return 0
+            else:
+                print_error(args.json, "run-terminal", f"Cannot cancel run in terminal state '{status}'")
+                return 1
+
+        record["status"] = "cancelled"
+        record["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        save_run_record(ws, record)
+
+    # Outside the flock, kill process group
+    agent = record.get("agent", {})
+    agent_pid = agent.get("pid")
+    agent_pgid = agent.get("pgid")
+    agent_start = agent.get("start_time")
+    if agent_pid and agent_pgid and agent_start:
+        kill_process_group(
+            pgid=agent_pgid,
+            leader_pid=agent_pid,
+            expected_leader_start_time=agent_start,
+            timeout=10.0,
+        )
+
+    # Also signal supervisor if running
+    sup = record.get("supervisor", {})
+    sup_pid = sup.get("pid")
+    sup_start = sup.get("start_time")
+    if sup_pid and sup_start and is_process_alive(sup_pid, sup_start):
+        try:
+            os.kill(sup_pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    if args.json:
+        print(json.dumps({"ok": True, "run_id": run_id, "status": "cancelled"}, indent=2))
+    else:
+        print(f"Run {run_id} cancelled.")
     return 0
 
 
@@ -1750,6 +2603,53 @@ def build_parser() -> argparse.ArgumentParser:
     p_prev.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_prev.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_prev.set_defaults(func=cmd_preview)
+
+    # start
+    p_start = sub.add_parser("start", help="Start agent run with supervisor")
+    p_start.add_argument("--task", required=True, help="Task ID (e.g. T007)")
+    p_start.add_argument("--mode", choices=("orchestrate", "execute", "verify"), default=None)
+    p_start.add_argument("--tool", default=None, help="Target tool (kilo, claude, codex)")
+    p_start.add_argument("--profile", default=None, help="Role profile")
+    p_start.add_argument("--model", default=None, help="Model identifier")
+    p_start.add_argument("--variant", default=None, help="Reasoning variant")
+    p_start.add_argument("--effort", default=None, help="Reasoning effort")
+    p_start.add_argument("--isolation", choices=("worktree", "none"), default=None)
+    p_start.add_argument("--target-run", default=None, help="Target execute run ID for verify mode (or 'none')")
+    p_start.add_argument("--instructions", default=None, help="Additional prompt instructions")
+    p_start.add_argument("--allow-same-tool", action="store_true", help="Allow same tool for verify (downgrades to independent-session)")
+    p_start.add_argument("--allow-dirty-base", action="store_true", help="Proceed from dirty HEAD with warning")
+    p_start.add_argument("--force", action="store_true", help="Bypass same-task active run guard")
+    p_start.add_argument("--expect-plan-hash", default=None, help="Required for ui/vscode, optional for cli")
+    p_start.add_argument("--requested-by", choices=("ui", "vscode", "cli"), default="cli", help="Caller origin")
+    p_start.add_argument("--workspace", default=None, help="Project workspace root")
+    p_start.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+    p_start.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_start.set_defaults(func=cmd_start)
+
+    # logs
+    p_logs = sub.add_parser("logs", help="Display run logs with logical offsets across chunks")
+    p_logs.add_argument("run_id", help="Run ID")
+    p_logs.add_argument("--tail", type=int, default=None, help="Show last N lines/events")
+    p_logs.add_argument("--since-offset", type=int, default=0, help="Logical byte offset to start reading from")
+    p_logs.add_argument("--raw", action="store_true", help="Output raw stream instead of parsed summary")
+    p_logs.add_argument("--workspace", default=None, help="Project workspace root")
+    p_logs.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+    p_logs.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_logs.set_defaults(func=cmd_logs)
+
+    # cancel
+    p_cancel = sub.add_parser("cancel", help="Cancel active run by terminating process group")
+    p_cancel.add_argument("run_id", help="Run ID")
+    p_cancel.add_argument("--workspace", default=None, help="Project workspace root")
+    p_cancel.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+    p_cancel.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_cancel.set_defaults(func=cmd_cancel)
+
+    # _supervise (internal)
+    p_sup = sub.add_parser("_supervise", help="Internal runner supervisor")
+    p_sup.add_argument("run_dir", help="Path to run directory")
+    p_sup.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+    p_sup.set_defaults(func=cmd_supervise)
 
     # list
     p_list = sub.add_parser("list", help="List agent runs after reconciliation")
