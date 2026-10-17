@@ -11,6 +11,10 @@ agent-manager.json
 ### ai-orchestration runtime ###
 .ai-orch.lock
 .ai-orchestration/
+.mcp.json*
+.claude/
+.codex/
+.kilo/
 
 ### Local Environment Overrides ###
 *.local

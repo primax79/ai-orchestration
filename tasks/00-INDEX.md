@@ -42,7 +42,6 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 <!-- ai-orch:generated next-up -->
 | Id | Priority | Task | Executor | Handoff |
 | --- | --- | --- | --- | --- |
-| T008 | P1 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](server-and-bindings/T008-claude-mcp-phase1-spike.md) | claude | `Read tasks/server-and-bindings/T008-claude-mcp-phase1-spike.md and ../claude-mcp/SPEC.md, run the Phase 1 spike, record findings, and update the task and the registry.` |
 | T016 | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | claude | `Read tasks/env-doctor/T016-doctor-findings-study.md and produce the report in tasks/env-doctor/notes/.` |
 <!-- /ai-orch:generated next-up -->
 
@@ -62,7 +61,6 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T008 | P1 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](server-and-bindings/T008-claude-mcp-phase1-spike.md) | open | claude | - |
 | T012 | P2 | [kilo-mcp: detect kilo run processes that hang after finishing](server-and-bindings/T012-kilo-run-hangs-after-completion.md) | verified | kilo | - |
 
 ### micro
@@ -110,6 +108,7 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 | T014 | [One backend test failed once in eleven runs](done/micro/T014-flaky-backend-test.md) | done | 2026-10-17 |
 | T006 | [Extract incident narratives to references/incidents.md (progressive disclosure)](done/methodology/T006-incidents-progressive-disclosure.md) | done | 2026-10-17 |
 | T007 | [Structured verification gate tool in kilo-mcp](done/server-and-bindings/T007-verification-gate-tool.md) | done | 2026-10-17 |
+| T008 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](done/server-and-bindings/T008-claude-mcp-phase1-spike.md) | done | 2026-10-17 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

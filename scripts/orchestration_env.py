@@ -38,6 +38,7 @@ SCOPES = ("global", "project")
 REMOTE_REPOS = {
     "ai-orchestration": "https://github.com/primax79/ai-orchestration.git",
     "kilo-mcp": "https://github.com/primax79/kilo-mcp.git",
+    "claude-mcp": "https://github.com/primax79/claude-mcp.git",
 }
 
 OBSOLETE_SKILL_RENAMES = {

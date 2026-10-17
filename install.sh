@@ -67,9 +67,10 @@ python3 "${ORCH_ROOT}/bin/ai-orch" env install-skills \
   ${LINK_MODE}
 
 if [[ "${WITH_MCP}" -eq 1 ]]; then
-  echo "==> [3/3] Fetching and registering MCP servers (kilo-mcp, codex-mcp)..."
-  python3 "${ORCH_ROOT}/bin/ai-orch" env fetch-repos --repos ai-orchestration kilo-mcp
+  echo "==> [3/3] Fetching and registering MCP servers (kilo-mcp, claude-mcp, codex-mcp)..."
+  python3 "${ORCH_ROOT}/bin/ai-orch" env fetch-repos --repos ai-orchestration kilo-mcp claude-mcp
   python3 "${ORCH_ROOT}/bin/ai-orch" env register-mcp kilo-mcp --assistants claude codex --scope "${SCOPE}" --provision-venv
+  python3 "${ORCH_ROOT}/bin/ai-orch" env register-mcp claude-mcp --assistants kilo codex --scope "${SCOPE}" --provision-venv
   if command -v codex >/dev/null 2>&1; then
     python3 "${ORCH_ROOT}/bin/ai-orch" env register-mcp codex-mcp --assistants claude kilo --scope "${SCOPE}"
   fi

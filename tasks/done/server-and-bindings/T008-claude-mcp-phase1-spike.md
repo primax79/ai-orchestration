@@ -5,14 +5,15 @@
 - category: server-and-bindings
 - priority: P1
 - priority-reason: Unblocks implementation of claude-mcp as second Executor binding (SPEC.md and 01-claude-mcp-server/plan.md ready)
-- next-up: yes
-- state: open
+- next-up: no
+- state: done
 - executor: claude
 - depends-on: -
 - decider: -
 - sources: ../claude-mcp/SPEC.md (§3, §5), docs/02-gap-analysis-and-evolution-roadmap.md
 - paths: ../claude-mcp/
 - handoff: Read tasks/server-and-bindings/T008-claude-mcp-phase1-spike.md and ../claude-mcp/SPEC.md, run the Phase 1 spike, record findings, and update the task and the registry.
+- verifier: orchestrator:deep-reasoning
 
 ## Goal
 
