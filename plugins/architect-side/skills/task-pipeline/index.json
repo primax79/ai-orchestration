@@ -23,6 +23,9 @@
         "scripts/fixtures/index-regression/tooling/T010-local-skill-copies.md",
         "scripts/fixtures/index-regression/tooling/T012-swissknife-cli-capabilities.md",
         "scripts/fixtures/index-regression/tooling/T013-ai-orchestration-project.md",
+        "scripts/fixtures/real-plans/06-plan.md",
+        "scripts/fixtures/real-plans/07-plan.md",
+        "scripts/fixtures/real-plans/11-plan.md",
         "scripts/tasks_engine.py",
         "scripts/test_tasks_engine.py"
       ]

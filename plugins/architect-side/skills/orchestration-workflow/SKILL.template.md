@@ -91,6 +91,11 @@ in doubt, delegate rather than fix it yourself.
     the activation command instead of running it**, and to prove it didn't by
     showing `git config --get <key>` returning empty. Activation is the user's
     call, not the task's.
+  - **Track Branch and Physical Worktree Path on the Task:** When dispatching a
+    task to an isolated worktree, record `- branch: <branch-name>` and
+    `- worktree: <physical-worktree-path>` on the task file (or in its `PROGRESS.md`).
+    This guarantees that the Architect, the UI dashboard, and the reviewer always know
+    the exact physical checkout path and git ref without searching.
 - **Phase 3 - Delegation:** {{BLOCK:phase3_body}}dispatch implementation work through the
   delegation channel. Prefer non-blocking delegation that returns
   immediately with a task handle - never block the conversation waiting on
@@ -127,16 +132,11 @@ in doubt, delegate rather than fix it yourself.
     run is abandoned (`discarded`) rather than resumed, **clean up its
     isolated worktree and branch immediately** (`git worktree remove <path>`)
     so orphan worktrees do not accumulate.
-  - **Don't go idle after dispatching - check back proactively, don't wait
-    to be asked.** Non-blocking delegation returning a task handle
-    immediately means control comes back to you well before the work is
-    done; if you just end your turn there, nothing polls the task until
-    the user happens to ask "how's it going?" (see `references/incidents.md` #5).
-    If your host exposes a deterministic completion-wait call or a
-    self-scheduled wakeup mechanism, use it to await or check progress
-    after a delay sized to the task. If no such mechanism exists in your host,
-    at minimum say explicitly in your response that the task is still
-    running and how the user can check on it themselves.{{/BLOCK}}{{ADD:phase4_extra}}
+  - **Detect Delivery via On-Branch Task Annotation:** The Executor contract
+    mandates updating the task file to `- state: delivered` with
+    `verification pending: <command>` directly on its worktree branch before committing.
+    When the branch updates or the task report arrives, immediately transition the task
+    to `delivered` in the main registry and proceed to Phase 5 Independent Verification.{{/BLOCK}}{{ADD:phase4_extra}}
 - **Phase 5 - Verification & Review: NEVER trust the Final Report alone.**
   {{BLOCK:phase5_body}}Inspect the actual resulting diff/workspace status, then actually
   **execute** what was built - reading the report or the diff is not
