@@ -74,14 +74,14 @@
 
 ### 09.8 - UI backend: task attachment endpoints and per-class serving
 
-- **Status:** `in progress` (2026-10-17; claude; kilo, ai-orchestration-ui worktree task/09.8-task-attachments) · **Profile:** `bulk-execution` · **Depends on:** 09.7, 09.2 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `delivered` (2026-10-17; claude; merged (rebased onto 09.5, conflicts resolved: both route sets kept, moved helpers deduplicated); 47 backend tests; per-class headers: image inline, text/plain utf-8, pdf attachment, nosniff) · **Profile:** `bulk-execution` · **Depends on:** 09.7, 09.2 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Spec §7: `POST/GET/DELETE /api/tasks/{id}/attachments[/{name}]` mirroring the inbox ones; serving by class (inline image, `text/plain; charset=utf-8`, PDF as attachment), `nosniff` on all; inbox upload accepts the new classes (the engine decides).
 - **Verification:** tests for auth, each class's headers, traversal refusal, 409 on a stale hash.
 
 ### 09.9 - Frontend: attachments by class in the note editor and the task detail
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 09.3, 09.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `in progress` (2026-10-17; claude; kilo, ai-orchestration-ui worktree task/09.9-attachments-ui) · **Profile:** `bulk-execution` · **Depends on:** 09.3, 09.8 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`
 - **Goal:** Spec §7 UI: thumbnails, text viewer, PDF download chip; paste/drop/picker in the task detail too.
 - **Verification:** Playwright on a scratch workspace: attach a `.log` and a `.pdf` to a note and to a task, open the text viewer, convert the note and see the attachments on the new task.
