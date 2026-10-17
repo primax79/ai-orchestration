@@ -3151,3 +3151,29 @@ def test_inbox_resolve_rollback_on_failure(tmp_path: pathlib.Path, monkeypatch: 
     assert orig_note_file.read_text(encoding="utf-8") == orig_note_content
 
 
+
+
+def test_plan_format_warnings_flag_non_canonical_task_items(tmp_path: pathlib.Path) -> None:
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        "# Plan\n\n## Tasks\n\n"
+        "### 05.1 - Canonical task\n"
+        "### 05.12 - Canonical two-digit task\n"
+        "### 05.2a - Letter suffix is not an id\n"
+        "### 05.3 Missing separator\n"
+        "- **T1 — Bullet task**: text\n"
+        "| **T2** | **Table task** | x |\n"
+        "#### T3 - Heading with T id\n"
+        "```\n- **T9 — inside a fence is ignored**\n```\n",
+        encoding="utf-8",
+    )
+    warnings = te.plan_format_warnings(plan, "05-x/plan.md")
+    assert len(warnings) == 1
+    w = warnings[0]
+    assert "2 `NN.T` heading without ' - ' separator" in w
+    assert "1 bullet task `T<n>`" in w
+    assert "1 table row task `T<n>`" in w
+    assert "1 heading task `T<n>`" in w
+
+    plan.write_text("### 05.1 - Fine\n### 05.10 — Em dash is accepted\n", encoding="utf-8")
+    assert te.plan_format_warnings(plan, "05-x/plan.md") == []

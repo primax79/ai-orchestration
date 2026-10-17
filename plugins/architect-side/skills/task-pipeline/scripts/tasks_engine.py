@@ -1163,6 +1163,43 @@ def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
 # Validation
 # ---------------------------------------------------------------------------
 
+# Non-canonical task items in a plan: bullets/headings/table rows with T<n> ids, or
+# NN.T headings without the " - " separator. Canonical form: "### NN.T - <title>".
+_LEGACY_PLAN_ITEM_RES = (
+    ("bullet task `T<n>`", re.compile(r"^\s*[-*]\s+\*{0,2}T\d+[a-z]?\b")),
+    ("table row task `T<n>`", re.compile(r"^\|\s*\*{0,2}T\d+[a-z]?\*{0,2}\s*\|")),
+    ("heading task `T<n>`", re.compile(r"^#{2,4}\s+T\d+[a-z]?\b")),
+    ("`NN.T` heading without ' - ' separator", re.compile(r"^#{2,4}\s+\d{2,}\.\d+(?!\d)(?!\s+[\u2014\u2013-]\s)")),
+)
+
+
+def plan_format_warnings(plan_path: pathlib.Path, rel: str) -> list[str]:
+    """Warnings for task items the engine cannot see as canonical `### NN.T - title` blocks."""
+    try:
+        text = plan_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    counts: dict[str, int] = {}
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        for label, rx in _LEGACY_PLAN_ITEM_RES:
+            if rx.match(line):
+                counts[label] = counts.get(label, 0) + 1
+                break
+    if not counts:
+        return []
+    found = ", ".join(f"{n} {label}" for label, n in counts.items())
+    return [
+        f"{rel}: non-canonical task items ({found}); plan tasks must be `### NN.T - <title>` blocks "
+        "with a `- **Status:**` line (task-pipeline: 'Normalizing existing tasks')."
+    ]
+
+
 def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -1177,6 +1214,9 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
         known_task_ids.add(init["id"])
         for t in init.get("tasks", []):
             known_task_ids.add(t["id"])
+        rel_plan = init.get("rel_path")
+        if rel_plan and rel_plan.endswith("plan.md"):
+            warnings.extend(plan_format_warnings(tasks_dir / rel_plan, rel_plan))
 
     for task in emergent:
         tid = task["id"]

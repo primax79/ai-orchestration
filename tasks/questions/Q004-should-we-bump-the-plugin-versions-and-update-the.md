@@ -26,7 +26,4 @@ Claude runs architect-side@ai-orchestration 0.3.0 and architect-side@kilo-mcp 0.
 - choice: A
 - answered-by: owner
 - answered: 2026-10-17
-
-## Applied
-
-- 2026-10-17: initiative 06 closed (06.9 live check rides on this install). Released ai-orchestration architect-side 0.4.0 / shared 0.2.0 / executor-side 0.1.1 and kilo-mcp architect-side 0.2.3 / executor-side 0.1.1; pushed; Claude plugins updated; VS Code extension 0.2.0 reinstalled. From now on significant verified features are released without asking (owner, chat 2026-10-17).
+- text: Applied 2026-10-17: initiative 06 closed (06.9 live check rides on this install). Released ai-orchestration architect-side 0.4.0 / shared 0.2.0 / executor-side 0.1.1 and kilo-mcp architect-side 0.2.3 / executor-side 0.1.1; pushed; Claude plugins updated; VS Code extension 0.2.0 reinstalled. From now on significant verified features are released without asking (owner, chat 2026-10-17).

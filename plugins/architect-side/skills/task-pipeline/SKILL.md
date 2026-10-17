@@ -15,6 +15,13 @@ description: "Author and maintain a durable, resumable development pipeline as a
 | **Companion Scripts** | `scripts/tasks_engine.py`, `bin/ai-orch` |
 | **Related Skills** | `orchestration-workflow`, `task-spec-authoring`, `orchestration-setup` |
 
+### Format is not optional (every create or edit)
+
+- **Plan tasks** are blocks `### NN.T - <title>` (number, space, hyphen or dash, space, title), each followed by `- **Status:** \`<state>\` · ...`. Never bullets (`- **T1 — ...**`), never table rows, never `T<n>` ids inside a plan (`T###` belongs to emergent tasks), never letter suffixes (`12.2a`: use children `12.2.1`).
+- **Emergent tasks** are created with `ai-orch tasks new ...` (or `--from-note N###`), not by hand-writing a header from memory.
+- **After every change under `tasks/`** run `ai-orch tasks validate`: zero errors and no "non-canonical task items" warning for the files you touched, then `ai-orch tasks sync-index --check`. A change that leaves either is not finished.
+- **Found a project in an older format?** Follow "Normalizing existing tasks" below before adding to it.
+
 ## Purpose
 
 Produce a durable, resumable home for development work too large for one
