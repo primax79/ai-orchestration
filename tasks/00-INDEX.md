@@ -16,7 +16,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](06-control-plane-safety/plan.md) | in progress (done: 06.1–06.8, 06.10; 06.9 delivered, live VS Code check pending) | 05 | L |
 | 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | in progress (done: 07.1–07.4, 07.6, 07.10; next: 07.7, 11.2) | 05, 06 | L |
 | 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1–08.4; 08.5 delivered, live VS Code check pending; next: 08.6) | 06 | M |
-| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1; next: 09.2) | 06 (07 for agent triage) | M |
+| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1, 09.2; next: 09.3) | 06 (07 for agent triage) | M |
 | 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | open | 06, 09.1 | S |
 | 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | open | 06, 09.1 | M |
 
@@ -70,6 +70,7 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
+| T014 | P2 | [One backend test failed once in eleven runs](micro/T014-flaky-backend-test.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting

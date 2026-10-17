@@ -18,7 +18,7 @@
 
 ### 09.2 - UI backend: inbox endpoints with authenticated uploads
 
-- **Status:** `open` · **Profile:** `bulk-execution` · **Depends on:** 09.1, 06.7 (backend lane) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 09.1, 06.7 (backend lane) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Spec §5 "Safety", plus thin endpoints over `ai-orch inbox`: list / show / add / edit / attach (multipart, streamed to a temp file, then `inbox attach`) / detach / resolve / discard / reopen / serve attachment.
 - **Verification:**
