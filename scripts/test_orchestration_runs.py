@@ -68,6 +68,30 @@ BIN_AI_ORCH = pathlib.Path(__file__).resolve().parent.parent / "bin" / "ai-orch"
 STUB_AGENT = pathlib.Path(__file__).resolve().parent / "fixtures" / "runs" / "stub_agent.py"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_agent_clis(tmp_path_factory, monkeypatch):
+    """Tests must never reach the real kilo/claude/codex CLIs (they call real models).
+
+    Fake executables that fail loudly shadow them on PATH for every test; a test
+    that needs an agent configures `[tools.<t>.headless] argv` with STUB_AGENT.
+    """
+    fake_bin = tmp_path_factory.mktemp("fake-agent-clis")
+    for name in ("kilo", "claude", "codex"):
+        exe = fake_bin / name
+        # Availability probes (--version, `kilo models`) answer; anything that would run an agent fails.
+        exe.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            f'  --version) echo "{name} 0.0.0-test-fake"; exit 0 ;;\n'
+            '  models) echo "google/gemini-3.8-flash"; exit 0 ;;\n'
+            "esac\n"
+            f"echo 'REAL {name} CLI CALLED FROM A TEST: configure a stub argv' >&2\n"
+            "exit 97\n"
+        )
+        exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
 def compute_tree_hash(root: pathlib.Path) -> str:
     """Compute sha256 over all relative file paths and file contents in root."""
     hasher = hashlib.sha256()
@@ -1380,6 +1404,14 @@ def test_log_rotation_and_offsets(sample_workspace: pathlib.Path, monkeypatch):
 
 
 def test_expect_plan_hash_mismatch_and_requested_by(sample_workspace: pathlib.Path):
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    proj_cfg.write_text(
+        proj_cfg.read_text(encoding="utf-8")
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--sleep", "30"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "stub agent"], cwd=str(sample_workspace), check=True, capture_output=True)
     cmd_prev = [
         str(BIN_AI_ORCH),
         "run",
@@ -1790,6 +1822,14 @@ def wait_for_terminal(ws: pathlib.Path, run_id: str, timeout: float = 10.0) -> d
 
 
 def test_dirty_repo_refusal_and_allow_dirty_base(sample_workspace: pathlib.Path):
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    proj_cfg.write_text(
+        proj_cfg.read_text(encoding="utf-8")
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--exit-code", "0"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "stub agent"], cwd=str(sample_workspace), check=True, capture_output=True)
     dirty_file = sample_workspace / "dirty_base.txt"
     dirty_file.write_text("uncommitted dirty file")
 
