@@ -6,7 +6,7 @@
 
 ### 12.1 - Headless resumption facts (merged into 07.5)
 
-- **Status:** `open` · **Size:** M · **Executor:** self · **Depends on:** 07.12
+- **Status:** `in progress` (2026-10-18; claude; covered by the 07.5 live capture (same subagent)) · **Size:** M · **Executor:** self · **Depends on:** 07.12
 - **Goal:** Task 07.5 (live capture with the real CLIs) also covers spec §0 and E8:
   - resume from a fresh process, after a crash, after a cancel, with an invalid session id, with two overlapping resumes, and after a cwd change;
   - normalized usage fields.

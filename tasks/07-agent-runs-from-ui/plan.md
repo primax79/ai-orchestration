@@ -72,7 +72,7 @@
 
 ### 07.5 - Live capture with the real CLIs: session ids, Final Report, verdict, continue; flag table correction
 
-- **Status:** `open` · **Size:** M · **Profile:** `deep-reasoning` · **Executor:** `self` (orchestrator: needs the real CLIs and auth) · **Depends on:** 07.4 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-18; claude; claude subagent, worktree task/07.5-live-capture, scratch repo under the worktree .tmp) · **Size:** M · **Profile:** `deep-reasoning` · **Executor:** `self` (orchestrator: needs the real CLIs and auth) · **Depends on:** 07.4 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/fixtures/runs/{claude,kilo,codex}-*.jsonl` (new), `scripts/test_orchestration_runs.py`, `tasks/specs/agent-runs-from-ui.md` (§5.7 table)
 - **Goal:** In a scratch git repo with a one-step task, do per tool:
   - one `execute`, one `--continue` and one `verify`;
@@ -167,7 +167,7 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
 
 ### 07.11 - Batch runs for microtasks
 
-- **Status:** `open` · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 10.4 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/07.11-batch-runs) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 10.4 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:** `../specs/timeline-gantt.md` §5 "Batch runs":
   - `run start --batch IDS` takes microtasks of one target repo only (refused otherwise);
