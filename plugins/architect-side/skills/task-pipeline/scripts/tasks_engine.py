@@ -153,13 +153,13 @@ ROOT_INITIATIVE_ID_RE = re.compile(r"^\d{2,}$")
 EMERGENT_ID_RE = re.compile(r"^T\d{3,}$")
 INITIATIVE_DIR_RE = re.compile(r"^(\d{2,})-(.+)$")
 HEADER_LINE_RE = re.compile(r"^-\s+([a-z][a-z0-9-]*):\s*(.*)$")
-INLINE_TASK_HEADING_RE = re.compile(r"^###\s+(\d{2,}\.\d+)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
-PLAN_TASK_DEPENDS_RE = re.compile(r"\*\*Depends on:\*\*\s*([^·]+)")
-PLAN_TASK_STATUS_RE = re.compile(r"^\s*[-*]\s+\*\*Status:\*\*\s*`([^`]+)`")
 INLINE_TASK_HEADING_RE = re.compile(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+)+)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
 INLINE_ANY_HEADING_RE = re.compile(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+)*)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
 EXPANDED_BULLET_RE = re.compile(r"^\s*[-*]\s+\*\*Expanded:\*\*\s*\[([^\]]+)\]\(([^)]+)\)", re.IGNORECASE)
-DEP_ID_RE = re.compile(r"\b((?:T\d{3,}|\d{2,})(?:\.\d+)*)\b")
+# Node ids in `Depends on` / `blocks` (spec subtasks S7, §3 "any node id"): `NN`, `NN.T[.n...]`,
+# `T###[.n...]`. A letter-suffixed id (`12.2a`) is not an id and must not match as its prefix `12`
+# (plan_format_warnings flags such headings).
+DEP_ID_RE = re.compile(r"\b((?:T\d{3,}|\d{2,})(?:\.\d+)*)(?![\w.]|\.\w)")
 NODE_TYPES: set[str] = {"initiative", "container", "leaf", "microtask"}
 INHERITED_FIELDS: tuple[str, ...] = ("executor", "priority", "profile", "repo", "paths")
 
@@ -167,7 +167,12 @@ INHERITED_FIELDS: tuple[str, ...] = ("executor", "priority", "profile", "repo", 
 def normalize_state(raw_state: str) -> str:
     """Map parameterized state strings like 'done with a caveat: self-verified only',
     'dropped: reason', '`done` (2026-10-16)', or '`in progress`' to their canonical base state."""
-    s = raw_state.strip().strip("`").strip()
+    s = raw_state.strip()
+    m_tick = re.match(r"^`([^`]+)`(?:\s*\(.*\))?\s*$", s)
+    if m_tick:
+        # '`in progress` (Kilo)', '`done` (2026-10-17; claude)': the state is the code span.
+        s = m_tick.group(1)
+    s = s.strip("`").strip()
     m_date = re.match(r"^(.+?)\s*\(\d{4}-\d{2}-\d{2}\)$", s)
     if m_date:
         s = m_date.group(1).strip().strip("`").strip()
@@ -677,33 +682,61 @@ def serialize_bullet_segments(prefix: str, segments: list[BulletSegment]) -> str
     return prefix + " · ".join(pieces)
 
 
-def parse_depends_on_field(raw_val: str) -> tuple[list[str], str]:
+def _parse_depends_on_items(raw_val: str) -> tuple[list[tuple[str, str]], str]:
+    """Split a `Depends on` value into `(id, annotation)` items and trailing free text (spec S7).
+
+    The list is ids separated by `,`; an id may carry a parenthesised note before the next comma
+    (`07.4 (same file), T012`). Whatever follows the last id (`(same file)`, ` — supervisor`,
+    `, frontend lane after 10.5`) is the free text.
+    """
     if not raw_val or raw_val.strip() == "-":
         return [], ""
     val = raw_val.strip()
-    m_list = list(DEP_ID_RE.finditer(val))
-    if not m_list:
-        return [], val
-
-    ids: list[str] = []
-    last_id_end = 0
-    for idx, m in enumerate(m_list):
-        span = m.span()
-        between = val[last_id_end:span[0]].strip(" ,\t`")
-        if idx > 0 and between and not between.startswith(","):
+    items: list[tuple[str, str]] = []
+    pos = 0
+    item_re = re.compile(r"\s*`?" + DEP_ID_RE.pattern + r"`?(\s*\([^()]*\))?")
+    # Letter-suffixed legacy ids (`12.2a`) are kept verbatim in the list but are not ids.
+    legacy_re = re.compile(r"\s*`?(\d{2,}(?:\.\d+)+[a-z])`?(\s*\([^()]*\))?(?![\w.])")
+    sep_re = re.compile(r"\s*,")
+    last_end = 0
+    while True:
+        m = item_re.match(val, pos)
+        if m:
+            items.append((m.group(1), m.group(2) or ""))
+        else:
+            m = legacy_re.match(val, pos)
+            if not m:
+                break
+            items.append(("\0" + m.group(1), m.group(2) or ""))
+        last_end = m.end()
+        sep = sep_re.match(val, last_end)
+        if not sep:
             break
-        ids.append(m.group(1))
-        last_id_end = span[1]
+        pos = sep.end()
+    if not items:
+        return [], val
+    # The note of the last id is free text (it is kept at the end on rewrite).
+    last_id, last_note = items[-1]
+    free_text = val[last_end - len(last_note):].rstrip() if last_note else val[last_end:].rstrip()
+    items[-1] = (last_id, "")
+    return items, free_text
 
-    free_text = val[last_id_end:].rstrip()
-    return ids, free_text
+
+def parse_depends_on_field(raw_val: str) -> tuple[list[str], str]:
+    items, free_text = _parse_depends_on_items(raw_val)
+    return list(dict.fromkeys(i for i, _ in items if not i.startswith("\0"))), free_text
 
 
 def update_depends_on_field(raw_val: str, new_ids: list[str]) -> str:
-    _, free_text = parse_depends_on_field(raw_val)
-    ids_str = ", ".join(new_ids) if new_ids else "-"
+    """Rewrite the id list only; per-id notes, legacy (letter-suffixed) items and the trailing
+    free text are kept byte-for-byte."""
+    items, free_text = _parse_depends_on_items(raw_val)
+    notes = {i: n for i, n in items if n}
+    legacy = [f"{i[1:]}{n}" for i, n in items if i.startswith("\0")]
+    parts = legacy + [f"{i}{notes.get(i, '')}" for i in new_ids]
+    ids_str = ", ".join(parts) if parts else "-"
     if free_text:
-        if not free_text.startswith(" ") and ids_str != "-":
+        if not free_text.startswith((" ", ",")) and ids_str != "-":
             return f"{ids_str} {free_text}"
         return f"{ids_str}{free_text}"
     return ids_str
@@ -856,7 +889,13 @@ def rewrite_block_in_file(
     new_deps: list[str] | None = None,
     new_labels: list[str] | None = None,
     expect_task_hash: str | None = None,
+    status_note: str | None = None,
 ) -> tuple[str, str]:
+    """Rewrite one `### id - title` block in place; every other byte of the file is preserved.
+
+    A new status replaces the Status value (code span kept) and its parenthesised note, which
+    becomes `status_note` when given: `- **Status:** `in progress` (2026-10-17; claude; reason)`.
+    """
     text = file_path.read_text(encoding="utf-8")
     heading_re = re.compile(
         rf"^###\s+{re.escape(task_id)}\s+[—–-]\s+.*$",
@@ -903,9 +942,12 @@ def rewrite_block_in_file(
                 for seg in segments:
                     if seg.key in ("status", "state"):
                         if "`" in seg.raw_value:
-                            seg.raw_value = f"`{new_status}`"
+                            new_raw = f"`{new_status}`"
                         else:
-                            seg.raw_value = new_status
+                            new_raw = new_status
+                        if status_note:
+                            new_raw += f" ({status_note})"
+                        seg.raw_value = new_raw
                         modified = True
 
             if new_deps is not None:
@@ -933,6 +975,17 @@ def rewrite_block_in_file(
     _atomic_write_text(file_path, new_text, encoding="utf-8")
     new_hash = hashlib.sha256(new_block_text.encode("utf-8")).hexdigest()
     return new_block_text, new_hash
+
+
+def _status_value(raw: str) -> str:
+    """The state written in a Status bullet, without its code span and parenthesised note:
+    '`in progress` (2026-10-17; kilo)' -> 'in progress'; 'done with a caveat: x' is kept whole."""
+    s = (raw or "").strip()
+    m_tick = re.match(r"^`([^`]+)`", s)
+    if m_tick:
+        return m_tick.group(1).strip()
+    m_note = re.match(r"^(.+?)\s*\([^)]*\)\s*$", s)
+    return (m_note.group(1) if m_note else s).strip() or "open"
 
 
 def parse_child_blocks(
@@ -970,16 +1023,16 @@ def parse_child_blocks(
 
     raw_lines = [sl.text for sl in scanned_lines]
 
-    for i, (start_idx, cid, ctitle, is_closed) in enumerate(block_indices):
+    for start_idx, cid, ctitle, is_closed in block_indices:
+        # A block ends at the next `###`/`##` heading of any kind (also a non-canonical one such as
+        # `### 12.2a - ...`), exactly where rewrite_block_in_file ends it: the block hash and the
+        # rewritten span must be the same bytes, and a block must not absorb the bullets below it.
         end_idx = len(scanned_lines)
-        if i + 1 < len(block_indices):
-            end_idx = block_indices[i + 1][0]
-        else:
-            for next_idx in range(start_idx + 1, len(scanned_lines)):
-                sl = scanned_lines[next_idx]
-                if not sl.is_fenced and sl.text.startswith("## "):
-                    end_idx = next_idx
-                    break
+        for next_idx in range(start_idx + 1, len(scanned_lines)):
+            sl = scanned_lines[next_idx]
+            if not sl.is_fenced and (sl.text.startswith("### ") or sl.text.startswith("## ")):
+                end_idx = next_idx
+                break
 
         block_lines = raw_lines[start_idx:end_idx]
         block_text = "\n".join(block_lines) + "\n"
@@ -1066,7 +1119,10 @@ def parse_child_blocks(
                     if seg.key:
                         own_fields[seg.key] = seg.clean_value
 
-            raw_status = own_fields.get("status") or own_fields.get("state") or "open"
+            # A leaf of a shipped initiative (done/, merged/) with no Status bullet is a legacy plan
+            # closed before blocks carried states: read it as done (the validator warns).
+            default_status = "done" if in_done else "open"
+            raw_status = _status_value(own_fields.get("status") or own_fields.get("state") or default_status)
             canon_st = normalize_state(raw_status)
             deps_val = own_fields.get("depends_on") or own_fields.get("depends") or ""
             parsed_deps, free_txt = parse_depends_on_field(deps_val)
@@ -1661,6 +1717,10 @@ def child_add(
                     "plan_hash": plan_hash,
                     "folder": str(new_folder),
                 }
+            return {
+                "ok": False,
+                "error": f"child add under the file/folder leaf {parent_id!r} is not implemented yet (blocks only).",
+            }
 
         else:
             parent_file = pathlib.Path(parent.file_path)
@@ -1978,7 +2038,11 @@ def set_labels(
                         "error": f"Cannot remove inherited label '{rl}' (inherited from {ancestor}).",
                     }
 
-        curr_own = list(node.own_fields.get("labels", []))
+        raw_own = node.own_fields.get("labels", [])
+        if isinstance(raw_own, str):
+            # Block bullets give the raw string ("runs, ui"); never split it into characters.
+            raw_own = [l.strip() for l in raw_own.split(",") if l.strip() and l.strip() != "-"]
+        curr_own = list(raw_own)
         if to_labels is not None:
             new_own = list(to_labels)
         else:
@@ -1992,10 +2056,11 @@ def set_labels(
 
         file_path = pathlib.Path(node.file_path)
         if node.block_text is not None:
+            if "labels" not in node.own_fields and "label" not in node.own_fields:
+                return {"ok": False, "error": f"Block {node_id!r} has no '**Labels:**' segment to rewrite (add one first)."}
             _, new_block_hash = rewrite_block_in_file(file_path, node_id, new_labels=new_own)
             return {"ok": True, "task_id": node_id, "labels": new_own, "task_hash": new_block_hash}
-        else:
-            return {"ok": True, "task_id": node_id, "labels": new_own}
+        return {"ok": False, "error": f"set-labels on file/folder node {node_id!r} is not implemented yet (blocks only)."}
 
 
 # ---------------------------------------------------------------------------
@@ -2441,62 +2506,178 @@ def discover_emergent_tasks(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
     return results
 
 
-def discover_initiatives(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
+def _format_depends_on(ids: list[str]) -> str:
+    """Comma-separated id list, or '-' (the `depends_on` string exposed to the UI and `tasks list`)."""
+    return ", ".join(dict.fromkeys(ids)) or "-"
+
+
+def _read_index_initiative_statuses(tasks_dir: pathlib.Path) -> dict[str, str]:
+    """Initiative states from the 00-INDEX.md Initiatives table (legacy plans without task blocks)."""
+    index_path = tasks_dir / "00-INDEX.md"
+    statuses: dict[str, str] = {}
+    if not index_path.is_file():
+        return statuses
+    for line in index_path.read_text(encoding="utf-8").splitlines():
+        m_idx = re.match(r"^\|\s*\d+\s*\|\s*(\d{2,})\s*\|\s*\[([^\]]+)\]\(([^)]+)\)\s*\|\s*([^|]+)\|", line)
+        if m_idx:
+            st_col = m_idx.group(4).lower()
+            if "not merged" in st_col or "progress" in st_col:
+                statuses[m_idx.group(1)] = "in progress"
+            elif "merged" in st_col or "done" in st_col:
+                statuses[m_idx.group(1)] = "done"
+            else:
+                statuses[m_idx.group(1)] = "open"
+    return statuses
+
+
+def _legacy_initiative_status(
+    entry: pathlib.Path, num: str, in_done: bool, scanned_lines: list[ScannedLine], index_statuses: dict[str, str]
+) -> str:
+    """Initiative state for a plan with no `### NN.T - title` blocks (nothing to derive from)."""
+    if in_done or (entry / "summary.md").is_file():
+        return "done"
+    if num in index_statuses:
+        return index_statuses[num]
+    for sline in scanned_lines:
+        if sline.is_fenced:
+            continue
+        sm = re.search(r"^\s*>\s*\*\*Status:\*\*\s*([^\n·]+)", sline.text, re.IGNORECASE)
+        if sm:
+            st_raw = sm.group(1).lower()
+            if "not merged" in st_raw or "progress" in st_raw:
+                return "in progress"
+            if "done" in st_raw or "merged" in st_raw:
+                return "done"
+            return "open"
+    return "open"
+
+
+def _legacy_plan_tasks(
+    tasks_dir: pathlib.Path, entry: pathlib.Path, num: str, text: str, scanned_lines: list[ScannedLine], init_status: str
+) -> list[dict[str, Any]]:
+    """Non-canonical plan items (table rows, `NN.T-*.md` files), read-only, for plans not yet normalized
+    (`plan_format_warnings` flags them; spec subtasks §5 / plan 11.5)."""
+    expanded_tasks = []
+    for sub in sorted(entry.glob(f"{num}.*-*.md")):
+        sub_m = re.match(rf"^({re.escape(num)}\.\d+)-(.+)\.md$", sub.name)
+        if sub_m:
+            expanded_tasks.append(
+                {"id": sub_m.group(1), "title": sub_m.group(2), "rel_path": sub.relative_to(tasks_dir).as_posix(),
+                 "state": init_status, "depends_on": "-", "legacy": True}
+            )
+    if expanded_tasks:
+        return expanded_tasks
+    table_tasks = []
+    for sline in scanned_lines:
+        if sline.is_fenced:
+            continue
+        tm = re.match(r"^\|\s*\*\*(T\w+|\d+\.\d+)\*\*\s*\|\s*(.+?)\s*\|", sline.text)
+        if not tm:
+            continue
+        sub_id, raw_content = tm.groups()
+        title_m = re.match(r"^\*\*([^*]+)\*\*[:\s]*(.*)$", raw_content.strip())
+        sub_title = title_m.group(1).strip() if title_m else raw_content.strip()
+        sub_state = init_status
+        if init_status == "in progress":
+            if re.search(rf"\b{re.escape(sub_id)}\b.*?\bverified\b", text, re.IGNORECASE):
+                sub_state = "verified"
+            elif re.search(rf"\b{re.escape(sub_id)}\b.*?\bdelivered\b", text, re.IGNORECASE):
+                sub_state = "delivered"
+            elif re.search(rf"\b{re.escape(sub_id)}\b.*?\bqueued\b", text, re.IGNORECASE):
+                sub_state = "open"
+        table_tasks.append({"id": sub_id, "title": sub_title, "state": sub_state, "depends_on": "-", "legacy": True})
+    return table_tasks
+
+
+def _node_task_dict(cn: "TaskNode") -> dict[str, Any]:
+    return {
+        "id": cn.id,
+        "title": cn.title,
+        "parent": cn.parent,
+        "depth": cn.depth,
+        "node_type": cn.node_type,
+        "state": cn.state,
+        "canonical_state": cn.canonical_state,
+        "derived_state": cn.derived_state,
+        "priority": cn.priority,
+        "priority_reason": cn.priority_reason,
+        "executor": cn.executor,
+        "handoff": cn.handoff,
+        "rel_path": cn.rel_path,
+        "file_path": cn.file_path,
+        "is_leaf": cn.is_leaf,
+        "is_container": cn.is_container,
+        "leaves_done": cn.leaves_done,
+        "leaves_total": cn.leaves_total,
+        "bundle_sha256": cn.task_hash,
+        "task_hash": cn.task_hash,
+        # String form kept for the UI / `tasks list` consumers; the id lists are alongside.
+        "depends_on": _format_depends_on(cn.depends_on),
+        "depends_on_ids": list(cn.depends_on),
+        "expanded_depends_on": cn.expanded_depends_on,
+        "fields": cn.fields,
+        "labels": cn.labels,
+        "in_closed_section": cn.in_closed_section,
+    }
+
+
+def discover_initiatives(tasks_dir: pathlib.Path, tree: dict[str, "TaskNode"] | None = None) -> list[dict[str, Any]]:
     initiatives: list[dict[str, Any]] = []
     if not tasks_dir.is_dir():
         return initiatives
 
-    tree = discover_task_tree(tasks_dir)
+    if tree is None:
+        tree = discover_task_tree(tasks_dir)
     init_nodes = [n for n in tree.values() if n.node_type == "initiative"]
     init_nodes.sort(key=lambda n: n.id)
+    index_statuses: dict[str, str] | None = None
 
     for n in init_nodes:
-        child_tasks = []
-        def _collect_tasks(cid: str):
+        child_tasks: list[dict[str, Any]] = []
+
+        def _collect_tasks(cid: str) -> None:
             if cid not in tree:
                 return
             cn = tree[cid]
-            child_tasks.append({
-                "id": cn.id,
-                "title": cn.title,
-                "state": cn.state,
-                "canonical_state": cn.canonical_state,
-                "priority": cn.priority,
-                "priority_reason": cn.priority_reason,
-                "executor": cn.executor,
-                "handoff": cn.handoff,
-                "rel_path": cn.rel_path,
-                "file_path": cn.file_path,
-                "is_leaf": cn.is_leaf,
-                "bundle_sha256": cn.task_hash,
-                "task_hash": cn.task_hash,
-                "depends_on": cn.depends_on,
-                "expanded_depends_on": cn.expanded_depends_on,
-                "fields": cn.fields,
-                "labels": cn.labels,
-            })
+            child_tasks.append(_node_task_dict(cn))
             for ccid in cn.children:
                 _collect_tasks(ccid)
 
         for cid in n.children:
             _collect_tasks(cid)
 
-        location = "done" if n.in_done else "active"
+        plan_path = pathlib.Path(n.file_path)
+        entry = plan_path.parent
+        location = "active"
+        if n.in_done:
+            location = "merged" if entry.parent.name == "merged" else "done"
+        status = n.derived_state or n.state
+        legacy = False
+        if not child_tasks:
+            # No canonical blocks: keep the pre-11.1 reading of legacy plans (nothing to derive from).
+            if index_statuses is None:
+                index_statuses = _read_index_initiative_statuses(tasks_dir)
+            text = plan_path.read_text(encoding="utf-8")
+            scanned_lines, _ = scan_markdown_blocks(text)
+            status = _legacy_initiative_status(entry, n.id, n.in_done, scanned_lines, index_statuses)
+            child_tasks = _legacy_plan_tasks(tasks_dir, entry, n.id, text, scanned_lines, status)
+            legacy = bool(child_tasks)
         initiatives.append({
             "id": n.id,
             "slug": n.slug,
-            "folder": pathlib.Path(n.file_path).parent.name,
+            "folder": entry.name,
             "title": n.title,
-            "status": n.derived_state or n.state,
+            "status": status,
+            "derived_state": n.derived_state,
             "location": location,
             "rel_path": n.rel_path,
-            "has_summary": (pathlib.Path(n.file_path).parent / "summary.md").is_file(),
+            "has_summary": (entry / "summary.md").is_file(),
             "tasks": child_tasks,
+            "legacy_tasks": legacy,
             "bundle_sha256": n.task_hash,
             "leaves_done": n.leaves_done,
             "leaves_total": n.leaves_total,
         })
-    return initiatives
     return initiatives
 
 
@@ -2594,7 +2775,10 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
 
             if node.is_leaf:
                 if not node.fields.get("status") and not node.own_fields.get("status") and not node.fields.get("state") and not node.own_fields.get("state"):
-                    errors.append(f"{rel}: leaf node {nid} missing required 'Status'.")
+                    if node.in_done:
+                        warnings.append(f"{rel}: archived leaf node {nid} has no 'Status' (read as done).")
+                    else:
+                        errors.append(f"{rel}: leaf node {nid} missing required 'Status'.")
 
         for dep in node.own_depends_on:
             if dep in tree and tree[dep].is_container and not tree[dep].children:
@@ -3128,81 +3312,6 @@ def _move_task_to_done(task_info: dict[str, Any], tasks_dir: pathlib.Path) -> pa
     return dest_root / "README.md" if task_info["is_folder"] else dest_root
 
 
-PLAN_TASK_ID_RE = re.compile(r"^\d{2,}\.\d+$")
-
-
-def _transition_plan_task(
-    tasks_dir: pathlib.Path,
-    task_id: str,
-    new_state: str,
-    actor: str | None,
-    reason: str | None,
-    expect_task_hash: str | None,
-) -> tuple[bool, dict[str, Any]] | None:
-    """Transition an initiative task `NN.T` by rewriting its `- **Status:**` line in plan.md.
-
-    Returns None when no plan defines `task_id` (the caller reports not-found).
-    Must be called with the task-write lock held.
-    """
-    for init in discover_initiatives(tasks_dir):
-        rel = init.get("rel_path") or ""
-        if not rel.endswith("plan.md"):
-            continue
-        plan_path = tasks_dir / rel
-        try:
-            text = plan_path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        lines = text.split("\n")
-        head_idx = next(
-            (i for i, ln in enumerate(lines)
-             if (m := INLINE_TASK_HEADING_RE.match(ln)) and m.group(1) == task_id),
-            None,
-        )
-        if head_idx is None:
-            continue
-        status_idx = None
-        for j in range(head_idx + 1, min(head_idx + 6, len(lines))):
-            if INLINE_TASK_HEADING_RE.match(lines[j]):
-                break
-            if PLAN_TASK_STATUS_RE.match(lines[j]):
-                status_idx = j
-                break
-        if status_idx is None:
-            return False, {"ok": False, "task_id": task_id, "error": f"{rel}: task {task_id} has no '- **Status:** `state`' line."}
-        current_hash = _file_sha256(plan_path)
-        if expect_task_hash is not None and current_hash.lower() != expect_task_hash.strip().lower():
-            return False, {"ok": False, "task_id": task_id, "error": "stale-task", "expected": expect_task_hash, "actual": current_hash}
-        old_canon = normalize_state(PLAN_TASK_STATUS_RE.match(lines[status_idx]).group(1))
-        new_canon = normalize_state(new_state)
-        if old_canon != new_canon and new_canon not in ALLOWED_TRANSITIONS.get(old_canon, set()):
-            allowed = sorted(ALLOWED_TRANSITIONS.get(old_canon, set()))
-            return False, {"ok": False, "task_id": task_id, "error": f"Illegal transition {old_canon!r} -> {new_canon!r} (allowed: {allowed})."}
-        note_parts = [datetime.date.today().isoformat()]
-        if actor:
-            note_parts.append(actor.strip())
-        if reason:
-            note_parts.append(reason.strip())
-        # Replace the state token and its parenthesised note, keep the rest of the line.
-        lines[status_idx] = re.sub(
-            r"(\*\*Status:\*\*\s*)`[^`]*`(?:\s*\([^)]*\))?",
-            lambda m: f"{m.group(1)}`{new_canon}` ({'; '.join(note_parts)})",
-            lines[status_idx],
-            count=1,
-        )
-        _atomic_write_text(plan_path, "\n".join(lines))
-        return True, {
-            "ok": True,
-            "task_id": task_id,
-            "kind": "initiative_task",
-            "file_path": str(plan_path),
-            "old_state": old_canon,
-            "new_state": new_canon,
-            "task_hash": _file_sha256(plan_path),
-        }
-    return None
-
-
 def transition_task(
     tasks_dir: pathlib.Path,
     task_id: str,
@@ -3341,11 +3450,19 @@ def transition_task(
                 elif new_canon == "done with a caveat" and ":" not in new_state and vmode == "self":
                     effective_state = "done with a caveat: self-verified only"
 
+                note_parts = [datetime.date.today().isoformat()]
+                if actor and actor.strip():
+                    note_parts.append(actor.strip())
+                if reason and reason.strip() and reason.strip() not in effective_state:
+                    note_parts.append(reason.strip())
                 file_path = pathlib.Path(node.file_path)
-                _, new_h = rewrite_block_in_file(file_path, task_id, new_status=effective_state)
+                _, new_h = rewrite_block_in_file(
+                    file_path, task_id, new_status=effective_state, status_note="; ".join(note_parts)
+                )
                 return True, {
                     "ok": True,
                     "task_id": task_id,
+                    "kind": "initiative_task" if not task_id.startswith("T") else "emergent_child",
                     "old_state": old_state,
                     "new_state": effective_state,
                     "file_path": str(file_path),
@@ -3356,10 +3473,6 @@ def transition_task(
 
             emergent = discover_emergent_tasks(tasks_dir)
             target = next((t for t in emergent if t["id"] == task_id), None)
-            if target is None and PLAN_TASK_ID_RE.match(task_id):
-                plan_res = _transition_plan_task(tasks_dir, task_id, new_state, actor, reason, expect_task_hash)
-                if plan_res is not None:
-                    return plan_res
             if target is None:
                 return False, {
                     "ok": False,
@@ -3879,6 +3992,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 init_lines.append(line)
 
         new_region_content = "\n".join(init_lines)
+        # "\n".join(splitlines()) drops the final newline: keep it (the blank line before the next `##`).
+        if region_to_search.endswith("\n"):
+            new_region_content += "\n"
         if has_init_marker:
             existing_index = _replace_generated_region(existing_index, "initiatives", new_region_content)
         else:
@@ -4258,14 +4374,100 @@ def cmd_list(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     tree = discover_task_tree(tasks_dir)
     emergent = discover_emergent_tasks(tasks_dir)
-    initiatives = discover_initiatives(tasks_dir)
+    initiatives = discover_initiatives(tasks_dir, tree)
 
-    all_tasks: list[dict[str, Any]] = [node.to_dict() for node in tree.values()]
+    tree_dicts = {nid: node.to_dict() for nid, node in tree.items()}
+    tree_keys = ("parent", "depth", "node_type", "is_leaf", "is_container", "derived_state", "leaves_done",
+                 "leaves_total", "labels", "fields", "expanded_depends_on", "children")
+
+    # Emergent roots keep their full header dict (the UI reads sources/paths/next-up...), plus tree info.
+    all_tasks: list[dict[str, Any]] = []
+    for et in emergent:
+        item = dict(et)
+        td = tree_dicts.get(et["id"])
+        if td:
+            for k in tree_keys:
+                item[k] = td[k]
+            if td["is_container"]:
+                item["state"] = td["state"]
+                item["canonical_state"] = td["canonical_state"]
+        all_tasks.append(item)
+
+    def _child_item(td: dict[str, Any], category: str, next_up: str, fallback_handoff: str) -> dict[str, Any]:
+        node = tree[td["id"]]
+        item = dict(td)
+        item.update({
+            "kind": "initiative_task" if not td["id"].startswith("T") else "emergent_child",
+            "category": category,
+            "next_up": next_up,
+            "depends_on": _format_depends_on(node.depends_on),
+            "depends_on_ids": list(node.depends_on),
+            "handoff": td.get("handoff") or fallback_handoff,
+        })
+        return item
+
+    for init in initiatives:
+        init_st = init.get("status", "open")
+        category = init.get("slug", init.get("folder", "initiative"))
+        if init.get("legacy_tasks"):
+            for sub_t in init["tasks"]:
+                sub_id = sub_t["id"]
+                if not (sub_id.startswith(init["id"]) or sub_id.startswith("T")):
+                    sub_id = f"{init['id']}.{sub_id}"
+                all_tasks.append({
+                    "kind": "initiative_task",
+                    "id": sub_id,
+                    "title": sub_t["title"],
+                    "category": category,
+                    "priority": "P1",
+                    "priority_reason": f"Subtask of Initiative #{init['id']}",
+                    "next_up": "yes" if init_st == "in progress" and sub_t.get("state") != "done" else "no",
+                    "state": sub_t.get("state", init_st),
+                    "executor": "kilo",
+                    "depends_on": "-",
+                    "handoff": f"Work on task {sub_id} in {init.get('rel_path')}",
+                    "file_path": str(tasks_dir / init["rel_path"]),
+                    "in_done": sub_t.get("state", init_st) == "done",
+                    "bundle_sha256": init.get("bundle_sha256"),
+                    "legacy": True,
+                })
+        elif init.get("tasks"):
+            for sub_t in init["tasks"]:
+                td = tree_dicts[sub_t["id"]]
+                nu = "yes" if init_st == "in progress" and td["is_leaf"] and td["canonical_state"] not in TERMINAL_STATES else "no"
+                all_tasks.append(_child_item(td, category, nu, f"Work on task {td['id']} in {td['rel_path']}"))
+        else:
+            all_tasks.append({
+                "kind": "initiative",
+                "id": f"INIT-{init['id']}",
+                "title": init["title"],
+                "category": category,
+                "priority": "P1",
+                "priority_reason": f"Initiative container #{init['id']}",
+                "next_up": "yes" if init_st == "in progress" else "no",
+                "state": init_st,
+                "executor": "architect",
+                "handoff": f"Review plan for Initiative #{init['id']} in {init.get('rel_path')}",
+                "file_path": str(tasks_dir / init["rel_path"]),
+                "in_done": init_st == "done",
+                "bundle_sha256": init.get("bundle_sha256"),
+            })
+
+    # Children of emergent roots (T014.1, ...) and microtasks not already listed.
+    listed = {t["id"] for t in all_tasks}
+    for nid, td in tree_dicts.items():
+        if nid in listed or td["node_type"] == "initiative":
+            continue
+        root = nid.split(".")[0]
+        if td["parent"] is None and td["node_type"] != "microtask":
+            continue
+        cat = tree[root].category if root in tree else ""
+        all_tasks.append(_child_item(td, cat, "no", f"Work on task {nid} in {td['rel_path']}"))
 
     payload = {
         "ok": True,
         "tasks_dir": str(tasks_dir),
-        "tree": {nid: node.to_dict() for nid, node in tree.items()},
+        "tree": tree_dicts,
         "all_tasks": all_tasks,
         "emergent_tasks": emergent,
         "initiatives": initiatives,

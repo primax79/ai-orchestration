@@ -3250,6 +3250,8 @@ def test_plan_task_depends_on_from_status_line(tmp_path: pathlib.Path) -> None:
     deps = {t["id"]: t["depends_on"] for i in te.discover_initiatives(tasks_dir) for t in i["tasks"]}
     assert deps["05.1"] == "-"
     assert deps["05.2"] == "05.1, 07.4, T012"
+
+
 # ---------------------------------------------------------------------------
 # Task 11.1: First-class Task Hierarchy (N levels) Tests
 # ---------------------------------------------------------------------------
@@ -3762,3 +3764,46 @@ def test_question_blocking_leaf_works_blocking_container_refused(tmp_path: pathl
     assert tree_after["07.4"].canonical_state == "open"
 
 
+
+
+def test_block_ends_at_non_canonical_heading_and_legacy_dep_ids(tmp_path: pathlib.Path) -> None:
+    """A block stops at any `###` heading (a letter-suffixed `### 12.2a - ...` included), so it never
+    absorbs the next item's bullets; letter-suffixed ids are not dependency ids and are kept on rewrite."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "12-sample").mkdir(parents=True)
+    plan = tasks_dir / "12-sample" / "plan.md"
+    plan.write_text(
+        "# 12 - Sample\n\n## Tasks\n\n"
+        "### 12.1 - A\n\n- **Status:** `open` · **Depends on:** 07.12\n- **Goal:** g\n\n"
+        "### 12.2a - Legacy\n\n- **Status:** `done` · **Depends on:** 10.4 (lane end)\n- **Goal:** g\n\n"
+        "### 12.3 - B\n\n- **Status:** `open` · **Depends on:** 12.2a, 07.11 (runs lane end), 12.1\n- **Goal:** g\n",
+        encoding="utf-8",
+    )
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["12.1"].depends_on == ["07.12"] and tree["12.1"].canonical_state == "open"
+    assert "12.2a" not in tree
+    assert tree["12.3"].own_depends_on == ["07.11", "12.1"]
+    assert te.update_depends_on_field("12.2a, 07.11 (runs lane end), 12.1", ["07.11", "12.1"]) == (
+        "12.2a, 07.11 (runs lane end), 12.1"
+    )
+    before = plan.read_text(encoding="utf-8")
+    ok, res = te.transition_task(tasks_dir, "12.1", "in progress", actor="claude", expect_task_hash=tree["12.1"].task_hash)
+    assert ok, res
+    after = plan.read_text(encoding="utf-8")
+    assert after != before
+    assert after.split("### 12.2a")[1] == before.split("### 12.2a")[1]
+    assert "- **Status:** `in progress` (" in after.split("### 12.2a")[0]
+
+
+def test_set_labels_on_block_keeps_label_words_and_child_add_on_file_leaf_refused(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "05-x").mkdir(parents=True)
+    plan = tasks_dir / "05-x" / "plan.md"
+    plan.write_text("# 05 - X\n\n## Tasks\n\n### 05.1 - A\n\n- **Status:** `open` · **Labels:** runs\n- **Goal:** g\n", encoding="utf-8")
+    res = te.set_labels(tasks_dir, "05.1", add_labels=["ui"])
+    assert res["ok"] and res["labels"] == ["runs", "ui"]
+    assert "- **Status:** `open` · **Labels:** runs, ui\n" in plan.read_text(encoding="utf-8")
+    ok, r = te.tasks_new_from_note(tasks_dir, None, "bugfix", "Fix", priority="P1", priority_reason="r", goal="g")
+    assert ok
+    res = te.child_add(tasks_dir, r["id"], "child")
+    assert res is not None and res["ok"] is False and "not implemented" in res["error"]
