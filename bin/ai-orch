@@ -374,6 +374,10 @@ def main() -> int:
         proc = subprocess.run([sys.executable, str(TASKS_ENGINE_SCRIPT), "questions", *rest], check=False)
         return proc.returncode
 
+    if group == "use-cases":
+        proc = subprocess.run([sys.executable, str(TASKS_ENGINE_SCRIPT), "use-cases", *rest], check=False)
+        return proc.returncode
+
     if group == "inbox":
         proc = subprocess.run([sys.executable, str(TASKS_ENGINE_SCRIPT), "inbox", *rest], check=False)
         return proc.returncode

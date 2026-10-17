@@ -98,6 +98,17 @@ two tasks can share no stated dependency yet still edit the same file),
 is safe to delegate for implementation while the others go through
 another cycle.
 
+## Writing the spec: anchor Goal and Verification to Use Cases
+
+A software system is built to satisfy user scenarios, not just compile code. Therefore, **Use Cases (`tasks/use-cases/UC###-*.md`) are the primary source of truth for both task specifications and acceptance/validation criteria**:
+
+1. **Top-Down Traceability (`Goal` & `Verification`):**
+   - The task's **`## Goal`** must explicitly state which Use Case scenario step(s) it fulfills (e.g., `Implements fuel-type query filtering for UC001 (Car Search)`).
+   - The task's **`## Verification`** section must be directly derived from the Use Case's acceptance criteria and scenario steps: concrete commands (e.g. API endpoint curls with expected JSON shapes, or automated test commands) that prove the user scenario works.
+   - The task header must include `- use-cases: UC001, UC003`.
+2. **Bottom-Up Validation:**
+   - When all tasks linked to a Use Case are delivered, the Use Case can be tested end-to-end via autonomous AI validation (`./bin/ai-orch use-cases validate UC001`). If gaps are found, emergent tasks (`T###`) are spawned to close them.
+
 ## Writing the spec: task granularity is the single biggest lever on defect rate
 
 Narrow, single-module tasks come back clean almost every time. The one

@@ -22,7 +22,7 @@ Provide end-to-end support for **Use Cases (`tasks/use-cases/UC###-<slug>.md`)**
 ## Tasks (One Task = One Commit)
 
 ### 15.1 - Engine & Data Model (`tasks/use-cases/`, Parser, Validator, `- use-cases:` Task Header)
-- **Status:** open
+- **Status:** `done` (2026-10-17)
 - **Profile:** `deep-reasoning`
 - **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `tasks/specs/task-and-state-model.md`
@@ -31,12 +31,12 @@ Provide end-to-end support for **Use Cases (`tasks/use-cases/UC###-<slug>.md`)**
   - Add `use-cases` to `OPTIONAL_EXTENSION_FIELDS` in task headers (`- use-cases: UC001, UC003`).
   - Implement `discover_use_cases(tasks_dir)` parsing `UC###` files (id, title, actor, status, priority, linked_tasks, verification_type, last_tested, last_verdict, scenario, verification_command, acceptance_criteria, validation_log).
   - Implement `create_or_update_use_case` and `record_use_case_validation`.
-  - Expose `./bin/ai-orch use-cases list | show | create | record-audit`.
+  - Expose `./bin/ai-orch use-cases list | show | create | record-validation`.
   - Write unit tests in `test_tasks_engine.py`.
-- **Verification:** `pytest test_tasks_engine.py` passes 100%.
+- **Verification:** `pytest test_tasks_engine.py` passes 100% (74 passed).
 
 ### 15.2 - Top-Down Skill Integration (`task-spec-authoring` & `task-pipeline`)
-- **Status:** open
+- **Status:** `done` (2026-10-17)
 - **Profile:** `deep-reasoning`
 - **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-spec-authoring/SKILL.md`, `plugins/architect-side/skills/task-pipeline/SKILL.md`, `plugins/architect-side/skills/task-pipeline/references/template.md`

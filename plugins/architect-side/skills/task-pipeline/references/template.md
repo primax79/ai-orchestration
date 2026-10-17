@@ -283,6 +283,46 @@ code/data, don't describe it abstractly>
 
 ---
 
+## `tasks/use-cases/UC###-<slug>.md` (use case specification & validation target)
+
+```markdown
+# UC### - <Title>
+
+- id: UC###
+- title: <Title>
+- actor: <End-User | Developer | Operator | Buyer>
+- status: <draft | active | verified | failing>
+- priority: <P0 | P1 | P2 | P3>
+- linked-tasks: <NN.T, T### or ->
+- verification-type: <automated-probe | e2e | code-audit | api-probe>
+- last-tested: -
+- last-verdict: -
+
+## Description & Business Value
+<Who is the actor, what do they want to accomplish, and what business/user value does it deliver?>
+
+## Preconditions
+- <Environment, running server port, database seed data, or active services needed>
+
+## Scenario / Interaction Steps
+1. <Actor performs action or calls endpoint>
+2. <System responds with expected behavior>
+3. <Boundary checks or error cases>
+
+## Automated Verification Command
+```bash
+<runnable probe: curl command, pytest call, or test script>
+```
+
+## Acceptance Criteria
+- [ ] <Observable acceptance criterion 1>
+- [ ] <Observable acceptance criterion 2>
+
+## AI Validation Log
+```
+
+---
+
 ## `tasks/NN-<slug>/plan.md` - INLINE form (small/medium initiative)
 
 ```markdown

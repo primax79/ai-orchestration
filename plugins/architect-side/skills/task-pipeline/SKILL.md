@@ -526,6 +526,14 @@ objective verification. Prefer the **expanded** packaging for heavy delegation
 See `task-spec-authoring` (in `ai-orchestration`) for writing the *content*
 of individual tasks and calibrating verification depth.
 
+## Use Cases (`tasks/use-cases/UC###-<slug>.md`)
+
+Use Cases represent end-to-end capabilities from the user/actor perspective. They connect requirements to autonomous validation:
+1. **Top-Down:** Use Cases drive task `## Goal` and `## Verification` criteria. Each task specifies `- use-cases: UC001`.
+2. **Bottom-Up:** Implemented tasks link back to Use Cases (`- linked-tasks: 08.T1, 08.T3`).
+3. **Autonomous AI Validation:** Once linked tasks are delivered, the operator can trigger AI testing of the scenario (`ai-orch use-cases validate UC001` or UI "Validate with AI"), which records evidence into `## AI Validation Log`.
+4. **Product Validation Campaigns:** Running `ai-orch use-cases campaign` validates all active Use Cases across the assembled product and detects regressions.
+
 ## Companion script: `scripts/tasks_engine.py`
 
 Deterministic, stdlib-only CLI engine for parsing, validating, transitioning,
