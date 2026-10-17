@@ -43,7 +43,7 @@
 
 ### 07.3 - Run engine B: supervisor, adapters (prompt via stdin/file), cancel and lost reconciliation with process-group kill
 
-- **Status:** `open` · **Profile:** `deep-reasoning` · **Depends on:** 07.2 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 07.2 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`, `scripts/fixtures/runs/stub_agent.py` (new)
 - **Goal:** Spec §4 (`start`, `logs`, `cancel`), §5.3, §5.7 (adapters, with the stub agent configured through `[tools.<t>.headless]`), and the task transition to `in progress` on a successful execute spawn (§3 "Task state ownership").
 - **Verification:** Tests against the stub agent (which can sleep, spawn a grandchild, write events, and exit 0 or 1):
