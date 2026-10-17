@@ -561,6 +561,29 @@ When working on a project created with older conventions (e.g. legacy `macroplan
    > *"Use the `task-pipeline` skill to upgrade this project's `tasks/` directory to the latest model, align `tasks/AGENTS.md`, and run `ai-orch tasks sync-index --apply`."*
    The assistant inspects the tasks, updates the rules, assigns `profile: bulk-execution` or `deep-reasoning` to active tasks, and validates the result.
 
+## Normalizing existing tasks (any project, any age)
+
+`tasks upgrade` fixes the scaffolding (rules, folders, index tables); it does **not** rewrite plans or task files. Projects written by hand or by older sessions drift in ways only a reader can fix: task lists as bullets or tables, ids that collide with emergent ids (`T1` inside a plan), states that contradict the log, work done as emergent tasks but still "in progress" in the plan, closed initiatives left among open ones. When asked to normalize (or when `tasks list` shows synthetic `INIT-NN` cards, i.e. a plan whose tasks the engine cannot see), do this:
+
+1. **Inventory, read-only.** Run `ai-orch tasks validate --json` and `ai-orch tasks list --json`. For every `NN-<slug>/plan.md`, record: does the engine see its tasks (`kind: initiative_task` rows with `NN.T` ids)? which ids does it use? A plan with no rows, or rows with ids not shaped `NN.T`, needs work. Read `00-INDEX.md`, the plan's log, and the emergent tasks that reference the initiative (e.g. titles ending `(08-T3)`).
+2. **Decide the target per plan, then write it.** Each task becomes a canonical block, keeping the original wording of goal, steps and verification:
+
+   ```markdown
+   ### NN.T - <title>
+
+   - **Status:** `<state>` (<date if known>) · **Profile:** `<profile>` · **Depends on:** <NN.T ids or -> · **Repo:** `<repo or ->`
+   - **Goal:** ...
+   - **Verification:** ...
+   ```
+
+   - **Ids:** `NN.1, NN.2, ...` in the plan's order; a sub-letter task (`T2b`) becomes its own number. Never reuse `T###` for plan tasks (that namespace belongs to emergent tasks). Rewrite the plan's internal references (`T3` → `NN.3`, "depends on T1") in the same edit.
+   - **State:** from evidence only (the log, merged commits, the emergent task that executed it, `done/`), never from optimism. When a plan task was executed as an emergent task, set the plan task to that task's state and add `executed as [T###](path)`; do not duplicate the work.
+   - **Unknowns** (a state you cannot establish, a dependency that is ambiguous) become blocking questions (`questions ask`), not guesses.
+   - Text outside the task section (goal, design, log, open questions) stays as it is; append a log line: `<date> — tasks normalized to the NN.T convention (ids T1..T7 → NN.1..NN.8)`.
+3. **Initiative state and placement.** When every task is closed, the initiative is done: write `summary.md` and move the folder under `done/` (fixing links that pointed into it), as for any completed initiative. Mark an initiative `in progress` only if a task is.
+4. **Index and check.** `ai-orch tasks sync-index --check`, review the diff, `--apply`; then `validate` must show no errors and `tasks list` must show every plan task with an `NN.T` id and no `INIT-NN` card for a plan that has tasks.
+5. **One commit per project** (`docs(tasks): normalize plans to the NN.T convention`), touching only `tasks/`. If another session is working in the same repository, do it in a worktree and fast-forward, so concurrent task edits surface as conflicts instead of being overwritten.
+
 ## Reference
 
 See [`references/template.md`](references/template.md) for copy-paste skeletons
