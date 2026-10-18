@@ -1,6 +1,6 @@
 # 08 - Blocking questions (format, engine, pending-answers UI)
 
-- short: Blocking questions
+- **Short:** Blocking questions
 
 > **Derived from:** [`../specs/blocking-questions.md`](../specs/blocking-questions.md). Read the spec first; this plan does not repeat it.
 

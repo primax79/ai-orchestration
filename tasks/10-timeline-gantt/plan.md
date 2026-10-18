@@ -1,6 +1,6 @@
 # 10 - Abstract timeline: dependencies and priorities
 
-- short: Abstract timeline
+- **Short:** Abstract timeline
 
 > **Derived from:** [`../specs/timeline-gantt.md`](../specs/timeline-gantt.md). Lane order: see `../06-control-plane-safety/plan.md`.
 

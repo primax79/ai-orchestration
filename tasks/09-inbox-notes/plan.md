@@ -1,6 +1,6 @@
 # 09 - Inbox: draft notes, reports and screenshots, processed into tasks
 
-- short: Inbox notes
+- **Short:** Inbox notes
 
 > **Derived from:** [`../specs/inbox-notes.md`](../specs/inbox-notes.md). Read the spec first. Lane order: see `../06-control-plane-safety/plan.md` ("UI lane order"); 09 tasks join the same lanes.
 

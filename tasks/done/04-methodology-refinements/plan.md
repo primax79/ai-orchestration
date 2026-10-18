@@ -1,6 +1,6 @@
 # 04 - Orchestration Methodology & Skill Refinements (Review Tier 2)
 
-- short: Methodology refinements
+- **Short:** Methodology refinements
 
 > **Derived from:** [`../../docs/02-gap-analysis-and-evolution-roadmap.md`](../../docs/02-gap-analysis-and-evolution-roadmap.md) Track A
 > **Status:** `done` (2026-10-17)

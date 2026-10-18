@@ -1,6 +1,6 @@
 # 03 - Configuration & Task Management Skill + Python Scripts
 
-- short: Config and task scripts
+- **Short:** Config and task scripts
 
 > **Derived from specs:** [`../specs/orchestration-config-and-agents-md.md`](../../specs/orchestration-config-and-agents-md.md), [`../specs/task-and-state-model.md`](../../specs/task-and-state-model.md)
 

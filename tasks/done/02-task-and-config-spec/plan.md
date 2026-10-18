@@ -1,6 +1,6 @@
 # 02 - Formal Task Model, State Machine & `orchestration.toml` Specification
 
-- short: Formal task model
+- **Short:** Formal task model
 
 > **Derived from specs:** [`../specs/task-and-state-model.md`](../../specs/task-and-state-model.md), [`../specs/orchestration-config-and-agents-md.md`](../../specs/orchestration-config-and-agents-md.md)
 

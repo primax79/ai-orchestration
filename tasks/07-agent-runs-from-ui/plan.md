@@ -1,6 +1,6 @@
 # 07 - Agent runs from the control plane (choose who does the work)
 
-- short: Agent runs
+- **Short:** Agent runs
 
 > **Derived from:** [`../specs/agent-runs-from-ui.md`](../specs/agent-runs-from-ui.md) (v2). Read the spec first; this plan does not repeat it.
 >

@@ -1,6 +1,6 @@
 # 12 - Events, orchestration sessions and triggers
 
-- short: Events and triggers
+- **Short:** Events and triggers
 
 > **Derived from:** [`../specs/events-and-triggers.md`](../specs/events-and-triggers.md). The §0, §0b and §0c amendments are normative. Plan rewritten on 2026-10-17 after the Codex review: 12.2 is split per file, and the lane dependencies are explicit.
 

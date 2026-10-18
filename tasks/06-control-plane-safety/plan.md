@@ -1,6 +1,6 @@
 # 06 - Control-plane safety (Doctor, index, UI backend, VS Code bridge)
 
-- short: Control-plane safety
+- **Short:** Control-plane safety
 
 > **Derived from:** [`../specs/control-plane-safety.md`](../specs/control-plane-safety.md). Read the spec first; this plan does not repeat it. Finding ids (E*, I*, U*, V*) refer to its §1.
 

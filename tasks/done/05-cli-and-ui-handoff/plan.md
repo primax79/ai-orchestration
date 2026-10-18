@@ -1,6 +1,6 @@
 # 05 - Standalone CLI (`ai-orch`), From-Scratch Installer & Extension Control Plane
 
-- short: CLI installer control plane
+- **Short:** CLI installer control plane
 
 > **Derived from:** [`../specs/orchestration-extension-spec.md`](../../specs/orchestration-extension-spec.md) and [`../../docs/03-task-model-and-ui-architecture.md`](../../../docs/03-task-model-and-ui-architecture.md)
 

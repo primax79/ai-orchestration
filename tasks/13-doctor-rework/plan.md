@@ -1,6 +1,6 @@
 # 13 - Doctor rework: findings that are true, actionable and resolvable
 
-- short: Doctor rework
+- **Short:** Doctor rework
 
 > **Derived from:** [`../env-doctor/notes/T016-report.md`](../env-doctor/notes/T016-report.md), the evidence-based study of every Doctor finding on the owner's machine (2026-10-17). Each task below is the report's proposal of the same id; read its section in the report first. The `orchestration_env.py` lane runs `13.1 → 13.3 → 13.4 → 13.5 → 13.6 → 13.7`. UI parts follow the frontend lane.
 >

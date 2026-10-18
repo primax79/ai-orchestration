@@ -1,6 +1,6 @@
 # 01 - Consolidate Orchestration & Task Skills into `ai-orchestration`
 
-- short: Consolidate into ai-orchestration
+- **Short:** Consolidate into ai-orchestration
 
 > **Goal:** Make `ai-orchestration` the single, self-contained repository for all task-definition and orchestration skills, templates, and bindings, leaving `kilo-mcp` and `claude-mcp` as pure standalone MCP server repos.
 

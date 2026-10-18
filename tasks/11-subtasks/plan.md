@@ -1,6 +1,6 @@
 # 11 - First-class task hierarchy (N levels)
 
-- short: Task hierarchy
+- **Short:** Task hierarchy
 
 > **Derived from:** [`../specs/subtasks.md`](../specs/subtasks.md). It comes **before** initiative 10's engine work: 10.1 builds `tasks graph` on the child parser from 11.1. Lane order: see `../06-control-plane-safety/plan.md`.
 
