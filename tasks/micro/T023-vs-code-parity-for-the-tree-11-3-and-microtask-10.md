@@ -6,13 +6,15 @@
 - priority: P2
 - priority-reason: The webview sends new message types without handlers; the extension release waits for it
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: -
 - paths: ../vscode-ai-orchestration/src/views/dashboard-panel.ts
 - handoff: Read tasks/micro/T023-vs-code-parity-for-the-tree-11-3-and-microtask-10.md, do the open steps, run the Verification, update the task and the registry.
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
