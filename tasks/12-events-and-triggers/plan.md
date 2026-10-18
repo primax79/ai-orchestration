@@ -46,7 +46,7 @@
 
 ### 12.5 - Headless orchestrator role (sessions, queue, turns, succession, bounds)
 
-- **Status:** `open` · **Size:** L · **Depends on:** 12.1, 12.3, 12.13
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.5-orchestrator-role) · **Size:** L · **Depends on:** 12.1, 12.3, 12.13
 - **Goal:** §0, E2, E4, E5, E6, E8 and E9.
 
 ### 12.9 - Orchestrator configuration: reassignment as succession, `ai-orch setup` engine shared with the `orchestration-setup` skill
