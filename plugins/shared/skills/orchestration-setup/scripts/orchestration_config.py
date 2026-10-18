@@ -13,18 +13,28 @@ Zero external dependencies on Python 3.11+ (uses stdlib `tomllib`, `json`,
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import datetime
 import difflib
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import re
 import subprocess
 import sys
+import threading
 import uuid
-from typing import Any
+from typing import Any, Iterator
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
+
+logger = logging.getLogger("orchestration_config")
 
 try:
     import tomllib  # Python 3.11+
@@ -549,6 +559,150 @@ def write_file_atomic(path: pathlib.Path, content: str) -> None:
                 temp_path.unlink()
             except OSError:
                 pass
+
+
+_CONFIG_LOCK_COUNTS: dict[str, int] = {}
+_CONFIG_LOCK_FDS: dict[str, int] = {}
+_CONFIG_THREAD_LOCKS: dict[str, threading.RLock] = {}
+_CONFIG_GLOBAL_LOCK = threading.Lock()
+
+
+def _get_config_thread_lock(lock_key: str) -> threading.RLock:
+    with _CONFIG_GLOBAL_LOCK:
+        if lock_key not in _CONFIG_THREAD_LOCKS:
+            _CONFIG_THREAD_LOCKS[lock_key] = threading.RLock()
+        return _CONFIG_THREAD_LOCKS[lock_key]
+
+
+@contextlib.contextmanager
+def config_lock(target_path: pathlib.Path | str) -> Iterator[pathlib.Path]:
+    """Exclusive fcntl.flock on <target_path>.lock file beside the target.
+
+    Serialized across processes via fcntl.flock; re-entrant across nested calls
+    and serialized across threads in the same process via threading.RLock.
+    """
+    target = pathlib.Path(target_path).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = target.parent / f"{target.name}.lock"
+    lock_key = str(lock_file)
+    thread_lock = _get_config_thread_lock(lock_key)
+
+    with thread_lock:
+        count = _CONFIG_LOCK_COUNTS.get(lock_key, 0)
+        if count > 0:
+            _CONFIG_LOCK_COUNTS[lock_key] = count + 1
+            try:
+                yield lock_file
+            finally:
+                _CONFIG_LOCK_COUNTS[lock_key] -= 1
+                if _CONFIG_LOCK_COUNTS[lock_key] == 0:
+                    _CONFIG_LOCK_COUNTS.pop(lock_key, None)
+            return
+
+        fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            _CONFIG_LOCK_COUNTS[lock_key] = 1
+            _CONFIG_LOCK_FDS[lock_key] = fd
+            yield lock_file
+        finally:
+            _CONFIG_LOCK_COUNTS.pop(lock_key, None)
+            _CONFIG_LOCK_FDS.pop(lock_key, None)
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+
+
+def _find_repo_root() -> pathlib.Path | None:
+    cur = pathlib.Path(__file__).resolve().parent
+    for parent in [cur, *cur.parents]:
+        if (parent / "scripts" / "orchestration_events.py").is_file():
+            return parent
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+def _get_orchestration_events() -> Any | None:
+    try:
+        import orchestration_events
+        return orchestration_events
+    except ImportError:
+        pass
+
+    try:
+        repo_root = _find_repo_root()
+        if repo_root is not None:
+            scripts_dir = repo_root / "scripts"
+            if scripts_dir.is_dir() and str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+        import orchestration_events
+        return orchestration_events
+    except Exception as e:
+        logger.warning("Could not import orchestration_events: %s", e)
+        return None
+
+
+def _emit_config_changed(
+    *,
+    scope: str,
+    target_path: pathlib.Path,
+    workspace: pathlib.Path | None,
+    keys_changed: list[str],
+    before_hash: str,
+    after_hash: str,
+) -> dict[str, Any] | None:
+    """Emit config.changed event through orchestration_events into workspace event store."""
+    ws_to_use: pathlib.Path | None = None
+    if scope == "project":
+        ws_to_use = workspace or pathlib.Path(".").resolve()
+    elif scope == "global":
+        if workspace is not None:
+            ws_to_use = pathlib.Path(workspace).resolve()
+        else:
+            # Spec §0c E10: config.changed covers project config only;
+            # global writes without a workspace emit nothing.
+            logger.info("Global config write without workspace: skipping config.changed event emission")
+            return None
+
+    orch_events = _get_orchestration_events()
+    if orch_events is None:
+        print(
+            "[warning] could not import orchestration_events; config.changed event omitted",
+            file=sys.stderr,
+        )
+        return None
+
+    payload = {
+        "scope": scope,
+        "path": str(target_path.resolve()),
+        "keys": keys_changed,
+        "keys_changed": keys_changed,
+        "before_hash": before_hash,
+        "after_hash": after_hash,
+        "before_sha256": before_hash,
+        "after_sha256": after_hash,
+    }
+
+    try:
+        ev = orch_events.emit(
+            ws_to_use,
+            "config.changed",
+            payload,
+            source="orchestration_config",
+            subject=str(target_path.resolve()),
+        )
+        return ev
+    except Exception as e:
+        print(
+            f"[warning] failed to emit config.changed event: {e}",
+            file=sys.stderr,
+        )
+        return None
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -1194,16 +1348,30 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_init_global(args: argparse.Namespace) -> int:
     gpath = args.global_config or default_global_config_path()
-    if gpath.exists() and not args.force:
-        msg = f"{gpath} already exists (pass --force to overwrite)."
-        if args.json:
-            print(json.dumps({"ok": False, "path": str(gpath), "message": msg}))
-        else:
-            print(f"[skip] {msg}")
-        return 0
-    gpath.parent.mkdir(parents=True, exist_ok=True)
-    content = dump_toml(DEFAULT_GLOBAL_CONFIG)
-    gpath.write_text(content, encoding="utf-8")
+    with config_lock(gpath):
+        if gpath.exists() and not args.force:
+            msg = f"{gpath} already exists (pass --force to overwrite)."
+            if args.json:
+                print(json.dumps({"ok": False, "path": str(gpath), "message": msg}))
+            else:
+                print(f"[skip] {msg}")
+            return 0
+        before_bytes = gpath.read_bytes() if gpath.exists() else b""
+        before_hash = hashlib.sha256(before_bytes).hexdigest()
+        content = dump_toml(DEFAULT_GLOBAL_CONFIG)
+        write_file_atomic(gpath, content)
+        after_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        ws = getattr(args, "workspace", None)
+        target_ws = pathlib.Path(ws).resolve() if ws else None
+        _emit_config_changed(
+            scope="global",
+            target_path=gpath,
+            workspace=target_ws,
+            keys_changed=list(DEFAULT_GLOBAL_CONFIG.keys()),
+            before_hash=before_hash,
+            after_hash=after_hash,
+        )
     if args.json:
         print(json.dumps({"ok": True, "path": str(gpath)}))
     else:
@@ -1231,17 +1399,11 @@ def cmd_set_profile(args: argparse.Namespace) -> int:
     if args.scope == "project":
         ws = pathlib.Path(args.workspace or ".").resolve()
         target_path = find_project_config_path(ws, gpath)
-        if target_path.exists():
-            current_bytes = target_path.read_bytes()
-            current_hash = hashlib.sha256(current_bytes).hexdigest()
-            existing_text = current_bytes.decode("utf-8")
-        else:
-            current_bytes = b""
-            current_hash = hashlib.sha256(b"").hexdigest()
-            existing_text = ""
-        text = existing_text
     else:
+        ws = pathlib.Path(args.workspace).resolve() if getattr(args, "workspace", None) else None
         target_path = gpath or default_global_config_path()
+
+    if getattr(args, "diff", False):
         if target_path.exists():
             current_bytes = target_path.read_bytes()
             current_hash = hashlib.sha256(current_bytes).hexdigest()
@@ -1251,20 +1413,19 @@ def cmd_set_profile(args: argparse.Namespace) -> int:
             current_bytes = b""
             current_hash = hashlib.sha256(b"").hexdigest()
             existing_text = ""
-            text = dump_toml(DEFAULT_GLOBAL_CONFIG)
+            text = dump_toml(DEFAULT_GLOBAL_CONFIG) if args.scope == "global" else ""
 
-    table_path = ["tools", args.tool, "profiles", args.profile]
-    text = set_toml_value(text, table_path, "model", args.model)
-    if args.variant is not None:
-        text = set_toml_value(text, table_path, "variant", args.variant)
-        text = set_toml_value(text, table_path, "effort", None)
-    if args.effort is not None:
-        text = set_toml_value(text, table_path, "effort", args.effort)
-        text = set_toml_value(text, table_path, "variant", None)
-    if args.basis is not None:
-        text = set_toml_value(text, table_path, "basis", args.basis)
+        table_path = ["tools", args.tool, "profiles", args.profile]
+        text = set_toml_value(text, table_path, "model", args.model)
+        if args.variant is not None:
+            text = set_toml_value(text, table_path, "variant", args.variant)
+            text = set_toml_value(text, table_path, "effort", None)
+        if args.effort is not None:
+            text = set_toml_value(text, table_path, "effort", args.effort)
+            text = set_toml_value(text, table_path, "variant", None)
+        if args.basis is not None:
+            text = set_toml_value(text, table_path, "basis", args.basis)
 
-    if getattr(args, "diff", False):
         diff_str = "".join(
             difflib.unified_diff(
                 existing_text.splitlines(keepends=True),
@@ -1293,28 +1454,68 @@ def cmd_set_profile(args: argparse.Namespace) -> int:
                 print(f"[ok] no changes in {target_path}")
         return 0
 
-    if getattr(args, "expect_hash", None) is not None:
-        disk_bytes = target_path.read_bytes() if target_path.exists() else b""
-        actual_hash = hashlib.sha256(disk_bytes).hexdigest()
-        if actual_hash.lower() != args.expect_hash.strip().lower():
-            msg = f"hash mismatch for {target_path}: expected {args.expect_hash}, found {actual_hash}"
-            if getattr(args, "json", False):
-                print(
-                    json.dumps(
-                        {
-                            "ok": False,
-                            "error": msg,
-                            "expected_hash": args.expect_hash,
-                            "actual_hash": actual_hash,
-                            "path": str(target_path),
-                        }
-                    )
-                )
-            else:
-                print(f"[FAIL] {msg}", file=sys.stderr)
-            return 2
+    keys_changed = [f"tools.{args.tool}.profiles.{args.profile}.model"]
+    if args.variant is not None:
+        keys_changed.append(f"tools.{args.tool}.profiles.{args.profile}.variant")
+    if args.effort is not None:
+        keys_changed.append(f"tools.{args.tool}.profiles.{args.profile}.effort")
+    if args.basis is not None:
+        keys_changed.append(f"tools.{args.tool}.profiles.{args.profile}.basis")
 
-    write_file_atomic(target_path, text)
+    with config_lock(target_path):
+        if target_path.exists():
+            current_bytes = target_path.read_bytes()
+            current_hash = hashlib.sha256(current_bytes).hexdigest()
+            existing_text = current_bytes.decode("utf-8")
+            text = existing_text
+        else:
+            current_bytes = b""
+            current_hash = hashlib.sha256(b"").hexdigest()
+            existing_text = ""
+            text = dump_toml(DEFAULT_GLOBAL_CONFIG) if args.scope == "global" else ""
+
+        if getattr(args, "expect_hash", None) is not None:
+            if current_hash.lower() != args.expect_hash.strip().lower():
+                msg = f"hash mismatch for {target_path}: expected {args.expect_hash}, found {current_hash}"
+                if getattr(args, "json", False):
+                    print(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "error": msg,
+                                "expected_hash": args.expect_hash,
+                                "actual_hash": current_hash,
+                                "path": str(target_path),
+                            }
+                        )
+                    )
+                else:
+                    print(f"[FAIL] {msg}", file=sys.stderr)
+                return 2
+
+        table_path = ["tools", args.tool, "profiles", args.profile]
+        text = set_toml_value(text, table_path, "model", args.model)
+        if args.variant is not None:
+            text = set_toml_value(text, table_path, "variant", args.variant)
+            text = set_toml_value(text, table_path, "effort", None)
+        if args.effort is not None:
+            text = set_toml_value(text, table_path, "effort", args.effort)
+            text = set_toml_value(text, table_path, "variant", None)
+        if args.basis is not None:
+            text = set_toml_value(text, table_path, "basis", args.basis)
+
+        write_file_atomic(target_path, text)
+        after_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        target_ws = ws if ws is not None else (pathlib.Path(".").resolve() if args.scope == "project" else None)
+        _emit_config_changed(
+            scope=args.scope,
+            target_path=target_path,
+            workspace=target_ws,
+            keys_changed=keys_changed,
+            before_hash=current_hash,
+            after_hash=after_hash,
+        )
 
     parsed = tomllib.loads(text) if tomllib is not None else {}
     entry = parsed.get("tools", {}).get(args.tool, {}).get("profiles", {}).get(args.profile, {})
@@ -1395,27 +1596,26 @@ def cmd_set_routing(args: argparse.Namespace) -> int:
     else:
         target_path = gpath or default_global_config_path()
 
-    if target_path.exists():
-        current_bytes = target_path.read_bytes()
-        current_hash = hashlib.sha256(current_bytes).hexdigest()
-        existing_text = current_bytes.decode("utf-8")
-    else:
-        current_bytes = b""
-        current_hash = hashlib.sha256(b"").hexdigest()
-        existing_text = ""
-
-    text = existing_text
-
-    if args.orchestrator is not None:
-        text = set_toml_value(text, ["routing"], "default_orchestrator", args.orchestrator)
-    if args.executor is not None:
-        text = set_toml_value(text, ["routing"], "default_executor", args.executor)
-    if args.default_profile is not None:
-        text = set_toml_value(text, ["routing"], "default_profile", args.default_profile)
-    if args.verification_mode is not None:
-        text = set_toml_value(text, ["verification"], "default_mode", args.verification_mode)
-
     if getattr(args, "diff", False):
+        if target_path.exists():
+            current_bytes = target_path.read_bytes()
+            current_hash = hashlib.sha256(current_bytes).hexdigest()
+            existing_text = current_bytes.decode("utf-8")
+        else:
+            current_bytes = b""
+            current_hash = hashlib.sha256(b"").hexdigest()
+            existing_text = ""
+
+        text = existing_text
+        if args.orchestrator is not None:
+            text = set_toml_value(text, ["routing"], "default_orchestrator", args.orchestrator)
+        if args.executor is not None:
+            text = set_toml_value(text, ["routing"], "default_executor", args.executor)
+        if args.default_profile is not None:
+            text = set_toml_value(text, ["routing"], "default_profile", args.default_profile)
+        if args.verification_mode is not None:
+            text = set_toml_value(text, ["verification"], "default_mode", args.verification_mode)
+
         diff_str = "".join(
             difflib.unified_diff(
                 existing_text.splitlines(keepends=True),
@@ -1444,28 +1644,67 @@ def cmd_set_routing(args: argparse.Namespace) -> int:
                 print(f"[ok] no changes in {target_path}")
         return 0
 
-    if getattr(args, "expect_hash", None) is not None:
-        disk_bytes = target_path.read_bytes() if target_path.exists() else b""
-        actual_hash = hashlib.sha256(disk_bytes).hexdigest()
-        if actual_hash.lower() != args.expect_hash.strip().lower():
-            msg = f"hash mismatch for {target_path}: expected {args.expect_hash}, found {actual_hash}"
-            if getattr(args, "json", False):
-                print(
-                    json.dumps(
-                        {
-                            "ok": False,
-                            "error": msg,
-                            "expected_hash": args.expect_hash,
-                            "actual_hash": actual_hash,
-                            "path": str(target_path),
-                        }
-                    )
-                )
-            else:
-                print(f"[FAIL] {msg}", file=sys.stderr)
-            return 2
+    keys_changed = []
+    if args.orchestrator is not None:
+        keys_changed.append("routing.default_orchestrator")
+    if args.executor is not None:
+        keys_changed.append("routing.default_executor")
+    if args.default_profile is not None:
+        keys_changed.append("routing.default_profile")
+    if args.verification_mode is not None:
+        keys_changed.append("verification.default_mode")
 
-    write_file_atomic(target_path, text)
+    with config_lock(target_path):
+        if target_path.exists():
+            current_bytes = target_path.read_bytes()
+            current_hash = hashlib.sha256(current_bytes).hexdigest()
+            existing_text = current_bytes.decode("utf-8")
+        else:
+            current_bytes = b""
+            current_hash = hashlib.sha256(b"").hexdigest()
+            existing_text = ""
+
+        if getattr(args, "expect_hash", None) is not None:
+            if current_hash.lower() != args.expect_hash.strip().lower():
+                msg = f"hash mismatch for {target_path}: expected {args.expect_hash}, found {current_hash}"
+                if getattr(args, "json", False):
+                    print(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "error": msg,
+                                "expected_hash": args.expect_hash,
+                                "actual_hash": current_hash,
+                                "path": str(target_path),
+                            }
+                        )
+                    )
+                else:
+                    print(f"[FAIL] {msg}", file=sys.stderr)
+                return 2
+
+        text = existing_text
+        if args.orchestrator is not None:
+            text = set_toml_value(text, ["routing"], "default_orchestrator", args.orchestrator)
+        if args.executor is not None:
+            text = set_toml_value(text, ["routing"], "default_executor", args.executor)
+        if args.default_profile is not None:
+            text = set_toml_value(text, ["routing"], "default_profile", args.default_profile)
+        if args.verification_mode is not None:
+            text = set_toml_value(text, ["verification"], "default_mode", args.verification_mode)
+
+        write_file_atomic(target_path, text)
+        after_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        target_ws = ws if ws is not None else (pathlib.Path(".").resolve() if args.scope == "project" else None)
+        _emit_config_changed(
+            scope=args.scope,
+            target_path=target_path,
+            workspace=target_ws,
+            keys_changed=keys_changed,
+            before_hash=current_hash,
+            after_hash=after_hash,
+        )
 
     updated_routing: dict[str, str] = {}
     if args.orchestrator is not None:
@@ -1499,37 +1738,48 @@ def cmd_set_routing(args: argparse.Namespace) -> int:
 def cmd_init_project(args: argparse.Namespace) -> int:
     ws = pathlib.Path(args.workspace or ".").resolve()
     ppath = find_project_config_path(ws, args.global_config)
-    if ppath.exists() and not args.force:
-        if args.json:
-            print(json.dumps({"ok": False, "path": str(ppath), "message": "already exists"}))
-        else:
-            print(f"[skip] {ppath} already exists (pass --force to overwrite)")
-        return 0
+    with config_lock(ppath):
+        if ppath.exists() and not args.force:
+            if args.json:
+                print(json.dumps({"ok": False, "path": str(ppath), "message": "already exists"}))
+            else:
+                print(f"[skip] {ppath} already exists (pass --force to overwrite)")
+            return 0
 
-    proj_data: dict[str, Any] = {
-        "project": {
-            "name": args.name or ws.name,
-            "primary_orchestrator": args.orchestrator or "kilo",
-        },
-        "routing": {
-            "default_executor": args.executor or (args.orchestrator or "kilo"),
-        },
-        "verification": {
-            "default_mode": args.verification_mode or "cross-agent",
-        },
-        "project_isolation": {},
-    }
-    # Use nested [project.isolation]
-    proj_data.pop("project_isolation", None)
-    proj_data["project"]["isolation"] = {
-        "shared_databases": [],
-        "shared_ports": [],
-        "worker_port_range": [8766, 8779],
-        "conflict_prone_files": [],
-        "zero_conflict_registries": [],
-    }
-    ppath.parent.mkdir(parents=True, exist_ok=True)
-    ppath.write_text(dump_toml(proj_data), encoding="utf-8")
+        before_bytes = ppath.read_bytes() if ppath.exists() else b""
+        before_hash = hashlib.sha256(before_bytes).hexdigest()
+
+        proj_data: dict[str, Any] = {
+            "project": {
+                "name": args.name or ws.name,
+                "primary_orchestrator": args.orchestrator or "kilo",
+                "isolation": {
+                    "shared_databases": [],
+                    "shared_ports": [],
+                    "worker_port_range": [8766, 8779],
+                    "conflict_prone_files": [],
+                    "zero_conflict_registries": [],
+                },
+            },
+            "routing": {
+                "default_executor": args.executor or (args.orchestrator or "kilo"),
+            },
+            "verification": {
+                "default_mode": args.verification_mode or "cross-agent",
+            },
+        }
+        content = dump_toml(proj_data)
+        write_file_atomic(ppath, content)
+        after_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+        _emit_config_changed(
+            scope="project",
+            target_path=ppath,
+            workspace=ws,
+            keys_changed=["project", "routing", "verification"],
+            before_hash=before_hash,
+            after_hash=after_hash,
+        )
     if args.json:
         print(json.dumps({"ok": True, "path": str(ppath)}))
     else:
@@ -1763,6 +2013,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ig = sub.add_parser("init-global", help="Initialize ~/.config/ai-orchestration/orchestration.toml")
     p_ig.add_argument("--force", action="store_true")
+    p_ig.add_argument("--workspace", default=None, help="Workspace root to emit config.changed event to")
     p_ig.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_ig.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_ig.set_defaults(func=cmd_init_global)

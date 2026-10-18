@@ -18,6 +18,8 @@ import orchestration_config as oc  # noqa: E402
 
 SCRIPT_PATH = SCRIPT_DIR / "orchestration_config.py"
 REPO_ROOT = SCRIPT_DIR.parents[4]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import orchestration_events  # noqa: E402
 
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
@@ -1595,3 +1597,412 @@ def test_render_agents_md_model_catalog_validation(tmp_path: pathlib.Path) -> No
     payload_allow = json.loads(res_apply_allow.stdout)
     assert payload_allow["ok"] is True
     assert (ws / "AGENTS.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Task 12.14: Locking and config.changed events tests
+# ---------------------------------------------------------------------------
+
+def test_config_lock_file_created_beside_target_and_exclusive(tmp_path: pathlib.Path) -> None:
+    target = tmp_path / "cfg" / "orchestration.toml"
+    expected_lock = tmp_path / "cfg" / "orchestration.toml.lock"
+
+    assert not expected_lock.exists()
+
+    with oc.config_lock(target) as lock_path:
+        assert lock_path == expected_lock
+        assert expected_lock.is_file()
+
+        # Re-entrant in same thread succeeds
+        with oc.config_lock(target):
+            pass
+
+        # Another process attempting non-blocking lock fails
+        code = (
+            "import os, fcntl, sys; "
+            "fd = os.open(sys.argv[1], os.O_RDWR); "
+            "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)"
+        )
+        proc = subprocess.run([sys.executable, "-c", code, str(expected_lock)], capture_output=True)
+        assert proc.returncode != 0
+
+    # Once released, another process can acquire
+    code_acq = (
+        "import os, fcntl, sys; "
+        "fd = os.open(sys.argv[1], os.O_RDWR); "
+        "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); "
+        "fcntl.flock(fd, fcntl.LOCK_UN)"
+    )
+    proc2 = subprocess.run([sys.executable, "-c", code_acq, str(expected_lock)], capture_output=True)
+    assert proc2.returncode == 0
+
+
+def test_concurrent_set_routing_serializes_no_lost_update(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # Initialize project config
+    res_init = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "init-project",
+        "--workspace",
+        str(workspace),
+        "--orchestrator",
+        "codex",
+        "--executor",
+        "codex",
+    )
+    assert res_init.returncode == 0
+
+    # Launch two concurrent processes updating different fields
+    # Process 1 sets orchestrator to claude
+    cmd1 = [
+        sys.executable,
+        str(SCRIPT_PATH),
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--scope",
+        "project",
+        "--workspace",
+        str(workspace),
+    ]
+    # Process 2 sets executor to kilo
+    cmd2 = [
+        sys.executable,
+        str(SCRIPT_PATH),
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--executor",
+        "kilo",
+        "--scope",
+        "project",
+        "--workspace",
+        str(workspace),
+    ]
+
+    p1 = subprocess.Popen(cmd1, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    p2 = subprocess.Popen(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out1, err1 = p1.communicate()
+    out2, err2 = p2.communicate()
+
+    assert p1.returncode == 0, f"p1 failed: {err1}"
+    assert p2.returncode == 0, f"p2 failed: {err2}"
+
+    # Read project config to verify BOTH changes are present (no lost update!)
+    proj_cfg_path = oc.find_project_config_path(workspace, global_cfg_path)
+    content = proj_cfg_path.read_text(encoding="utf-8")
+    assert 'default_orchestrator = "claude"' in content
+    assert 'default_executor = "kilo"' in content
+
+    # Verify event emission: 1 init event + 2 set-routing events = 3 events
+    events = orchestration_events.read_events(workspace)
+    assert len(events) == 3
+    ev_types = [e["type"] for e in events]
+    assert ev_types == ["config.changed", "config.changed", "config.changed"]
+
+
+def test_concurrent_set_routing_expect_hash_one_succeeds_one_refused(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # Initialize project config
+    run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "init-project",
+        "--workspace",
+        str(workspace),
+        "--orchestrator",
+        "codex",
+    )
+    proj_cfg_path = oc.find_project_config_path(workspace, global_cfg_path)
+    initial_hash = hashlib.sha256(proj_cfg_path.read_bytes()).hexdigest()
+
+    # Both processes try to update using the SAME initial expect-hash
+    cmd1 = [
+        sys.executable,
+        str(SCRIPT_PATH),
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--expect-hash",
+        initial_hash,
+        "--scope",
+        "project",
+        "--workspace",
+        str(workspace),
+    ]
+    cmd2 = [
+        sys.executable,
+        str(SCRIPT_PATH),
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "kilo",
+        "--expect-hash",
+        initial_hash,
+        "--scope",
+        "project",
+        "--workspace",
+        str(workspace),
+    ]
+
+    p1 = subprocess.Popen(cmd1, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    p2 = subprocess.Popen(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out1, err1 = p1.communicate()
+    out2, err2 = p2.communicate()
+
+    returncodes = sorted([p1.returncode, p2.returncode])
+    # Exactly one succeeded (0) and the second was refused by hash (2)
+    assert returncodes == [0, 2]
+
+    # Check error payload of the refused one
+    failed_out = out1 if p1.returncode == 2 else out2
+    data = json.loads(failed_out)
+    assert data["ok"] is False
+    assert "hash mismatch" in data["error"]
+
+
+def test_config_changed_event_payload_fields(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    res_init = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "init-project",
+        "--workspace",
+        str(workspace),
+        "--name",
+        "test-proj",
+        "--orchestrator",
+        "claude",
+    )
+    assert res_init.returncode == 0
+    proj_path = oc.find_project_config_path(workspace, global_cfg_path)
+    hash_after_init = hashlib.sha256(proj_path.read_bytes()).hexdigest()
+
+    events = orchestration_events.read_events(workspace)
+    assert len(events) == 1
+    ev_init = events[0]
+    assert ev_init["seq"] == 1
+    assert ev_init["type"] == "config.changed"
+    assert ev_init["source"] == "orchestration_config"
+    assert ev_init["subject"] == str(proj_path.resolve())
+    assert ev_init["payload"]["scope"] == "project"
+    assert ev_init["payload"]["path"] == str(proj_path.resolve())
+    assert ev_init["payload"]["keys_changed"] == ["project", "routing", "verification"]
+    assert ev_init["payload"]["keys"] == ["project", "routing", "verification"]
+    assert ev_init["payload"]["before_hash"] == hashlib.sha256(b"").hexdigest()
+    assert ev_init["payload"]["after_hash"] == hash_after_init
+
+    # Now set-profile
+    res_prof = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-profile",
+        "kilo",
+        "deep-reasoning",
+        "--model",
+        "google/gemini-pro-test",
+        "--variant",
+        "high",
+        "--scope",
+        "project",
+        "--workspace",
+        str(workspace),
+    )
+    assert res_prof.returncode == 0
+    hash_after_prof = hashlib.sha256(proj_path.read_bytes()).hexdigest()
+
+    events = orchestration_events.read_events(workspace)
+    assert len(events) == 2
+    ev_prof = events[1]
+    assert ev_prof["seq"] == 2
+    assert ev_prof["type"] == "config.changed"
+    assert ev_prof["payload"]["scope"] == "project"
+    assert ev_prof["payload"]["path"] == str(proj_path.resolve())
+    assert ev_prof["payload"]["keys_changed"] == [
+        "tools.kilo.profiles.deep-reasoning.model",
+        "tools.kilo.profiles.deep-reasoning.variant",
+    ]
+    assert ev_prof["payload"]["before_hash"] == hash_after_init
+    assert ev_prof["payload"]["after_hash"] == hash_after_prof
+
+
+def test_no_event_on_diff_or_refused_or_skipped(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # 1. Diff preview never emits
+    res_diff = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--scope",
+        "project",
+        "--workspace",
+        str(workspace),
+        "--diff",
+    )
+    assert res_diff.returncode == 0
+    assert len(orchestration_events.read_events(workspace)) == 0
+
+    res_pdiff = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-profile",
+        "kilo",
+        "bulk-execution",
+        "--model",
+        "custom/model",
+        "--scope",
+        "project",
+        "--workspace",
+        str(workspace),
+        "--diff",
+    )
+    assert res_pdiff.returncode == 0
+    assert len(orchestration_events.read_events(workspace)) == 0
+
+    # 2. Refused write (hash mismatch) never emits
+    res_bad_hash = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--scope",
+        "project",
+        "--workspace",
+        str(workspace),
+        "--expect-hash",
+        "0" * 64,
+    )
+    assert res_bad_hash.returncode == 2
+    assert len(orchestration_events.read_events(workspace)) == 0
+
+    # 3. Skipped write (init-project when exists without --force)
+    run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "init-project",
+        "--workspace",
+        str(workspace),
+    )
+    # Init emitted 1 event
+    assert len(orchestration_events.read_events(workspace)) == 1
+
+    # Now run init-project again without --force (skipped)
+    res_skip = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "init-project",
+        "--workspace",
+        str(workspace),
+    )
+    assert res_skip.returncode == 0
+    # Still only 1 event!
+    assert len(orchestration_events.read_events(workspace)) == 1
+
+
+def test_write_succeeds_when_events_module_unavailable(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # Simulate orchestration_events unimportable
+    monkeypatch.setattr(oc, "_get_orchestration_events", lambda: None)
+
+    import argparse
+    args = argparse.Namespace(
+        orchestrator="codex",
+        executor=None,
+        default_profile=None,
+        verification_mode=None,
+        scope="project",
+        workspace=str(workspace),
+        diff=False,
+        expect_hash=None,
+        global_config=global_cfg_path,
+        json=True,
+    )
+
+    rc = oc.cmd_set_routing(args)
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "could not import orchestration_events" in captured.err
+
+    # Check file was indeed written
+    proj_path = oc.find_project_config_path(workspace, global_cfg_path)
+    assert proj_path.is_file()
+    assert 'default_orchestrator = "codex"' in proj_path.read_text(encoding="utf-8")
+
+
+def test_global_write_with_and_without_workspace(tmp_path: pathlib.Path) -> None:
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # 1. Global write without workspace: writes file, emits 0 events
+    res_g1 = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "codex",
+        "--scope",
+        "global",
+    )
+    assert res_g1.returncode == 0
+    assert len(orchestration_events.read_events(workspace)) == 0
+
+    # 2. Global write WITH workspace: writes file, emits event to that workspace
+    res_g2 = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "set-routing",
+        "--orchestrator",
+        "claude",
+        "--scope",
+        "global",
+        "--workspace",
+        str(workspace),
+    )
+    assert res_g2.returncode == 0
+    events = orchestration_events.read_events(workspace)
+    assert len(events) == 1
+    assert events[0]["type"] == "config.changed"
+    assert events[0]["payload"]["scope"] == "global"
+    assert events[0]["payload"]["path"] == str(global_cfg_path.resolve())
+    assert events[0]["payload"]["keys_changed"] == ["routing.default_orchestrator"]
