@@ -56,12 +56,12 @@
 
 ### 12.6 - UI: event and queue streams, notification area, Triggers page, session chips, "awaiting application" group
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, ai-orchestration-ui worktree task/12.6-events-ui) · **Size:** L · **Depends on:** 12.4, frontend lane after 10.5
+- **Status:** `delivered` (2026-10-18; claude; merged; 58 backend tests; proposed actions are list-only until the engine has confirm/reject (T024)) · **Size:** L · **Depends on:** 12.4, frontend lane after 10.5
 - **Goal:** §6 and E12.
 
 ### 12.8 - UI: orchestrator chat panel
 
-- **Status:** `open` · **Size:** L · **Depends on:** 12.5, 12.6
+- **Status:** `in progress` (2026-10-18; claude; kilo, ai-orchestration-ui worktree task/12.8-orchestrator-chat) · **Size:** L · **Depends on:** 12.5, 12.6
 - **Goal:** §0 "Owner chat in the UI" and E12; proposed-action confirmations (E3).
 
 ### 12.10 - UI: Orchestrator card in Config (current holder, Reassign…, pause/rotate) and first-run setup wizard
@@ -71,7 +71,7 @@
 
 ### 12.7 - VS Code: event watcher and notifications
 
-- **Status:** `open` · **Size:** S · **Depends on:** 12.6, VS Code lane after 10.3
+- **Status:** `in progress` (2026-10-18; claude; kilo, vscode worktree task/12.7-vscode-events) · **Size:** S · **Depends on:** 12.6, VS Code lane after 10.3
 - **Goal:** §1 "Reading" (E13) and §6.
 
 > 2026-10-17: tasks `12.2a`–`12.2d` renumbered `12.11`–`12.14` (letter-suffixed ids are not task ids; validate flagged them and their dependencies were invisible).

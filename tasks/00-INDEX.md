@@ -16,11 +16,11 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](06-control-plane-safety/plan.md) | in progress (done: 06.1–06.8, 06.10; to verify: 06.9) | 05 | L |
 | 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | in progress (done: 07.1–07.4, 07.6–07.8, 07.10, 07.12; to verify: 07.5, 07.9, 07.11) | 05, 06 | L |
 | 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1–08.4; to verify: 08.5–08.7) | 06 | M |
-| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1–09.3, 09.7; to verify: 09.4–09.6, 09.8–09.9, 09.11) | 06 (07 for agent triage) | M |
+| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1–09.3, 09.7; running: 09.10; to verify: 09.4–09.6, 09.8–09.9, 09.11) | 06 (07 for agent triage) | M |
 | 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | in progress (done: 10.1, 10.4; to verify: 10.2–10.3, 10.5–10.6) | 06, 09.1 | S |
-| 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | in progress (done: 11.1–11.2, 11.5–11.6; running: 11.4; to verify: 11.3) | 06, 09.1 | M |
-| 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | in progress (done: 12.3, 12.11–12.14; running: 12.4; to verify: 12.1) | 07, 08, 11 | L |
-| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (done: 13.1, 13.4; running: 13.6; to verify: 13.2–13.3, 13.5) | 06 | M |
+| 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | in progress (done: 11.1–11.2, 11.5–11.6; to verify: 11.3–11.4) | 06, 09.1 | M |
+| 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | in progress (done: 12.3–12.4, 12.11–12.14; running: 12.7–12.8; to verify: 12.1, 12.5–12.6, 12.9) | 07, 08, 11 | L |
+| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (done: 13.1, 13.4; running: 13.7; to verify: 13.2–13.3, 13.5–13.6) | 06 | M |
 | 15 | 15 | [Use-Case Driven Specification, Task Definition & Product Validation](15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 
 ## Specs
@@ -65,6 +65,7 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T022 | P1 | [Run engine fixes found by the 07.5/12.1 live capture](server-and-bindings/T022-run-engine-fixes-found-by-the-07-5-12-1-live-captu.md) | delivered | kilo | - |
+| T024 | P2 | [Confirm or reject trigger-proposed actions (engine + UI wiring)](server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md) | open | kilo | - |
 
 ### micro
 
@@ -72,7 +73,7 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T023 | P2 | [VS Code parity for the Tree (11.3) and microtask (10.5) messages](micro/T023-vs-code-parity-for-the-tree-11-3-and-microtask-10.md) | in progress | kilo | - |
+| T023 | P2 | [VS Code parity for the Tree (11.3) and microtask (10.5) messages](micro/T023-vs-code-parity-for-the-tree-11-3-and-microtask-10.md) | delivered | kilo | - |
 
 ### env-doctor
 
