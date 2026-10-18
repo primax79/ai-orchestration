@@ -5455,6 +5455,10 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             "proposal_status": record.get("proposal_status"),
         },
     )
+    # The terminal status is saved several times above, before `run.finished` exists in the event store. Readers that
+    # wait for "the run is over, its event is there" wait for `finalized_at`, written only after the event.
+    record["finalized_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save_run_record(workspace, record)
     return 0
 
 

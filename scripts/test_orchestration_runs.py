@@ -5769,7 +5769,7 @@ def test_run_events_lifecycle_and_ordering(sample_workspace: pathlib.Path):
     deadline = time.time() + 10.0
     while time.time() < deadline:
         rec = load_run_record(ws, run_id)
-        if rec and rec.get("status") in TERMINAL_STATES:
+        if rec and rec.get("status") in TERMINAL_STATES and rec.get("finalized_at"):
             break
         time.sleep(0.1)
 
@@ -6216,7 +6216,7 @@ def test_run_events_session_filter(sample_workspace: pathlib.Path):
     deadline = time.time() + 10.0
     while time.time() < deadline:
         rec = load_run_record(ws, run_id)
-        if rec and rec.get("status") == "succeeded":
+        if rec and rec.get("status") == "succeeded" and rec.get("finalized_at"):
             break
         time.sleep(0.1)
 
