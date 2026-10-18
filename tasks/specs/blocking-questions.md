@@ -7,7 +7,7 @@
 
 ## 0. Amendments after review 2 (normative; each overrides the section it names)
 
-- **Q1 — §2 `blocks` holds `T###` only** (initiative tasks have no mutable state yet; this matches spec 07 §1).
+- **Q1 — §2 `blocks` accepts leaf node IDs at any depth** (spec subtasks S4, §3; overrides review 2 restriction): emergent tasks (`T###`), initiative tasks (`NN.T`), and child tasks (`07.4.2`, `T014.1`). Containers cannot be blocked; a question about a container blocks the leaves the asker names (S4).
 - **Q2 — §2 the prior state is recorded in the question.** The header field `blocks` records each blocked task's state at the time of asking: `blocks: T013 (in progress), T014 (open)`. The restore uses this value. `PROGRESS.md` is not used for this, because single-file tasks have none.
 - **Q3 — §3 several questions on one task.**
   - `ask` also links a task that is already `waiting` because of other questions: it appends to `decider` (`Q004, Q007`) and records `(waiting)` as the prior state in the new question.
@@ -97,7 +97,7 @@ run anything on this machine. A middle ground is an explicit `allowed_tools` lis
 | `id` | yes | `Q###`, equal to the filename prefix |
 | `question` | yes | **Short text**, one sentence, at most 160 characters, ending with `?`. It must stand alone: no "this", "the above", or references to the context section. |
 | `status` | yes | `open`, `answered`, `withdrawn` |
-| `blocks` | yes | comma-separated task or initiative-task ids (`T###`, `NN.T`), or `-` |
+| `blocks` | yes | comma-separated leaf task ids (`T###`, `NN.T`, `07.4.2`, `T014.1`), or `-` |
 | `decider` | yes | `owner`, or a named role or person |
 | `asked-by` | yes | `<tool>:<profile>`, `owner`, or a session name |
 | `asked` | yes | ISO date |

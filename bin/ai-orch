@@ -186,7 +186,7 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "Upgrade an existing tasks/ directory to the latest task-pipeline v0.3.0 convention.",
                 },
                 "new": {
-                    "usage": "ai-orch tasks new --from-note <id> --category <cat> --title <title> [--priority <P0-P3>] [--priority-reason <reason>] [--tasks-dir <dir>] [--json]",
+                    "usage": "ai-orch tasks new --from-note <id> [--category <cat>] --title <title> [--parent <id>] [--priority <P0-P3>] [--priority-reason <reason>] [--tasks-dir <dir>] [--json]",
                     "description": "Create a new emergent task from an inbox note under the task-write lock.",
                 },
                 "micro": {

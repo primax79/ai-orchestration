@@ -3685,7 +3685,9 @@ def test_s12_add_child_to_running_container_allowed_and_to_inflight_leaf_refused
         encoding="utf-8",
     )
 
-    res_add_init = te.child_add(tasks_dir, "07", title="Task 3")
+    res_dry = te.child_add(tasks_dir, "07", title="Task 3", dry_run=True)
+    assert res_dry["ok"] is True
+    res_add_init = te.child_add(tasks_dir, "07", title="Task 3", expect_plan_hash=res_dry["plan_hash"])
     assert res_add_init["ok"] is True
     assert res_add_init["allocated_id"] == "07.3"
 
@@ -3693,7 +3695,9 @@ def test_s12_add_child_to_running_container_allowed_and_to_inflight_leaf_refused
     assert res_add_inflight["ok"] is False
     assert "Cannot add child to in-flight leaf '07.1'" in res_add_inflight["error"]
 
-    res_add_open = te.child_add(tasks_dir, "07.2", title="Subtask of 2")
+    res_dry_open = te.child_add(tasks_dir, "07.2", title="Subtask of 2", dry_run=True)
+    assert res_dry_open["ok"] is True
+    res_add_open = te.child_add(tasks_dir, "07.2", title="Subtask of 2", expect_plan_hash=res_dry_open["plan_hash"])
     assert res_add_open["ok"] is True
     assert res_add_open["allocated_id"] == "07.2.1"
     assert "folder" in res_add_open
@@ -3721,7 +3725,9 @@ def test_expand_collapse_roundtrip_byte_exact(tmp_path: pathlib.Path) -> None:
     plan_file = init_dir / "plan.md"
     plan_file.write_text(original_plan, encoding="utf-8")
 
-    res_exp = te.expand_node(tasks_dir, "07.4")
+    res_dry_exp = te.expand_node(tasks_dir, "07.4", dry_run=True)
+    assert res_dry_exp["ok"] is True
+    res_exp = te.expand_node(tasks_dir, "07.4", expect_plan_hash=res_dry_exp["plan_hash"])
     assert res_exp["ok"] is True
     folder_path = pathlib.Path(res_exp["folder"])
     assert folder_path.is_dir()
@@ -3730,7 +3736,9 @@ def test_expand_collapse_roundtrip_byte_exact(tmp_path: pathlib.Path) -> None:
     exp_plan_text = plan_file.read_text(encoding="utf-8")
     assert "- **Expanded:** [07.4-run-engine-c-worktrees-verify-verdicts/](07.4-run-engine-c-worktrees-verify-verdicts/README.md)" in exp_plan_text
 
-    res_col = te.collapse_node(tasks_dir, "07.4")
+    res_dry_col = te.collapse_node(tasks_dir, "07.4", dry_run=True)
+    assert res_dry_col["ok"] is True
+    res_col = te.collapse_node(tasks_dir, "07.4", expect_plan_hash=res_dry_col["plan_hash"])
     assert res_col["ok"] is True
     assert not folder_path.exists()
 
@@ -3757,12 +3765,16 @@ def test_reopen_from_done_in_open_location(tmp_path: pathlib.Path) -> None:
         encoding="utf-8",
     )
 
-    res = te.reopen_node(tasks_dir, "07.1", reason="Re-testing verification")
+    res_dry = te.reopen_node(tasks_dir, "07.1", reason="Re-testing verification", dry_run=True)
+    assert res_dry["ok"] is True
+    res = te.reopen_node(tasks_dir, "07.1", reason="Re-testing verification", expect_plan_hash=res_dry["plan_hash"])
     assert res["ok"] is True
     assert res["new_state"] == "open"
 
     tree = te.discover_task_tree(tasks_dir)
     assert tree["07.1"].canonical_state == "open"
+    plan_text = (init_dir / "plan.md").read_text(encoding="utf-8")
+    assert "Re-testing verification" in plan_text
 
 
 def test_question_blocking_leaf_works_blocking_container_refused(tmp_path: pathlib.Path) -> None:
@@ -3856,8 +3868,18 @@ def test_set_labels_on_block_keeps_label_words_and_child_add_on_file_leaf_refuse
     assert "- **Status:** `open` · **Labels:** runs, ui\n" in plan.read_text(encoding="utf-8")
     ok, r = te.tasks_new_from_note(tasks_dir, None, "bugfix", "Fix", priority="P1", priority_reason="r", goal="g")
     assert ok
-    res = te.child_add(tasks_dir, r["id"], "child")
-    assert res is not None and res["ok"] is False and "not implemented" in res["error"]
+    # Missing expect_plan_hash refused:
+    res_missing = te.child_add(tasks_dir, r["id"], "child")
+    assert res_missing["ok"] is False and "requires --expect-plan-hash" in res_missing["error"]
+    # Dry run works:
+    res_dry = te.child_add(tasks_dir, r["id"], "child", dry_run=True)
+    assert res_dry["ok"] is True and res_dry["allocated_id"] == f"{r['id']}.1"
+    # Apply works and converts file leaf to folder:
+    res_app = te.child_add(tasks_dir, r["id"], "child", expect_plan_hash=res_dry["plan_hash"])
+    assert res_app["ok"] is True and res_app["allocated_id"] == f"{r['id']}.1"
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree[r["id"]].is_container is True
+    assert f"{r['id']}.1" in tree
 
 
 def test_attachment_classes_and_validation(tmp_path: pathlib.Path) -> None:
@@ -5178,3 +5200,626 @@ def test_validator_detects_unknown_kind_and_malformed_label(tmp_path: pathlib.Pa
     assert "invalid label 'bad_label_with_UPPERCASE' on node 03.2" in errors
     assert "invalid kind 'not_a_kind'" in errors
     assert "invalid label 'this-label-is-far-too-long-exceeding-twenty-four-chars'" in errors
+
+
+# ---------------------------------------------------------------------------
+# 11.6 Follow-up Tests: CLI structure commands, S10 hashes, reopen, file/folder children,
+# scoped set-deps, set-labels on file/folder, depth > 2, initiative status in sync-index
+# ---------------------------------------------------------------------------
+
+def test_cli_s10_hashes_child_add_expand_collapse_reopen(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    init_dir = tasks_dir / "07-test"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        """# 07 - Test
+
+- **Goal:** S10 hash CLI tests.
+
+## Tasks
+
+### 07.1 - Leaf Task
+- **Status:** `open`
+- **Goal:** Goal 1.
+
+### 07.2 - Done Task
+- **Status:** `done` (2026-10-16)
+- **Goal:** Goal 2.
+""",
+        encoding="utf-8",
+    )
+
+    # 1. child add: missing hash refused
+    res = run_cli("child", "add", "07", "--title", "Task 3", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode != 0
+    assert "requires --expect-plan-hash" in json.loads(res.stdout)["error"]
+
+    # dry-run returns plan_hash
+    res_dry = run_cli("child", "add", "07", "--title", "Task 3", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry.returncode == 0
+    data_dry = json.loads(res_dry.stdout)
+    assert data_dry["dry_run"] is True
+    plan_hash = data_dry["plan_hash"]
+    assert plan_hash and len(plan_hash) == 64
+
+    # stale hash refused
+    res_stale = run_cli("child", "add", "07", "--title", "Task 3", "--expect-plan-hash", "00" * 32, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_stale.returncode != 0
+    assert "Plan hash mismatch" in json.loads(res_stale.stdout)["error"]
+
+    # apply with matching hash succeeds
+    res_app = run_cli("child", "add", "07", "--title", "Task 3", "--expect-plan-hash", plan_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_app.returncode == 0
+    assert json.loads(res_app.stdout)["allocated_id"] == "07.3"
+
+    # 2. expand: missing hash refused
+    res_exp_bad = run_cli("expand", "07.3", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_exp_bad.returncode != 0
+    assert "requires --expect-plan-hash" in json.loads(res_exp_bad.stdout)["error"]
+
+    res_exp_dry = run_cli("expand", "07.3", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_exp_dry.returncode == 0
+    exp_hash = json.loads(res_exp_dry.stdout)["plan_hash"]
+
+    res_exp_stale = run_cli("expand", "07.3", "--expect-plan-hash", "00" * 32, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_exp_stale.returncode != 0
+    assert "Plan hash mismatch" in json.loads(res_exp_stale.stdout)["error"]
+
+    res_exp_ok = run_cli("expand", "07.3", "--expect-plan-hash", exp_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_exp_ok.returncode == 0
+    assert (init_dir / "07.3-task-3" / "README.md").is_file()
+
+    # 3. collapse: missing hash refused
+    res_col_bad = run_cli("collapse", "07.3", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_col_bad.returncode != 0
+    assert "requires --expect-plan-hash" in json.loads(res_col_bad.stdout)["error"]
+
+    res_col_dry = run_cli("collapse", "07.3", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_col_dry.returncode == 0
+    col_hash = json.loads(res_col_dry.stdout)["plan_hash"]
+
+    res_col_stale = run_cli("collapse", "07.3", "--expect-plan-hash", "00" * 32, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_col_stale.returncode != 0
+    assert "Plan hash mismatch" in json.loads(res_col_stale.stdout)["error"]
+
+    res_col_ok = run_cli("collapse", "07.3", "--expect-plan-hash", col_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_col_ok.returncode == 0
+    assert not (init_dir / "07.3-task-3").exists()
+
+    # 4. reopen: missing hash refused
+    res_reop_bad = run_cli("reopen", "07.2", "--reason", "verification failed", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_reop_bad.returncode != 0
+    assert "requires --expect-plan-hash" in json.loads(res_reop_bad.stdout)["error"]
+
+    res_reop_dry = run_cli("reopen", "07.2", "--reason", "verification failed", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_reop_dry.returncode == 0
+    reop_hash = json.loads(res_reop_dry.stdout)["plan_hash"]
+
+    res_reop_stale = run_cli("reopen", "07.2", "--reason", "verification failed", "--expect-plan-hash", "00" * 32, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_reop_stale.returncode != 0
+    assert "Plan hash mismatch" in json.loads(res_reop_stale.stdout)["error"]
+
+    res_reop_ok = run_cli("reopen", "07.2", "--reason", "verification failed", "--expect-plan-hash", reop_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_reop_ok.returncode == 0
+    assert json.loads(res_reop_ok.stdout)["new_state"] == "open"
+    plan_text = plan_file.read_text(encoding="utf-8")
+    assert "verification failed" in plan_text
+
+
+def test_cli_reopen_writes_reason_and_restores_ancestors(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    feat_dir = tasks_dir / "features"
+    t_folder = feat_dir / "T014-payment-gateway"
+    t_folder.mkdir(parents=True)
+    readme = t_folder / "README.md"
+    readme.write_text(
+        """# T014 Payment Gateway
+
+- id: T014
+- title: Payment Gateway
+- category: features
+- priority: P1
+- priority-reason: core flow
+- next-up: no
+- state: done
+- executor: kilo
+- depends-on: -
+- decider: -
+- sources: -
+- paths: -
+- handoff: Read instructions.
+
+## Goal
+
+Payment gateway feature.
+
+## Subtasks
+
+### T014.1 - Stripe connector
+
+- **Status:** `done` (2026-10-15) · **Kind:** feature
+- **Goal:** Implement Stripe connector.
+""",
+        encoding="utf-8",
+    )
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["T014"].state == "done"
+    assert tree["T014.1"].canonical_state == "done"
+
+    # Dry-run reopen on T014.1
+    res_dry = run_cli("reopen", "T014.1", "--reason", "Stripe API v3 breaking changes", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry.returncode == 0
+    data_dry = json.loads(res_dry.stdout)
+    plan_hash = data_dry["plan_hash"]
+
+    # Apply reopen
+    res_app = run_cli("reopen", "T014.1", "--reason", "Stripe API v3 breaking changes", "--expect-plan-hash", plan_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_app.returncode == 0
+
+    new_readme = readme.read_text(encoding="utf-8")
+    assert "Stripe API v3 breaking changes" in new_readme
+    assert "- state: open" in new_readme
+
+    tree_after = te.discover_task_tree(tasks_dir)
+    assert tree_after["T014.1"].canonical_state == "open"
+    assert tree_after["T014"].canonical_state == "open"
+
+
+def test_cli_child_add_on_emergent_task_converts_file_to_folder(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    feat_dir = tasks_dir / "features"
+    feat_dir.mkdir(parents=True)
+    task_file = feat_dir / "T020-auth.md"
+    task_file.write_text(
+        """# T020 Authentication
+
+- id: T020
+- title: Authentication
+- category: features
+- priority: P1
+- priority-reason: auth core
+- next-up: no
+- state: open
+- executor: kilo
+- depends-on: -
+- decider: -
+- sources: -
+- paths: -
+- handoff: Read instructions.
+
+## Goal
+
+Authentication module.
+
+## Steps
+
+- [ ] Implement auth.
+
+## Verification
+
+- [ ] Test auth.
+""",
+        encoding="utf-8",
+    )
+
+    # 1. child add on single-file leaf converts to folder
+    res_dry = run_cli("child", "add", "T020", "--title", "Add JWT support", "--kind", "feature", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry.returncode == 0
+    d_dry = json.loads(res_dry.stdout)
+    assert d_dry["allocated_id"] == "T020.1"
+    plan = d_dry["plan"]
+    assert any(p["action"] == "delete" and "T020-auth.md" in p["path"] for p in plan)
+    assert any(p["action"] == "create" and "T020-" in p["path"] and "README.md" in p["path"] for p in plan)
+
+    res_app = run_cli("child", "add", "T020", "--title", "Add JWT support", "--kind", "feature", "--expect-plan-hash", d_dry["plan_hash"], "--tasks-dir", str(tasks_dir), "--json")
+    assert res_app.returncode == 0
+    assert not task_file.exists()
+    folder = feat_dir / "T020-authentication"
+    readme = folder / "README.md"
+    assert readme.is_file()
+    readme_text = readme.read_text(encoding="utf-8")
+    assert "## Subtasks" in readme_text
+    assert "### T020.1 - Add JWT support" in readme_text
+
+    # 2. Add second child under the container
+    res_dry2 = run_cli("child", "add", "T020", "--title", "Add OAuth2 support", "--kind", "feature", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry2.returncode == 0
+    d_dry2 = json.loads(res_dry2.stdout)
+    assert d_dry2["allocated_id"] == "T020.2"
+
+    res_app2 = run_cli("child", "add", "T020", "--title", "Add OAuth2 support", "--kind", "feature", "--expect-plan-hash", d_dry2["plan_hash"], "--tasks-dir", str(tasks_dir), "--json")
+    assert res_app2.returncode == 0
+    readme_text2 = readme.read_text(encoding="utf-8")
+    assert "### T020.2 - Add OAuth2 support" in readme_text2
+
+    # Validation passes 100%
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+
+
+def test_cli_tasks_new_from_note_with_parent(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    inbox_dir = tasks_dir / "_inbox" / "to-analyze" / "N001-fix-bug"
+    inbox_dir.mkdir(parents=True)
+    (inbox_dir / "note.md").write_text(
+        """# N001 Fix Gateway Bug
+
+- id: N001
+- date: 2026-10-17
+- source: sentry
+- author: team
+- status: ready
+- kind: bug
+- title: Fix Gateway Bug
+- about: src/gateway.py
+
+Payment gateway times out under burst load.
+""",
+        encoding="utf-8",
+    )
+
+    init_dir = tasks_dir / "08-payments"
+    init_dir.mkdir(parents=True)
+    (init_dir / "plan.md").write_text(
+        """# 08 - Payments
+
+- **Goal:** Payment service.
+
+## Tasks
+
+### 08.1 - Setup DB
+- **Status:** `open`
+- **Goal:** Setup payment DB.
+""",
+        encoding="utf-8",
+    )
+
+    # Create task new under parent 08
+    res_new = run_cli("new", "--from-note", "N001", "--parent", "08", "--title", "Fix gateway timeout", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_new.returncode == 0
+    d_new = json.loads(res_new.stdout)
+    assert d_new["id"] == "08.2"
+    assert d_new["parent"] == "08"
+
+    plan_text = (init_dir / "plan.md").read_text(encoding="utf-8")
+    assert "### 08.2 - Fix gateway timeout" in plan_text
+    assert "**Kind:** bug" in plan_text
+
+    # Validation passes
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+
+
+def test_cli_set_deps_emergent_file_preserves_surrounding_and_free_text(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    feat_dir = tasks_dir / "features"
+    feat_dir.mkdir(parents=True)
+    for tid in ("T001", "T002", "T003"):
+        (feat_dir / f"{tid}-dummy.md").write_text(
+            f"# {tid} Dummy\n\n- id: {tid}\n- title: Dummy\n- category: features\n- priority: P2\n- priority-reason: test\n- next-up: no\n- state: open\n- executor: kilo\n- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: -\n\n## Goal\nDummy\n",
+            encoding="utf-8",
+        )
+    task_file = feat_dir / "T040-pipeline.md"
+    original_content = """# T040 Pipeline
+
+- id: T040
+- title: Pipeline
+- category: features
+- priority: P2
+- priority-reason: core flow
+- next-up: no
+- state: open
+- executor: kilo
+- depends-on: T001, T002 (staging only)
+- decider: -
+- sources: -
+- paths: -
+- handoff: Read instructions.
+
+## Goal
+
+Special characters & exact line preservation test.
+
+## Notes
+
+Some critical details that must not change!
+"""
+    task_file.write_text(original_content, encoding="utf-8")
+
+    # Add T003
+    res_add = run_cli("set-deps", "T040", "--add", "T003", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_add.returncode == 0
+    content_after_add = task_file.read_text(encoding="utf-8")
+    assert "- depends-on: T001, T002, T003 (staging only)" in content_after_add
+    # Check that everything before and after - depends-on: is untouched
+    assert content_after_add.split("- depends-on:")[0] == original_content.split("- depends-on:")[0]
+    assert content_after_add.split("\n- decider:")[1] == original_content.split("\n- decider:")[1]
+
+    # Remove T001
+    res_rem = run_cli("set-deps", "T040", "--remove", "T001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_rem.returncode == 0
+    content_after_rem = task_file.read_text(encoding="utf-8")
+    assert "- depends-on: T002, T003 (staging only)" in content_after_rem
+    assert content_after_rem.split("- depends-on:")[0] == original_content.split("- depends-on:")[0]
+    assert content_after_rem.split("\n- decider:")[1] == original_content.split("\n- decider:")[1]
+
+
+def test_cli_set_labels_file_and_folder_nodes(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    feat_dir = tasks_dir / "features"
+    feat_dir.mkdir(parents=True)
+    t_file = feat_dir / "T050-foo.md"
+    t_file.write_text(
+        """# T050 Foo
+
+- id: T050
+- title: Foo
+- category: features
+- priority: P2
+- priority-reason: test
+- next-up: no
+- state: open
+- executor: kilo
+- depends-on: -
+- decider: -
+- sources: -
+- paths: -
+- handoff: Read instructions.
+
+## Goal
+
+Foo.
+""",
+        encoding="utf-8",
+    )
+
+    t_folder = feat_dir / "T051-bar"
+    t_folder.mkdir()
+    readme = t_folder / "README.md"
+    readme.write_text(
+        """# T051 Bar
+
+- id: T051
+- title: Bar
+- category: features
+- priority: P2
+- priority-reason: test
+- next-up: no
+- state: open
+- executor: kilo
+- depends-on: -
+- decider: -
+- sources: -
+- paths: -
+- handoff: Read instructions.
+
+## Goal
+
+Bar.
+""",
+        encoding="utf-8",
+    )
+
+    # 1. set-labels on single file
+    res1 = run_cli("set-labels", "T050", "--add", "ui,frontend", "--tasks-dir", str(tasks_dir), "--json")
+    assert res1.returncode == 0
+    assert "- labels: ui, frontend" in t_file.read_text(encoding="utf-8")
+
+    # 2. set-labels on folder node
+    res2 = run_cli("set-labels", "T051", "--add", "backend", "--tasks-dir", str(tasks_dir), "--json")
+    assert res2.returncode == 0
+    assert "- labels: backend" in readme.read_text(encoding="utf-8")
+
+    # 3. remove label on single file
+    res3 = run_cli("set-labels", "T050", "--remove", "frontend", "--tasks-dir", str(tasks_dir), "--json")
+    assert res3.returncode == 0
+    assert "- labels: ui" in t_file.read_text(encoding="utf-8")
+
+    # 4. set-labels to exact list
+    res4 = run_cli("set-labels", "T050", "--to", "auth,security", "--tasks-dir", str(tasks_dir), "--json")
+    assert res4.returncode == 0
+    assert "- labels: auth, security" in t_file.read_text(encoding="utf-8")
+
+
+def test_cli_expand_collapse_depth_greater_than_two(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    init_dir = tasks_dir / "09-deep"
+    init_dir.mkdir(parents=True)
+    (init_dir / "plan.md").write_text(
+        """# 09 - Deep
+
+- **Goal:** Deep nesting test.
+
+## Tasks
+
+### 09.1 - Level 1 Task
+- **Status:** `open`
+- **Goal:** Level 1.
+""",
+        encoding="utf-8",
+    )
+
+    # 1. Expand 09.1 (depth 1 -> 2)
+    res_dry1 = run_cli("expand", "09.1", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry1.returncode == 0
+    res_exp1 = run_cli("expand", "09.1", "--expect-plan-hash", json.loads(res_dry1.stdout)["plan_hash"], "--tasks-dir", str(tasks_dir), "--json")
+    assert res_exp1.returncode == 0
+    l1_folder = init_dir / "09.1-level-1-task"
+    assert (l1_folder / "README.md").is_file()
+
+    # 2. Add child 09.1.1 to 09.1
+    res_dry_add = run_cli("child", "add", "09.1", "--title", "Level 2 Task", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry_add.returncode == 0
+    assert json.loads(res_dry_add.stdout)["allocated_id"] == "09.1.1"
+    res_add1 = run_cli("child", "add", "09.1", "--title", "Level 2 Task", "--expect-plan-hash", json.loads(res_dry_add.stdout)["plan_hash"], "--tasks-dir", str(tasks_dir), "--json")
+    assert res_add1.returncode == 0
+
+    # 3. Expand 09.1.1 (depth 2 -> 3)
+    res_dry2 = run_cli("expand", "09.1.1", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry2.returncode == 0
+    res_exp2 = run_cli("expand", "09.1.1", "--expect-plan-hash", json.loads(res_dry2.stdout)["plan_hash"], "--tasks-dir", str(tasks_dir), "--json")
+    assert res_exp2.returncode == 0
+    l2_folder = l1_folder / "09.1.1-level-2-task"
+    assert (l2_folder / "README.md").is_file()
+
+    # 4. Collapse 09.1.1 back to block in 09.1/README.md
+    res_dry_col = run_cli("collapse", "09.1.1", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry_col.returncode == 0
+    res_col = run_cli("collapse", "09.1.1", "--expect-plan-hash", json.loads(res_dry_col.stdout)["plan_hash"], "--tasks-dir", str(tasks_dir), "--json")
+    assert res_col.returncode == 0
+    assert not l2_folder.exists()
+    assert "### 09.1.1 - Level 2 Task" in (l1_folder / "README.md").read_text(encoding="utf-8")
+
+
+def test_cli_sync_index_initiative_status_cells(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    init_dir = tasks_dir / "10-sample"
+    init_dir.mkdir(parents=True)
+    (init_dir / "plan.md").write_text(
+        """# 10 - Sample
+
+- **Goal:** Sample initiative.
+
+## Tasks
+
+### 10.1 - Done Task
+- **Status:** `done` (2026-10-15)
+- **Goal:** G1.
+
+### 10.2 - Running Task
+- **Status:** `in progress` (2026-10-16; kilo)
+- **Goal:** G2.
+
+### 10.3 - Open Task
+- **Status:** `open`
+- **Goal:** G3.
+""",
+        encoding="utf-8",
+    )
+
+    index_file = tasks_dir / "00-INDEX.md"
+    index_file.write_text(
+        """# Tasks Registry
+
+## Initiatives
+
+<!-- ai-orch:generated initiatives -->
+| Priority | ID | Initiative | Status | Owner | Scope |
+| --- | --- | --- | --- | --- | --- |
+| P1 | 10 | [Sample](10-sample/plan.md) | open | owner | Sample |
+<!-- ai-orch:generated initiatives -->
+
+## Active Tasks
+<!-- ai-orch:generated active-tasks -->
+<!-- ai-orch:generated active-tasks -->
+
+## Closed Tasks
+<!-- ai-orch:generated closed-tasks -->
+<!-- ai-orch:generated closed-tasks -->
+""",
+        encoding="utf-8",
+    )
+
+    res_sync = run_cli("sync-index", "--apply", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sync.returncode == 0
+
+    idx_text = index_file.read_text(encoding="utf-8")
+    assert "in progress (done: 10.1; running: 10.2)" in idx_text
+
+
+def test_cli_questions_ask_blocks_child_ids(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    init_dir = tasks_dir / "11-orch"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        """# 11 - Orchestration
+
+- **Goal:** Test.
+
+## Tasks
+
+### 11.1 - Container Task
+- **Status:** `open`
+- **Goal:** C1.
+""",
+        encoding="utf-8",
+    )
+
+    # Expand 11.1 to folder and add child 11.1.1
+    res_dry_exp = te.expand_node(tasks_dir, "11.1", dry_run=True)
+    te.expand_node(tasks_dir, "11.1", expect_plan_hash=res_dry_exp["plan_hash"])
+
+    res_dry_add = te.child_add(tasks_dir, "11.1", "Child leaf", dry_run=True)
+    te.child_add(tasks_dir, "11.1", "Child leaf", expect_plan_hash=res_dry_add["plan_hash"])
+
+    # Create emergent task T060 with child T060.1
+    feat_dir = tasks_dir / "features"
+    feat_dir.mkdir(parents=True)
+    (feat_dir / "T060-worker.md").write_text(
+        """# T060 Worker
+
+- id: T060
+- title: Worker
+- category: features
+- priority: P2
+- priority-reason: test
+- next-up: no
+- state: open
+- executor: kilo
+- depends-on: -
+- decider: -
+- sources: -
+- paths: -
+- handoff: Read instructions.
+
+## Goal
+
+Worker.
+
+## Steps
+
+- [ ] Steps.
+
+## Verification
+
+- [ ] Verification.
+""",
+        encoding="utf-8",
+    )
+    res_dry_cadd = te.child_add(tasks_dir, "T060", "Worker subtask", dry_run=True)
+    te.child_add(tasks_dir, "T060", "Worker subtask", expect_plan_hash=res_dry_cadd["plan_hash"])
+
+    # Ask question blocking child IDs 11.1.1 and T060.1
+    res_ask = run_cli("questions", "ask", "--question", "Confirm API specs?", "--context", "Need confirmation on endpoints.", "--blocks", "11.1.1, T060.1", "--open-answer", "yes", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_ask.returncode == 0
+    d_ask = json.loads(res_ask.stdout)
+    qid = d_ask["id"]
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["11.1.1"].state == "waiting"
+    assert tree["T060.1"].state == "waiting"
+
+    # Filter questions list by blocked child ID
+    res_list = run_cli("questions", "list", "--blocks", "11.1.1", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_list.returncode == 0
+    d_list = json.loads(res_list.stdout)
+    assert any(q["id"] == qid for q in d_list["questions"])
+
+    # Validate passes with 0 errors
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+
+    # Answer question -> unblocks back to open
+    res_ans = run_cli("questions", "answer", qid, "--choice", "open", "--text", "Confirmed", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_ans.returncode == 0
+
+    tree_after = te.discover_task_tree(tasks_dir)
+    assert tree_after["11.1.1"].canonical_state == "open"
+    assert tree_after["T060.1"].canonical_state == "open"
+
+    res_val_after = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val_after.returncode == 0
+

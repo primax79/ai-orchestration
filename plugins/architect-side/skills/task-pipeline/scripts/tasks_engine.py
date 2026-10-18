@@ -981,6 +981,7 @@ def rewrite_block_in_file(
     new_priority: str | None = None,
     new_size: str | None = None,
     new_kind: str | None = None,
+    new_decider: str | None = None,
     expect_task_hash: str | None = None,
     status_note: str | None = None,
     dry_run: bool = False,
@@ -1028,6 +1029,7 @@ def rewrite_block_in_file(
     kind_updated = False
     labels_updated = False
     deps_updated = False
+    decider_updated = False
     status_line_idx: int | None = None
 
     parsed_lines: list[tuple[str, list[BulletSegment], str, bool, str]] = []
@@ -1089,6 +1091,19 @@ def rewrite_block_in_file(
                         seg.clean_value = new_kind
                         kind_updated = True
 
+            if new_decider is not None:
+                to_remove = []
+                for s_idx, seg in enumerate(segments):
+                    if seg.key in ("decider",):
+                        if new_decider == "-" or not new_decider.strip():
+                            to_remove.append(s_idx)
+                        else:
+                            seg.raw_value = new_decider
+                            seg.clean_value = new_decider
+                        decider_updated = True
+                for s_idx in reversed(to_remove):
+                    segments.pop(s_idx)
+
             parsed_lines.append((prefix, segments, line_ending, True, line))
         else:
             parsed_lines.append(("", [], line, False, line))
@@ -1139,6 +1154,12 @@ def rewrite_block_in_file(
             new_seg = BulletSegment(raw_key="Labels", key="labels", raw_value=lbl_val, clean_value=lbl_val)
             segments.append(new_seg)
             labels_updated = True
+
+        if new_decider is not None and not decider_updated and new_decider != "-" and new_decider.strip():
+            new_seg = BulletSegment(raw_key="Decider", key="decider", raw_value=new_decider, clean_value=new_decider)
+            segments.insert(insert_idx, new_seg)
+            insert_idx += 1
+            decider_updated = True
 
         parsed_lines[status_line_idx] = (prefix, segments, line_ending, is_b, orig)
 
@@ -1268,7 +1289,7 @@ def parse_child_blocks(
                 in_done=in_done,
                 in_closed_section=is_closed,
                 task_hash=block_hash,
-                block_text=block_text,
+                block_text=None,
                 expanded_rel_path=expanded_link,
                 category=parent_category,
                 slug=slugify(ctitle),
@@ -1292,6 +1313,10 @@ def parse_child_blocks(
                     c_node.executor = sub_own_fields["executor"]
                 if "kind" in sub_own_fields:
                     c_node.kind = sub_own_fields["kind"]
+                if "labels" in sub_own_fields and sub_own_fields["labels"]:
+                    raw_lbls = str(sub_own_fields["labels"]).strip()
+                    c_node.labels = [l.strip() for l in raw_lbls.split(",") if l.strip() and l.strip() != "-"]
+                    c_node.label_sources = {l: "own" for l in c_node.labels}
 
                 sub_children = parse_child_blocks(
                     target_readme,
@@ -1772,7 +1797,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                             depends_on=list(et_parsed.get("depends_on", [])),
                             expanded_depends_on=list(et_parsed.get("depends_on", [])),
                             own_depends_on=list(et_parsed.get("depends_on", [])),
-                            depends_on_free_text="",
+            depends_on_free_text=et.get("depends_on_free_text", ""),
                             state=et_parsed["state"],
                             canonical_state=et_parsed["canonical_state"],
                             derived_state=None,
@@ -1935,18 +1960,24 @@ def child_add(
                 })
 
                 plan, plan_hash = compute_operation_plan(operations)
-                if expect_plan_hash and expect_plan_hash != plan_hash:
-                    return {
-                        "ok": False,
-                        "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
-                        "plan_hash": plan_hash,
-                    }
                 if dry_run:
                     return {
                         "ok": True,
                         "dry_run": True,
                         "allocated_id": new_id,
                         "plan": plan,
+                        "plan_hash": plan_hash,
+                    }
+                if not expect_plan_hash:
+                    return {
+                        "ok": False,
+                        "error": "Applying child add requires --expect-plan-hash <hash>. Run with --dry-run to obtain the plan hash.",
+                        "plan_hash": plan_hash,
+                    }
+                if expect_plan_hash != plan_hash:
+                    return {
+                        "ok": False,
+                        "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
                         "plan_hash": plan_hash,
                     }
 
@@ -1990,10 +2021,113 @@ def child_add(
                     "plan_hash": plan_hash,
                     "folder": str(new_folder),
                 }
-            return {
-                "ok": False,
-                "error": f"child add under the file/folder leaf {parent_id!r} is not implemented yet (blocks only).",
-            }
+            else:
+                parent_dir = parent_file.parent
+                if not parent.is_folder:
+                    # Single-file leaf -> convert to folder
+                    new_folder = parent_dir / f"{parent_id}-{slug}"
+                    new_readme = new_folder / "README.md"
+                    operations.append({
+                        "action": "delete",
+                        "path": parent_file.relative_to(tasks_dir).as_posix(),
+                        "before_hash": _file_sha256(parent_file),
+                    })
+                    operations.append({
+                        "action": "create",
+                        "path": new_readme.relative_to(tasks_dir).as_posix(),
+                        "before_hash": "",
+                    })
+                    plan, plan_hash = compute_operation_plan(operations)
+                    if dry_run:
+                        return {
+                            "ok": True,
+                            "dry_run": True,
+                            "allocated_id": new_id,
+                            "plan": plan,
+                            "plan_hash": plan_hash,
+                        }
+                    if not expect_plan_hash:
+                        return {
+                            "ok": False,
+                            "error": "Applying child add requires --expect-plan-hash <hash>. Run with --dry-run to obtain the plan hash.",
+                            "plan_hash": plan_hash,
+                        }
+                    if expect_plan_hash != plan_hash:
+                        return {
+                            "ok": False,
+                            "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
+                            "plan_hash": plan_hash,
+                        }
+
+                    old_text = parent_file.read_text(encoding="utf-8")
+                    child_block = (
+                        f"\n### {new_id} - {title}\n\n"
+                        f"- **Status:** `open` · **Kind:** {kind}\n"
+                        f"- **Goal:** {title}\n"
+                    )
+                    new_readme_text = old_text.rstrip() + f"\n\n## Subtasks\n{child_block}"
+                    new_folder.mkdir(parents=True, exist_ok=True)
+                    _atomic_write_text(new_readme, new_readme_text)
+                    parent_file.unlink()
+                    return {
+                        "ok": True,
+                        "allocated_id": new_id,
+                        "plan_hash": plan_hash,
+                        "folder": str(new_folder),
+                    }
+                else:
+                    # Folder leaf
+                    operations.append({
+                        "action": "modify",
+                        "path": parent_file.relative_to(tasks_dir).as_posix(),
+                        "before_hash": _file_sha256(parent_file),
+                    })
+                    plan, plan_hash = compute_operation_plan(operations)
+                    if dry_run:
+                        return {
+                            "ok": True,
+                            "dry_run": True,
+                            "allocated_id": new_id,
+                            "plan": plan,
+                            "plan_hash": plan_hash,
+                        }
+                    if not expect_plan_hash:
+                        return {
+                            "ok": False,
+                            "error": "Applying child add requires --expect-plan-hash <hash>. Run with --dry-run to obtain the plan hash.",
+                            "plan_hash": plan_hash,
+                        }
+                    if expect_plan_hash != plan_hash:
+                        return {
+                            "ok": False,
+                            "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
+                            "plan_hash": plan_hash,
+                        }
+
+                    old_text = parent_file.read_text(encoding="utf-8")
+                    child_block = (
+                        f"\n### {new_id} - {title}\n\n"
+                        f"- **Status:** `open` · **Kind:** {kind}\n"
+                        f"- **Goal:** {title}\n"
+                    )
+                    if re.search(r"^##\s+Subtasks\b", old_text, re.MULTILINE):
+                        closed_m = re.search(r"^##\s+Closed\b", old_text, re.MULTILINE)
+                        if closed_m:
+                            new_text = old_text[:closed_m.start()] + child_block.lstrip() + "\n" + old_text[closed_m.start():]
+                        else:
+                            new_text = old_text.rstrip() + "\n" + child_block
+                    else:
+                        closed_m = re.search(r"^##\s+Closed\b", old_text, re.MULTILINE)
+                        if closed_m:
+                            new_text = old_text[:closed_m.start()] + "## Subtasks\n" + child_block + "\n" + old_text[closed_m.start():]
+                        else:
+                            new_text = old_text.rstrip() + "\n\n## Subtasks\n" + child_block
+                    _atomic_write_text(parent_file, new_text)
+                    return {
+                        "ok": True,
+                        "allocated_id": new_id,
+                        "plan_hash": plan_hash,
+                    }
 
         else:
             parent_file = pathlib.Path(parent.file_path)
@@ -2004,18 +2138,24 @@ def child_add(
                 "before_hash": parent_before_hash,
             })
             plan, plan_hash = compute_operation_plan(operations)
-            if expect_plan_hash and expect_plan_hash != plan_hash:
-                return {
-                    "ok": False,
-                    "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
-                    "plan_hash": plan_hash,
-                }
             if dry_run:
                 return {
                     "ok": True,
                     "dry_run": True,
                     "allocated_id": new_id,
                     "plan": plan,
+                    "plan_hash": plan_hash,
+                }
+            if not expect_plan_hash:
+                return {
+                    "ok": False,
+                    "error": "Applying child add requires --expect-plan-hash <hash>. Run with --dry-run to obtain the plan hash.",
+                    "plan_hash": plan_hash,
+                }
+            if expect_plan_hash != plan_hash:
+                return {
+                    "ok": False,
+                    "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
                     "plan_hash": plan_hash,
                 }
 
@@ -2025,11 +2165,18 @@ def child_add(
                 f"- **Goal:** {title}\n"
             )
             old_text = parent_file.read_text(encoding="utf-8")
-            closed_m = re.search(r"^##\s+Closed\b", old_text, re.MULTILINE)
-            if closed_m:
-                new_text = old_text[:closed_m.start()] + child_block.lstrip() + "\n" + old_text[closed_m.start():]
+            if parent_file.name == "README.md" and not re.search(r"^##\s+Subtasks\b", old_text, re.MULTILINE):
+                closed_m = re.search(r"^##\s+Closed\b", old_text, re.MULTILINE)
+                if closed_m:
+                    new_text = old_text[:closed_m.start()] + "## Subtasks\n" + child_block + "\n" + old_text[closed_m.start():]
+                else:
+                    new_text = old_text.rstrip() + "\n\n## Subtasks\n" + child_block
             else:
-                new_text = old_text.rstrip() + "\n" + child_block
+                closed_m = re.search(r"^##\s+Closed\b", old_text, re.MULTILINE)
+                if closed_m:
+                    new_text = old_text[:closed_m.start()] + child_block.lstrip() + "\n" + old_text[closed_m.start():]
+                else:
+                    new_text = old_text.rstrip() + "\n" + child_block
 
             _atomic_write_text(parent_file, new_text)
             return {
@@ -2073,14 +2220,20 @@ def expand_node(
             },
         ]
         plan, plan_hash = compute_operation_plan(operations)
-        if expect_plan_hash and expect_plan_hash != plan_hash:
+        if dry_run:
+            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash}
+        if not expect_plan_hash:
+            return {
+                "ok": False,
+                "error": "Applying expand requires --expect-plan-hash <hash>. Run with --dry-run to obtain the plan hash.",
+                "plan_hash": plan_hash,
+            }
+        if expect_plan_hash != plan_hash:
             return {
                 "ok": False,
                 "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
                 "plan_hash": plan_hash,
             }
-        if dry_run:
-            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash}
 
         rel_folder = f"{node_id}-{slug}/"
         rel_readme = f"{node_id}-{slug}/README.md"
@@ -2144,14 +2297,20 @@ def collapse_node(
             },
         ]
         plan, plan_hash = compute_operation_plan(operations)
-        if expect_plan_hash and expect_plan_hash != plan_hash:
+        if dry_run:
+            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash}
+        if not expect_plan_hash:
+            return {
+                "ok": False,
+                "error": "Applying collapse requires --expect-plan-hash <hash>. Run with --dry-run to obtain the plan hash.",
+                "plan_hash": plan_hash,
+            }
+        if expect_plan_hash != plan_hash:
             return {
                 "ok": False,
                 "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
                 "plan_hash": plan_hash,
             }
-        if dry_run:
-            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash}
 
         readme_text = readme.read_text(encoding="utf-8")
         lines = readme_text.splitlines()
@@ -2212,20 +2371,81 @@ def reopen_node(
                 "before_hash": _file_sha256(file_path),
             }
         ]
+
+        ancestors_to_restore: list[tuple[TaskNode, str]] = []
+        old_st = node.state
+        old_cst = node.canonical_state
+        node.state = "open"
+        node.canonical_state = "open"
+
+        curr = node.parent
+        while curr and curr in tree:
+            anc = tree[curr]
+            child_nodes = [tree[cid] for cid in anc.children if cid in tree]
+            child_states = [c.state for c in child_nodes]
+            new_derived = derive_container_state(child_states)
+            anc.derived_state = new_derived
+            anc.state = new_derived
+            anc.canonical_state = normalize_state(new_derived)
+            if anc.file_path and pathlib.Path(anc.file_path).is_file():
+                anc_file = pathlib.Path(anc.file_path)
+                anc_text = anc_file.read_text(encoding="utf-8")
+                m_state = re.search(r"^-\s+state:\s*(.*)$", anc_text, re.MULTILINE)
+                if m_state:
+                    anc_old_state = m_state.group(1).strip()
+                    if normalize_state(anc_old_state) in TERMINAL_STATES and anc_old_state != new_derived:
+                        ancestors_to_restore.append((anc, new_derived))
+                        anc_rel = anc_file.relative_to(tasks_dir).as_posix()
+                        if anc_file != file_path and not any(op["path"] == anc_rel for op in operations):
+                            operations.append({
+                                "action": "modify",
+                                "path": anc_rel,
+                                "before_hash": _file_sha256(anc_file),
+                            })
+            curr = anc.parent
+
+        node.state = old_st
+        node.canonical_state = old_cst
+
         plan, plan_hash = compute_operation_plan(operations)
-        if expect_plan_hash and expect_plan_hash != plan_hash:
+        if dry_run:
+            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash}
+        if not expect_plan_hash:
+            return {
+                "ok": False,
+                "error": "Applying reopen requires --expect-plan-hash <hash>. Run with --dry-run to obtain the plan hash.",
+                "plan_hash": plan_hash,
+            }
+        if expect_plan_hash != plan_hash:
             return {
                 "ok": False,
                 "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
                 "plan_hash": plan_hash,
             }
-        if dry_run:
-            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash}
+
+        today = datetime.date.today().isoformat()
+        reason_clean = reason.strip() if reason else "reopened"
+        status_note = f"{today}; {reason_clean}"
 
         if node.block_text is not None:
-            rewrite_block_in_file(file_path, node_id, new_status="open")
+            rewrite_block_in_file(file_path, node_id, new_status="open", status_note=status_note)
         else:
-            update_task_state_in_file(file_path, "open")
+            _update_task_file_headers_and_state(file_path, "open")
+            t_dict = node.to_dict() if hasattr(node, "to_dict") else vars(node)
+            _append_progress_log(t_dict, old_st, "open", actor="owner", verifier=None, reason=reason_clean)
+
+        for anc, new_anc_state in ancestors_to_restore:
+            anc_file = pathlib.Path(anc.file_path)
+            _update_task_file_headers_and_state(anc_file, new_anc_state)
+            anc_dict = anc.to_dict() if hasattr(anc, "to_dict") else vars(anc)
+            _append_progress_log(
+                anc_dict,
+                anc.state,
+                new_anc_state,
+                actor="owner",
+                verifier=None,
+                reason=f"Restored ancestor because child {node_id} reopened: {reason_clean}",
+            )
 
         return {"ok": True, "task_id": node_id, "new_state": "open", "plan_hash": plan_hash}
 
@@ -2449,8 +2669,12 @@ def set_deps(
             }
         else:
             old_text = file_path.read_text(encoding="utf-8")
-            deps_str = ", ".join(new_deps) if new_deps else "-"
-            new_text = re.sub(r"^-\s+depends-on:\s*.*$", f"- depends-on: {deps_str}", old_text, flags=re.MULTILINE)
+            m = re.search(r"^-\s+depends-on:\s*(.*)$", old_text, flags=re.MULTILINE)
+            if not m:
+                return {"ok": False, "error": f"Header line '- depends-on:' not found in {file_path}"}
+            raw_val = m.group(1)
+            new_raw = update_depends_on_field(raw_val, new_deps)
+            new_text = old_text[:m.start()] + f"- depends-on: {new_raw}" + old_text[m.end():]
             diff_lines = list(difflib.unified_diff(
                 old_text.splitlines(keepends=True),
                 new_text.splitlines(keepends=True),
@@ -2460,7 +2684,7 @@ def set_deps(
             diff_str = "".join(diff_lines)
             if not dry_run:
                 _atomic_write_text(file_path, new_text, encoding="utf-8")
-                new_hash = _file_sha256(file_path)
+                new_hash = task_bundle_sha256(file_path)
             else:
                 new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
             return {
@@ -2780,11 +3004,7 @@ def parse_emergent_task_file(
     is_micro = (folder_category == "micro") or (headers.get("category") == "micro")
 
     raw_depends = headers.get("depends-on", "-")
-    depends_list = (
-        [d.strip() for d in raw_depends.split(",") if d.strip() and d.strip() != "-"]
-        if raw_depends and raw_depends != "-"
-        else []
-    )
+    depends_list, depends_free_text = parse_depends_on_field(raw_depends) if raw_depends and raw_depends != "-" else ([], "")
 
     raw_labels = headers.get("labels", "")
     labels_list = (
@@ -2822,6 +3042,7 @@ def parse_emergent_task_file(
         "executor": headers.get("executor", "kilo" if is_micro else ""),
         "depends_on": depends_list,
         "depends_on_raw": raw_depends,
+        "depends_on_free_text": depends_free_text,
         "decider": headers.get("decider", "-"),
         "sources": headers.get("sources", "-"),
         "paths": headers.get("paths", "-"),
@@ -6974,7 +7195,12 @@ def ask_question(
                 # Update tasks
                 for t, new_st, dec_mode in tasks_to_update:
                     if hasattr(t, "block_text") and t.block_text is not None:
-                        rewrite_block_in_file(pathlib.Path(t.file_path), t.id, new_status=new_st)
+                        curr_dec = str(t.own_fields.get("decider", "") or t.fields.get("decider", {}).get("value", "")).strip() if hasattr(t, "own_fields") else ""
+                        if dec_mode == "SET":
+                            new_dec = q_id
+                        else:
+                            new_dec = f"{curr_dec}, {q_id}" if curr_dec and curr_dec != "-" else q_id
+                        rewrite_block_in_file(pathlib.Path(t.file_path), t.id, new_status=new_st, new_decider=new_dec)
                     else:
                         tp = pathlib.Path(t.file_path if hasattr(t, "file_path") else t["file_path"])
                         curr_dec = (t.fields.get("decider", {}).get("value", "") or t.own_fields.get("decider", "")) if hasattr(t, "own_fields") else t.get("decider", "")
@@ -7107,7 +7333,7 @@ def answer_question(
                         t_node = tree[tid]
                         if t_node.block_text is not None:
                             restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, [question_id])
-                            rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state)
+                            rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state, new_decider="-")
                             unblocked.append(tid)
                             continue
                     if tid not in emergent_map:
@@ -7239,7 +7465,7 @@ def withdraw_question(
                         t_node = tree[tid]
                         if t_node.block_text is not None:
                             restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, [question_id])
-                            rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state)
+                            rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state, new_decider="-")
                             unblocked.append(tid)
                             continue
                     if tid not in emergent_map:
@@ -8856,9 +9082,10 @@ def tasks_new_from_note(
     goal: str | None = None,
     sources: str | None = None,
     paths: str | None = None,
+    parent: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Create an emergent task `T###`, from an inbox note (`from_note`) or standalone
-    (then `goal` and `priority_reason` are required)."""
+    (then `goal` and `priority_reason` are required), or as a child under `parent`."""
     if not is_platform_supported():
         return False, {
             "ok": False,
@@ -8869,6 +9096,133 @@ def tasks_new_from_note(
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     from_note = (from_note or "").strip()
     category = (category or "").strip()
+    parent = (parent or "").strip() if parent else None
+
+    if parent:
+        with task_write_lock(tasks_dir):
+            tree = discover_task_tree(tasks_dir)
+            if parent not in tree:
+                return False, {"ok": False, "error": f"Parent node {parent!r} not found."}
+            p_node = tree[parent]
+            if p_node.is_leaf and p_node.canonical_state != "open":
+                return False, {
+                    "ok": False,
+                    "error": f"Cannot add child to in-flight leaf '{parent}' in state '{p_node.state}'. Leaf must be in state 'open'.",
+                }
+            note = None
+            if from_note:
+                note = find_inbox_note(tasks_dir, from_note)
+                if not note:
+                    return False, {"ok": False, "error": f"Inbox note {from_note!r} not found."}
+
+            kind = note.get("kind", "feature") if note else "feature"
+            if kind not in VALID_KINDS:
+                kind = "feature"
+            t_title = title.strip() if title and title.strip() else (note.get("title") if note else "")
+            if not t_title:
+                return False, {"ok": False, "error": "Missing required --title."}
+
+            if goal and goal.strip():
+                g_text = goal.strip()
+            elif note:
+                body = note.get("body", "").strip()
+                paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+                g_text = paragraphs[0] if paragraphs else f"Goal derived from inbox note {from_note}."
+            else:
+                g_text = t_title
+
+            new_id = allocate_child_id(tree, parent, tasks_dir)
+            parent_file = pathlib.Path(p_node.file_path)
+            slug = slugify(p_node.title)
+            child_block = f"\n### {new_id} - {t_title}\n\n- **Status:** `open` · **Kind:** {kind}\n- **Goal:** {g_text}\n"
+
+            if p_node.is_leaf:
+                if p_node.block_text is not None:
+                    parent_dir = parent_file.parent
+                    new_folder = parent_dir / f"{parent}-{slug}"
+                    new_readme = new_folder / "README.md"
+
+                    old_text = parent_file.read_text(encoding="utf-8")
+                    block_lines = p_node.block_text.splitlines()
+                    filtered_lines = [bl for bl in block_lines if not re.match(r"^\s*[-*]\s+\*\*(Status|State):\*\*", bl)]
+                    body_content = "\n".join(filtered_lines[1:]).strip()
+
+                    rel_folder_link = f"{parent}-{slug}/"
+                    rel_readme_link = f"{parent}-{slug}/README.md"
+                    expanded_block = f"### {parent} - {p_node.title}\n\n- **Expanded:** [{rel_folder_link}]({rel_readme_link})\n"
+                    new_parent_text = old_text.replace(p_node.block_text, expanded_block, 1)
+                    _atomic_write_text(parent_file, new_parent_text)
+
+                    readme_lines = [f"# {parent} - {p_node.title}", ""]
+                    if body_content:
+                        readme_lines.append(body_content)
+                        readme_lines.append("")
+                    readme_lines.extend([
+                        "## Subtasks",
+                        "",
+                        f"### {new_id} - {t_title}",
+                        "",
+                        f"- **Status:** `open` · **Kind:** {kind}",
+                        f"- **Goal:** {g_text}",
+                        "",
+                    ])
+                    new_folder.mkdir(parents=True, exist_ok=True)
+                    _atomic_write_text(new_readme, "\n".join(readme_lines))
+                    target_file = new_readme
+                else:
+                    if not p_node.is_folder:
+                        parent_dir = parent_file.parent
+                        new_folder = parent_dir / f"{parent}-{slug}"
+                        new_readme = new_folder / "README.md"
+                        old_text = parent_file.read_text(encoding="utf-8")
+                        new_readme_text = old_text.rstrip() + f"\n\n## Subtasks\n{child_block}"
+                        new_folder.mkdir(parents=True, exist_ok=True)
+                        _atomic_write_text(new_readme, new_readme_text)
+                        parent_file.unlink()
+                        target_file = new_readme
+                    else:
+                        old_text = parent_file.read_text(encoding="utf-8")
+                        if re.search(r"^##\s+Subtasks\b", old_text, re.MULTILINE):
+                            closed_m = re.search(r"^##\s+Closed\b", old_text, re.MULTILINE)
+                            if closed_m:
+                                new_text = old_text[:closed_m.start()] + child_block.lstrip() + "\n" + old_text[closed_m.start():]
+                            else:
+                                new_text = old_text.rstrip() + "\n" + child_block
+                        else:
+                            closed_m = re.search(r"^##\s+Closed\b", old_text, re.MULTILINE)
+                            if closed_m:
+                                new_text = old_text[:closed_m.start()] + "## Subtasks\n" + child_block + "\n" + old_text[closed_m.start():]
+                            else:
+                                new_text = old_text.rstrip() + "\n\n## Subtasks\n" + child_block
+                        _atomic_write_text(parent_file, new_text)
+                        target_file = parent_file
+            else:
+                old_text = parent_file.read_text(encoding="utf-8")
+                if parent_file.name == "README.md" and not re.search(r"^##\s+Subtasks\b", old_text, re.MULTILINE):
+                    closed_m = re.search(r"^##\s+Closed\b", old_text, re.MULTILINE)
+                    if closed_m:
+                        new_text = old_text[:closed_m.start()] + "## Subtasks\n" + child_block + "\n" + old_text[closed_m.start():]
+                    else:
+                        new_text = old_text.rstrip() + "\n\n## Subtasks\n" + child_block
+                else:
+                    closed_m = re.search(r"^##\s+Closed\b", old_text, re.MULTILINE)
+                    if closed_m:
+                        new_text = old_text[:closed_m.start()] + child_block.lstrip() + "\n" + old_text[closed_m.start():]
+                    else:
+                        new_text = old_text.rstrip() + "\n" + child_block
+                _atomic_write_text(parent_file, new_text)
+                target_file = parent_file
+
+            rel_path = target_file.relative_to(tasks_dir).as_posix()
+            return True, {
+                "ok": True,
+                "id": new_id,
+                "parent": parent,
+                "file_path": str(target_file),
+                "rel_path": rel_path,
+                "sources": note["rel_path"] if note else (sources or "-"),
+                "paths": paths or "-",
+            }
     if from_note and not category:
         note_for_hint = find_inbox_note(tasks_dir, from_note)
         if note_for_hint:
@@ -9762,6 +10116,7 @@ def cmd_tasks_new(args: argparse.Namespace) -> int:
         goal=getattr(args, "goal", None),
         sources=getattr(args, "sources", None),
         paths=getattr(args, "paths", None),
+        parent=getattr(args, "parent", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -10059,6 +10414,7 @@ def build_parser() -> argparse.ArgumentParser:
     # tasks new
     p_new = sub.add_parser("new", help="Create a new task from an inbox note")
     p_new.add_argument("--from-note", default=None, help="Source inbox note ID (e.g. N001) or filename; omit to create a standalone task")
+    p_new.add_argument("--parent", default=None, help="Parent task/initiative ID to create task as a child")
     p_new.add_argument("--goal", default=None, help="Goal paragraph (required without --from-note)")
     p_new.add_argument("--sources", default=None, help="Sources header value (standalone tasks)")
     p_new.add_argument("--paths", default=None, help="Paths header value (standalone tasks)")
