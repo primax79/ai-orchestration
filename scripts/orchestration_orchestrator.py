@@ -18,10 +18,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime
+import difflib
+import hashlib
 import json
 import logging
 import os
 import pathlib
+import shutil
 import sys
 import threading
 import time
@@ -103,12 +106,20 @@ try:
         find_project_config_path,
         default_global_config_path,
         load_toml_file,
+        set_toml_value,
+        write_file_atomic,
+        config_lock,
+        _emit_config_changed,
     )
 except ImportError:
     resolve_config = None  # type: ignore
     find_project_config_path = None  # type: ignore
     default_global_config_path = None  # type: ignore
     load_toml_file = None  # type: ignore
+    set_toml_value = None  # type: ignore
+    write_file_atomic = None  # type: ignore
+    config_lock = None  # type: ignore
+    _emit_config_changed = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -350,6 +361,20 @@ def ensure_orchestrator(
             raise RuntimeError(
                 f"Tool '{selected_tool}' is disabled in configuration. "
                 f"Run 'ai-orch setup' or 'ai-orch config' to reassign the orchestrator role."
+            )
+
+        is_installed = False
+        if shutil.which(selected_tool):
+            is_installed = True
+        elif isinstance(tool_cfg, dict):
+            headless_argv = tool_cfg.get("headless", {}).get("argv", [])
+            if headless_argv and shutil.which(str(headless_argv[0])):
+                is_installed = True
+
+        if not is_installed:
+            raise RuntimeError(
+                f"Tool '{selected_tool}' is not installed or not found on PATH. "
+                f"Run 'ai-orch setup' to configure available tools."
             )
 
         # Resolve model
@@ -1570,6 +1595,179 @@ def rotate_orchestrator(
         }
 
 
+def reassign_orchestrator(
+    workspace: pathlib.Path | str,
+    tool: str,
+    *,
+    model: str | None = None,
+    scope: str = "project",
+    dry_run: bool = False,
+    expect_hash: str | None = None,
+    no_handoff: bool = False,
+    timeout: float = 300.0,
+    global_config: str | pathlib.Path | None = None,
+) -> dict[str, Any]:
+    """Reassign orchestrator role to another tool/model via fenced succession (Spec §0b).
+
+    In dry-run mode, previews config diff, plan, and plan hash.
+    In apply mode, writes config under lock (emitting config.changed) and executes
+    fenced succession with reason 'reassigned' (generation N -> N+1, handoff turn,
+    retires old session, carries queue and cursor).
+    """
+    ws = pathlib.Path(workspace).resolve()
+    ensure_git_exclude(ws)
+
+    orch_file = get_orchestrator_file(ws)
+    if not orch_file.is_file():
+        ensure_orchestrator(ws)
+    orch_doc = _read_json_safe(orch_file)
+    cur = orch_doc.get("current", {})
+    old_gen = orch_doc.get("generation", 1)
+    cur_tool = cur.get("tool", "claude")
+    target_gen = old_gen + 1
+
+    plan_desc = f"generation {old_gen} ({cur_tool}) → {target_gen} ({tool}), with a handoff turn"
+
+    # Resolve target config path
+    gpath = pathlib.Path(global_config).resolve() if global_config else None
+    if find_project_config_path is not None and default_global_config_path is not None:
+        if scope == "project":
+            target_path = find_project_config_path(ws, gpath)
+        else:
+            target_path = gpath or default_global_config_path()
+    else:
+        target_path = ws / ".ai-orchestration.local.toml"
+
+    if target_path.exists():
+        current_bytes = target_path.read_bytes()
+        current_hash = hashlib.sha256(current_bytes).hexdigest()
+        existing_text = current_bytes.decode("utf-8")
+    else:
+        current_bytes = b""
+        current_hash = hashlib.sha256(b"").hexdigest()
+        existing_text = ""
+
+    if set_toml_value is None:
+        raise RuntimeError("orchestration_config module is required for reassign")
+
+    text = set_toml_value(existing_text, ["routing"], "default_orchestrator", tool)
+    if model is not None:
+        text = set_toml_value(text, ["tools", tool, "profiles", "orchestration"], "model", model)
+
+    diff_str = "".join(
+        difflib.unified_diff(
+            existing_text.splitlines(keepends=True),
+            text.splitlines(keepends=True),
+            fromfile=f"a/{target_path.name}",
+            tofile=f"b/{target_path.name}",
+        )
+    )
+
+    plan_hash = hashlib.sha256(
+        f"{target_path}:{current_hash}:{old_gen}:{target_gen}:{tool}:{diff_str}".encode("utf-8")
+    ).hexdigest()
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "plan": plan_desc,
+            "plan_hash": plan_hash,
+            "hash": current_hash,
+            "config_hash": current_hash,
+            "diff": diff_str,
+            "path": str(target_path),
+            "from_tool": cur_tool,
+            "to_tool": tool,
+            "generation": old_gen,
+            "target_generation": target_gen,
+        }
+
+    # Verify expect_hash if provided
+    if expect_hash is not None:
+        norm_exp = expect_hash.strip().lower()
+        if norm_exp not in (current_hash.lower(), plan_hash.lower()):
+            msg = f"hash mismatch for {target_path}: expected {expect_hash}, found {current_hash} (plan hash: {plan_hash})"
+            return {
+                "ok": False,
+                "error": msg,
+                "expected_hash": expect_hash,
+                "actual_hash": current_hash,
+                "plan_hash": plan_hash,
+                "path": str(target_path),
+            }
+
+    lock_fn = config_lock if config_lock is not None else contextlib.nullcontext
+    with lock_fn(target_path):
+        if target_path.exists():
+            locked_bytes = target_path.read_bytes()
+            locked_hash = hashlib.sha256(locked_bytes).hexdigest()
+        else:
+            locked_hash = hashlib.sha256(b"").hexdigest()
+
+        if expect_hash is not None and expect_hash.strip().lower() not in (locked_hash.lower(), plan_hash.lower()):
+            msg = f"hash mismatch under lock for {target_path}: expected {expect_hash}, found {locked_hash}"
+            return {
+                "ok": False,
+                "error": msg,
+                "expected_hash": expect_hash,
+                "actual_hash": locked_hash,
+                "path": str(target_path),
+            }
+
+        if write_file_atomic is not None:
+            write_file_atomic(target_path, text)
+        else:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(text, encoding="utf-8")
+
+        after_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        keys_changed = ["routing.default_orchestrator"]
+        if model is not None:
+            keys_changed.append(f"tools.{tool}.profiles.orchestration.model")
+
+        if _emit_config_changed is not None:
+            _emit_config_changed(
+                scope=scope,
+                target_path=target_path,
+                workspace=ws if scope == "project" else None,
+                keys_changed=keys_changed,
+                before_hash=locked_hash,
+                after_hash=after_hash,
+            )
+
+    rot_res = rotate_orchestrator(
+        ws,
+        new_tool=tool,
+        new_model=model,
+        reason="reassigned",
+        handoff=not no_handoff,
+        timeout=timeout,
+    )
+
+    if rot_res.get("status") == "failed":
+        return {
+            "ok": False,
+            "error": rot_res.get("error", "rotation_failed"),
+            "exit_code": rot_res.get("exit_code"),
+            "status": "failed",
+        }
+
+    return {
+        "ok": True,
+        "status": "reassigned",
+        "plan": plan_desc,
+        "plan_hash": plan_hash,
+        "generation": rot_res.get("generation"),
+        "session_id": rot_res.get("session_id"),
+        "tool": tool,
+        "model": rot_res.get("model"),
+        "path": str(target_path),
+        "diff": diff_str,
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI Command Dispatcher
 # ---------------------------------------------------------------------------
@@ -1629,6 +1827,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     # hand-off
     sub.add_parser("hand-off", parents=[common], help="Generate and inspect the handoff prompt")
+
+    # reassign
+    p_reass = sub.add_parser("reassign", parents=[common], help="Reassign orchestrator role via fenced succession")
+    p_reass.add_argument("--tool", "-t", required=True, help="Target orchestrator tool (e.g. kilo, claude, codex)")
+    p_reass.add_argument("--model", "-m", help="Target model identifier")
+    p_reass.add_argument("--scope", choices=["global", "project"], default="project", help="Config scope (default: project)")
+    p_reass.add_argument("--dry-run", action="store_true", help="Preview plan and config diff without applying")
+    p_reass.add_argument("--expect-hash", help="Expected config or plan hash for optimistic concurrency")
+    p_reass.add_argument("--no-handoff", action="store_true", help="Skip handoff turn execution")
+    p_reass.add_argument("--timeout", type=float, default=300.0, help="Handoff timeout in seconds")
+    p_reass.add_argument("--global-config", help="Path to global config file")
 
     # cancel
     p_can = sub.add_parser("cancel", parents=[common], help="Cancel a turn")
@@ -1745,6 +1954,37 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"handoff_prompt": prompt}, indent=2))
             else:
                 print(prompt)
+            return 0
+
+        if args.subcommand == "reassign":
+            res = reassign_orchestrator(
+                ws,
+                tool=args.tool,
+                model=args.model,
+                scope=args.scope,
+                dry_run=args.dry_run,
+                expect_hash=args.expect_hash,
+                no_handoff=args.no_handoff,
+                timeout=args.timeout,
+                global_config=args.global_config,
+            )
+            if not res.get("ok", True):
+                if args.json:
+                    print(json.dumps(res, indent=2))
+                else:
+                    print(f"[FAIL] {res.get('error')}", file=sys.stderr)
+                return 2
+            if args.json:
+                print(json.dumps(res, indent=2))
+            else:
+                if args.dry_run:
+                    print(f"[dry-run] Plan: {res['plan']}")
+                    print(f"Plan hash: {res['plan_hash']}")
+                    print(f"Config hash: {res['config_hash']}")
+                    if res.get("diff"):
+                        sys.stdout.write(res["diff"])
+                else:
+                    print(f"[ok] Reassigned orchestrator to {res['tool']} (generation {res['generation']})")
             return 0
 
         if args.subcommand == "cancel":

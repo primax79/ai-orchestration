@@ -72,6 +72,20 @@ CLI_DESCRIPTION: dict[str, Any] = {
             "usage": "ai-orch describe [--json]",
             "description": "Return machine-readable JSON catalog of all ai-orch commands, arguments, and scripts.",
         },
+        "setup": {
+            "script": str(ORCH_CONFIG_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": (
+                "ai-orch setup [--workspace <dir>] [--global-config <file>] "
+                "[--scope global|project|project-local] [--orchestrator <tool>] "
+                "[--executor <tool>] [--verification-mode <mode>] "
+                "[--executor-model <model>] [--orchestrator-model <model>] "
+                "[--plan] [--apply] [--expect-hash <hash>] [--start-orchestrator] [--json]"
+            ),
+            "description": (
+                "First-run setup engine: probe tools, propose defaults (Claude orch, Kilo exec with gemini-3.8-flash), "
+                "show Q001 permissions, preview diff with hash, and apply with --expect-hash."
+            ),
+        },
         "config": {
             "script": str(ORCH_CONFIG_SCRIPT.relative_to(REPO_ROOT)),
             "usage": "ai-orch config <subcommand> [options] [--json]",
@@ -499,6 +513,17 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch orchestrator hand-off [--workspace <dir>] [--json]",
                     "description": "Generate and inspect the handoff prompt.",
                 },
+                "reassign": {
+                    "usage": (
+                        "ai-orch orchestrator reassign --tool <tool> [--model <model>] "
+                        "[--scope global|project] [--dry-run] [--expect-hash <hash>] "
+                        "[--no-handoff] [--workspace <dir>] [--global-config <file>] [--json]"
+                    ),
+                    "description": (
+                        "Reassign orchestrator role to another tool/model via fenced succession "
+                        "(shows plan preview & hash in dry-run; applies with config update, succession, and config.changed)."
+                    ),
+                },
                 "cancel": {
                     "usage": "ai-orch orchestrator cancel <turn_id> [--workspace <dir>] [--json]",
                     "description": "Cancel a queued or running turn.",
@@ -539,6 +564,10 @@ def main() -> int:
     if group == "describe":
         print(json.dumps(CLI_DESCRIPTION, indent=2))
         return 0
+
+    if group == "setup":
+        proc = subprocess.run([sys.executable, str(ORCH_CONFIG_SCRIPT), "setup", *rest], check=False)
+        return proc.returncode
 
     if group == "config":
         proc = subprocess.run([sys.executable, str(ORCH_CONFIG_SCRIPT), *rest], check=False)

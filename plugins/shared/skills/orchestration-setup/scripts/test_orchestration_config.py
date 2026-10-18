@@ -2006,3 +2006,242 @@ def test_global_write_with_and_without_workspace(tmp_path: pathlib.Path) -> None
     assert events[0]["payload"]["scope"] == "global"
     assert events[0]["payload"]["path"] == str(global_cfg_path.resolve())
     assert events[0]["payload"]["keys_changed"] == ["routing.default_orchestrator"]
+
+
+# ---------------------------------------------------------------------------
+# Setup Wizard & Detection Tests (Task 12.9, Spec §0b)
+# ---------------------------------------------------------------------------
+
+BIN_AI_ORCH = REPO_ROOT / "bin" / "ai-orch"
+
+
+def _create_fake_clis(tmp_bin: pathlib.Path) -> None:
+    tmp_bin.mkdir(parents=True, exist_ok=True)
+    # fake kilo
+    kilo_exe = tmp_bin / "kilo"
+    kilo_exe.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  --version) echo "kilo 2.0.0-test" ; exit 0 ;;\n'
+        '  models) echo "google/gemini-3.8-flash\ngoogle/gemini-4-argon" ; exit 0 ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+    kilo_exe.chmod(0o755)
+
+    # fake claude
+    claude_exe = tmp_bin / "claude"
+    claude_exe.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  --version) echo "claude 1.0.0-test" ; exit 0 ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+    claude_exe.chmod(0o755)
+
+
+def test_setup_detection_with_fake_clis(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_bin = tmp_path / "bin"
+    _create_fake_clis(fake_bin)
+    # Isolate PATH to fake_bin and standard system paths to avoid real ~/.local/bin/codex
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    oc.reset_kilo_models_cache(None)
+
+    env_info = oc.detect_environment()
+    assert env_info["claude"]["installed"] is True
+    assert "claude 1.0.0-test" in env_info["claude"]["version"]
+
+    assert env_info["kilo"]["installed"] is True
+    assert "kilo 2.0.0-test" in env_info["kilo"]["version"]
+    assert "google/gemini-3.8-flash" in env_info["kilo"]["models"]
+    assert env_info["kilo"]["auth_status"] == "authenticated"
+
+    # codex binary not created
+    assert env_info["codex"]["installed"] is False
+    assert env_info["codex"]["auth_status"] == "not_installed"
+
+
+def test_setup_plan_mode_defaults(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_bin = tmp_path / "bin"
+    _create_fake_clis(fake_bin)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    oc.reset_kilo_models_cache(None)
+
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    res = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "setup",
+        "--workspace",
+        str(workspace),
+    )
+    assert res.returncode == 0
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is True
+    assert payload["applied"] is False
+    assert payload["routing"]["default_orchestrator"] == "claude"
+    assert payload["routing"]["default_executor"] == "kilo"
+    assert payload["routing"]["default_profile"] == "bulk-execution"
+    assert payload["verification"]["default_mode"] == "cross-agent"
+    assert payload["profiles"]["executor"]["model"] == "google/gemini-3.8-flash"
+    assert payload["profiles"]["orchestrator"]["model"] == "sonnet"
+    assert len(payload["plan_hash"]) == 64
+    assert payload["existing_exists"] is False
+
+    # Dry-run / plan must not write the file
+    assert not pathlib.Path(payload["path"]).exists()
+
+
+def test_setup_writes_only_with_hash(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_bin = tmp_path / "bin"
+    _create_fake_clis(fake_bin)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    oc.reset_kilo_models_cache(None)
+
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # 1. Get plan to obtain plan_hash
+    res_plan = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "setup",
+        "--workspace",
+        str(workspace),
+    )
+    assert res_plan.returncode == 0
+    plan_data = json.loads(res_plan.stdout)
+    plan_hash = plan_data["plan_hash"]
+    target_path = pathlib.Path(plan_data["path"])
+
+    # 2. Refuses write when --expect-hash is omitted
+    res_no_hash = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "setup",
+        "--workspace",
+        str(workspace),
+        "--apply",
+    )
+    assert res_no_hash.returncode == 2
+    no_hash_data = json.loads(res_no_hash.stdout)
+    assert no_hash_data["ok"] is False
+    assert not target_path.exists()
+
+    # 3. Refuses write when --expect-hash is wrong / stale
+    res_bad_hash = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "setup",
+        "--workspace",
+        str(workspace),
+        "--apply",
+        "--expect-hash",
+        "deadbeef00000000000000000000000000000000000000000000000000000000",
+    )
+    assert res_bad_hash.returncode == 2
+    bad_hash_data = json.loads(res_bad_hash.stdout)
+    assert bad_hash_data["ok"] is False
+    assert "hash mismatch" in bad_hash_data["error"]
+    assert not target_path.exists()
+
+    # 4. Writes when --expect-hash matches plan_hash
+    res_ok = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "setup",
+        "--workspace",
+        str(workspace),
+        "--apply",
+        "--expect-hash",
+        plan_hash,
+    )
+    assert res_ok.returncode == 0
+    ok_data = json.loads(res_ok.stdout)
+    assert ok_data["ok"] is True
+    assert ok_data["applied"] is True
+    assert target_path.exists()
+
+    # Validate written configuration
+    saved_cfg = oc.load_toml_file(target_path)
+    assert saved_cfg["routing"]["default_orchestrator"] == "claude"
+    assert saved_cfg["routing"]["default_executor"] == "kilo"
+    assert saved_cfg["tools"]["kilo"]["profiles"]["bulk-execution"]["model"] == "google/gemini-3.8-flash"
+
+
+def test_setup_emits_config_changed_event(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_bin = tmp_path / "bin"
+    _create_fake_clis(fake_bin)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    oc.reset_kilo_models_cache(None)
+
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # Get plan hash
+    res_plan = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "setup",
+        "--workspace",
+        str(workspace),
+    )
+    plan_hash = json.loads(res_plan.stdout)["plan_hash"]
+
+    # Apply
+    res_apply = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "setup",
+        "--workspace",
+        str(workspace),
+        "--apply",
+        "--expect-hash",
+        plan_hash,
+    )
+    assert res_apply.returncode == 0
+
+    # Verify event emission
+    evs = orchestration_events.read_events(workspace)
+    assert len(evs) >= 1
+    assert any(e["type"] == "config.changed" for e in evs)
+
+
+def test_ai_orch_setup_dispatch(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_bin = tmp_path / "bin"
+    _create_fake_clis(fake_bin)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    oc.reset_kilo_models_cache(None)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "setup",
+            "--workspace",
+            str(workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is True
+    assert payload["routing"]["default_orchestrator"] == "claude"

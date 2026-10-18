@@ -626,3 +626,177 @@ def test_cli_subcommands(ws: pathlib.Path):
     rot = json.loads(res.stdout)
     assert rot["status"] == "rotated"
     assert rot["generation"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 12. Reassignment as Succession Tests (Task 12.9, Spec §0b)
+# ---------------------------------------------------------------------------
+
+def test_reassign_dry_run_shows_plan(ws: pathlib.Path):
+    """Reassign dry-run previews config diff, plan, and plan hash without applying."""
+    orch.start_orchestrator(ws)
+    st_before = orch.get_orchestrator_status(ws)
+    assert st_before["generation"] == 1
+    assert st_before["tool"] == "claude"
+
+    res = orch.reassign_orchestrator(ws, tool="kilo", dry_run=True)
+    assert res["ok"] is True
+    assert res["dry_run"] is True
+    assert res["plan"] == "generation 1 (claude) → 2 (kilo), with a handoff turn"
+    assert len(res["plan_hash"]) == 64
+    assert res["from_tool"] == "claude"
+    assert res["to_tool"] == "kilo"
+    assert res["generation"] == 1
+    assert res["target_generation"] == 2
+    assert "default_orchestrator" in res["diff"]
+
+    # Verify no state was modified during dry-run
+    st_after = orch.get_orchestrator_status(ws)
+    assert st_after["generation"] == 1
+    assert st_after["tool"] == "claude"
+
+
+def test_reassign_stale_hash_refused(ws: pathlib.Path):
+    """Reassign refuses stale/mismatched expect_hash and leaves state intact."""
+    orch.start_orchestrator(ws)
+    res = orch.reassign_orchestrator(
+        ws,
+        tool="kilo",
+        expect_hash="deadbeef00000000000000000000000000000000000000000000000000000000",
+    )
+    assert res["ok"] is False
+    assert "hash mismatch" in res["error"]
+
+    st = orch.get_orchestrator_status(ws)
+    assert st["generation"] == 1
+    assert st["tool"] == "claude"
+
+
+def test_reassign_apply_succession_and_event(ws: pathlib.Path):
+    """Reassign apply bumps generation, retires old session, preserves queue, and emits events."""
+    orch.start_orchestrator(ws)
+    st1 = orch.get_orchestrator_status(ws)
+    old_sess_id = st1["session_id"]
+
+    # Enqueue a turn to verify queue preservation across reassignment
+    turn = orch.enqueue_turn(ws, message="carry me over")["turn"]
+    t_id = turn["turn_id"]
+
+    # Preview to get plan_hash
+    prev = orch.reassign_orchestrator(ws, tool="kilo", dry_run=True)
+    plan_hash = prev["plan_hash"]
+
+    # Apply reassignment with plan_hash
+    res = orch.reassign_orchestrator(ws, tool="kilo", expect_hash=plan_hash, no_handoff=True)
+    assert res["ok"] is True
+    assert res["status"] == "reassigned"
+    assert res["generation"] == 2
+    assert res["tool"] == "kilo"
+
+    # Status check
+    st2 = orch.get_orchestrator_status(ws)
+    assert st2["generation"] == 2
+    assert st2["tool"] == "kilo"
+    assert st2["session_id"] != old_sess_id
+
+    # Queue carried over
+    q_items = orch.list_queue(ws)
+    assert any(it["turn_id"] == t_id for it in q_items)
+
+    # Old session retired
+    old_sess = sessions.get_session(ws, old_sess_id)
+    assert old_sess["status"] == "retired"
+    assert old_sess["retired"]["reason"] == "reassigned"
+
+    # Event emission: config.changed and orchestrator.rotated
+    evs = events.read_events(ws)
+    ev_types = [e["type"] for e in evs]
+    assert "config.changed" in ev_types
+    assert "orchestrator.rotated" in ev_types
+
+
+def test_reassign_cli(ws: pathlib.Path):
+    """Test CLI commands for ai-orch orchestrator reassign (dry-run, bad hash, apply)."""
+    orch.start_orchestrator(ws)
+
+    # 1. dry-run
+    res_dry = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "orchestrator",
+            "reassign",
+            "--tool",
+            "kilo",
+            "--dry-run",
+            "--workspace",
+            str(ws),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    dry_data = json.loads(res_dry.stdout)
+    assert dry_data["ok"] is True
+    assert dry_data["dry_run"] is True
+    plan_hash = dry_data["plan_hash"]
+
+    # 2. stale hash refused
+    res_stale = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "orchestrator",
+            "reassign",
+            "--tool",
+            "kilo",
+            "--expect-hash",
+            "wrong_hash",
+            "--workspace",
+            str(ws),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_stale.returncode == 2
+    stale_data = json.loads(res_stale.stdout)
+    assert stale_data["ok"] is False
+    assert "hash mismatch" in stale_data["error"]
+
+    # 3. apply
+    res_apply = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "orchestrator",
+            "reassign",
+            "--tool",
+            "kilo",
+            "--no-handoff",
+            "--expect-hash",
+            plan_hash,
+            "--workspace",
+            str(ws),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    apply_data = json.loads(res_apply.stdout)
+    assert apply_data["ok"] is True
+    assert apply_data["status"] == "reassigned"
+    assert apply_data["generation"] == 2
+    assert apply_data["tool"] == "kilo"
+
+
+def test_ensure_orchestrator_refuses_uninstalled_tool(ws: pathlib.Path):
+    """orchestrator start refuses when tool is not installed or enabled, naming ai-orch setup."""
+    with pytest.raises(RuntimeError) as exc_info:
+        orch.ensure_orchestrator(ws, tool="nonexistent_ghost_tool", force=True)
+    msg = str(exc_info.value)
+    assert "nonexistent_ghost_tool" in msg
+    assert "ai-orch setup" in msg

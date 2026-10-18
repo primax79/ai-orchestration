@@ -110,75 +110,77 @@ variant = "low"
 basis = "operator-stated"
 ```
 
-## Companion script: `scripts/orchestration_config.py`
+## Shared Engine: `ai-orch setup` and `scripts/orchestration_config.py`
 
-Manages Global and Project `orchestration.toml`, validates configuration and skill requirements, and deterministically renders the `<!-- BEGIN ai-orchestration --> ... <!-- END ai-orchestration -->` block in `<workspace>/AGENTS.md` while preserving all custom content outside those markers. Every subcommand supports `--json`.
+Manages Global and Project `orchestration.toml`, validates configuration and skill requirements, executes first-run wizard setup, handles orchestrator reassignment via fenced succession, and deterministically renders the `<!-- BEGIN ai-orchestration --> ... <!-- END ai-orchestration -->` block in `<workspace>/AGENTS.md` while preserving all custom content outside those markers. Every subcommand supports `--json`.
 
 ```bash
-# 1. Initialize global config (~/.config/ai-orchestration/orchestration.toml)
-python3 scripts/orchestration_config.py [--json] init-global [--force]
+# 1. First-Run Setup Engine (shared across CLI, Web UI 12.10, and this skill)
+#    Inspects available tools, versions, auth, proposes defaults (Claude orch, Kilo exec with gemini-3.8-flash),
+#    shows Q001 permissions, previews diff, and outputs plan_hash:
+ai-orch setup [--json] [--workspace <dir>] [--scope project|global|project-local]
 
-# 2. Initialize project config (<workspace>/tasks/orchestration.toml)
-#    Single-Framework Native example: --orchestrator kilo --executor kilo --verification-mode independent-session
-#    Multi-Framework MCP example:     --orchestrator claude --executor kilo --verification-mode cross-agent
-python3 scripts/orchestration_config.py [--json] init-project \
+# 2. Confirm and apply setup plan (requires --expect-hash matching plan_hash):
+ai-orch setup --apply --expect-hash <plan_hash> [--workspace <dir>] [--start-orchestrator] [--json]
+
+# 3. Reassign orchestrator role via fenced succession (Spec §0b):
+#    Dry-run preview (shows plan "generation N (claude) → N+1 (kilo), with a handoff turn", diff, and hash):
+ai-orch orchestrator reassign --tool kilo [--model <model>] [--scope project|global] --dry-run [--json]
+#    Confirm and apply reassignment:
+ai-orch orchestrator reassign --tool kilo [--model <model>] [--scope project|global] --expect-hash <hash> [--json]
+
+# 4. Initialize global config (~/.config/ai-orchestration/orchestration.toml)
+ai-orch config init-global [--force] [--global-config <file>] [--json]
+
+# 5. Initialize project config (<workspace>/tasks/orchestration.toml or .ai-orchestration.local.toml)
+ai-orch config init-project \
   --workspace <dir> [--name <project-name>] \
   --orchestrator <tool> --executor <tool> \
-  --verification-mode <self|independent-session|cross-agent|panel|owner>
+  --verification-mode <self|independent-session|cross-agent|panel|owner> [--json]
 
-# 3. Atomically set or update a (tool, profile) model mapping in global or project scope
-python3 scripts/orchestration_config.py [--json] set-profile <tool> <profile> \
+# 6. Atomically set or update a (tool, profile) model mapping in global or project scope
+ai-orch config set-profile <tool> <profile> \
   --model <model-id> [--variant <v>] [--effort <e>] [--basis <b>] \
-  [--scope global|project] [--workspace <dir>]
+  [--scope global|project] [--workspace <dir>] [--diff] [--expect-hash <hash>] [--json]
 
-# 4. Inspect effective merged configuration (Global + Project)
-python3 scripts/orchestration_config.py [--json] show [--workspace <dir>]
+# 7. Inspect effective merged configuration (Global + Project)
+ai-orch config show [--workspace <dir>] [--json]
 
-# 5. Validate kit skill-requirements.json + merged orchestration.toml
-python3 scripts/orchestration_config.py [--json] validate \
+# 8. Validate kit skill-requirements.json + merged orchestration.toml
+ai-orch config validate \
   [--workspace <dir>] \
   --plugin-dir plugins/architect-side \
   --plugin-dir plugins/executor-side \
-  --plugin-dir plugins/shared
+  --plugin-dir plugins/shared [--json]
 
-# 6. Render or check the managed orchestration block in <workspace>/AGENTS.md
-python3 scripts/orchestration_config.py [--json] render-agents-md --workspace <dir> --apply
-python3 scripts/orchestration_config.py [--json] render-agents-md --workspace <dir> --check
+# 9. Render or check the managed orchestration block in <workspace>/AGENTS.md
+ai-orch config render-agents-md --workspace <dir> --apply
+ai-orch config render-agents-md --workspace <dir> --check
 ```
 
 ## Guided flow
 
-The skill performs the capability analysis itself; the operator reviews and corrects a
-proposal instead of producing one from a blank slate. Confirmation still happens per
-profile at the end - what changes is what's being confirmed.
+The skill drives the shared `ai-orch setup` engine (`scripts/orchestration_config.py setup`)
+instead of duplicating detection and config generation logic. The operator reviews and corrects
+a structured proposal instead of producing one from a blank slate.
 
 The hard constraint that shapes every step below: **the kit carries no hardcoded model
-lineup in its logic.** The ranking cannot be a lookup table - it has to be derived at
-runtime from evidence, and the evidence has to be recorded so a wrong ranking is visible
+lineup in its logic.** The ranking cannot be a lookup table - it is derived at
+runtime from evidence, and the evidence is recorded so a wrong ranking is visible
 rather than silent.
 
-### 1. Discovery
+### 1. Discovery & Proposed Plan
 
-Enumerate what's *reachable*, not just what's currently configured - the operator is
-usually running inside one of the hosts being mapped, so read before asking:
-
-- **Kilo**: call its live model-listing tool unfiltered. The currently configured default
-  is one entry, not the candidate set.
-- **Claude Code**: the running session's own model (visible directly, no file read
-  needed), `~/.claude/settings.json`'s `model` key, `CLAUDE_CODE_SUBAGENT_MODEL` in the
-  environment, and - where readable - the set of models the plan/organization actually
-  permits. An org-managed seat with a restricted allowlist has a different candidate set
-  than a personal plan.
-- Any other host reachable in the environment (e.g. `~/.config/kilo/kilo.jsonc`'s
-  `model`/`small_model`/`agent.*.model` keys, if that host is in play).
-
-Record, per candidate, whatever metadata the host actually returns - identifier,
-provider, context window, cost, tier naming, effort support. Never invent a field the
-host didn't supply, and never substitute a memorized model lineup for this step (see
-"Ranking" for the one narrow, explicitly fallible exception).
-
-A host that can't be enumerated isn't silently skipped - record which host and why; it
-resurfaces at gap reporting.
+Call `ai-orch setup --json [--workspace <dir>] [--scope project|global]` to run the read-only probe:
+- **Installed Tools & Auth:** Inspects `claude`, `kilo`, `codex` binaries on PATH, their versions, and auth status.
+- **Model Discovery:** Enumerates reachable models (e.g. `kilo models`).
+- **Proposed Routing Defaults:**
+  - `default_orchestrator`: `claude` (Owner default per 2026-10-17 spec; falls back to `kilo` if Claude unavailable)
+  - `default_executor`: `kilo` (with `google/gemini-3.8-flash` for `bulk-execution`)
+  - `default_profile`: `bulk-execution`
+  - `verification.default_mode`: `cross-agent` (or `independent-session` if orchestrator == executor)
+- **Q001 Permission Defaults:** Displays Option A per-mode allow-lists for unattended and headless runs.
+- **Preview & Plan Hash:** Generates the exact unified diff and deterministic `plan_hash`.
 
 ### 2. Ranking
 
@@ -237,15 +239,26 @@ Partial or degenerate discovery gets named, not papered over:
 
 ### 5. Confirm, then persist
 
-Present the full proposal as a table - profile, host, model, effort, justification,
-ranking basis - then run the per-profile confirm-or-correct step: ask whether each row is
-what the operator wants, or something else. Never skip this even when discovery and
-ranking were clean: current/discovered config is evidence of what's *available*, not of
-what the operator *wants* for a given profile - a cheap default configured for cost
-reasons is not evidence they want it for `deep-reasoning`.
+Present the full proposal as a table — profile, host, model, effort, justification,
+ranking basis, unified config diff, and the deterministic `plan_hash`. Run the
+confirm-or-correct step: ask whether each row matches what the operator intends.
 
-On confirmation, write `roles.toml` in the existing shape plus the optional `basis` field
-from step 2 (see "Config file" above). Nothing else about the schema changes.
+On confirmation, apply the plan using the engine:
+```bash
+ai-orch setup --apply --expect-hash <plan_hash> [--workspace <dir>] [--scope project|global] [--start-orchestrator]
+```
+The engine writes the file atomically under exclusive `config_lock`, verifies the optimistic concurrency hash, and emits the `config.changed` domain event into the workspace event store.
+
+### 6. Reassignment as Succession
+
+When reassigning the orchestrator role (to another tool or model), never mutate the role record directly. Instead, invoke:
+```bash
+# Preview
+ai-orch orchestrator reassign --tool <tool> [--model <model>] [--scope project|global] --dry-run
+# Apply
+ai-orch orchestrator reassign --tool <tool> [--model <model>] [--scope project|global] --expect-hash <hash>
+```
+This executes fenced succession: updates the configuration, registers a candidate session with the new tool, conducts the handoff turn, retires the prior session with reason `reassigned`, advances generation ($N \to N+1$), preserves queue items and cursor, and emits `config.changed` and `orchestrator.rotated`.
 
 ## Verification
 

@@ -23,6 +23,7 @@ import logging
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -71,6 +72,69 @@ ALLOWED_PLACEHOLDERS = {
     "permission_mode",
     "sandbox",
     "prompt_file",
+}
+
+DEFAULT_CLAUDE_ALLOWED_TOOLS: dict[str, list[str]] = {
+    "execute": [
+        "Read",
+        "Edit",
+        "Write",
+        "Glob",
+        "Grep",
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git add:*)",
+        "Bash(git commit:*)",
+        "Bash(git log:*)",
+        "Bash(pytest:*)",
+        "Bash(python -m pytest:*)",
+        "Bash(python3 -m pytest:*)",
+        "Bash(uv run:*)",
+        "Bash(npm test:*)",
+        "Bash(npm run build:*)",
+    ],
+    "verify": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git log:*)",
+        "Bash(pytest:*)",
+        "Bash(python -m pytest:*)",
+        "Bash(python3 -m pytest:*)",
+        "Bash(uv run:*)",
+        "Bash(npm test:*)",
+        "Bash(npm run build:*)",
+    ],
+    "orchestrate": [
+        "Read",
+        "Edit",
+        "Write",
+        "Glob",
+        "Grep",
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git add:*)",
+        "Bash(git commit:*)",
+        "Bash(git log:*)",
+        "Bash(pytest:*)",
+        "Bash(python -m pytest:*)",
+        "Bash(python3 -m pytest:*)",
+        "Bash(uv run:*)",
+        "Bash(npm test:*)",
+        "Bash(npm run build:*)",
+        "mcp__kilo-mcp__*",
+    ],
+    "triage": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git log:*)",
+        "Bash(git show:*)",
+    ],
 }
 
 BEGIN_MARKER = "<!-- BEGIN ai-orchestration -->"
@@ -1991,6 +2055,422 @@ def cmd_render_agents_md(args: argparse.Namespace) -> int:
     return 0
 
 
+def detect_tool(name: str) -> dict[str, Any]:
+    exe = shutil.which(name)
+    if not exe:
+        return {
+            "installed": False,
+            "path": None,
+            "version": None,
+            "auth_status": "not_installed",
+            "models": [],
+        }
+
+    version = "unknown"
+    try:
+        proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=5, check=False)
+        out = (proc.stdout or proc.stderr).strip()
+        if out:
+            version = out.splitlines()[0]
+    except Exception:
+        pass
+
+    auth_status = "configured"
+    models: list[str] = []
+
+    if name == "kilo":
+        k_models = get_kilo_models(timeout=5.0)
+        if k_models is not None and len(k_models) > 0:
+            models = sorted(k_models)
+            auth_status = "authenticated"
+        else:
+            kilo_cfg = pathlib.Path.home() / ".config" / "kilo"
+            if kilo_cfg.exists() or os.environ.get("KILO_API_KEY"):
+                auth_status = "configured"
+            else:
+                auth_status = "unauthenticated"
+    elif name == "claude":
+        claude_cfg = pathlib.Path.home() / ".claude"
+        if claude_cfg.exists() or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY"):
+            auth_status = "authenticated"
+        else:
+            auth_status = "configured"
+        models = ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"]
+    elif name == "codex":
+        codex_cfg = pathlib.Path.home() / ".codex"
+        if codex_cfg.exists() or os.environ.get("CODEX_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+            auth_status = "authenticated"
+        else:
+            auth_status = "configured"
+        models = ["gpt-5-codex", "gpt-5-codex-mini"]
+
+    return {
+        "installed": True,
+        "path": exe,
+        "version": version,
+        "auth_status": auth_status,
+        "models": models,
+    }
+
+
+def detect_environment(tool_names: list[str] | None = None) -> dict[str, Any]:
+    names = tool_names or ["claude", "kilo", "codex"]
+    return {t: detect_tool(t) for t in names}
+
+
+def build_setup_plan(
+    workspace: pathlib.Path | str,
+    *,
+    global_config: pathlib.Path | None = None,
+    scope: str = "project",
+    orchestrator: str | None = None,
+    executor: str | None = None,
+    verification_mode: str | None = None,
+    executor_model: str | None = None,
+    orchestrator_model: str | None = None,
+) -> dict[str, Any]:
+    ws = pathlib.Path(workspace).resolve()
+    detection = detect_environment()
+
+    # Step 2: Choose orchestrator and executor
+    # Owner default (2026-10-17): Claude orchestrates, Kilo executes
+    if orchestrator:
+        orch_tool = orchestrator
+    elif detection.get("claude", {}).get("installed"):
+        orch_tool = "claude"
+    elif detection.get("kilo", {}).get("installed"):
+        orch_tool = "kilo"
+    elif detection.get("codex", {}).get("installed"):
+        orch_tool = "codex"
+    else:
+        orch_tool = "claude"
+
+    if executor:
+        exec_tool = executor
+    elif detection.get("kilo", {}).get("installed"):
+        exec_tool = "kilo"
+    elif detection.get("claude", {}).get("installed") and orch_tool != "claude":
+        exec_tool = "claude"
+    else:
+        exec_tool = "kilo"
+
+    # Step 3: Choose verification mode & cross-agent order
+    if verification_mode:
+        v_mode = verification_mode
+    elif orch_tool != exec_tool:
+        v_mode = "cross-agent"
+    else:
+        v_mode = "independent-session"
+
+    order = [f"{orch_tool}:deep-reasoning", f"{exec_tool}:deep-reasoning"]
+    for rem in ("codex", "claude", "kilo"):
+        cand = f"{rem}:deep-reasoning"
+        if cand not in order and detection.get(rem, {}).get("installed"):
+            order.append(cand)
+
+    # Step 4: Choose models per profile
+    # Default executor model: google/gemini-3.8-flash for kilo
+    if executor_model:
+        exec_m = executor_model
+    elif exec_tool == "kilo":
+        exec_m = "google/gemini-3.8-flash"
+    elif exec_tool == "claude":
+        exec_m = "sonnet"
+    else:
+        exec_m = "gpt-5-codex-mini"
+
+    # Default orchestrator model: sonnet for claude
+    if orchestrator_model:
+        orch_m = orchestrator_model
+    elif orch_tool == "claude":
+        orch_m = "sonnet"
+    elif orch_tool == "kilo":
+        orch_m = "google/gemini-4-argon"
+    else:
+        orch_m = "gpt-5-codex"
+
+    # Step 5: Scope
+    gpath = global_config or default_global_config_path()
+    if scope == "project-local":
+        target_path = ws / ".ai-orchestration.local.toml"
+    elif scope == "project":
+        target_path = find_project_config_path(ws, gpath)
+    else:
+        target_path = gpath
+
+    if target_path.exists():
+        existing_bytes = target_path.read_bytes()
+        existing_hash = hashlib.sha256(existing_bytes).hexdigest()
+        existing_text = existing_bytes.decode("utf-8")
+    else:
+        existing_bytes = b""
+        existing_hash = hashlib.sha256(b"").hexdigest()
+        existing_text = ""
+
+    # Build proposed content
+    if scope == "global":
+        if existing_text:
+            new_text = set_toml_value(existing_text, ["routing"], "default_orchestrator", orch_tool)
+            new_text = set_toml_value(new_text, ["routing"], "default_executor", exec_tool)
+            new_text = set_toml_value(new_text, ["routing"], "default_profile", "bulk-execution")
+            new_text = set_toml_value(new_text, ["verification"], "default_mode", v_mode)
+            new_text = set_toml_value(new_text, ["tools", exec_tool, "profiles", "bulk-execution"], "model", exec_m)
+            new_text = set_toml_value(new_text, ["tools", orch_tool, "profiles", "orchestration"], "model", orch_m)
+        else:
+            cfg_data = copy.deepcopy(DEFAULT_GLOBAL_CONFIG)
+            cfg_data["routing"]["default_orchestrator"] = orch_tool
+            cfg_data["routing"]["default_executor"] = exec_tool
+            cfg_data["routing"]["default_profile"] = "bulk-execution"
+            cfg_data["verification"]["default_mode"] = v_mode
+            cfg_data["verification"]["cross_agent_order"] = order
+            if exec_tool in cfg_data.get("tools", {}):
+                cfg_data["tools"][exec_tool]["profiles"]["bulk-execution"]["model"] = exec_m
+            if orch_tool in cfg_data.get("tools", {}):
+                cfg_data["tools"][orch_tool]["profiles"]["orchestration"]["model"] = orch_m
+            new_text = dump_toml(cfg_data)
+    else:
+        # project or project-local
+        if existing_text:
+            new_text = set_toml_value(existing_text, ["routing"], "default_orchestrator", orch_tool)
+            new_text = set_toml_value(new_text, ["routing"], "default_executor", exec_tool)
+            new_text = set_toml_value(new_text, ["routing"], "default_profile", "bulk-execution")
+            new_text = set_toml_value(new_text, ["verification"], "default_mode", v_mode)
+            new_text = set_toml_value(new_text, ["tools", exec_tool, "profiles", "bulk-execution"], "model", exec_m)
+            new_text = set_toml_value(new_text, ["tools", orch_tool, "profiles", "orchestration"], "model", orch_m)
+        else:
+            proj_data = {
+                "project": {
+                    "name": ws.name,
+                    "primary_orchestrator": orch_tool,
+                    "isolation": {
+                        "shared_databases": [],
+                        "shared_ports": [],
+                        "worker_port_range": [8766, 8779],
+                        "conflict_prone_files": [],
+                        "zero_conflict_registries": [],
+                    },
+                },
+                "routing": {
+                    "default_orchestrator": orch_tool,
+                    "default_executor": exec_tool,
+                    "default_profile": "bulk-execution",
+                },
+                "verification": {
+                    "default_mode": v_mode,
+                    "cross_agent_order": order,
+                },
+                "tools": {
+                    exec_tool: {
+                        "enabled": True,
+                        "profiles": {
+                            "bulk-execution": {
+                                "model": exec_m,
+                                "variant": "medium",
+                                "basis": "template-default",
+                            },
+                        },
+                    },
+                    orch_tool: {
+                        "enabled": True,
+                        "profiles": {
+                            "orchestration": {
+                                "model": orch_m,
+                                "variant": "medium",
+                                "basis": "template-default",
+                            },
+                        },
+                    },
+                },
+            }
+            new_text = dump_toml(proj_data)
+
+    diff_str = "".join(
+        difflib.unified_diff(
+            existing_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"a/{target_path.name}",
+            tofile=f"b/{target_path.name}",
+        )
+    )
+
+    plan_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+
+    return {
+        "ok": True,
+        "applied": False,
+        "detection": detection,
+        "routing": {
+            "default_orchestrator": orch_tool,
+            "default_executor": exec_tool,
+            "default_profile": "bulk-execution",
+        },
+        "verification": {
+            "default_mode": v_mode,
+            "cross_agent_order": order,
+        },
+        "profiles": {
+            "orchestrator": {
+                "tool": orch_tool,
+                "profile": "orchestration",
+                "model": orch_m,
+            },
+            "executor": {
+                "tool": exec_tool,
+                "profile": "bulk-execution",
+                "model": exec_m,
+            },
+        },
+        "permission_policy": {
+            "description": "Q001 option A (per-mode allow-list: execute and verify get git/test runners/file tools, orchestrate also gets kilo-mcp)",
+            "defaults": DEFAULT_CLAUDE_ALLOWED_TOOLS,
+        },
+        "scope": scope,
+        "path": str(target_path),
+        "existing_exists": target_path.exists(),
+        "diff": diff_str,
+        "plan_hash": plan_hash,
+        "config_hash": existing_hash,
+        "hash": plan_hash,
+        "proposed_text": new_text,
+    }
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    ws = pathlib.Path(getattr(args, "workspace", ".") or ".").resolve()
+    gpath = getattr(args, "global_config", None)
+    scope = getattr(args, "scope", "project")
+    apply_mode = getattr(args, "apply", False)
+    expect_hash = getattr(args, "expect_hash", None) or getattr(args, "expect_plan_hash", None)
+
+    plan = build_setup_plan(
+        ws,
+        global_config=gpath,
+        scope=scope,
+        orchestrator=getattr(args, "orchestrator", None),
+        executor=getattr(args, "executor", None),
+        verification_mode=getattr(args, "verification_mode", None),
+        executor_model=getattr(args, "executor_model", None),
+        orchestrator_model=getattr(args, "orchestrator_model", None),
+    )
+
+    target_path = pathlib.Path(plan["path"])
+    plan_hash = plan["plan_hash"]
+    existing_hash = plan["config_hash"]
+    proposed_text = plan.pop("proposed_text")
+
+    if not apply_mode:
+        if getattr(args, "json", False):
+            print(json.dumps(plan, indent=2))
+            return 0
+
+        # Formatted console output
+        print("=" * 80)
+        print("ai-orch setup — Orchestrator & Execution Configuration Wizard")
+        print("=" * 80)
+        print("\n1. Tool Detection:")
+        for tname, tinfo in plan["detection"].items():
+            if tinfo["installed"]:
+                auth_str = f" [auth: {tinfo['auth_status']}]" if tinfo.get("auth_status") else ""
+                models_str = f" (models: {', '.join(tinfo['models'])})" if tinfo.get("models") else ""
+                print(f"   - {tname:<8}: installed ({tinfo.get('version')}){auth_str}{models_str}")
+            else:
+                print(f"   - {tname:<8}: not installed")
+
+        print("\n2. Routing Defaults:")
+        print(f"   - Default Orchestrator : {plan['routing']['default_orchestrator']}")
+        print(f"   - Default Executor     : {plan['routing']['default_executor']}")
+        print(f"   - Default Profile      : {plan['routing']['default_profile']}")
+
+        print("\n3. Verification:")
+        print(f"   - Default Mode         : {plan['verification']['default_mode']}")
+        print(f"   - Cross-Agent Order    : {' -> '.join(plan['verification']['cross_agent_order'])}")
+
+        print("\n4. Profiles:")
+        print(f"   - Orchestrator : {plan['profiles']['orchestrator']['tool']} (profile: {plan['profiles']['orchestrator']['profile']}, model: {plan['profiles']['orchestrator']['model']})")
+        print(f"   - Executor     : {plan['profiles']['executor']['tool']} (profile: {plan['profiles']['executor']['profile']}, model: {plan['profiles']['executor']['model']})")
+
+        print(f"\n5. Scope:")
+        print(f"   - Target Path : {plan['path']} (scope: {plan['scope']})")
+
+        print("\n6. Permission Policy:")
+        print(f"   - {plan['permission_policy']['description']}")
+
+        print("\n7. Preview Diff:")
+        if plan.get("diff"):
+            sys.stdout.write(plan["diff"])
+        else:
+            print("   (no diff, identical configuration)")
+
+        print(f"\nPlan hash: {plan_hash}")
+        print("\nTo apply this configuration, run:")
+        print(f"  ai-orch setup --apply --expect-hash {plan_hash} --scope {scope} --workspace {ws}")
+        return 0
+
+    # Apply mode
+    if not expect_hash:
+        msg = "--expect-hash <hash> is required when applying setup. Run 'ai-orch setup' first to preview and inspect the plan_hash."
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "applied": False, "error": msg, "plan_hash": plan_hash}))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
+        return 2
+
+    norm_exp = expect_hash.strip().lower()
+    if norm_exp not in (plan_hash.lower(), existing_hash.lower()):
+        msg = f"hash mismatch for {target_path}: expected {expect_hash}, computed plan hash {plan_hash}"
+        if getattr(args, "json", False):
+            print(json.dumps({
+                "ok": False,
+                "applied": False,
+                "error": msg,
+                "expected_hash": expect_hash,
+                "actual_hash": existing_hash,
+                "plan_hash": plan_hash,
+                "path": str(target_path),
+            }))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
+        return 2
+
+    # Write file under config_lock
+    with config_lock(target_path):
+        write_file_atomic(target_path, proposed_text)
+        after_hash = hashlib.sha256(proposed_text.encode("utf-8")).hexdigest()
+        _emit_config_changed(
+            scope="global" if scope == "global" else "project",
+            target_path=target_path,
+            workspace=ws if scope != "global" else None,
+            keys_changed=["routing", "verification", "tools"],
+            before_hash=existing_hash,
+            after_hash=after_hash,
+        )
+
+    orch_started = False
+    if getattr(args, "start_orchestrator", False):
+        try:
+            from orchestration_orchestrator import start_orchestrator
+            start_orchestrator(ws)
+            orch_started = True
+        except Exception as e:
+            logger.warning(f"Could not start orchestrator: {e}")
+
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "ok": True,
+            "applied": True,
+            "scope": scope,
+            "path": str(target_path),
+            "plan_hash": plan_hash,
+            "hash": after_hash,
+            "orchestrator_started": orch_started,
+        }))
+    else:
+        print(f"[ok] Applied configuration to {target_path}")
+        if orch_started:
+            print("[ok] Started orchestrator role session")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--global-config", type=pathlib.Path, default=None, help="Override path to global orchestration.toml")
@@ -2081,6 +2561,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_ra.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_ra.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_ra.set_defaults(func=cmd_render_agents_md)
+
+    p_setup = sub.add_parser(
+        "setup",
+        help="First-run setup engine: probe tools, propose defaults (Claude orch, Kilo exec with gemini-3.8-flash), preview diff with hash, and apply",
+    )
+    p_setup.add_argument("--workspace", default=".", help="Project workspace root")
+    p_setup.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS, help="Override path to global config")
+    p_setup.add_argument("--scope", choices=("global", "project", "project-local"), default="project", help="Config scope (default: project)")
+    p_setup.add_argument("--orchestrator", default=None, help="Orchestrator tool ID")
+    p_setup.add_argument("--executor", default=None, help="Default executor tool ID")
+    p_setup.add_argument("--verification-mode", choices=sorted(VERIFICATION_MODES), default=None, help="Verification mode")
+    p_setup.add_argument("--executor-model", default=None, help="Executor model (default: google/gemini-3.8-flash for kilo)")
+    p_setup.add_argument("--orchestrator-model", default=None, help="Orchestrator model")
+    p_setup.add_argument("--plan", action="store_true", default=False, help="Show setup plan without applying (default if --apply not passed)")
+    p_setup.add_argument("--apply", action="store_true", default=False, help="Apply setup plan to target configuration")
+    p_setup.add_argument("--expect-hash", default=None, help="Expected plan or config hash required to confirm and apply")
+    p_setup.add_argument("--expect-plan-hash", default=None, help="Alias for --expect-hash")
+    p_setup.add_argument("--start-orchestrator", action="store_true", default=False, help="Start orchestrator role after applying setup")
+    p_setup.add_argument("--non-interactive", action="store_true", default=False, help="Never prompt for confirmation")
+    p_setup.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_setup.set_defaults(func=cmd_setup)
 
     return ap
 
