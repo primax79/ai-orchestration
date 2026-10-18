@@ -42,6 +42,27 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     tomllib = None  # type: ignore
 
+WORKSPACE_SLUG_REGEX = re.compile(r"^[a-z0-9][a-z0-9-]{1,47}$")
+
+
+def is_valid_workspace_slug(slug: Any) -> bool:
+    return isinstance(slug, str) and bool(WORKSPACE_SLUG_REGEX.match(slug))
+
+
+def is_valid_project_slug(slug: Any) -> bool:
+    return isinstance(slug, str) and (slug == "_workspace" or bool(WORKSPACE_SLUG_REGEX.match(slug)))
+
+
+def is_valid_uuid4(val: Any) -> bool:
+    if not isinstance(val, str):
+        return False
+    try:
+        u = uuid.UUID(val)
+        return u.version == 4
+    except Exception:
+        return False
+
+
 PROFILES = ("deep-reasoning", "orchestration", "bulk-execution", "exploration")
 PROFILE_SET = set(PROFILES)
 BASIS_VALUES = {
@@ -965,6 +986,78 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
             errors.append("[agents_md] must be a table.")
         elif "strict_main_session" in agents_md and not isinstance(agents_md["strict_main_session"], bool):
             errors.append("[agents_md].strict_main_session must be a boolean.")
+
+    ws_cfg = cfg.get("workspace")
+    if ws_cfg is not None:
+        if not isinstance(ws_cfg, dict):
+            errors.append("[workspace] must be a table.")
+        else:
+            ws_uuid = ws_cfg.get("uuid")
+            if ws_uuid is None:
+                errors.append("[workspace].uuid is required.")
+            elif not is_valid_uuid4(ws_uuid):
+                errors.append(f"[workspace].uuid = {ws_uuid!r} must be a valid UUID4 string.")
+
+            ws_id = ws_cfg.get("id")
+            if ws_id is None:
+                errors.append("[workspace].id is required.")
+            elif not is_valid_workspace_slug(ws_id):
+                errors.append(
+                    f"[workspace].id = {ws_id!r} must be a lowercase slug matching ^[a-z0-9][a-z0-9-]{{1,47}}$."
+                )
+
+            if "title" in ws_cfg:
+                title = ws_cfg["title"]
+                if not isinstance(title, str):
+                    errors.append("[workspace].title must be a string.")
+
+            projects = ws_cfg.get("projects")
+            if projects is not None:
+                if not isinstance(projects, list):
+                    errors.append("[[workspace.projects]] must be a list of tables.")
+                else:
+                    seen_pids: set[str] = set()
+                    seen_puuids: set[str] = set()
+                    seen_paths: set[str] = set()
+                    for idx, p in enumerate(projects):
+                        if not isinstance(p, dict):
+                            errors.append(f"[[workspace.projects]] item {idx} must be a table.")
+                            continue
+                        puuid = p.get("uuid")
+                        if puuid is None:
+                            errors.append(f"[[workspace.projects]] item {idx} is missing 'uuid'.")
+                        elif not is_valid_uuid4(puuid):
+                            errors.append(
+                                f"[[workspace.projects]] item {idx} uuid {puuid!r} must be a valid UUID4 string."
+                            )
+                        elif puuid in seen_puuids:
+                            errors.append(f"[[workspace.projects]] duplicate project uuid: {puuid!r}.")
+                        else:
+                            seen_puuids.add(puuid)
+
+                        pid = p.get("id")
+                        if pid is None:
+                            errors.append(f"[[workspace.projects]] item {idx} is missing 'id'.")
+                        elif not is_valid_project_slug(pid):
+                            errors.append(
+                                f"[[workspace.projects]] item {idx} id {pid!r} must be '_workspace' or match ^[a-z0-9][a-z0-9-]{{1,47}}$."
+                            )
+                        elif pid in seen_pids:
+                            errors.append(f"[[workspace.projects]] duplicate project id: {pid!r}.")
+                        else:
+                            seen_pids.add(pid)
+
+                        ppath = p.get("path")
+                        if ppath is None:
+                            errors.append(f"[[workspace.projects]] item {idx} is missing 'path'.")
+                        elif not isinstance(ppath, str) or not ppath.strip():
+                            errors.append(f"[[workspace.projects]] item {idx} path must be a non-empty string.")
+                        else:
+                            norm_path = os.path.normpath(ppath.strip())
+                            if norm_path in seen_paths:
+                                errors.append(f"[[workspace.projects]] duplicate project path: {ppath!r}.")
+                            else:
+                                seen_paths.add(norm_path)
 
     return errors, warnings
 
