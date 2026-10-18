@@ -95,6 +95,19 @@ cwd (C2-4). `whoami` reports the binding.
 - **Lifecycle:** `orchestrator.ensure(workspace, dry_run)` (config writes under `config_lock` with the base hash
   re-read under the lock, C7), `orchestrator.pause|resume`, `console.register`.
 
+### 3a. Findings of the client spike (16.1, 2026-10-18; normative)
+
+All three clients work through the stdio shim (`16-orchestration-broker/notes/16.1-client-spike.md`), with these rules:
+
+- Results are serialised **without null fields**: Claude Code silently drops a server whose tool list carries
+  `"title": null` and similar.
+- Read tools are **compact and paged** with a response cap (≈1 MB results failed in the relay, and are useless in a
+  model's context): `tasks.list` returns id, short title, state, priority and project; details come from `tasks.show`.
+- The MCP registration written by the Doctor/setup sets Codex's per-server `default_tools_approval_mode` (without it,
+  unattended `codex exec` cancels every MCP call); Kilo uses `"mcp": {"<name>": {"type": "local", "command": [...],
+  "environment": {...}}}`.
+- Tool and field names are part of the contract and are fixed in this spec before 16.5.
+
 ## 4. Orchestrator per workspace
 
 - `events-and-triggers.md` §0/§0a, with the worker loop inside the broker: serialised per workspace, parallel across

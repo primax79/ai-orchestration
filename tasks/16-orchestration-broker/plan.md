@@ -8,7 +8,7 @@
 
 ### 16.1 - MCP client spike: minimal broker and stdio shim used from Claude Code, Kilo and Codex
 
-- **Status:** `in progress` (2026-10-18) · **Short:** MCP client spike · **Size:** M · **Kind:** investigation · **Depends on:** - · **Repo:** `ai-orchestration/`
+- **Status:** `delivered` (2026-10-18) · **Short:** MCP client spike · **Size:** M · **Kind:** investigation · **Depends on:** - · **Repo:** `ai-orchestration/`
 - **Goal:** the spec §8 step 2 gate. A throwaway-quality broker (`ai-orch broker serve`, streamable HTTP on localhost with the UI token) and stdio shim (`ai-orch mcp`, immediate `initialize`, `broker.launch.lock`, readiness file) exposing two read tools (`whoami`, `tasks.list` for an explicit project path) and one slow tool (`debug.sleep`, for long-call behaviour).
 - **Verification:** with ISOLATED client configs only (never the real `~/.claude`, `~/.kilo`, `~/.codex`, `~/.config/kilo`): each of Claude Code, Kilo and Codex lists and calls the tools; two shims started at once launch one broker; broker killed and restarted mid-session → the client recovers or the failure mode is recorded; a notice appended to text content is visible to the model. Report in `tasks/16-orchestration-broker/notes/16.1-client-spike.md` with a go / amend verdict per client.
 
