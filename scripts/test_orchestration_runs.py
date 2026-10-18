@@ -4695,12 +4695,12 @@ def test_adapter_argv_live_flag_corrections():
 
 
 def test_kilo_unattended_turn_enforces_restricted_agent():
-    """T028: Unattended Kilo turns (mode=triage) enforce restricted agent (ask); orchestrate turns remain unchanged."""
+    """T028: Unattended Kilo turns (mode=triage) use the verified restricted agent; orchestrate turns remain unchanged."""
     # Start: triage mode adds --agent ask
     start_triage = build_adapter_argv("kilo", {}, "triage", "/w", "google/gemini-3.8-flash", prompt_file="/p.md")
     assert "--agent" in start_triage
     idx = start_triage.index("--agent")
-    assert start_triage[idx + 1] == "ask"
+    assert start_triage[idx + 1] == "aio-unattended"
 
     # Resume: triage mode adds --agent ask
     resume_triage = build_adapter_argv(
@@ -4708,7 +4708,7 @@ def test_kilo_unattended_turn_enforces_restricted_agent():
     )
     assert "--agent" in resume_triage
     idx = resume_triage.index("--agent")
-    assert resume_triage[idx + 1] == "ask"
+    assert resume_triage[idx + 1] == "aio-unattended"
     assert resume_triage[-3:] == ["/p.md", "--", "Continue."]
 
     # Owner orchestrate turn: unchanged (no --agent)
@@ -4737,8 +4737,16 @@ def test_kilo_unattended_turn_enforces_restricted_agent():
     assert not ok_agent
     assert "Kilo requires a restricted agent" in err_msg
 
+    # The default agent is accepted only when Kilo's resolved permissions really deny everything but reading
+    import orchestration_runs as _runs
+    _runs._kilo_agent_cache.clear()
+    _runs._kilo_agent_cache["aio-unattended"] = (True, None)
     ok_default, _ = check_kilo_agent({}, "triage")
     assert ok_default
+    _runs._kilo_agent_cache["aio-unattended"] = (False, "Kilo agent 'aio-unattended' is not installed")
+    ok_missing, err_missing = check_kilo_agent({}, "triage")
+    assert not ok_missing and "not installed" in err_missing
+    _runs._kilo_agent_cache.clear()
     ok_orch, _ = check_kilo_agent({}, "orchestrate")
     assert ok_orch
 
@@ -6246,3 +6254,66 @@ def test_run_events_session_filter(sample_workspace: pathlib.Path):
     assert out_agent["count"] >= 1
     assert any(e["type"] == "run.finished" for e in out_agent["events"])
 
+
+
+
+SYNTHETIC_KILO_AGENT_LIST = """ask (primary)
+[
+  {"permission": "*", "action": "allow", "pattern": "*"},
+  {"permission": "edit", "pattern": "*", "action": "allow"},
+  {"permission": "bash", "pattern": "*", "action": "allow"},
+  {"permission": "edit", "pattern": "*", "action": "deny"},
+  {"permission": "bash", "pattern": "*", "action": "deny"},
+  {"permission": "bash", "pattern": "cp *", "action": "allow"},
+  {"permission": "webfetch", "pattern": "*", "action": "allow"},
+  {"permission": "codex-mcp_*", "pattern": "*", "action": "ask"}
+]
+aio-unattended (primary)
+[
+  {"permission": "*", "action": "allow", "pattern": "*"},
+  {"permission": "edit", "pattern": "*", "action": "allow"},
+  {"permission": "bash", "pattern": "*", "action": "allow"},
+  {"permission": "task", "pattern": "*", "action": "allow"},
+  {"permission": "*", "pattern": "*", "action": "deny"},
+  {"permission": "read", "pattern": "*", "action": "allow"},
+  {"permission": "glob", "pattern": "*", "action": "allow"},
+  {"permission": "grep", "pattern": "*", "action": "allow"},
+  {"permission": "list", "pattern": "*", "action": "allow"}
+]
+leaky (primary)
+[
+  {"permission": "*", "pattern": "*", "action": "deny"},
+  {"permission": "read", "pattern": "*", "action": "allow"},
+  {"permission": "bash", "pattern": "*", "action": "allow"}
+]
+"""
+
+
+def test_kilo_agent_restriction_uses_last_matching_rule():
+    """T028: Kilo merges global permissions into every agent and evaluates with "last matching rule wins";
+    only an agent whose effective permissions deny every probe is accepted for unattended turns."""
+    import orchestration_runs as _runs
+
+    ok, reason = _runs.kilo_agent_is_restricted("aio-unattended", SYNTHETIC_KILO_AGENT_LIST)
+    assert ok, reason
+    ok_ask, reason_ask = _runs.kilo_agent_is_restricted("ask", SYNTHETIC_KILO_AGENT_LIST)
+    assert not ok_ask and "bash cp a b" in reason_ask
+    ok_leaky, reason_leaky = _runs.kilo_agent_is_restricted("leaky", SYNTHETIC_KILO_AGENT_LIST)
+    assert not ok_leaky and "bash rm -rf build" in reason_leaky
+    ok_missing, reason_missing = _runs.kilo_agent_is_restricted("nope", SYNTHETIC_KILO_AGENT_LIST)
+    assert not ok_missing and "not installed" in reason_missing
+
+
+def test_kilo_agent_command_preview_and_apply(tmp_path: pathlib.Path):
+    """T028: `ai-orch run kilo-agent` previews by default and writes only with --apply (never replacing silently)."""
+    env = dict(os.environ, AI_ORCH_KILO_AGENT_DIR=str(tmp_path))
+    prev = subprocess.run([str(BIN_AI_ORCH), "run", "kilo-agent", "--json"], capture_output=True, text=True, env=env, check=True)
+    assert json.loads(prev.stdout)["plan"]["action"] == "create"
+    assert not (tmp_path / "aio-unattended.md").exists()
+    subprocess.run([str(BIN_AI_ORCH), "run", "kilo-agent", "--apply", "--json"], capture_output=True, text=True, env=env, check=True)
+    content = (tmp_path / "aio-unattended.md").read_text(encoding="utf-8")
+    assert '"*": deny' in content and "read: allow" in content
+    (tmp_path / "aio-unattended.md").write_text("changed", encoding="utf-8")
+    refused = subprocess.run([str(BIN_AI_ORCH), "run", "kilo-agent", "--apply", "--json"], capture_output=True, text=True, env=env)
+    assert refused.returncode == 1
+    assert (tmp_path / "aio-unattended.md").read_text(encoding="utf-8") == "changed"
