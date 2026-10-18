@@ -11,7 +11,7 @@
   - the `ai-orchestration` backend becomes an MCP server, and task updates, formalisation and similar work are
     delegated to it (and to the orchestrator behind it) instead of to skills;
   - it is multi-workspace, and a workspace can contain several projects, each with its own tasks.
-- inputs: Codex review of draft 1 (2026-10-18, 12 items), Gemini review (pending).
+- inputs: Codex and Gemini reviews of draft 1 (2026-10-18, 12 items each), in `../_reviews/2026-10-18-peer-messaging-review-{codex,gemini}.md`; referenced below as C<n> and G<n>.
 
 ## 1. Model
 
@@ -39,13 +39,16 @@ user (one broker process)
 ## 2. Identity and registry
 
 - Each workspace carries an immutable id in its config: `[workspace] uuid = "<UUIDv4>"` plus a human slug
-  `[workspace] id = "ai-coding-tools"` (`^[a-z0-9][a-z0-9-]{1,47}$`). The uuid is what the broker keys on (Codex 10:
+  `[workspace] id = "ai-coding-tools"` (`^[a-z0-9][a-z0-9-]{1,47}$`). The uuid is what the broker keys on (C10:
   folder names collide and renames break lookups); the slug is the address people type.
-- Registry: owned by the broker, stored at `~/.config/ai-orchestration/broker/registry.sqlite` (or JSON under a lock;
-  the choice is part of the plan), with uuid → slug, canonical path, device/inode, projects, last_seen.
+- Registry: owned by the broker, stored under the active global config directory (`get_global_config_dir()`, so
+  `AI_ORCHESTRATION_CONFIG` isolates tests; G11) as `broker/registry.sqlite` (or JSON under a lock; the choice is part
+  of the plan), with uuid → slug, canonical path, device/inode, projects, last_seen. A workspace moved to a new folder
+  keeps its uuid; registering it from the new path updates the path after a confirmation (G11).
 - Registration: `workspace.register` (preview → apply), offered by `orchestrator ensure` and by the setup wizard.
   Before every write into a workspace the broker re-verifies canonical path, device/inode and uuid, and refuses
-  symlinked `.ai-orchestration` components (Codex 10). Stale entries are reported, never deleted silently.
+  symlinked `.ai-orchestration` components (C10). Stale entries are reported, never deleted silently.
+- Ids are UUIDv4 (stdlib only, no ULID dependency; G10), message ids prefixed `msg-<timestamp>-`.
 
 ## 3. The broker
 
@@ -57,7 +60,8 @@ user (one broker process)
     second trigger daemon: trigger evaluation lives in the broker (resolves Codex 6).
   - **Single writer** for the shared stores (registry, mailboxes, events, queues): every mutation goes through the
     broker, under its locks, so cross-workspace delivery is a local transaction instead of one process writing into
-    another workspace's files (resolves Codex 3, 4, 11).
+    another workspace's files (resolves C3, C4, C11). Locks are always taken in a fixed order (registry → sender
+    workspace → target workspace, by uuid) with deadlines, so two workspaces mailing each other cannot deadlock (G1).
 - The CLI (`ai-orch …`) stays and keeps working without the broker for single-project use (offline, CI); when the
   broker is running, the CLI's mutating commands go through it (so locks are not bypassed).
 - Start: by `orchestrator ensure`, by the stdio shim, by the UI launcher, or at login (optional launchd/systemd unit,
@@ -89,7 +93,11 @@ Tools (all scoped by `workspace` and `project`; defaults from the caller's cwd, 
 ## 5. Orchestrator per workspace
 
 - Unchanged from `events-and-triggers.md` §0/§0a except: the worker loop runs inside the broker, one logical worker
-  per workspace, serialised per workspace, parallel across workspaces.
+  per workspace, serialised per workspace, parallel across workspaces. `triggers daemon` is superseded: the broker owns
+  trigger evaluation and holds the existing daemon lock, so an old daemon cannot run beside it (G6).
+- Worker liveness is a separate volatile record (`orchestrator/worker.json`: broker pid, current turn, child pid,
+  heartbeat from a thread that keeps ticking during long turns); staleness checks the process table, not only the
+  heartbeat age (G7). The queue lock stays short-lived; the worker's own exclusivity uses a separate lock (G2).
 - The orchestrator works on **all projects of its workspace**; a turn names the project(s) it touched. Its tool calls
   to task data go through the same MCP surface (it is a client of the broker too), so its writes are validated like
   everyone else's.
@@ -97,7 +105,9 @@ Tools (all scoped by `workspace` and `project`; defaults from the caller's cwd, 
   canonical queue under the lock and the delivery cursor advances only after a turn completes (`server-and-bindings`
   T026); `status` is read-only (no auto-registration); explicit stop/pause is respected by `ensure` unless the owner
   asks to resume; an interrupted mutating turn is marked `outcome_unknown` for the owner instead of being retried
-  (Codex 8, 9).
+  (C8, C9); a claimed turn is not recovered while its lease is valid or within a startup grace period even if the child
+  pid is not written yet (G2, T027); unattended turns are restricted on every tool, Kilo included, and untrusted data is
+  wrapped with a per-turn nonce delimiter (G3, G4, T028).
 
 ## 6. Consoles: interactive sessions
 
@@ -111,19 +121,30 @@ Tools (all scoped by `workspace` and `project`; defaults from the caller's cwd, 
 
 ## 7. Mail safety
 
-- **Quarantine (Codex 1):** mail addressed to an orchestrator never enters the persistent orchestrator session as raw
+- **Quarantine (C1):** mail addressed to an orchestrator never enters the persistent orchestrator session as raw
   text. A fresh, stateless, no-tools classifier turn (cheap model) reads it and produces a structured result
   (`summary`, `intent`, `requested_actions[]`, `questions[]`, `suspicious: bool`). Only that structured result reaches
   the orchestrator, marked `untrusted_peer_data` with provenance. Reading referenced files or sending a substantive
   reply that quotes workspace content needs the owner's approval (a proposal, §0c E3).
-- **Structured effects (Codex 5):** the orchestrator acts on mail through broker tools (reply, decline, create a
-  question, create a proposal), never through shell commands; the broker applies them.
+- **Structured effects (C5):** the orchestrator acts on mail through broker tools (reply, decline, create a
+  question, create a proposal), never through shell commands; the broker applies them. `peer_message` and
+  `mail_classify` are first-class turn types with their own prompt builders (G4).
+- **Rate limits (G8):** per workspace `[mail] max_received_per_hour` (default 20) and `max_mail_turns_per_hour`
+  (default 6, shared token bucket with event turns); excess mail is stored and batched, never dropped.
+- **Outcomes reach the sender (G9):** `decline` and `expire` produce an automatic reply (`kind = reply`,
+  `receipt_status`), so the sender's outbox always ends in a terminal state. Events: `mail.received`, `mail.read`,
+  `mail.answered`, `mail.declined`, `mail.expired` (G12).
+- **References (G5):** `refs` are ids or paths relative to the sender's workspace root (no `..`, no absolute paths,
+  checked by the broker). The receiver reads one only through `mail.fetch_ref`, which the broker serves from the
+  sender's workspace after policy and size checks (and only after owner approval for orchestrator recipients).
 - **Policy** per workspace config: `[mail] isolation = open | restricted | blind`, `accept_from`, `send_to`, `deny`,
   `max_body_kib`. The broker checks both sides inside one transaction, at send time and again before the
-  classifier turn, and quarantines (does not process) mail whose policy changed meanwhile (Codex 11). An unregistered
+  classifier turn, and quarantines (does not process) mail whose policy changed meanwhile (C11). An unregistered
   or unconfigured target is `deny` by default.
 - **Content:** bodies are Markdown ≤ 32 KiB, references are ids or paths in the sender's workspace, no attachments in v1.
-  Secret scanning is best-effort and documented as such (Codex 12).
+  Secret scanning is best-effort and documented as such (C12, G8): a small set of explicit patterns (AWS, GitHub,
+  Anthropic/OpenAI style keys, private key blocks), tested; it warns or blocks, and never claims to catch hosts or
+  finding details.
 
 ## 8. What the skills become
 
