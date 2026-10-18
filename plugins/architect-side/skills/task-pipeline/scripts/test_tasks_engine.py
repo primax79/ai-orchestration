@@ -5823,3 +5823,587 @@ Worker.
     res_val_after = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
     assert res_val_after.returncode == 0
 
+
+# ===========================================================================
+# Task 12.12 Events & Questions Apply Tests
+# ===========================================================================
+
+def _read_ws_events(workspace: pathlib.Path) -> list[dict[str, Any]]:
+    scripts_dir = REPO_ROOT / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import orchestration_events
+    return orchestration_events.read_events(workspace)
+
+
+def test_events_task_creation(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # 1. tasks new from note
+    res_note = run_cli("inbox", "add", "--title", "Feature note", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_note.returncode == 0
+    note_id = json.loads(res_note.stdout)["id"]
+
+    res_new = run_cli("new", "--title", "Feature task", "--from-note", note_id, "--category", "features", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_new.returncode == 0
+    t_id = json.loads(res_new.stdout)["id"]
+
+    events = _read_ws_events(tmp_path)
+    ev_new = [e for e in events if e["type"] == "task.created" and e["subject"] == t_id]
+    assert len(ev_new) == 1
+    assert ev_new[0]["source"] == "tasks_engine"
+    assert ev_new[0]["data"]["category"] == "features"
+    assert ev_new[0]["data"]["state"] == "open"
+
+    # 2. microtask
+    res_micro = run_cli("micro", "--title", "Quick chore", "--kind", "chore", "--priority", "P3", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_micro.returncode == 0
+    m_id = json.loads(res_micro.stdout)["id"]
+
+    events = _read_ws_events(tmp_path)
+    ev_micro = [e for e in events if e["type"] == "task.created" and e["subject"] == m_id]
+    assert len(ev_micro) == 1
+    assert ev_micro[0]["data"]["kind"] == "chore"
+    assert ev_micro[0]["data"]["priority"] == "P3"
+
+    # 3. child add
+    res_dry = run_cli("child", "add", t_id, "--title", "Subtask 1", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry.returncode == 0
+    plan_hash = json.loads(res_dry.stdout)["plan_hash"]
+    res_child = run_cli("child", "add", t_id, "--title", "Subtask 1", "--expect-plan-hash", plan_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_child.returncode == 0
+    child_id = json.loads(res_child.stdout)["allocated_id"]
+
+    events = _read_ws_events(tmp_path)
+    ev_child = [e for e in events if e["type"] == "task.created" and e["subject"] == child_id]
+    assert len(ev_child) == 1
+    assert ev_child[0]["data"]["parent"] == t_id
+
+    # 4. promote
+    res_promo = run_cli("promote", m_id, "--category", "features", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_promo.returncode == 0
+    events = _read_ws_events(tmp_path)
+    ev_promo = [e for e in events if e["type"] == "task.created" and e["subject"] == m_id and e["data"].get("category") == "features"]
+    assert len(ev_promo) == 1
+
+
+def test_events_task_transitions_and_reopen(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # 1. Initiative task transition
+    init_dir = tasks_dir / "01-init"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text("# 01 Plan\n\n### 01.1 - Setup\n\n- **Status:** `open`\n- **Goal:** Setup\n", encoding="utf-8")
+
+    res_tr1 = run_cli("transition", "01.1", "in progress", "--actor", "executor-1", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tr1.returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    ev_init = [e for e in events if e["type"] == "task.transitioned" and e["subject"] == "01.1"]
+    assert len(ev_init) == 1
+    assert ev_init[0]["data"]["from"] == "open"
+    assert ev_init[0]["data"]["to"] == "in progress"
+    assert ev_init[0]["data"]["actor"] == "executor-1"
+    assert ev_init[0]["actor"] == "executor-1"
+    assert ev_init[0]["source"] == "tasks_engine"
+
+    # 2. Emergent task transitions
+    task_file = tasks_dir / "features" / "T001-test.md"
+    _write_sample_task(task_file, task_id="T001", state="open")
+
+    res_tr2 = run_cli("transition", "T001", "in progress", "--actor", "dev", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tr2.returncode == 0
+    res_tr3 = run_cli("transition", "T001", "delivered", "--actor", "dev", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tr3.returncode == 0
+    res_tr4 = run_cli("transition", "T001", "verified", "--verifier", "independent-session", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tr4.returncode == 0
+    res_tr5 = run_cli("transition", "T001", "done", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tr5.returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    ev_t001 = [e for e in events if e["type"] == "task.transitioned" and e["subject"] == "T001"]
+    assert len(ev_t001) == 4
+    assert [e["data"]["to"] for e in ev_t001] == ["in progress", "delivered", "verified", "done"]
+
+    # 3. Transition 01.1 to done, then reopen it
+    assert run_cli("transition", "01.1", "delivered", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    assert run_cli("transition", "01.1", "verified", "--verifier", "independent-session", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    assert run_cli("transition", "01.1", "done", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    res_reopen_dry = run_cli("reopen", "01.1", "--reason", "Fix bug", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_reopen_dry.returncode == 0
+    plan_hash = json.loads(res_reopen_dry.stdout)["plan_hash"]
+
+    res_reopen = run_cli("reopen", "01.1", "--reason", "Fix bug", "--expect-plan-hash", plan_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_reopen.returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    ev_reopen = [e for e in events if e["type"] == "task.transitioned" and e["subject"] == "01.1"]
+    last_ev = ev_reopen[-1]
+    assert last_ev["data"]["from"] == "done"
+    assert last_ev["data"]["to"] == "open"
+    assert last_ev["data"]["reason"] == "Fix bug"
+
+
+def test_events_structure_and_field_changes(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    init_dir = tasks_dir / "01-init"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text("# 01 Plan\n\n### 01.1 - Parent\n\n- **Status:** `open`\n- **Goal:** Parent goal\n", encoding="utf-8")
+
+    # 1. expand inline block 01.1 to folder
+    res_exp_dry = run_cli("expand", "01.1", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_exp_dry.returncode == 0
+    p_hash = json.loads(res_exp_dry.stdout)["plan_hash"]
+    res_exp = run_cli("expand", "01.1", "--expect-plan-hash", p_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_exp.returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    ev_exp = [e for e in events if e["type"] == "task.expanded" and e["subject"] == "01.1"]
+    assert len(ev_exp) == 1
+
+    # 2. collapse 01.1 folder back to block
+    res_col_dry = run_cli("collapse", "01.1", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_col_dry.returncode == 0
+    c_hash = json.loads(res_col_dry.stdout)["plan_hash"]
+    res_col = run_cli("collapse", "01.1", "--expect-plan-hash", c_hash, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_col.returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    ev_col = [e for e in events if e["type"] == "task.collapsed" and e["subject"] == "01.1"]
+    assert len(ev_col) == 1
+
+    # 3. set-priority, size, deps, kind, labels on emergent task T001
+    task_file = tasks_dir / "features" / "T001-structure.md"
+    _write_sample_task(task_file, task_id="T001", state="open")
+    task_file2 = tasks_dir / "features" / "T002-dep.md"
+    _write_sample_task(task_file2, task_id="T002", state="open")
+
+    assert run_cli("set-priority", "T001", "P0", "--reason", "Urgent", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    assert run_cli("set-size", "T001", "M", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    assert run_cli("set-deps", "T001", "--add", "T002", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    assert run_cli("set-kind", "T001", "bug", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    assert run_cli("set-labels", "T001", "--add", "backend", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    ev_updates = [e for e in events if e["type"] == "task.updated" and e["subject"] == "T001"]
+    fields_updated = [e["data"]["field"] for e in ev_updates]
+    assert "priority" in fields_updated
+    assert "size" in fields_updated
+    assert "depends_on" in fields_updated
+    assert "kind" in fields_updated
+    assert "labels" in fields_updated
+
+
+def test_events_attachments(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    task_file = tasks_dir / "features" / "T001-att.md"
+    _write_sample_task(task_file, task_id="T001", state="open")
+
+    sample_doc = tmp_path / "spec.pdf"
+    sample_doc.write_bytes(b"%PDF-1.4 sample content")
+
+    res_att = run_cli("attach", "T001", "--file", str(sample_doc), "--tasks-dir", str(tasks_dir), "--json")
+    assert res_att.returncode == 0
+    att_name = json.loads(res_att.stdout)["attachment"]
+
+    events = _read_ws_events(tmp_path)
+    ev_att = [e for e in events if e["type"] == "task.attached" and e["subject"] == "T001"]
+    assert len(ev_att) == 1
+    assert ev_att[0]["data"]["name"] == att_name
+
+    res_det = run_cli("detach", "T001", "--name", att_name, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_det.returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    ev_det = [e for e in events if e["type"] == "task.detached" and e["subject"] == "T001"]
+    assert len(ev_det) == 1
+    assert ev_det[0]["data"]["name"] == att_name
+
+
+def test_events_questions_and_apply(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    task_file = tasks_dir / "features" / "T001-q.md"
+    _write_sample_task(task_file, task_id="T001", state="open")
+
+    # 1. Ask question Q001
+    res_ask = run_cli(
+        "questions", "ask",
+        "--question", "Use SQLite or PostgreSQL?",
+        "--context", "Storage decision",
+        "--option", "A=SQLite: Simpler",
+        "--option", "B=PostgreSQL: Scalable",
+        "--blocks", "T001",
+        "--asked-by", "architect",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_ask.returncode == 0
+    qid = json.loads(res_ask.stdout)["id"]
+
+    events = _read_ws_events(tmp_path)
+    ev_ask = [e for e in events if e["type"] == "question.asked" and e["subject"] == qid]
+    assert len(ev_ask) == 1
+    assert ev_ask[0]["actor"] == "architect"
+    assert ev_ask[0]["data"]["question"] == "Use SQLite or PostgreSQL?"
+
+    # 2. Answer question Q001
+    res_ans = run_cli(
+        "questions", "answer", qid,
+        "--choice", "A",
+        "--text", "Go with SQLite for simplicity",
+        "--by", "lead-dev",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_ans.returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    ev_ans = [e for e in events if e["type"] == "question.answered" and e["subject"] == qid]
+    assert len(ev_ans) == 1
+    assert ev_ans[0]["actor"] == "lead-dev"
+    assert ev_ans[0]["data"]["choice"] == "A"
+
+    # 3. Apply question Q001
+    res_app = run_cli(
+        "questions", "apply", qid,
+        "--by", "lead-dev",
+        "--ref", "commit-abcdef",
+        "--note", "Adopted SQLite in sqlite_db.py",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_app.returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    ev_app = [e for e in events if e["type"] == "question.applied" and e["subject"] == qid]
+    assert len(ev_app) == 1
+    assert ev_app[0]["actor"] == "lead-dev"
+    assert ev_app[0]["data"]["ref"] == "commit-abcdef"
+    assert ev_app[0]["data"]["note"] == "Adopted SQLite in sqlite_db.py"
+
+    # 4. Ask Q002 and withdraw it
+    res_ask2 = run_cli(
+        "questions", "ask",
+        "--question", "Enable redis cache?",
+        "--context", "Caching layer",
+        "--blocks", "-",
+        "--open-answer", "yes",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_ask2.returncode == 0
+    qid2 = json.loads(res_ask2.stdout)["id"]
+
+    res_with = run_cli(
+        "questions", "withdraw", qid2,
+        "--reason", "Not needed at this scale",
+        "--by", "architect",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_with.returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    ev_with = [e for e in events if e["type"] == "question.withdrawn" and e["subject"] == qid2]
+    assert len(ev_with) == 1
+    assert ev_with[0]["actor"] == "architect"
+    assert ev_with[0]["data"]["reason"] == "Not needed at this scale"
+
+
+def test_events_inbox_lifecycle(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # 1. Draft note
+    res_add1 = run_cli("inbox", "add", "--title", "Draft Idea", "--status", "draft", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_add1.returncode == 0
+    n1 = json.loads(res_add1.stdout)["id"]
+
+    events = _read_ws_events(tmp_path)
+    ev_n1 = [e for e in events if e["type"] == "note.created" and e["subject"] == n1]
+    assert len(ev_n1) == 1
+
+    # 2. Ready note
+    res_add2 = run_cli("inbox", "add", "--title", "Ready Idea", "--status", "ready", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_add2.returncode == 0
+    n2 = json.loads(res_add2.stdout)["id"]
+
+    events = _read_ws_events(tmp_path)
+    ev_n2 = [e for e in events if e["type"] == "note.ready" and e["subject"] == n2]
+    assert len(ev_n2) == 1
+
+    # 3. Edit draft note to ready
+    res_edit = run_cli("inbox", "edit", n1, "--status", "ready", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_edit.returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    ev_n1_ready = [e for e in events if e["type"] == "note.ready" and e["subject"] == n1]
+    assert len(ev_n1_ready) == 1
+
+    # 4. Attach & detach
+    doc_file = tmp_path / "note_att.txt"
+    doc_file.write_text("Sample text", encoding="utf-8")
+    res_att = run_cli("inbox", "attach", n1, "--file", str(doc_file), "--tasks-dir", str(tasks_dir), "--json")
+    assert res_att.returncode == 0
+    att_name = json.loads(res_att.stdout)["attachment"]
+
+    events = _read_ws_events(tmp_path)
+    assert any(e["type"] == "note.attached" and e["subject"] == n1 for e in events)
+
+    res_det = run_cli("inbox", "detach", n1, "--name", att_name, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_det.returncode == 0
+    events = _read_ws_events(tmp_path)
+    assert any(e["type"] == "note.detached" and e["subject"] == n1 for e in events)
+
+    # 5. Resolve note N001
+    res_res = run_cli("inbox", "resolve", n1, "--produced", "T001", "--by", "triage-agent", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_res.returncode == 0
+    events = _read_ws_events(tmp_path)
+    ev_res = [e for e in events if e["type"] == "note.processed" and e["subject"] == n1]
+    assert len(ev_res) == 1
+    assert ev_res[0]["actor"] == "triage-agent"
+    assert ev_res[0]["data"]["status"] == "processed"
+
+    # 6. Discard note N002
+    res_disc = run_cli("inbox", "discard", n2, "--reason", "Not relevant", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_disc.returncode == 0
+    events = _read_ws_events(tmp_path)
+    ev_disc = [e for e in events if e["type"] == "note.processed" and e["subject"] == n2]
+    assert len(ev_disc) == 1
+    assert ev_disc[0]["data"]["status"] == "discarded"
+
+    # 7. Reopen note N002
+    res_reopen = run_cli("inbox", "reopen", n2, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_reopen.returncode == 0
+    events = _read_ws_events(tmp_path)
+    ev_reopen = [e for e in events if e["type"] == "note.ready" and e["subject"] == n2]
+    assert len(ev_reopen) == 2
+
+
+def test_events_no_event_on_dry_run_or_refusal(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    init_dir = tasks_dir / "01-init"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text("# 01 Plan\n\n### 01.1 - Setup\n\n- **Status:** `done`\n- **Goal:** Setup\n", encoding="utf-8")
+
+    task_file = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(task_file, task_id="T001", state="open")
+
+    events_before = _read_ws_events(tmp_path)
+    assert len(events_before) == 0
+
+    # Dry-run reopen on done task
+    res1 = run_cli("reopen", "01.1", "--reason", "Test dry run", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res1.returncode == 0
+    assert len(_read_ws_events(tmp_path)) == 0
+
+    # Illegal transition refusal (open -> done directly)
+    res2 = run_cli("transition", "T001", "done", "--tasks-dir", str(tasks_dir), "--json")
+    assert res2.returncode != 0
+    assert len(_read_ws_events(tmp_path)) == 0
+
+    # Dry-run child add
+    res3 = run_cli("child", "add", "T001", "--title", "Sub 1", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res3.returncode == 0
+    assert len(_read_ws_events(tmp_path)) == 0
+
+    # Child add with invalid plan hash refusal
+    res4 = run_cli("child", "add", "T001", "--title", "Sub 1", "--expect-plan-hash", "badhash", "--tasks-dir", str(tasks_dir), "--json")
+    assert res4.returncode != 0
+    assert len(_read_ws_events(tmp_path)) == 0
+
+    # Questions apply on non-existent question
+    res5 = run_cli("questions", "apply", "Q999", "--tasks-dir", str(tasks_dir), "--json")
+    assert res5.returncode != 0
+    assert len(_read_ws_events(tmp_path)) == 0
+
+
+def test_events_seq_ordering_matches_writes(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # 1. Add note
+    res1 = run_cli("inbox", "add", "--title", "Order test note", "--tasks-dir", str(tasks_dir), "--json")
+    assert res1.returncode == 0
+    n_id = json.loads(res1.stdout)["id"]
+
+    # 2. Edit note to ready
+    res2 = run_cli("inbox", "edit", n_id, "--status", "ready", "--tasks-dir", str(tasks_dir), "--json")
+    assert res2.returncode == 0
+
+    # 3. Create task from note
+    res3 = run_cli("new", "--title", "Order test task", "--from-note", n_id, "--category", "features", "--tasks-dir", str(tasks_dir), "--json")
+    assert res3.returncode == 0
+    t_id = json.loads(res3.stdout)["id"]
+
+    # 4. Set priority
+    res4 = run_cli("set-priority", t_id, "P1", "--tasks-dir", str(tasks_dir), "--json")
+    assert res4.returncode == 0
+
+    # 5. Transition task
+    res5 = run_cli("transition", t_id, "in progress", "--tasks-dir", str(tasks_dir), "--json")
+    assert res5.returncode == 0
+
+    # 6. Ask question
+    res6 = run_cli("questions", "ask", "--question", "Approval needed?", "--context", "Gate", "--blocks", t_id, "--open-answer", "yes", "--tasks-dir", str(tasks_dir), "--json")
+    assert res6.returncode == 0
+    q_id = json.loads(res6.stdout)["id"]
+
+    # 7. Answer question
+    res7 = run_cli("questions", "answer", q_id, "--choice", "open", "--text", "Approved", "--tasks-dir", str(tasks_dir), "--json")
+    assert res7.returncode == 0
+
+    # 8. Apply question
+    res8 = run_cli("questions", "apply", q_id, "--ref", t_id, "--tasks-dir", str(tasks_dir), "--json")
+    assert res8.returncode == 0
+
+    events = _read_ws_events(tmp_path)
+    assert len(events) >= 8
+
+    # Sequence numbers must be strictly monotonically increasing matching write order
+    seqs = [e["seq"] for e in events]
+    assert seqs == sorted(seqs)
+    assert len(seqs) == len(set(seqs))
+
+    # Check key types present in order
+    types = [e["type"] for e in events]
+    assert types[0] == "note.created"
+    assert types[1] == "note.ready"
+    assert types[2] == "task.created"
+    assert types[3] == "task.updated"
+    assert types[4] == "task.transitioned"
+    assert "question.asked" in types
+    assert "question.answered" in types
+    assert types[-1] == "question.applied"
+
+
+def test_events_graceful_fallback_when_module_unavailable(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # Monkeypatch _get_orchestration_events to return None
+    monkeypatch.setattr(te, "_get_orchestration_events", lambda: None)
+
+    # Microtask creation succeeds without error
+    ok_m, res_m = te.tasks_micro(tasks_dir, "Fallback microtask")
+    assert ok_m is True
+
+    # Transition succeeds without error
+    ok_tr, res_tr = te.transition_task(tasks_dir, res_m["id"], "in progress")
+    assert ok_tr is True
+
+    # Questions ask/answer/apply succeed without error
+    ok_ask, res_ask = te.ask_question(tasks_dir, question="Fallback Q?", context="Ctx", blocks="-", open_answer="yes")
+    assert ok_ask is True
+    ok_ans, res_ans = te.answer_question(tasks_dir, res_ask["id"], choice="open", text="ok")
+    assert ok_ans is True
+    ok_app, res_app = te.apply_question(tasks_dir, res_ask["id"], ref="ref-1")
+    assert ok_app is True
+
+
+def test_questions_apply_and_ledger_validation(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # Create task
+    task_file = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(task_file, task_id="T001", state="open")
+
+    # Ask question Q001 blocking T001
+    ok_ask, res_ask = te.ask_question(
+        tasks_dir,
+        question="Use JWT or session cookies?",
+        context="Auth mechanism",
+        blocks="T001",
+        open_answer="yes",
+    )
+    assert ok_ask is True
+    qid = res_ask["id"]
+
+    # 1. Apply before answered is refused
+    ok_app1, res_app1 = te.apply_question(tasks_dir, qid)
+    assert ok_app1 is False
+    assert "expected 'answered'" in res_app1["error"]
+
+    # 2. Answer question
+    ok_ans, _ = te.answer_question(tasks_dir, qid, choice="open", text="Use JWT with rotation")
+    assert ok_ans is True
+
+    # 3. Dry-run apply succeeds without writing ledger
+    ok_dry, res_dry = te.apply_question(tasks_dir, qid, dry_run=True, note="Dry run test")
+    assert ok_dry is True
+    assert res_dry["dry_run"] is True
+    assert not (tasks_dir / "questions" / "applied.jsonl").exists()
+
+    # 4. Real apply writes ledger and emits event
+    ok_real, res_real = te.apply_question(
+        tasks_dir,
+        qid,
+        by="security-lead",
+        ref="commit-123456",
+        note="Implemented JWT rotation",
+    )
+    assert ok_real is True
+    assert res_real["status"] == "applied"
+    assert res_real["record"]["question"] == qid
+    assert res_real["record"]["by"] == "security-lead"
+    assert res_real["record"]["ref"] == "commit-123456"
+
+    # Ledger file verification
+    ledger_file = tasks_dir / "questions" / "applied.jsonl"
+    assert ledger_file.is_file()
+    records = te.read_applied_ledger(tasks_dir)
+    assert len(records) == 1
+    assert records[0]["question"] == qid
+    assert records[0]["by"] == "security-lead"
+
+    # 5. Re-apply without force is refused
+    ok_dup, res_dup = te.apply_question(tasks_dir, qid)
+    assert ok_dup is False
+    assert "already recorded as applied" in res_dup["error"]
+
+    # 6. Re-apply with force succeeds
+    ok_force, res_force = te.apply_question(tasks_dir, qid, by="security-lead", force=True, note="Second application")
+    assert ok_force is True
+    records2 = te.read_applied_ledger(tasks_dir)
+    assert len(records2) == 2
+
+    # 7. Discover questions reports applied status (latest record)
+    questions = te.discover_questions(tasks_dir)
+    target_q = next(q for q in questions if q["id"] == qid)
+    assert target_q["applied"] is True
+    assert target_q["applied_record"]["note"] == "Second application"
+
+    # 8. Show question reports applied
+    ok_show, res_show = te.show_question(tasks_dir, qid)
+    assert ok_show is True
+    assert res_show["question"]["applied"] is True
+
+    # 9. CLI test
+    res_cli_show = run_cli("questions", "show", qid, "--tasks-dir", str(tasks_dir))
+    assert res_cli_show.returncode == 0
+    assert "Applied by : security-lead" in res_cli_show.stdout
+
+    # 10. Question file markdown format remains completely valid (only Context, Options, Answer)
+    q_file = tasks_dir / "questions" / f"{qid}-use-jwt-or-session-cookies.md"
+    assert q_file.is_file()
+    content = q_file.read_text(encoding="utf-8")
+    sections = [line for line in content.splitlines() if line.startswith("## ")]
+    assert sections == ["## Context", "## Options", "## Answer"]
+
+    # Validation passes with 0 errors
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+    val_data = json.loads(res_val.stdout)
+    assert val_data["errors"] == []
+
+

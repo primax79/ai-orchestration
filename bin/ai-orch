@@ -319,6 +319,10 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch questions withdraw <id> --reason <text> [--by <who>] [--tasks-dir <dir>] [--json]",
                     "description": "Withdraw a blocking question with a reason, unblocking tasks whose questions are resolved.",
                 },
+                "apply": {
+                    "usage": "ai-orch questions apply <id> [--by <who>] [--ref <text>] [--note <text>] [--force] [--dry-run] [--tasks-dir <dir>] [--json]",
+                    "description": "Record that an answered question's decision was applied into the application ledger.",
+                },
             },
         },
         "render-agents-md": {

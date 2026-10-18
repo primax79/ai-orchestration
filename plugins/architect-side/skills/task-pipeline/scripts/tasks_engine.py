@@ -354,6 +354,86 @@ def task_write_lock(tasks_dir: pathlib.Path, timeout: float | None = None) -> It
             pass
 
 
+# ---------------------------------------------------------------------------
+# Events Emission (Spec 12, E1)
+# ---------------------------------------------------------------------------
+
+def _find_repo_root() -> pathlib.Path | None:
+    cur = pathlib.Path(__file__).resolve().parent
+    for parent in [cur, *cur.parents]:
+        if (parent / "scripts" / "orchestration_events.py").is_file():
+            return parent
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+def _get_orchestration_events() -> Any | None:
+    try:
+        import orchestration_events
+        return orchestration_events
+    except ImportError:
+        pass
+
+    try:
+        repo_root = _find_repo_root()
+        if repo_root is not None:
+            scripts_dir = repo_root / "scripts"
+            if scripts_dir.is_dir() and str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+        import orchestration_events
+        return orchestration_events
+    except Exception as e:
+        print(f"[warning] could not import orchestration_events: {e}", file=sys.stderr)
+        return None
+
+
+def _resolve_workspace_from_tasks_dir(tasks_dir: pathlib.Path) -> pathlib.Path:
+    td = pathlib.Path(tasks_dir).resolve()
+    for cur in [td, *td.parents]:
+        if (cur / ".ai-orchestration").is_dir() or (cur / ".git").exists():
+            return cur
+    if td.name == "tasks":
+        return td.parent
+    return td
+
+
+def _emit_event(
+    tasks_dir: pathlib.Path,
+    event_type: str,
+    payload: Any,
+    *,
+    subject: str | None = None,
+    actor: str | None = None,
+    origin_session: str | None = None,
+) -> dict[str, Any] | None:
+    orch_events = _get_orchestration_events()
+    if orch_events is None:
+        print(
+            f"[warning] could not import orchestration_events; {event_type} event omitted",
+            file=sys.stderr,
+        )
+        return None
+
+    workspace = _resolve_workspace_from_tasks_dir(tasks_dir)
+    try:
+        return orch_events.emit(
+            workspace,
+            event_type,
+            payload,
+            source="tasks_engine",
+            subject=subject,
+            actor=actor or "tasks_engine",
+            origin_session=origin_session,
+        )
+    except Exception as e:
+        print(
+            f"[warning] failed to emit {event_type} event: {e}",
+            file=sys.stderr,
+        )
+        return None
+
+
 def _file_sha256(path: pathlib.Path) -> str:
     if not path.is_file():
         return hashlib.sha256(b"").hexdigest()
@@ -2015,6 +2095,20 @@ def child_add(
                 new_folder.mkdir(parents=True, exist_ok=True)
                 _atomic_write_text(new_readme, "\n".join(readme_lines))
 
+                _emit_event(
+                    tasks_dir,
+                    "task.created",
+                    {
+                        "title": title,
+                        "parent": parent_id,
+                        "state": "open",
+                        "from": None,
+                        "to": "open",
+                        "actor": "owner",
+                    },
+                    subject=new_id,
+                    actor="owner",
+                )
                 return {
                     "ok": True,
                     "allocated_id": new_id,
@@ -2069,6 +2163,20 @@ def child_add(
                     new_folder.mkdir(parents=True, exist_ok=True)
                     _atomic_write_text(new_readme, new_readme_text)
                     parent_file.unlink()
+                    _emit_event(
+                        tasks_dir,
+                        "task.created",
+                        {
+                            "title": title,
+                            "parent": parent_id,
+                            "state": "open",
+                            "from": None,
+                            "to": "open",
+                            "actor": "owner",
+                        },
+                        subject=new_id,
+                        actor="owner",
+                    )
                     return {
                         "ok": True,
                         "allocated_id": new_id,
@@ -2123,6 +2231,20 @@ def child_add(
                         else:
                             new_text = old_text.rstrip() + "\n\n## Subtasks\n" + child_block
                     _atomic_write_text(parent_file, new_text)
+                    _emit_event(
+                        tasks_dir,
+                        "task.created",
+                        {
+                            "title": title,
+                            "parent": parent_id,
+                            "state": "open",
+                            "from": None,
+                            "to": "open",
+                            "actor": "owner",
+                        },
+                        subject=new_id,
+                        actor="owner",
+                    )
                     return {
                         "ok": True,
                         "allocated_id": new_id,
@@ -2179,6 +2301,20 @@ def child_add(
                     new_text = old_text.rstrip() + "\n" + child_block
 
             _atomic_write_text(parent_file, new_text)
+            _emit_event(
+                tasks_dir,
+                "task.created",
+                {
+                    "title": title,
+                    "parent": parent_id,
+                    "state": "open",
+                    "from": None,
+                    "to": "open",
+                    "actor": "owner",
+                },
+                subject=new_id,
+                actor="owner",
+            )
             return {
                 "ok": True,
                 "allocated_id": new_id,
@@ -2251,6 +2387,16 @@ def expand_node(
         folder.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(readme, readme_text)
         _atomic_write_text(parent_file, new_parent_text)
+
+        _emit_event(
+            tasks_dir,
+            "task.expanded",
+            {
+                "folder": str(folder),
+                "node_id": node_id,
+            },
+            subject=node_id,
+        )
 
         return {"ok": True, "plan_hash": plan_hash, "folder": str(folder)}
 
@@ -2334,6 +2480,15 @@ def collapse_node(
 
         shutil.rmtree(folder)
         _atomic_write_text(parent_file, new_parent_text)
+
+        _emit_event(
+            tasks_dir,
+            "task.collapsed",
+            {
+                "node_id": node_id,
+            },
+            subject=node_id,
+        )
 
         return {"ok": True, "plan_hash": plan_hash}
 
@@ -2447,6 +2602,32 @@ def reopen_node(
                 reason=f"Restored ancestor because child {node_id} reopened: {reason_clean}",
             )
 
+        _emit_event(
+            tasks_dir,
+            "task.transitioned",
+            {
+                "from": old_st,
+                "to": "open",
+                "actor": "owner",
+                "reason": reason_clean,
+            },
+            subject=node_id,
+            actor="owner",
+        )
+        for anc, new_anc_state in ancestors_to_restore:
+            _emit_event(
+                tasks_dir,
+                "task.transitioned",
+                {
+                    "from": anc.state,
+                    "to": new_anc_state,
+                    "actor": "owner",
+                    "reason": f"Restored ancestor because child {node_id} reopened: {reason_clean}",
+                },
+                subject=anc.id,
+                actor="owner",
+            )
+
         return {"ok": True, "task_id": node_id, "new_state": "open", "plan_hash": plan_hash}
 
 
@@ -2484,6 +2665,18 @@ def set_priority(
                 dry_run=dry_run,
                 return_diff=True,
             )
+            if not dry_run:
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "priority",
+                        "value": priority,
+                        "priority": priority,
+                        "reason": reason,
+                    },
+                    subject=node_id,
+                )
             return {
                 "ok": True,
                 "task_id": node_id,
@@ -2507,6 +2700,17 @@ def set_priority(
             if not dry_run:
                 _atomic_write_text(file_path, new_text, encoding="utf-8")
                 new_hash = _file_sha256(file_path)
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "priority",
+                        "value": priority,
+                        "priority": priority,
+                        "reason": reason,
+                    },
+                    subject=node_id,
+                )
             else:
                 new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
             return {
@@ -2552,6 +2756,17 @@ def set_size(
                 dry_run=dry_run,
                 return_diff=True,
             )
+            if not dry_run:
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "size",
+                        "value": size,
+                        "size": size,
+                    },
+                    subject=node_id,
+                )
             return {
                 "ok": True,
                 "task_id": node_id,
@@ -2583,6 +2798,16 @@ def set_size(
             if not dry_run:
                 _atomic_write_text(file_path, new_text, encoding="utf-8")
                 new_hash = _file_sha256(file_path)
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "size",
+                        "value": size,
+                        "size": size,
+                    },
+                    subject=node_id,
+                )
             else:
                 new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
             return {
@@ -2659,6 +2884,17 @@ def set_deps(
                 dry_run=dry_run,
                 return_diff=True,
             )
+            if not dry_run:
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "depends_on",
+                        "value": ", ".join(new_deps) if new_deps else "-",
+                        "depends_on": new_deps,
+                    },
+                    subject=node_id,
+                )
             return {
                 "ok": True,
                 "task_id": node_id,
@@ -2685,6 +2921,16 @@ def set_deps(
             if not dry_run:
                 _atomic_write_text(file_path, new_text, encoding="utf-8")
                 new_hash = task_bundle_sha256(file_path)
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "depends_on",
+                        "value": new_raw,
+                        "depends_on": new_deps,
+                    },
+                    subject=node_id,
+                )
             else:
                 new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
             return {
@@ -2730,6 +2976,17 @@ def set_kind(
                 dry_run=dry_run,
                 return_diff=True,
             )
+            if not dry_run:
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "kind",
+                        "value": kind,
+                        "kind": kind,
+                    },
+                    subject=node_id,
+                )
             return {
                 "ok": True,
                 "task_id": node_id,
@@ -2775,6 +3032,16 @@ def set_kind(
             if not dry_run:
                 _atomic_write_text(file_path, new_text, encoding="utf-8")
                 new_hash = _file_sha256(file_path)
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "kind",
+                        "value": kind,
+                        "kind": kind,
+                    },
+                    subject=node_id,
+                )
             else:
                 new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
             return {
@@ -2866,6 +3133,17 @@ def set_labels(
                 dry_run=dry_run,
                 return_diff=True,
             )
+            if not dry_run:
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "labels",
+                        "value": ", ".join(new_own) if new_own else "-",
+                        "labels": new_own,
+                    },
+                    subject=node_id,
+                )
             return {
                 "ok": True,
                 "task_id": node_id,
@@ -2915,6 +3193,16 @@ def set_labels(
             if not dry_run:
                 _atomic_write_text(file_path, new_text, encoding="utf-8")
                 new_hash = _file_sha256(file_path)
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "labels",
+                        "value": labels_val,
+                        "labels": new_own,
+                    },
+                    subject=node_id,
+                )
             else:
                 new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
             return {
@@ -3306,11 +3594,30 @@ def discover_questions(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
     questions_dir = tasks_dir / "questions"
     if not questions_dir.is_dir():
         return []
+    applied_map: dict[str, dict[str, Any]] = {}
+    ledger_file = questions_dir / "applied.jsonl"
+    if ledger_file.is_file():
+        try:
+            for line in ledger_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    rec = json.loads(line)
+                    if isinstance(rec, dict) and "question" in rec:
+                        applied_map[rec["question"]] = rec
+        except Exception:
+            pass
+
     questions: list[dict[str, Any]] = []
     for entry in sorted(questions_dir.iterdir()):
         if entry.is_file() and entry.suffix == ".md" and QUESTION_ID_RE.match(entry.name.split("-")[0]):
             try:
                 q = parse_question_file(entry, tasks_dir)
+                if q["id"] in applied_map:
+                    q["applied"] = True
+                    q["applied_record"] = applied_map[q["id"]]
+                else:
+                    q["applied"] = False
+                    q["applied_record"] = None
                 questions.append(q)
             except Exception:
                 pass
@@ -4868,6 +5175,19 @@ def transition_task(
                 _, new_h = rewrite_block_in_file(
                     file_path, task_id, new_status=effective_state, status_note="; ".join(note_parts)
                 )
+                _emit_event(
+                    tasks_dir,
+                    "task.transitioned",
+                    {
+                        "from": old_state,
+                        "to": effective_state,
+                        "actor": actor or "owner",
+                        "reason": reason,
+                        "verifier": verifier,
+                    },
+                    subject=task_id,
+                    actor=actor or "owner",
+                )
                 return True, {
                     "ok": True,
                     "task_id": task_id,
@@ -5038,6 +5358,19 @@ def transition_task(
                 final_path = _move_task_to_done(target, tasks_dir)
 
             new_bundle_hash = task_bundle_sha256(final_path)
+            _emit_event(
+                tasks_dir,
+                "task.transitioned",
+                {
+                    "from": old_state,
+                    "to": effective_state,
+                    "actor": actor or "owner",
+                    "reason": reason,
+                    "verifier": verifier or target.get("verifier"),
+                },
+                subject=task_id,
+                actor=actor or "owner",
+            )
             return True, {
                 "ok": True,
                 "task_id": task_id,
@@ -7220,6 +7553,36 @@ def ask_question(
                             reason=f"Blocked by question {q_id}",
                         )
 
+                _emit_event(
+                    tasks_dir,
+                    "question.asked",
+                    {
+                        "question": question,
+                        "context": context,
+                        "options": [opt[0] for opt in options] if options else [],
+                        "blocks": blocks or "",
+                        "by": asked_by or "owner",
+                        "origin_run": origin_run or "-",
+                    },
+                    subject=q_id,
+                    actor=asked_by or "owner",
+                )
+                for t, new_st, _ in tasks_to_update:
+                    old_st = t.state if hasattr(t, "state") else t["state"]
+                    tid = t.id if hasattr(t, "id") else t["id"]
+                    _emit_event(
+                        tasks_dir,
+                        "task.transitioned",
+                        {
+                            "from": old_st,
+                            "to": new_st,
+                            "actor": asked_by or "owner",
+                            "reason": f"Blocked by question {q_id}",
+                        },
+                        subject=tid,
+                        actor=asked_by or "owner",
+                    )
+
                 return True, {
                     "ok": True,
                     "id": q_id,
@@ -7327,6 +7690,7 @@ def answer_question(
                 q_status_map[question_id] = "answered"
 
                 unblocked: list[str] = []
+                unblocked_states: dict[str, str] = {}
                 tree = discover_task_tree(tasks_dir)
                 for tid, _ in target_q["blocks_parsed"]:
                     if tid in tree:
@@ -7335,6 +7699,7 @@ def answer_question(
                             restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, [question_id])
                             rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state, new_decider="-")
                             unblocked.append(tid)
+                            unblocked_states[tid] = restored_state
                             continue
                     if tid not in emergent_map:
                         continue
@@ -7356,6 +7721,33 @@ def answer_question(
                             reason=f"Unblocked: question {question_id} answered",
                         )
                         unblocked.append(tid)
+                        unblocked_states[tid] = restored_state
+
+                _emit_event(
+                    tasks_dir,
+                    "question.answered",
+                    {
+                        "choice": choice,
+                        "text": text,
+                        "by": by or "owner",
+                        "unblocked_tasks": unblocked,
+                    },
+                    subject=question_id,
+                    actor=by or "owner",
+                )
+                for tid in unblocked:
+                    _emit_event(
+                        tasks_dir,
+                        "task.transitioned",
+                        {
+                            "from": "waiting",
+                            "to": unblocked_states.get(tid, "open"),
+                            "actor": by or "owner",
+                            "reason": f"Unblocked: question {question_id} answered",
+                        },
+                        subject=tid,
+                        actor=by or "owner",
+                    )
 
                 return True, {
                     "ok": True,
@@ -7459,6 +7851,7 @@ def withdraw_question(
                 q_status_map[question_id] = "withdrawn"
 
                 unblocked: list[str] = []
+                unblocked_states: dict[str, str] = {}
                 tree = discover_task_tree(tasks_dir)
                 for tid, _ in target_q["blocks_parsed"]:
                     if tid in tree:
@@ -7467,6 +7860,7 @@ def withdraw_question(
                             restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, [question_id])
                             rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state, new_decider="-")
                             unblocked.append(tid)
+                            unblocked_states[tid] = restored_state
                             continue
                     if tid not in emergent_map:
                         continue
@@ -7488,6 +7882,32 @@ def withdraw_question(
                             reason=f"Unblocked: question {question_id} withdrawn: {reason.strip()}",
                         )
                         unblocked.append(tid)
+                        unblocked_states[tid] = restored_state
+
+                _emit_event(
+                    tasks_dir,
+                    "question.withdrawn",
+                    {
+                        "reason": reason.strip(),
+                        "by": by or "owner",
+                        "unblocked_tasks": unblocked,
+                    },
+                    subject=question_id,
+                    actor=by or "owner",
+                )
+                for tid in unblocked:
+                    _emit_event(
+                        tasks_dir,
+                        "task.transitioned",
+                        {
+                            "from": "waiting",
+                            "to": unblocked_states.get(tid, "open"),
+                            "actor": by or "owner",
+                            "reason": f"Unblocked: question {question_id} withdrawn: {reason.strip()}",
+                        },
+                        subject=tid,
+                        actor=by or "owner",
+                    )
 
                 return True, {
                     "ok": True,
@@ -7592,6 +8012,11 @@ def cmd_questions_show(args: argparse.Namespace) -> int:
             print(f"  Answered on: {q['answer']['answered']}")
             if q["answer"]["text"]:
                 print(f"  Text       :\n{q['answer']['text']}")
+            if q.get("applied"):
+                rec = q.get("applied_record") or {}
+                print(f"  Applied by : {rec.get('by', '-')} on {rec.get('at', '-')} (ref: {rec.get('ref', '-')})")
+                if rec.get("note") and rec.get("note") != rec.get("ref"):
+                    print(f"  Note       : {rec['note']}")
         else:
             print(f"[FAIL] {res.get('error', 'not found')}", file=sys.stderr)
     return 0 if ok else 1
@@ -7662,6 +8087,150 @@ def cmd_questions_withdraw(args: argparse.Namespace) -> int:
             print(f"[ok] Withdrew {res['id']} with reason {res['reason']!r} (unblocked tasks: {unb})")
         else:
             print(f"[FAIL] {res.get('error', 'withdraw failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def read_applied_ledger(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
+    ledger_path = pathlib.Path(tasks_dir) / "questions" / "applied.jsonl"
+    if not ledger_path.is_file():
+        return []
+    records: list[dict[str, Any]] = []
+    try:
+        for line in ledger_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                entry = json.loads(line)
+                if isinstance(entry, dict):
+                    records.append(entry)
+    except Exception:
+        pass
+    return records
+
+
+def apply_question(
+    tasks_dir: pathlib.Path,
+    question_id: str,
+    by: str = "owner",
+    ref: str | None = None,
+    note: str | None = None,
+    force: bool = False,
+    dry_run: bool = False,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    try:
+        with task_write_lock(tasks_dir):
+            questions = discover_questions(tasks_dir)
+            target_q = next((q for q in questions if q["id"] == question_id), None)
+            if target_q is None:
+                return False, {"ok": False, "error": f"Question {question_id!r} not found in {tasks_dir}."}
+
+            if target_q["status"] != "answered":
+                return False, {
+                    "ok": False,
+                    "error": f"Question {question_id!r} is in status '{target_q['status']}', expected 'answered'.",
+                }
+
+            questions_dir = tasks_dir / "questions"
+            ledger_path = questions_dir / "applied.jsonl"
+            if ledger_path.is_file() and not force:
+                try:
+                    for line in ledger_path.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        entry = json.loads(line)
+                        if isinstance(entry, dict) and entry.get("question") == question_id:
+                            return False, {
+                                "ok": False,
+                                "error": f"Question {question_id!r} is already recorded as applied. Pass --force to re-apply.",
+                            }
+                except Exception:
+                    pass
+
+            resolved_ref = ref or note or "-"
+            resolved_note = note or ref or "-"
+            by_clean = by.strip() if by else "owner"
+
+            if dry_run:
+                return True, {
+                    "ok": True,
+                    "dry_run": True,
+                    "id": question_id,
+                    "by": by_clean,
+                    "ref": resolved_ref,
+                    "note": resolved_note,
+                }
+
+            questions_dir.mkdir(parents=True, exist_ok=True)
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            record = {
+                "question": question_id,
+                "by": by_clean,
+                "at": now_iso,
+                "ref": resolved_ref,
+                "note": resolved_note,
+            }
+
+            line_str = json.dumps(record, sort_keys=True) + "\n"
+            with open(ledger_path, "a", encoding="utf-8") as f:
+                f.write(line_str)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+
+            _emit_event(
+                tasks_dir,
+                "question.applied",
+                record,
+                subject=question_id,
+                actor=by_clean,
+            )
+
+            return True, {
+                "ok": True,
+                "id": question_id,
+                "status": "applied",
+                "by": by_clean,
+                "record": record,
+            }
+    except LockTimeoutError:
+        return False, {
+            "ok": False,
+            "error": "lock-timeout",
+            "message": "Timed out waiting for task-write lock in tasks/.",
+        }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def cmd_questions_apply(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = apply_question(
+        tasks_dir=tasks_dir,
+        question_id=args.question_id,
+        by=getattr(args, "by", "owner") or "owner",
+        ref=getattr(args, "ref", None),
+        note=getattr(args, "note", None),
+        force=getattr(args, "force", False),
+        dry_run=getattr(args, "dry_run", False),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            action = "Planned application of" if getattr(args, "dry_run", False) else "Applied"
+            rec = res.get("record", {})
+            print(f"[ok] {action} decision for {res['id']} by {res.get('by', rec.get('by', 'owner'))}")
+        else:
+            print(f"[FAIL] {res.get('error', 'apply failed')}", file=sys.stderr)
     return 0 if ok else 1
 
 
@@ -8325,6 +8894,34 @@ def inbox_add(
                 raise
 
             parsed = parse_note_folder(folder_path, tasks_dir, in_analyzed=False)
+            if status == "ready":
+                _emit_event(
+                    tasks_dir,
+                    "note.ready",
+                    {
+                        "id": note_id,
+                        "title": title,
+                        "kind": kind,
+                        "status": "ready",
+                        "author": author,
+                    },
+                    subject=note_id,
+                    actor=author,
+                )
+            else:
+                _emit_event(
+                    tasks_dir,
+                    "note.created",
+                    {
+                        "id": note_id,
+                        "title": title,
+                        "kind": kind,
+                        "status": status or "draft",
+                        "author": author,
+                    },
+                    subject=note_id,
+                    actor=author,
+                )
             return True, {
                 "ok": True,
                 "id": note_id,
@@ -8436,6 +9033,26 @@ def inbox_edit(
             _atomic_write_text(note_file, content)
 
             updated = parse_note_folder(folder_path, tasks_dir, in_analyzed=note["in_analyzed"])
+            if new_status == "ready" and note.get("status") != "ready":
+                _emit_event(
+                    tasks_dir,
+                    "note.ready",
+                    {
+                        "id": updated["id"],
+                        "status": "ready",
+                    },
+                    subject=updated["id"],
+                )
+            else:
+                _emit_event(
+                    tasks_dir,
+                    "note.updated",
+                    {
+                        "id": updated["id"],
+                        "status": updated["status"],
+                    },
+                    subject=updated["id"],
+                )
             return True, {
                 "ok": True,
                 "id": updated["id"],
@@ -8546,6 +9163,18 @@ def inbox_attach(
 
             updated = parse_note_folder(folder_path, tasks_dir, in_analyzed=note["in_analyzed"])
 
+            _emit_event(
+                tasks_dir,
+                "note.attached",
+                {
+                    "id": updated["id"],
+                    "name": dest_filename,
+                    "class": att_class,
+                    "path": str(dest_path),
+                },
+                subject=updated["id"],
+            )
+
             return True, {
                 "ok": True,
                 "id": updated["id"],
@@ -8622,6 +9251,16 @@ def inbox_detach(
 
             target_file.unlink()
             updated = parse_note_folder(folder_path, tasks_dir, in_analyzed=note["in_analyzed"])
+
+            _emit_event(
+                tasks_dir,
+                "note.detached",
+                {
+                    "id": updated["id"],
+                    "name": name,
+                },
+                subject=updated["id"],
+            )
 
             return True, {
                 "ok": True,
@@ -8899,6 +9538,18 @@ def inbox_resolve(
             )
 
             updated = parse_note_folder(dst_folder, tasks_dir, in_analyzed=True)
+            _emit_event(
+                tasks_dir,
+                "note.processed",
+                {
+                    "id": updated["id"],
+                    "status": "processed",
+                    "produced": updated["produced"],
+                    "by": by.strip() or "owner",
+                },
+                subject=updated["id"],
+                actor=by.strip() or "owner",
+            )
             return True, {
                 "ok": True,
                 "id": updated["id"],
@@ -8978,6 +9629,16 @@ def inbox_discard(
             )
 
             updated = parse_note_folder(dst_folder, tasks_dir, in_analyzed=True)
+            _emit_event(
+                tasks_dir,
+                "note.processed",
+                {
+                    "id": updated["id"],
+                    "status": "discarded",
+                    "reason": reason.strip(),
+                },
+                subject=updated["id"],
+            )
             return True, {
                 "ok": True,
                 "id": updated["id"],
@@ -9037,6 +9698,15 @@ def inbox_reopen(
             )
 
             updated = parse_note_folder(dst_folder, tasks_dir, in_analyzed=False)
+            _emit_event(
+                tasks_dir,
+                "note.ready",
+                {
+                    "id": updated["id"],
+                    "status": "ready",
+                },
+                subject=updated["id"],
+            )
             return True, {
                 "ok": True,
                 "id": updated["id"],
@@ -9399,6 +10069,23 @@ def tasks_new_from_note(
                     pass
                 return False, {"ok": False, "error": f"Created task failed validation: {'; '.join(task_errors)}"}
 
+            _emit_event(
+                tasks_dir,
+                "task.created",
+                {
+                    "title": title,
+                    "category": category,
+                    "state": "open",
+                    "from": None,
+                    "to": "open",
+                    "actor": executor or "owner",
+                    "sources": sources,
+                    "paths": paths,
+                },
+                subject=t_id,
+                actor=executor or "owner",
+            )
+
             return True, {
                 "ok": True,
                 "id": t_id,
@@ -9535,6 +10222,22 @@ def tasks_micro(
                     pass
                 return False, {"ok": False, "error": f"Created microtask failed validation: {'; '.join(task_errors)}"}
 
+            _emit_event(
+                tasks_dir,
+                "task.created",
+                {
+                    "title": title.strip(),
+                    "kind": kind_clean,
+                    "priority": prio_clean,
+                    "state": "open",
+                    "from": None,
+                    "to": "open",
+                    "actor": "owner",
+                },
+                subject=t_id,
+                actor="owner",
+            )
+
             return True, {
                 "ok": True,
                 "id": t_id,
@@ -9636,6 +10339,22 @@ def tasks_promote(
             if task_errors:
                 dest_file.unlink()
                 return False, {"ok": False, "error": f"Promoted task failed validation: {'; '.join(task_errors)}"}
+
+            _emit_event(
+                tasks_dir,
+                "task.created",
+                {
+                    "task_id": task_id,
+                    "category": target_category,
+                    "state": parsed["state"] or "open",
+                    "from": old_state if "old_state" in locals() else "open",
+                    "to": "open",
+                    "actor": "owner",
+                    "promoted_from": old_rel,
+                },
+                subject=task_id,
+                actor="owner",
+            )
 
             return True, {
                 "ok": True,
@@ -9772,6 +10491,17 @@ def tasks_attach(
 
             updated = parse_emergent_task_file(readme_file, tasks_dir, in_done=task["in_done"])
 
+            _emit_event(
+                tasks_dir,
+                "task.attached",
+                {
+                    "name": dest_filename,
+                    "class": att_class,
+                    "path": str(dest_path),
+                },
+                subject=updated["id"],
+            )
+
             return True, {
                 "ok": True,
                 "id": updated["id"],
@@ -9870,14 +10600,21 @@ def tasks_detach(
             readme_file = task_folder / "README.md"
             updated = parse_emergent_task_file(readme_file, tasks_dir, in_done=task["in_done"])
 
+            _emit_event(
+                tasks_dir,
+                "task.detached",
+                {
+                    "name": name,
+                },
+                subject=updated["id"],
+            )
+
             return True, {
                 "ok": True,
                 "id": updated["id"],
                 "detached": name,
                 "bundle_sha256": updated["bundle_sha256"],
             }
-    except Exception as e:
-        return False, {"ok": False, "error": str(e)}
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
 
@@ -10306,6 +11043,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_qw.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_qw.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_qw.set_defaults(func=cmd_questions_withdraw)
+
+    # questions apply
+    p_qapp = q_sub.add_parser("apply", help="Record that an answered question's decision was applied into the ledger")
+    p_qapp.add_argument("question_id", help="Question ID (e.g. Q001)")
+    p_qapp.add_argument("--by", default="owner", help="Who applied the question (default: owner)")
+    p_qapp.add_argument("--ref", default=None, help="Reference (task ID, commit, PR, or config change)")
+    p_qapp.add_argument("--note", default=None, help="Note or description of how the decision was applied")
+    p_qapp.add_argument("--force", action="store_true", help="Apply even if already recorded in ledger")
+    p_qapp.add_argument("--dry-run", action="store_true", help="Preview apply without writing ledger or emitting event")
+    p_qapp.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_qapp.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_qapp.set_defaults(func=cmd_questions_apply)
 
     p_sync = sub.add_parser("sync-index", help="Deterministically synchronize tasks/00-INDEX.md tables from task headers")
     p_sync.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
