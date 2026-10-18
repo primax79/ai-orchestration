@@ -13,6 +13,7 @@ Implements:
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import copy
 import datetime
@@ -66,6 +67,7 @@ if str(ORCH_CONFIG_DIR) not in sys.path:
 
 try:
     from tasks_engine import (
+        ALLOWED_TRANSITIONS,
         discover_emergent_tasks,
         discover_initiatives,
         discover_task_tree,
@@ -82,6 +84,7 @@ try:
         validate_tasks_tree,
     )
 except ImportError:
+    ALLOWED_TRANSITIONS = None  # type: ignore
     discover_emergent_tasks = None  # type: ignore
     discover_initiatives = None  # type: ignore
     discover_task_tree = None  # type: ignore
@@ -218,13 +221,75 @@ def is_process_alive(pid: int, expected_start_time: str | None = None) -> bool:
     return True
 
 
+def get_process_descendants(root_pid: int) -> list[int]:
+    """Find all descendant process IDs of root_pid by recursively walking the process tree."""
+    if root_pid <= 0:
+        return []
+
+    # First attempt: ps -A -o pid=,ppid= (or ps -ax -o pid=,ppid= or ps -o pid=,ppid=)
+    for ps_cmd in (
+        ["ps", "-A", "-o", "pid=,ppid="],
+        ["ps", "-ax", "-o", "pid=,ppid="],
+        ["ps", "-o", "pid=,ppid="],
+    ):
+        try:
+            res = subprocess.run(ps_cmd, capture_output=True, text=True, check=False)
+            if res.returncode == 0 and res.stdout.strip():
+                parent_to_children: dict[int, list[int]] = collections.defaultdict(list)
+                for line in res.stdout.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            pid, ppid = int(parts[0]), int(parts[1])
+                            parent_to_children[ppid].append(pid)
+                        except ValueError:
+                            continue
+                descendants: list[int] = []
+                queue = collections.deque(parent_to_children.get(root_pid, []))
+                visited = {root_pid}
+                while queue:
+                    curr = queue.popleft()
+                    if curr in visited:
+                        continue
+                    visited.add(curr)
+                    descendants.append(curr)
+                    queue.extend(parent_to_children.get(curr, []))
+                return descendants
+        except Exception:
+            pass
+
+    # Fallback: pgrep -P recursively
+    try:
+        descendants = []
+        queue = collections.deque([root_pid])
+        visited = {root_pid}
+        while queue:
+            curr = queue.popleft()
+            res = subprocess.run(["pgrep", "-P", str(curr)], capture_output=True, text=True, check=False)
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    line = line.strip()
+                    if line:
+                        try:
+                            child_pid = int(line)
+                            if child_pid not in visited:
+                                visited.add(child_pid)
+                                descendants.append(child_pid)
+                                queue.append(child_pid)
+                        except ValueError:
+                            continue
+        return descendants
+    except Exception:
+        return []
+
+
 def kill_process_group(
     pgid: int,
     leader_pid: int | None = None,
     expected_leader_start_time: str | None = None,
     timeout: float = 10.0,
 ) -> bool:
-    """Send SIGTERM to process group after verifying leader start time, then SIGKILL if needed."""
+    """Send SIGTERM to process group and agent descendants, then SIGKILL if needed."""
     if pgid <= 0:
         return False
 
@@ -234,19 +299,59 @@ def kill_process_group(
             # PID reused or leader died with wrong start time: do NOT kill!
             return False
 
+    # Collect descendants of leader BEFORE sending signals
+    descendants: list[int] = []
+    if leader_pid is not None:
+        descendants = get_process_descendants(leader_pid)
+
+    # 1. Send SIGTERM to descendants
+    for dpid in descendants:
+        try:
+            os.kill(dpid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    # 2. Send SIGTERM to process group
     try:
         os.killpg(pgid, signal.SIGTERM)
     except OSError:
-        return True  # already dead
+        pass
 
     deadline = time.time() + timeout
     while time.time() < deadline:
+        group_alive = False
         try:
             os.killpg(pgid, 0)
+            group_alive = True
         except OSError:
-            return True
-        time.sleep(0.1)
+            pass
 
+        desc_alive = False
+        for dpid in descendants:
+            try:
+                os.kill(dpid, 0)
+                desc_alive = True
+                break
+            except OSError:
+                pass
+
+        if not group_alive and not desc_alive:
+            return True
+        time.sleep(0.05)
+
+    # Refresh descendants in case any were spawned before leader died
+    all_descendants = set(descendants)
+    if leader_pid is not None:
+        all_descendants.update(get_process_descendants(leader_pid))
+
+    # SIGKILL descendants
+    for dpid in all_descendants:
+        try:
+            os.kill(dpid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    # SIGKILL process group
     try:
         os.killpg(pgid, signal.SIGKILL)
     except OSError:
@@ -1489,8 +1594,8 @@ def get_repo_head(repo_root: pathlib.Path) -> str:
     return ""
 
 
-def check_repo_clean(repo_root: pathlib.Path) -> tuple[bool, list[str]]:
-    """Check if repository is clean, ignoring .ai-orchestration/."""
+def check_repo_clean(repo_root: pathlib.Path, ignore_tasks: bool = True) -> tuple[bool, list[str]]:
+    """Check if repository is clean, ignoring .ai-orchestration/ and optionally tasks/."""
     try:
         res = subprocess.run(
             ["git", "--no-optional-locks", "status", "--porcelain"],
@@ -1508,7 +1613,15 @@ def check_repo_clean(repo_root: pathlib.Path) -> tuple[bool, list[str]]:
                 continue
             # status line format: XY path
             file_part = line[3:].strip()
+            if file_part.startswith('"') and file_part.endswith('"'):
+                file_part = file_part[1:-1]
+            if " -> " in file_part:
+                file_part = file_part.split(" -> ", 1)[1]
+            if file_part.startswith("./"):
+                file_part = file_part[2:]
             if file_part.startswith(".ai-orchestration"):
+                continue
+            if ignore_tasks and (file_part.startswith("tasks/") or file_part == "tasks"):
                 continue
             lines.append(line_str)
         return len(lines) == 0, lines
@@ -1739,6 +1852,7 @@ def resolve_profile(
     project_cfg: dict[str, Any] | None,
     global_cfg: dict[str, Any] | None,
     chosen_cross_order_entry: str | None = None,
+    tool: str | None = None,
 ) -> str:
     """Resolve profile per mode and task (Spec §3)."""
     if requested_profile:
@@ -1753,7 +1867,47 @@ def resolve_profile(
     if mode == "verify":
         if chosen_cross_order_entry and ":" in chosen_cross_order_entry:
             return chosen_cross_order_entry.split(":", 1)[1]
-        return "deep-reasoning"
+
+        task_prof = task.get("profile")
+        if task_prof and task_prof != "-":
+            return task_prof
+
+        # Check if deep-reasoning is explicitly configured for this tool in project or global config
+        deep_reasoning_configured = False
+        if tool:
+            for cfg in (project_cfg, global_cfg):
+                if cfg and "tools" in cfg and tool in cfg["tools"]:
+                    t_entry = cfg["tools"][tool]
+                    if isinstance(t_entry, dict) and "profiles" in t_entry:
+                        if "deep-reasoning" in t_entry["profiles"]:
+                            p_info = t_entry["profiles"]["deep-reasoning"]
+                            if isinstance(p_info, dict) and p_info.get("model"):
+                                deep_reasoning_configured = True
+                                break
+        if deep_reasoning_configured:
+            return "deep-reasoning"
+
+        if project_cfg:
+            p_prof = project_cfg.get("routing", {}).get("default_profile")
+            if p_prof:
+                return p_prof
+
+        if global_cfg:
+            g_prof = global_cfg.get("routing", {}).get("default_profile")
+            if g_prof:
+                return g_prof
+
+        # Check if tool has configured profiles in project or global config
+        if tool:
+            for cfg in (project_cfg, global_cfg):
+                if cfg and "tools" in cfg and tool in cfg["tools"]:
+                    t_entry = cfg["tools"][tool]
+                    if isinstance(t_entry, dict) and "profiles" in t_entry and t_entry["profiles"]:
+                        if "bulk-execution" in t_entry["profiles"]:
+                            return "bulk-execution"
+                        return next(iter(t_entry["profiles"].keys()))
+
+        return merged_cfg.get("routing", {}).get("default_profile", "bulk-execution")
 
     if mode == "execute":
         task_prof = task.get("profile")
@@ -2538,6 +2692,7 @@ def create_run_record(
     note_id: str | None = None,
     note_bundle_sha256: str | None = None,
     attachment_paths: list[str] | None = None,
+    created_worktree: str | bool | None = None,
 ) -> dict[str, Any]:
     """Initialize a run.json record structure (Spec §5.1, R2, R3, R8, Task 09.4)."""
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -2556,6 +2711,7 @@ def create_run_record(
         "cwd": cwd,
         "isolation": isolation,
         "worktree_path": worktree_path,
+        "created_worktree": created_worktree,
         "branch": branch,
         "base_commit": base_commit,
         "final_commit": None,
@@ -2842,6 +2998,7 @@ def cmd_options(args: argparse.Namespace) -> int:
             merged_cfg=merged_cfg,
             project_cfg=project_cfg,
             global_cfg=global_cfg,
+            tool=res_tool,
         )
         t_for_mod = res_tool or "kilo"
         res_model, res_variant, res_effort = resolve_model_and_variants(
@@ -2982,6 +3139,7 @@ def validate_run_request(
             merged_cfg=merged_cfg,
             project_cfg=project_cfg,
             global_cfg=global_cfg,
+            tool=tool,
         )
 
         model, variant, effort = resolve_model_and_variants(
@@ -2994,6 +3152,24 @@ def validate_run_request(
         )
         if not model:
             return False, ("model-not-configured", f"No model configured for tool '{tool}' profile '{profile}'"), None
+
+        # Item 7: For Kilo (or verify runs), fail if model was not configured in project or global config rather than defaulting
+        if tool == "kilo" and not args.model and (mode == "verify" or getattr(args, "profile", None)):
+            kilo_configured = False
+            if project_cfg and "tools" in project_cfg and "kilo" in project_cfg["tools"] and "profiles" in project_cfg["tools"]["kilo"]:
+                k_profs = project_cfg["tools"]["kilo"]["profiles"]
+                if profile in k_profs and isinstance(k_profs[profile], dict) and k_profs[profile].get("model"):
+                    kilo_configured = True
+            elif global_cfg and "tools" in global_cfg and "kilo" in global_cfg["tools"] and "profiles" in global_cfg["tools"]["kilo"]:
+                k_profs = global_cfg["tools"]["kilo"]["profiles"]
+                if profile in k_profs and isinstance(k_profs[profile], dict) and k_profs[profile].get("model"):
+                    kilo_configured = True
+
+            if not kilo_configured:
+                return False, (
+                    "model-not-configured",
+                    f"No model configured for tool 'kilo' profile '{profile}' in project or global config; refusing built-in default '{model}'",
+                ), None
 
         isolation = "none"
         cwd = str(ws)
@@ -3258,6 +3434,7 @@ def validate_run_request(
         project_cfg=project_cfg,
         global_cfg=global_cfg,
         chosen_cross_order_entry=chosen_entry,
+        tool=tool,
     )
 
     model, variant, effort = resolve_model_and_variants(
@@ -3270,6 +3447,24 @@ def validate_run_request(
     )
     if not model:
         return False, ("model-not-configured", f"No model configured for tool '{tool}' profile '{profile}'"), None
+
+    # Item 7: For Kilo (or verify runs), fail if model was not configured in project or global config rather than defaulting
+    if tool == "kilo" and not args.model and (mode == "verify" or getattr(args, "profile", None)):
+        kilo_configured = False
+        if project_cfg and "tools" in project_cfg and "kilo" in project_cfg["tools"] and "profiles" in project_cfg["tools"]["kilo"]:
+            k_profs = project_cfg["tools"]["kilo"]["profiles"]
+            if profile in k_profs and isinstance(k_profs[profile], dict) and k_profs[profile].get("model"):
+                kilo_configured = True
+        elif global_cfg and "tools" in global_cfg and "kilo" in global_cfg["tools"] and "profiles" in global_cfg["tools"]["kilo"]:
+            k_profs = global_cfg["tools"]["kilo"]["profiles"]
+            if profile in k_profs and isinstance(k_profs[profile], dict) and k_profs[profile].get("model"):
+                kilo_configured = True
+
+        if not kilo_configured:
+            return False, (
+                "model-not-configured",
+                f"No model configured for tool 'kilo' profile '{profile}' in project or global config; refusing built-in default '{model}'",
+            ), None
 
     isolation = args.isolation or ("worktree" if mode == "execute" else "none")
 
@@ -3432,6 +3627,10 @@ def cmd_preview(args: argparse.Namespace) -> int:
 
     payload = {
         "ok": True,
+        "mode": data["mode"],  # type: ignore
+        "tool": data["tool"],  # type: ignore
+        "profile": data["profile"],  # type: ignore
+        "model": data["model"],  # type: ignore
         "prompt": data["prompt"],  # type: ignore
         "prompt_sha256": data["prompt_sha256"],  # type: ignore
         "argv_display": data["argv_display"],  # type: ignore
@@ -3532,13 +3731,43 @@ def cmd_start(args: argparse.Namespace) -> int:
                 )
                 return 1
 
-            if source_record.get("mode") == "execute" and source_record.get("isolation") == "worktree":
-                wt_p = pathlib.Path(source_record.get("worktree_path") or source_record["cwd"])
+            if source_record.get("mode") == "verify":
+                print_error(
+                    args.json,
+                    "verify-cannot-continue",
+                    f"Cannot continue verify run '{args.continue_run_id}': verify runs use throwaway worktrees and cannot be continued",
+                )
+                return 1
+
+            wt_p_str = source_record.get("worktree_path")
+            if wt_p_str:
+                wt_p = pathlib.Path(wt_p_str)
                 if not wt_p.is_dir():
                     print_error(
                         args.json,
                         "worktree-missing",
                         f"Worktree '{wt_p}' for run '{args.continue_run_id}' does not exist",
+                    )
+                    return 1
+
+            cwd_p = pathlib.Path(source_record.get("cwd", ""))
+            if not cwd_p.is_dir():
+                print_error(
+                    args.json,
+                    "worktree-missing",
+                    f"Working directory '{cwd_p}' for run '{args.continue_run_id}' does not exist",
+                )
+                return 1
+
+            if source_record.get("tool") == "kilo":
+                orig_ws = source_record.get("workspace") or source_record.get("cwd")
+                orig_repo = get_git_main_repo(pathlib.Path(orig_ws)) if orig_ws else None
+                cur_repo = get_git_main_repo(ws)
+                if orig_repo and cur_repo and orig_repo.resolve() != cur_repo.resolve():
+                    print_error(
+                        args.json,
+                        "kilo-resume-repo-mismatch",
+                        f"Kilo sessions can only be resumed from their original repository '{orig_repo}' (current repository is '{cur_repo}')",
                     )
                     return 1
 
@@ -3792,6 +4021,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                     panel_id=panel_id,
                     verification_mode="panel",
                     keep_worktree=bool(getattr(args, "keep_worktree", False)),
+                    created_worktree=str(wt_dir),
                 )
                 if session_id:
                     rec["session_id"] = session_id
@@ -3838,6 +4068,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         base_commit = None
         target_commit = data.get("target_commit")  # type: ignore
 
+        created_worktree = None
         if data["mode"] == "execute" and data["isolation"] == "worktree":  # type: ignore
             worktree_dir = target_repo.parent / ".worktrees" / target_repo.name / run_id
             worktree_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -3855,6 +4086,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                 return 1
             actual_cwd = str(worktree_dir)
             worktree_path = str(worktree_dir)
+            created_worktree = str(worktree_dir)
 
         elif data["mode"] == "verify":  # type: ignore
             worktree_dir = target_repo.parent / ".worktrees" / target_repo.name / run_id
@@ -3871,6 +4103,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                 return 1
             actual_cwd = str(worktree_dir)
             worktree_path = str(worktree_dir)
+            created_worktree = str(worktree_dir)
             branch_name = None
 
         elif data["isolation"] == "none":  # type: ignore
@@ -3936,6 +4169,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             note_id=data.get("note_id"),
             note_bundle_sha256=data.get("bundle_hash") if data["mode"] == "triage" else None,
             attachment_paths=data.get("attachment_paths"),
+            created_worktree=created_worktree,
         )
         if session_id:
             record["session_id"] = session_id
@@ -4036,7 +4270,15 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     prompt_text = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else ""
 
     cwd_path = pathlib.Path(record["cwd"])
-    cwd_path.mkdir(parents=True, exist_ok=True)
+    if not cwd_path.is_dir():
+        record["status"] = "failed"
+        record["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        record["exit_code"] = 1
+        record["invariant_error"] = f"Working directory '{cwd_path}' does not exist"
+        with open(run_dir / "stderr.log", "a", encoding="utf-8") as f:
+            f.write(f"Working directory '{cwd_path}' does not exist; refusing to run in non-existent directory\n")
+        save_run_record(workspace, record)
+        return 1
 
     # 3. Spawn agent process in new process group (Instruction 2)
     try:
@@ -4262,12 +4504,15 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     # Extract verdict if verify mode
     if record.get("mode") == "verify":
         record["verdict"] = extract_verdict_from_run(run_dir)
-        # 07.10: verify run throwaway worktree auto-removal
-        if record.get("keep_worktree"):
+        # 07.10 / T022: verify run throwaway worktree auto-removal (only if created by this run)
+        if record.get("keep_worktree") or not record.get("created_worktree"):
             record["worktree_removed"] = False
         else:
             wt_path_str = record.get("worktree_path")
-            if wt_path_str:
+            created_wt = record.get("created_worktree")
+            if isinstance(created_wt, str) and wt_path_str != created_wt:
+                record["worktree_removed"] = False
+            elif wt_path_str:
                 wt_path = pathlib.Path(wt_path_str)
                 target_repo = workspace
                 tasks_dir = workspace / "tasks"
@@ -4384,6 +4629,34 @@ def cmd_supervise(args: argparse.Namespace) -> int:
                 record["commits_after_base"] = int(res_cnt.stdout.strip()) if res_cnt.returncode == 0 else 0
             else:
                 record["commits_after_base"] = 0
+
+    # Item 5: Failed execute run sets task to blocked with failure reason
+    if record.get("mode") == "execute" and record.get("status") == "failed":
+        try:
+            tasks_dir = workspace / "tasks"
+            if tasks_dir.is_dir() and transition_task:
+                t = resolve_task_by_id(tasks_dir, record["task_id"])
+                state = t.get("canonical_state") if t else None
+                if state == "in progress":
+                    allowed = ALLOWED_TRANSITIONS.get("in progress", set()) if ALLOWED_TRANSITIONS else set()
+                    base_target = "bounced" if "bounced" in allowed else "blocked"
+                    failure_reason = (
+                        record.get("invariant_error")
+                        or record.get("agent_error")
+                        or f"Execute run {record['run_id']} failed with exit code {record.get('exit_code')}"
+                    )
+                    target_state = f"{base_target}: {failure_reason}"
+                    ok_trans, trans_res = transition_task(
+                        tasks_dir=tasks_dir,
+                        task_id=record["task_id"],
+                        new_state=target_state,
+                        actor=record.get("tool"),
+                        reason=failure_reason,
+                    )
+                    if not ok_trans:
+                        record["task_transition_error"] = trans_res.get("error") or str(trans_res)
+        except Exception as e:
+            record["task_transition_error"] = str(e)
 
     save_run_record(workspace, record)
     return 0

@@ -20,6 +20,8 @@ import hashlib
 import json
 import os
 import pathlib
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -47,6 +49,7 @@ from orchestration_runs import (
     validate_run_id,
     create_run_record,
     save_run_record,
+    discover_emergent_tasks,
     load_run_record,
     list_run_records,
     ensure_git_exclude,
@@ -4150,3 +4153,503 @@ def test_continue_refused_while_session_busy_and_mismatch_fails(sample_workspace
     assert rec2["observed_session_id"] == "sess-fresh-thread"
     assert rec2["session_id"] == "sess-init"
     assert "did not land in session" in rec2["invariant_error"]
+
+
+# ---------------------------------------------------------------------------
+# T022: Run Engine Fixes
+# ---------------------------------------------------------------------------
+
+def test_t022_cancel_stops_tool_children_in_new_session(sample_workspace: pathlib.Path):
+    """Item 1: run cancel terminates descendants of agent pid (including new session / setsid)."""
+    gc_pid_file = sample_workspace / "gc_setsid.pid"
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--sleep", "30", "--grandchild-pid-file", "{gc_pid_file}", "--grandchild-sleep", "60", "--grandchild-setsid"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "cfg cancel setsid"], cwd=str(sample_workspace), check=True)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res_start.stdout)["run_id"]
+
+    # Wait for grandchild PID file
+    for _ in range(50):
+        if gc_pid_file.exists():
+            break
+        time.sleep(0.1)
+    assert gc_pid_file.exists()
+    gc_pid = int(gc_pid_file.read_text(encoding="utf-8").strip())
+
+    rec = load_run_record(sample_workspace, run_id)
+    agent = rec.get("agent", {})
+    agent_pid = agent.get("pid")
+    agent_pgid = agent.get("pgid")
+    assert agent_pid is not None
+    assert agent_pgid is not None
+    assert is_process_alive(agent_pid)
+    assert is_process_alive(gc_pid)
+
+    # Verify grandchild is indeed in a different process group / session
+    gc_pgid = os.getpgid(gc_pid)
+    assert gc_pgid != agent_pgid, f"Grandchild pgid {gc_pgid} must differ from agent pgid {agent_pgid}"
+
+    # Cancel the run
+    cmd_cancel = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cancel",
+        run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_cancel = subprocess.run(cmd_cancel, capture_output=True, text=True, check=True)
+    assert json.loads(res_cancel.stdout)["ok"] is True
+
+    # Both agent and grandchild must be dead
+    for _ in range(50):
+        if not is_process_alive(agent_pid) and not is_process_alive(gc_pid):
+            break
+        time.sleep(0.1)
+    assert not is_process_alive(agent_pid), f"Agent PID {agent_pid} should be dead"
+    assert not is_process_alive(gc_pid), f"Grandchild PID {gc_pid} in new session should be terminated by cancel"
+
+
+def test_t022_continue_refused_for_verify_or_missing_worktree(sample_workspace: pathlib.Path):
+    """Item 2: continuing verify run or run whose worktree is missing is refused."""
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--session-id", "sess-test"]\n'
+        + f'[tools.claude.headless]\nallowed_tools = ["test"]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--verdict", "verified", "--session-id", "sess-ver"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "cfg cont test"], cwd=str(sample_workspace), check=True)
+
+    # 1. Execute run
+    cmd_exec = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_exec = subprocess.run(cmd_exec, capture_output=True, text=True, check=True)
+    r_exec_id = json.loads(res_exec.stdout)["run_id"]
+    rec_exec = wait_for_terminal(sample_workspace, r_exec_id)
+    assert rec_exec["status"] == "succeeded"
+
+    # Set task to delivered so verify run can run
+    task_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    task_text = task_file.read_text(encoding="utf-8")
+    task_file.write_text(re.sub(r"state: [^\n]+", "state: delivered", task_text), encoding="utf-8")
+
+    # 2. Verify run
+    cmd_ver = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "verify",
+        "--target-run",
+        r_exec_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_ver = subprocess.run(cmd_ver, capture_output=True, text=True, check=True)
+    r_ver_id = json.loads(res_ver.stdout)["run_id"]
+    rec_ver = wait_for_terminal(sample_workspace, r_ver_id)
+    assert rec_ver["status"] == "succeeded"
+
+    # Attempt to continue verify run -> must be refused
+    cmd_cont_ver = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--continue",
+        r_ver_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_cont_ver = subprocess.run(cmd_cont_ver, capture_output=True, text=True, check=False)
+    assert res_cont_ver.returncode != 0
+    data_cont_ver = json.loads(res_cont_ver.stdout)
+    assert data_cont_ver["ok"] is False
+    assert data_cont_ver["reason"] == "verify-cannot-continue"
+
+    # Attempt to continue execute run whose worktree is deleted -> must be refused
+    wt_dir = pathlib.Path(rec_exec["worktree_path"])
+    shutil.rmtree(wt_dir, ignore_errors=True)
+    assert not wt_dir.exists()
+
+    cmd_cont_exec = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--continue",
+        r_exec_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_cont_exec = subprocess.run(cmd_cont_exec, capture_output=True, text=True, check=False)
+    assert res_cont_exec.returncode != 0
+    data_cont_exec = json.loads(res_cont_exec.stdout)
+    assert data_cont_exec["ok"] is False
+    assert data_cont_exec["reason"] == "worktree-missing"
+
+
+def test_t022_verify_removes_only_created_worktrees(sample_workspace: pathlib.Path):
+    """Item 3: verify run never removes an inherited/foreign worktree."""
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report"]\n'
+        + f'[tools.claude.headless]\nallowed_tools = ["test"]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--verdict", "verified"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "cfg verify remove"], cwd=str(sample_workspace), check=True)
+
+    cmd_exec = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_exec = subprocess.run(cmd_exec, capture_output=True, text=True, check=True)
+    r_exec_id = json.loads(res_exec.stdout)["run_id"]
+    rec_exec = wait_for_terminal(sample_workspace, r_exec_id)
+    assert rec_exec["status"] == "succeeded"
+    wt_dir = pathlib.Path(rec_exec["worktree_path"])
+    assert wt_dir.is_dir()
+
+    # Manually forge a verify run record pointing at r_exec's worktree but without created_worktree
+    r_ver_id = "20261017-120000-T007-claude-9999"
+    r_ver_dir = sample_workspace / ".ai-orchestration" / "runs" / r_ver_id
+    r_ver_dir.mkdir(parents=True, exist_ok=True)
+    p_prompt = r_ver_dir / "prompt.md"
+    p_prompt.write_text("verify prompt", encoding="utf-8")
+
+    rec_ver = create_run_record(
+        run_id=r_ver_id,
+        task_id="T007",
+        mode="verify",
+        tool="claude",
+        profile="deep-reasoning",
+        model="claude-opus",
+        variant=None,
+        effort=None,
+        requested_by="cli",
+        workspace=str(sample_workspace),
+        cwd=str(wt_dir),
+        isolation="worktree",
+        task_bundle_sha256="",
+        argv_display=[],
+        plan_hash="",
+        worktree_path=str(wt_dir),
+        branch=None,
+        target_run=r_exec_id,
+        target_commit=rec_exec["final_commit"],
+        verification_mode="cross-agent",
+        created_worktree=None,  # verify run did NOT create this worktree!
+    )
+    save_run_record(sample_workspace, rec_ver)
+
+    # Supervise the verify run
+    runs_script = pathlib.Path(BIN_AI_ORCH).parent.parent / "scripts" / "orchestration_runs.py"
+    sup_cmd = [
+        sys.executable,
+        str(runs_script.resolve()),
+        "_supervise",
+        str(r_ver_dir),
+    ]
+    subprocess.run(sup_cmd, capture_output=True, text=True, check=True)
+    rec_after = load_run_record(sample_workspace, r_ver_id)
+    assert rec_after["status"] == "succeeded"
+    assert rec_after["worktree_removed"] is False
+    assert wt_dir.is_dir(), "Foreign worktree must remain intact"
+
+
+def test_t022_supervisor_in_progress_does_not_block_second_execute(sample_workspace: pathlib.Path):
+    """Item 4: task state transition to in progress must not block sequential execute runs in same repo."""
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report"]\n',
+        encoding="utf-8",
+    )
+
+    # Create task T008 in tasks/server
+    task_t008 = sample_workspace / "tasks" / "server" / "T008-second-task.md"
+    task_t008.write_text(
+        "# T008 Second Task\n\n- id: T008\n- title: Second Task\n- category: server\n- priority: P2\n- state: open\n- executor: kilo\n- next-up: yes\n- paths: -\n- depends-on: -\n- decider: -\n- sources: -\n- handoff: none\n\n## Goal\nGoal\n\n## Verification\npytest\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "setup two tasks"], cwd=str(sample_workspace), check=True)
+
+    # Start first execute run (T007)
+    cmd_r1 = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_r1 = subprocess.run(cmd_r1, capture_output=True, text=True, check=True)
+    r1_id = json.loads(res_r1.stdout)["run_id"]
+    rec1 = wait_for_terminal(sample_workspace, r1_id)
+    assert rec1["status"] == "succeeded"
+
+    # Verify tasks/ is now modified/uncommitted in sample_workspace (due to supervisor transition)
+    res_status = subprocess.run(["git", "status", "--porcelain"], cwd=str(sample_workspace), capture_output=True, text=True)
+    assert any("tasks/" in ln for ln in res_status.stdout.splitlines()), "Expected tasks/ to have uncommitted changes"
+
+    # Start second execute run (T008) in same repo without committing tasks/
+    cmd_r2 = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T008",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_r2 = subprocess.run(cmd_r2, capture_output=True, text=True, check=True)
+    data_r2 = json.loads(res_r2.stdout)
+    assert data_r2["ok"] is True
+    r2_id = data_r2["run_id"]
+    rec2 = wait_for_terminal(sample_workspace, r2_id)
+    assert rec2["status"] == "succeeded"
+
+
+def test_t022_failed_execute_run_transitions_task_to_blocked(sample_workspace: pathlib.Path):
+    """Item 5: failed execute run sets task back to blocked recording failure reason."""
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--exit-code", "42"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "cfg failing stub"], cwd=str(sample_workspace), check=True)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res_start.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "failed"
+    assert rec["exit_code"] == 42
+
+    # Check task state
+    tasks_dir = sample_workspace / "tasks"
+    tasks = discover_emergent_tasks(tasks_dir)
+    t = next(t for t in tasks if t["id"] == "T007")
+    assert t["canonical_state"] == "blocked"
+    # Check that failure reason is recorded in task file / progress log
+    task_file_content = pathlib.Path(t["file_path"]).read_text(encoding="utf-8")
+    assert "exit code 42" in task_file_content or "failed" in task_file_content
+
+
+def test_t022_kilo_resume_only_from_original_repo(sample_workspace: pathlib.Path, tmp_path: pathlib.Path):
+    """Item 6: Kilo session resume from another repo is refused, naming original repo."""
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--session-id", "sess-kilo-orig"]\n'
+        + f'resume_argv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--session-id", "{{session_id}}"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "cfg kilo resume"], cwd=str(sample_workspace), check=True)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res_start.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+
+    # Create a second separate git repository
+    other_ws = tmp_path / "other_repo"
+    other_ws.mkdir()
+    subprocess.run(["git", "init"], cwd=str(other_ws), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.local"], cwd=str(other_ws), check=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=str(other_ws), check=True)
+    (other_ws / "dummy.txt").write_text("hello", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(other_ws), check=True)
+    subprocess.run(["git", "commit", "-m", "init other"], cwd=str(other_ws), check=True)
+
+    # Copy the run record into other_ws
+    other_run_dir = other_ws / ".ai-orchestration" / "runs" / run_id
+    other_run_dir.mkdir(parents=True, exist_ok=True)
+    (other_run_dir / "run.json").write_text(json.dumps(rec), encoding="utf-8")
+    (other_run_dir / "prompt.md").write_text("prompt", encoding="utf-8")
+
+    # Attempt to continue from other_ws
+    cmd_cont = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--continue",
+        run_id,
+        "--workspace",
+        str(other_ws),
+        "--json",
+    ]
+    res_cont = subprocess.run(cmd_cont, capture_output=True, text=True, check=False)
+    assert res_cont.returncode != 0
+    data_cont = json.loads(res_cont.stdout)
+    assert data_cont["ok"] is False
+    assert data_cont["reason"] == "kilo-resume-repo-mismatch"
+    assert str(sample_workspace.resolve()) in data_cont["error"]
+
+
+def test_t022_verify_without_profile_uses_configured_profile(tmp_path: pathlib.Path):
+    """Item 7: Verify run without --profile resolves via configured routing/profiles and never defaults to expensive models."""
+    ws = tmp_path / "verify_profile_ws"
+    ws.mkdir()
+    subprocess.run(["git", "init"], cwd=str(ws), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.local"], cwd=str(ws), check=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=str(ws), check=True)
+
+    tasks_dir = ws / "tasks" / "server"
+    tasks_dir.mkdir(parents=True)
+    task_file = tasks_dir / "T007-verification-gate.md"
+    task_file.write_text(
+        "# T007\n\n- id: T007\n- title: T\n- category: server\n- priority: P2\n- state: delivered\n- executor: claude\n- paths: -\n- depends-on: -\n- decider: -\n- sources: -\n- handoff: none\n\n## Goal\nGoal\n\n## Verification\npytest\n",
+        encoding="utf-8",
+    )
+
+    # Config defining ONLY bulk-execution for kilo
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    proj_cfg.write_text(
+        '[project]\nname = "test"\nprimary_orchestrator = "kilo"\n\n'
+        '[routing]\ndefault_executor = "kilo"\ndefault_orchestrator = "kilo"\ndefault_profile = "bulk-execution"\n\n'
+        '[verification]\ndefault_mode = "cross-agent"\ncross_agent_order = ["kilo:bulk-execution"]\n\n'
+        '[tools.kilo.profiles.bulk-execution]\nmodel = "google/gemini-3.8-flash"\nvariant = "low"\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(ws), check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(ws), check=True)
+
+    # Preview verify mode without --profile
+    cmd_prev = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--task",
+        "T007",
+        "--mode",
+        "verify",
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res_prev = subprocess.run(cmd_prev, capture_output=True, text=True, check=True)
+    data_prev = json.loads(res_prev.stdout)
+    assert data_prev["ok"] is True
+    assert data_prev["profile"] == "bulk-execution", "Must resolve to configured default profile"
+    assert data_prev["model"] == "google/gemini-3.8-flash", "Must use configured model, not built-in expensive model"
+    assert data_prev["model"] != "google/gemini-4-argon"
+
+    # If --profile deep-reasoning is explicitly requested when not configured, it must fail
+    cmd_dr = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--task",
+        "T007",
+        "--mode",
+        "verify",
+        "--profile",
+        "deep-reasoning",
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res_dr = subprocess.run(cmd_dr, capture_output=True, text=True, check=False)
+    assert res_dr.returncode != 0
+    data_dr = json.loads(res_dr.stdout)
+    assert data_dr["ok"] is False
+    assert data_dr["reason"] == "model-not-configured"

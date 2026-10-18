@@ -27,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--exit-code", type=int, default=0, help="Exit code to return")
     parser.add_argument("--grandchild-pid-file", type=str, default=None, help="File to write grandchild PID to")
     parser.add_argument("--grandchild-sleep", type=float, default=60.0, help="Seconds for grandchild to sleep")
+    parser.add_argument("--grandchild-setsid", action="store_true", help="Start grandchild in a new session (setsid)")
     parser.add_argument("--grandchild", action="store_true", help="Internal flag for grandchild process")
 
     # 07.4 extensions
@@ -73,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             grandchild_cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            # Do NOT start new session: grandchild MUST stay in the same process group!
+            start_new_session=bool(args.grandchild_setsid),
         )
         pid_file = pathlib.Path(args.grandchild_pid_file)
         pid_file.parent.mkdir(parents=True, exist_ok=True)
