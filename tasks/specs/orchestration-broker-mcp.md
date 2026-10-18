@@ -108,6 +108,45 @@ All three clients work through the stdio shim (`16-orchestration-broker/notes/16
   "environment": {...}}}`.
 - Tool and field names are part of the contract and are fixed in this spec before 16.5.
 
+### 3b. Tool contract v1 (names and fields are normative; 16.5 implements exactly this)
+
+Conventions: tool names are `snake_case` with a dotted group (`tasks.list`); every tool takes `workspace` (slug or
+uuid) and, where it acts on a tree, `project` (slug); ids inside a project are bare. Every result is a JSON object in
+one text content item, with `ok: bool`; errors carry `error` (stable kebab-case code) and `message`. No nulls: absent
+means unknown. Lists are paged: `cursor` in, `next_cursor` out, `limit` default 50, max 200; responses capped at 256 KiB
+(a truncated list says so and returns `next_cursor`). Mutations accept `idempotency_key` and `expect_hash`, and return
+the new `hash`.
+
+| Tool | Arguments | Result (besides `ok`) |
+| --- | --- | --- |
+| `whoami` | – | `broker: {pid, version, started_at}`, `console: {uuid, name, workspace, project}`, `unread_mail` |
+| `workspaces.list` | `cursor?, limit?` | `items: [{uuid, slug, title, path, orchestrator: missing\|stopped\|running\|paused, unread_mail}]` |
+| `projects.list` | `workspace` | `items: [{uuid, slug, path, kind: project\|_workspace\|sub_workspace}]` |
+| `tasks.list` | `workspace, project, state?[], kind?, label?, text?, cursor?, limit?` | `items: [{id, short_title, title, state, priority, kind, size?, parent?, depends_on: [], hash}]` |
+| `tasks.show` | `workspace, project, id` | `task: {id, short_title, title, state, header: {…}, goal, steps, verification, children: [], attachments: [], hash, path}` |
+| `tasks.next` | `workspace, project?` | `items` as `tasks.list`, ready queue order |
+| `tasks.graph` | `workspace, project` | `nodes: [{id, short_title, state, column}]`, `edges: [[from, to]]`, `ready: []` (no Mermaid) |
+| `tasks.new` | `workspace, project, title, short, goal, category?, priority?, priority_reason?, kind?, parent?` | `id, hash, path` |
+| `tasks.transition` | `workspace, project, id, to, note?` | `id, from, to, hash` |
+| `tasks.set` | `workspace, project, id, field: priority\|size\|deps\|kind\|labels\|short, value` | `id, field, value, hash` |
+| `questions.list` | `workspace, project?, status?` | `items: [{id, short_title, question, status, blocks: [], decider}]` |
+| `questions.ask` | `workspace, project, question, short, context, options: [{label, consequences}], recommended?, blocks?: []` | `id, hash` |
+| `questions.answer` | `workspace, project, id, choice, text?` | `id, unblocked: []` |
+| `inbox.add_note` | `workspace, project, title, body, kind?` | `id, path` |
+| `orchestrator.status` | `workspace` | `state, tool, model, generation, queue_length, worker: {alive, heartbeat_at}, unread_mail` |
+| `orchestrator.ensure` | `workspace, dry_run?` | `plan: [{step, action}]`, `applied: bool` |
+| `orchestrator.ask` | `workspace, kind: formalize\|update\|plan\|review\|free, text, project?` | `ticket` |
+| `orchestrator.ticket` | `ticket` | `state: queued\|running\|done\|failed\|outcome_unknown, reply?, turn_id?` |
+| `mail.send` | `to, kind: info\|request\|question\|reply\|handoff, subject, body, refs?: [], thread?, in_reply_to?` | `msg_id, delivered_to: workspace\|console, target_orchestrator` |
+| `mail.inbox` | `workspace?, unread_only?, cursor?, limit?` | `items: [{msg_id, from, kind, subject, received_at, state, size}]` (no bodies) |
+| `mail.read` | `msg_id` | `message: {…, body}` (refused for orchestrator mail not yet accepted by the owner) |
+| `mail.reply` / `mail.decline` | `msg_id, body` / `msg_id, reason` | `msg_id` |
+| `mail.poll` | – | `unread_mail, newest: [{msg_id, from, subject}]` |
+| `console.register` | `name` | `console: {uuid, name}` |
+
+Destructive or owner-facing actions (`tasks.drop`, bulk rollback, global config writes, `mail.accept`) are not MCP
+tools in v1: they stay in the UI/CLI with `confirm_token`.
+
 ## 4. Orchestrator per workspace
 
 - `events-and-triggers.md` §0/§0a, with the worker loop inside the broker: serialised per workspace, parallel across
