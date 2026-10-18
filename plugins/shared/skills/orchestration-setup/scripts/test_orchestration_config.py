@@ -8,6 +8,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -2245,3 +2246,64 @@ def test_ai_orch_setup_dispatch(tmp_path: pathlib.Path, monkeypatch: pytest.Monk
     payload = json.loads(res.stdout)
     assert payload["ok"] is True
     assert payload["routing"]["default_orchestrator"] == "claude"
+
+
+def test_setup_concurrent_applies_on_same_base_exactly_one_succeeds(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_bin = tmp_path / "bin"
+    _create_fake_clis(fake_bin)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    oc.reset_kilo_models_cache(None)
+
+    global_cfg_path = tmp_path / "global" / "orchestration.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # Get plan hash
+    res_plan = run_cli(
+        "--global-config",
+        str(global_cfg_path),
+        "--json",
+        "setup",
+        "--workspace",
+        str(workspace),
+    )
+    assert res_plan.returncode == 0
+    plan_data = json.loads(res_plan.stdout)
+    plan_hash = plan_data["plan_hash"]
+    target_path = pathlib.Path(plan_data["path"])
+
+    import concurrent.futures
+
+    def _run_apply() -> subprocess.CompletedProcess[str]:
+        return run_cli(
+            "--global-config",
+            str(global_cfg_path),
+            "--json",
+            "setup",
+            "--workspace",
+            str(workspace),
+            "--apply",
+            "--expect-hash",
+            plan_hash,
+        )
+
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    # Hold lock so both processes compute plan against the same base and queue on lock
+    with oc.config_lock(target_path):
+        f1 = ex.submit(_run_apply)
+        f2 = ex.submit(_run_apply)
+        time.sleep(0.5)
+
+    r1 = f1.result(timeout=10)
+    r2 = f2.result(timeout=10)
+    ex.shutdown(wait=True)
+
+    results = [r1, r2]
+    successes = [r for r in results if r.returncode == 0]
+    failures = [r for r in results if r.returncode == 2]
+
+    assert len(successes) == 1, f"Expected exactly 1 success, got {len(successes)}: {[r.stdout for r in results]}"
+    assert len(failures) == 1, f"Expected exactly 1 failure, got {len(failures)}: {[r.stdout for r in results]}"
+    fail_data = json.loads(failures[0].stdout)
+    assert fail_data["ok"] is False
+    assert "hash mismatch" in fail_data["error"]

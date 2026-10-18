@@ -299,8 +299,22 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
 def default_global_config_path() -> pathlib.Path:
     env_path = os.environ.get("AI_ORCHESTRATION_CONFIG")
     if env_path:
-        return pathlib.Path(env_path).expanduser().resolve()
+        p = pathlib.Path(env_path).expanduser().resolve()
+        if p.is_dir():
+            return p / "orchestration.toml"
+        return p
     return pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml"
+
+
+def global_config_dir() -> pathlib.Path:
+    """Return the directory containing global orchestration configuration."""
+    env_path = os.environ.get("AI_ORCHESTRATION_CONFIG")
+    if env_path:
+        p = pathlib.Path(env_path).expanduser().resolve()
+        if p.is_file() or p.suffix == ".toml" or p.name.endswith(".toml"):
+            return p.parent
+        return p
+    return pathlib.Path.home() / ".config" / "ai-orchestration"
 
 
 def find_project_config_path(
@@ -1960,86 +1974,87 @@ def cmd_render_agents_md(args: argparse.Namespace) -> int:
             print(f"[ok] {agents_md_path} orchestration block is in sync")
         return 0 if in_sync else 1
 
-    if getattr(args, "expect_hash", None) is not None:
-        disk_bytes = agents_md_path.read_bytes() if agents_md_path.exists() else b""
-        actual_hash = hashlib.sha256(disk_bytes).hexdigest()
-        if actual_hash.lower() != args.expect_hash.strip().lower():
-            msg = f"hash mismatch for {agents_md_path}: expected {args.expect_hash}, found {actual_hash}"
-            if getattr(args, "json", False):
-                print(
-                    json.dumps(
-                        {
-                            "ok": False,
-                            "error": msg,
-                            "expected_hash": args.expect_hash,
-                            "actual_hash": actual_hash,
-                            "path": str(agents_md_path),
-                        }
-                    )
-                )
-            else:
-                print(f"[FAIL] {msg}", file=sys.stderr)
-            return 2
-
-        if not getattr(args, "apply", False):
-            msg = "--expect-hash requires --apply"
-            if getattr(args, "json", False):
-                print(json.dumps({"ok": False, "error": msg}))
-            else:
-                print(f"[FAIL] {msg}", file=sys.stderr)
-            return 2
+    if getattr(args, "expect_hash", None) is not None and not getattr(args, "apply", False):
+        msg = "--expect-hash requires --apply"
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": msg}))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
+        return 2
 
     if getattr(args, "apply", False):
-        if not has_project_config and not getattr(args, "allow_global_routing", False):
-            msg = (
-                f"Refusing to apply: workspace has no project config (would use global routing: {routing_desc}). "
-                "Pass --allow-global-routing to proceed or run 'ai-orch config init-project' first."
-            )
-            if getattr(args, "json", False):
-                print(
-                    json.dumps(
-                        {
-                            "ok": False,
-                            "error": msg,
-                            "path": str(agents_md_path),
-                            "routing": {
-                                "primary_orchestrator": orchestrator_id,
-                                "default_executor": executor_id,
-                                "verification_mode": v_mode,
-                            },
-                            "warnings": warnings,
-                        }
-                    )
-                )
-            else:
-                print(f"[FAIL] {msg}", file=sys.stderr)
-            return 2
+        with config_lock(agents_md_path):
+            if getattr(args, "expect_hash", None) is not None:
+                disk_bytes = agents_md_path.read_bytes() if agents_md_path.exists() else b""
+                actual_hash = hashlib.sha256(disk_bytes).hexdigest()
+                if actual_hash.lower() != args.expect_hash.strip().lower():
+                    msg = f"hash mismatch for {agents_md_path}: expected {args.expect_hash}, found {actual_hash}"
+                    if getattr(args, "json", False):
+                        print(
+                            json.dumps(
+                                {
+                                    "ok": False,
+                                    "error": msg,
+                                    "expected_hash": args.expect_hash,
+                                    "actual_hash": actual_hash,
+                                    "path": str(agents_md_path),
+                                }
+                            )
+                        )
+                    else:
+                        print(f"[FAIL] {msg}", file=sys.stderr)
+                    return 2
 
-        if unknown_models and not getattr(args, "allow_unknown_models", False):
-            unknown_strs = [f"{t}:{p}={m}" for t, p, m in unknown_models]
-            msg = (
-                f"Refusing to apply: unknown model id(s) not found in tool catalog: {', '.join(unknown_strs)}. "
-                "Pass --allow-unknown-models to proceed."
-            )
-            if getattr(args, "json", False):
-                print(
-                    json.dumps(
-                        {
-                            "ok": False,
-                            "error": msg,
-                            "path": str(agents_md_path),
-                            "unknown_models": [
-                                {"tool": t, "profile": p, "model": m} for t, p, m in unknown_models
-                            ],
-                            "warnings": warnings,
-                        }
-                    )
+            if not has_project_config and not getattr(args, "allow_global_routing", False):
+                msg = (
+                    f"Refusing to apply: workspace has no project config (would use global routing: {routing_desc}). "
+                    "Pass --allow-global-routing to proceed or run 'ai-orch config init-project' first."
                 )
-            else:
-                print(f"[FAIL] {msg}", file=sys.stderr)
-            return 2
+                if getattr(args, "json", False):
+                    print(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "error": msg,
+                                "path": str(agents_md_path),
+                                "routing": {
+                                    "primary_orchestrator": orchestrator_id,
+                                    "default_executor": executor_id,
+                                    "verification_mode": v_mode,
+                                },
+                                "warnings": warnings,
+                            }
+                        )
+                    )
+                else:
+                    print(f"[FAIL] {msg}", file=sys.stderr)
+                return 2
 
-        write_file_atomic(agents_md_path, updated)
+            if unknown_models and not getattr(args, "allow_unknown_models", False):
+                unknown_strs = [f"{t}:{p}={m}" for t, p, m in unknown_models]
+                msg = (
+                    f"Refusing to apply: unknown model id(s) not found in tool catalog: {', '.join(unknown_strs)}. "
+                    "Pass --allow-unknown-models to proceed."
+                )
+                if getattr(args, "json", False):
+                    print(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "error": msg,
+                                "path": str(agents_md_path),
+                                "unknown_models": [
+                                    {"tool": t, "profile": p, "model": m} for t, p, m in unknown_models
+                                ],
+                                "warnings": warnings,
+                            }
+                        )
+                    )
+                else:
+                    print(f"[FAIL] {msg}", file=sys.stderr)
+                return 2
+
+            write_file_atomic(agents_md_path, updated)
         if getattr(args, "json", False):
             print(json.dumps({"ok": True, "applied": True, "path": str(agents_md_path), "warnings": warnings}))
         else:
@@ -2417,24 +2432,28 @@ def cmd_setup(args: argparse.Namespace) -> int:
         return 2
 
     norm_exp = expect_hash.strip().lower()
-    if norm_exp not in (plan_hash.lower(), existing_hash.lower()):
-        msg = f"hash mismatch for {target_path}: expected {expect_hash}, computed plan hash {plan_hash}"
-        if getattr(args, "json", False):
-            print(json.dumps({
-                "ok": False,
-                "applied": False,
-                "error": msg,
-                "expected_hash": expect_hash,
-                "actual_hash": existing_hash,
-                "plan_hash": plan_hash,
-                "path": str(target_path),
-            }))
-        else:
-            print(f"[FAIL] {msg}", file=sys.stderr)
-        return 2
 
-    # Write file under config_lock
+    # Re-read target and verify base hash INSIDE config_lock before writing (CAS)
     with config_lock(target_path):
+        current_bytes = target_path.read_bytes() if target_path.exists() else b""
+        current_disk_hash = hashlib.sha256(current_bytes).hexdigest()
+
+        if current_disk_hash.lower() != existing_hash.lower() or norm_exp not in (plan_hash.lower(), existing_hash.lower()):
+            msg = f"hash mismatch for {target_path}: expected {expect_hash}, computed plan hash {plan_hash}, disk hash {current_disk_hash}"
+            if getattr(args, "json", False):
+                print(json.dumps({
+                    "ok": False,
+                    "applied": False,
+                    "error": msg,
+                    "expected_hash": expect_hash,
+                    "actual_hash": current_disk_hash,
+                    "plan_hash": plan_hash,
+                    "path": str(target_path),
+                }))
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
+
         write_file_atomic(target_path, proposed_text)
         after_hash = hashlib.sha256(proposed_text.encode("utf-8")).hexdigest()
         _emit_config_changed(
@@ -2442,7 +2461,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             target_path=target_path,
             workspace=ws if scope != "global" else None,
             keys_changed=["routing", "verification", "tools"],
-            before_hash=existing_hash,
+            before_hash=current_disk_hash,
             after_hash=after_hash,
         )
 
