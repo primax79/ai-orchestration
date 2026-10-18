@@ -4372,7 +4372,16 @@ def set_short(
             elif re.search(r"^\*\*(?:Short):\*\*\s*.*$", old_text, flags=re.MULTILINE):
                 new_text = re.sub(r"^\*\*(?:Short):\*\*\s*.*$", f"**Short:** {short_title}", old_text, flags=re.MULTILINE)
             else:
-                if re.search(r"^-\s+handoff:\s*.*$", old_text, flags=re.MULTILINE):
+                # Keep the canonical optional-field order: insert after the last header field that precedes `short`.
+                header_part = old_text.split("\n## ", 1)[0]
+                preceding = OPTIONAL_EXTENSION_FIELDS[: OPTIONAL_EXTENSION_FIELDS.index("short")] if "short" in OPTIONAL_EXTENSION_FIELDS else ()
+                last_pos = -1
+                for fld in preceding:
+                    for m_f in re.finditer(rf"^-\s+{re.escape(fld)}:\s*.*$", header_part, flags=re.MULTILINE):
+                        last_pos = max(last_pos, m_f.end())
+                if last_pos >= 0 and re.search(r"^-\s+handoff:\s*.*$", header_part, flags=re.MULTILINE):
+                    new_text = old_text[:last_pos] + f"\n- short: {short_title}" + old_text[last_pos:]
+                elif re.search(r"^-\s+handoff:\s*.*$", old_text, flags=re.MULTILINE):
                     new_text = re.sub(r"(^-\s+handoff:\s*.*$)", rf"\1\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)
                 elif re.search(r"^-\s+recommended:\s*.*$", old_text, flags=re.MULTILINE):
                     new_text = re.sub(r"(^-\s+recommended:\s*.*$)", rf"\1\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)

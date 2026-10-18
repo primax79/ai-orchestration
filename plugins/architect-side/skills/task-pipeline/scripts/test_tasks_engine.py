@@ -7322,3 +7322,23 @@ def test_sync_index_short_title_table_output(tmp_path: pathlib.Path) -> None:
 
 
 
+
+
+def test_set_short_keeps_optional_field_order(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    t_path = tasks_dir / "features" / "T001-sample.md"
+    t_path.write_text(
+        "# T001 Feature One\n\n"
+        "- id: T001\n- title: Feature One\n- category: features\n- priority: P1\n"
+        "- priority-reason: core\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: -\n- verifier: claude\n\n"
+        "## Goal\n\nGoal.\n\n## Steps\n\nSteps.\n\n## Verification\n\nVerify.\n",
+        encoding="utf-8",
+    )
+    dry = json.loads(run_cli("set-short", "T001", "feature one", "--dry-run", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    res = run_cli("set-short", "T001", "feature one", "--expect-task-hash", dry["task_hash"], "--tasks-dir", str(tasks_dir), "--json")
+    assert json.loads(res.stdout)["ok"] is True
+    text = t_path.read_text(encoding="utf-8")
+    assert text.index("- verifier: claude") < text.index("- short: feature one")
+    assert run_cli("validate", "--tasks-dir", str(tasks_dir)).returncode == 0
