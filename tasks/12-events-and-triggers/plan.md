@@ -56,7 +56,7 @@
 
 ### 12.6 - UI: event and queue streams, notification area, Triggers page, session chips, "awaiting application" group
 
-- **Status:** `open` · **Size:** L · **Depends on:** 12.4, frontend lane after 10.5
+- **Status:** `in progress` (2026-10-18; claude; kilo, ai-orchestration-ui worktree task/12.6-events-ui) · **Size:** L · **Depends on:** 12.4, frontend lane after 10.5
 - **Goal:** §6 and E12.
 
 ### 12.8 - UI: orchestrator chat panel
