@@ -435,6 +435,42 @@ def check_claude_allowed_tools(headless_cfg: dict[str, Any], mode: str) -> tuple
     return True, None
 
 
+DEFAULT_KILO_AGENTS: dict[str, str] = {
+    "triage": "ask",
+}
+
+
+def resolve_kilo_agent(
+    headless_cfg: dict[str, Any],
+    mode: str,
+) -> str | None:
+    """Resolve effective agent for Kilo under the given mode (Spec §5.7, T028).
+
+    Precedence:
+      1. Config per-mode: [tools.kilo.headless.agent] <mode> = "..."
+      2. Config single string: [tools.kilo.headless] agent = "..."
+      3. Built-in default per mode (e.g. 'ask' for triage)
+
+    Returns agent name or None.
+    """
+    raw = headless_cfg.get("agent")
+    if isinstance(raw, dict) and mode in raw:
+        val = raw[mode]
+        return str(val) if val else None
+    if isinstance(raw, str):
+        return raw if raw else None
+    return DEFAULT_KILO_AGENTS.get(mode)
+
+
+def check_kilo_agent(headless_cfg: dict[str, Any], mode: str) -> tuple[bool, str | None]:
+    """Validate that Kilo has a restricted agent for unattended/reduced-capability turns (T028)."""
+    if mode == "triage":
+        agent = resolve_kilo_agent(headless_cfg, mode)
+        if not agent:
+            return False, f"Kilo requires a restricted agent (such as 'ask') for mode '{mode}' under [tools.kilo.headless]"
+    return True, None
+
+
 def read_log_chunks(
     run_dir: pathlib.Path,
     since_offset: int = 0,
@@ -2051,6 +2087,11 @@ def build_adapter_argv(
     sandbox = headless.get("sandbox") or default_sandbox
     session_id_val = session_id or "{session_id}"
     prompt_file_val = prompt_file or "{prompt_file}"
+    kilo_agent = resolve_kilo_agent(headless, mode)
+    if tool == "kilo" and mode == "triage" and not kilo_agent:
+        raise ValueError(
+            f"Kilo requires a restricted agent (such as 'ask') for unattended mode '{mode}', but none is available or configured."
+        )
 
     # If headless has an explicit resume_argv / argv override
     if is_resume and "resume_argv" in headless and isinstance(headless["resume_argv"], list):
@@ -2064,6 +2105,7 @@ def build_adapter_argv(
             "permission_mode": permission_mode,
             "sandbox": sandbox,
             "prompt_file": prompt_file_val,
+            "agent": kilo_agent or "",
         }
         res: list[str] = []
         for arg in template:
@@ -2084,6 +2126,7 @@ def build_adapter_argv(
             "permission_mode": permission_mode,
             "sandbox": sandbox,
             "prompt_file": prompt_file_val,
+            "agent": kilo_agent or "",
         }
         res: list[str] = []
         for arg in template:
@@ -2110,6 +2153,8 @@ def build_adapter_argv(
             ]
             if variant:
                 argv.extend(["--variant", variant])
+            if kilo_agent:
+                argv.extend(["--agent", kilo_agent])
             # `-f` is a yargs array option: without `--` it swallows the message as a
             # second file ("Error: File not found: Continue.", seen live in 07.5).
             argv.extend(["-f", prompt_file_val, "--", "Continue."])
@@ -2175,6 +2220,8 @@ def build_adapter_argv(
         ]
         if variant:
             argv.extend(["--variant", variant])
+        if kilo_agent:
+            argv.extend(["--agent", kilo_agent])
         argv.extend(["-f", prompt_file_val])
         if attachment_paths:
             for att in attachment_paths:
@@ -3395,6 +3442,12 @@ def validate_run_request(
                 warnings.append(
                     f"Claude has empty 'allowed_tools' for mode '{mode}' under [tools.claude.headless]; launch will be refused."
                 )
+        elif tool == "kilo":
+            ok_k, _ = check_kilo_agent(headless_cfg, mode)
+            if not ok_k:
+                warnings.append(
+                    f"Kilo has no restricted agent for mode '{mode}' under [tools.kilo.headless]; launch will be refused."
+                )
 
         prompt = build_batch_prompt(task_list, instructions=args.instructions, mode=mode, target_commit=target_commit)
         prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -3619,21 +3672,42 @@ def validate_run_request(
         )
         prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
-        raw_argv = build_adapter_argv(
-            tool=tool,
-            tool_cfg=tool_cfg,
-            mode="triage",
-            cwd=cwd,
-            model=model,
-            variant=variant,
-            effort=effort,
-            session_id="{session_id}",
-            prompt_file="{prompt_file}",
-            attachment_paths=attachment_paths,
-        )
+        headless = tool_cfg.get("headless", {})
+        warnings: list[str] = []
+        if tool == "claude":
+            pm = headless.get("permission_mode")
+            if pm in ("bypassPermissions", "--dangerously-skip-permissions"):
+                warnings.append(f"Tool 'claude' has elevated permission mode '{pm}'.")
+            ok_at, _ = check_claude_allowed_tools(headless, "triage")
+            if not ok_at:
+                warnings.append(
+                    "Claude has empty 'allowed_tools' for mode 'triage' under [tools.claude.headless]; launch will be refused."
+                )
+        elif tool == "kilo":
+            ok_k, _ = check_kilo_agent(headless, "triage")
+            if not ok_k:
+                warnings.append(
+                    "Kilo has no restricted agent for mode 'triage' under [tools.kilo.headless]; launch will be refused."
+                )
+
+        try:
+            raw_argv = build_adapter_argv(
+                tool=tool,
+                tool_cfg=tool_cfg,
+                mode="triage",
+                cwd=cwd,
+                model=model,
+                variant=variant,
+                effort=effort,
+                session_id="{session_id}",
+                prompt_file="{prompt_file}",
+                attachment_paths=attachment_paths,
+            )
+        except ValueError as err:
+            warnings.append(str(err))
+            raw_argv = [tool, "[REFUSED: " + str(err) + "]"]
         argv_display = redact_argv(raw_argv)
 
-        headless = tool_cfg.get("headless", {})
         allowed_tools, allowed_tools_source = (
             resolve_claude_allowed_tools(headless, "triage") if tool == "claude" else (None, None)
         )
@@ -3698,7 +3772,7 @@ def validate_run_request(
             "bundle_hash": bundle_hash,
             "repo_head": repo_head,
             "plan_hash": plan_hash,
-            "warnings": [],
+            "warnings": warnings,
             "allowed_tools": allowed_tools,
             "allowed_tools_source": allowed_tools_source,
             "verification_mode": None,
@@ -3938,6 +4012,12 @@ def validate_run_request(
             warnings.append(
                 f"Claude has empty 'allowed_tools' for mode '{mode}' under [tools.claude.headless]; launch will be refused."
             )
+    elif tool == "kilo":
+        ok_k, _ = check_kilo_agent(headless_cfg, mode)
+        if not ok_k:
+            warnings.append(
+                f"Kilo has no restricted agent for mode '{mode}' under [tools.kilo.headless]; launch will be refused."
+            )
     elif tool == "codex":
         sb = headless_cfg.get("sandbox")
         if sb in ("danger-full-access", "read-write-full"):
@@ -3946,22 +4026,26 @@ def validate_run_request(
     prompt = build_prompt(mode, task, target_commit=target_commit, instructions=args.instructions)
     prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
-    raw_argv = build_adapter_argv(
-        tool=tool,
-        tool_cfg=tool_cfg,
-        mode=mode,
-        cwd=cwd,
-        model=model,
-        variant=variant,
-        effort=effort,
-        session_id="{session_id}",
-        prompt_file="{prompt_file}",
-        git_common_dir=(
-            git_common_dir_of(target_repo)
-            if tool == "codex" and mode == "execute" and isolation == "worktree"
-            else None
-        ),
-    )
+    try:
+        raw_argv = build_adapter_argv(
+            tool=tool,
+            tool_cfg=tool_cfg,
+            mode=mode,
+            cwd=cwd,
+            model=model,
+            variant=variant,
+            effort=effort,
+            session_id="{session_id}",
+            prompt_file="{prompt_file}",
+            git_common_dir=(
+                git_common_dir_of(target_repo)
+                if tool == "codex" and mode == "execute" and isolation == "worktree"
+                else None
+            ),
+        )
+    except ValueError as err:
+        warnings.append(str(err))
+        raw_argv = [tool, "[REFUSED: " + str(err) + "]"]
     argv_display = redact_argv(raw_argv)
 
     canonical_request: dict[str, Any] = {
@@ -4213,6 +4297,12 @@ def cmd_start(args: argparse.Namespace) -> int:
                 if not ok_at:
                     print_error(args.json, "missing-allowed-tools", at_err or "Missing allowed_tools for Claude")
                     return 1
+            elif tool == "kilo":
+                headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
+                ok_k, k_err = check_kilo_agent(headless_cfg, source_record["mode"])
+                if not ok_k:
+                    print_error(args.json, "missing-restricted-agent", k_err or "Missing restricted agent for Kilo")
+                    return 1
 
             resume_raw_argv = build_adapter_argv(
                 tool=tool,
@@ -4317,13 +4407,20 @@ def cmd_start(args: argparse.Namespace) -> int:
         print_error(args.json, reason, err_msg)
         return 1
 
-    # Claude allowed_tools check (R11)
+    # Claude allowed_tools check (R11) and Kilo restricted agent check (T028)
     if data["tool"] == "claude":  # type: ignore
         tool_cfg = data["merged_cfg"].get("tools", {}).get("claude", {})  # type: ignore
         headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
         ok_at, at_err = check_claude_allowed_tools(headless_cfg, data["mode"])  # type: ignore
         if not ok_at:
             print_error(args.json, "missing-allowed-tools", at_err or "Missing allowed_tools for Claude")
+            return 1
+    elif data["tool"] == "kilo":  # type: ignore
+        tool_cfg = data["merged_cfg"].get("tools", {}).get("kilo", {})  # type: ignore
+        headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
+        ok_k, k_err = check_kilo_agent(headless_cfg, data["mode"])  # type: ignore
+        if not ok_k:
+            print_error(args.json, "missing-restricted-agent", k_err or "Missing restricted agent for Kilo")
             return 1
 
     expect_hash = getattr(args, "expect_plan_hash", None)

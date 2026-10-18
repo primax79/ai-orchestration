@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Gemini review 2026-10-18: Kilo event turns run with full tools; untrusted data can close its own delimiter
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -21,8 +21,8 @@ Reduced-capability (triage/event_batch) turns are enforced only by Claude's allo
 
 ## Steps
 
-- [ ] Implement task steps.
+- [x] Implement task steps.
 
 ## Verification
 
-- [ ] Verify task implementation.
+- [x] Verify task implementation.
