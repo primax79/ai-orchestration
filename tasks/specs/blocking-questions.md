@@ -36,6 +36,7 @@
   - the options are empty, with `open-answer: yes` and `recommended: -`;
   - the validator warning is `context-not-completed`.
 - **Q10 — §5 rendering.** The context and options are rendered under spec 06 A12 (HTML escaped, safe links, CSP).
+- **Q11 — §2 origin-session header field** (spec 12 E10). Added directly after `origin-run`: records the session ID or role that asked the question (e.g. `orchestrator`), enabling `resume-origin` or routing answers back to the originating session. Defaults to `-` when absent. When both `origin-run` and an origin role exist, the run takes precedence for `resume-origin`.
 
 ## 1. Problem
 
@@ -67,6 +68,7 @@ One question = one file, `tasks/questions/Q###-<slug>.md`.
 - asked-by: claude:orchestration
 - asked: 2026-10-16
 - origin-run: -
+- origin-session: -
 - open-answer: yes
 - recommended: A
 
@@ -102,6 +104,7 @@ run anything on this machine. A middle ground is an explicit `allowed_tools` lis
 | `asked-by` | yes | `<tool>:<profile>`, `owner`, or a session name |
 | `asked` | yes | ISO date |
 | `origin-run` | yes | run id (spec 07) when asked from an agent run, else `-` |
+| `origin-session` | yes | session id or role (`orchestrator`) when asked from a registered session, else `-` |
 | `open-answer` | yes | `yes` or `no`: whether free text is accepted instead of, or in addition to, an option |
 | `recommended` | yes | an option label, or `-` |
 

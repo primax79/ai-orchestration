@@ -7,6 +7,8 @@ Dispatches:
   - `ai-orch inbox <subcommand> [args...]`  -> `tasks_engine.py inbox`
   - `ai-orch env <subcommand> [args...]`    -> `orchestration_env.py`
   - `ai-orch run <subcommand> [args...]`    -> `orchestration_runs.py`
+  - `ai-orch events <subcommand> [args...]` -> `orchestration_events.py`
+  - `ai-orch sessions <subcommand> [args...]` -> `orchestration_sessions.py`
   - `ai-orch render-agents-md [args...]`    -> `orchestration_config.py render-agents-md`
   - `ai-orch describe [--json]`             -> machine-readable command & schema catalog
 """
@@ -40,6 +42,7 @@ TASKS_ENGINE_SCRIPT = (
 ORCH_ENV_SCRIPT = REPO_ROOT / "scripts" / "orchestration_env.py"
 ORCH_RUNS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_runs.py"
 ORCH_EVENTS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_events.py"
+ORCH_SESSIONS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_sessions.py"
 
 CLI_DESCRIPTION: dict[str, Any] = {
     "name": "ai-orch",
@@ -382,6 +385,37 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
             },
         },
+        "sessions": {
+            "script": str(ORCH_SESSIONS_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch sessions <subcommand> [options] [--json]",
+            "description": "Session registry, role holders, and cursor tracking.",
+            "subcommands": {
+                "register": {
+                    "usage": "ai-orch sessions register [--tool <tool>] [--kind <headless|interactive>] [--role <role>] [--resume-id <id>] [--subscribe <types...>] [--workspace <dir>] [--json]",
+                    "description": "Register an orchestration session and return its session_id.",
+                },
+                "heartbeat": {
+                    "usage": "ai-orch sessions heartbeat <session_id> [--workspace <dir>] [--json]",
+                    "description": "Touch session last_seen and reset staleness.",
+                },
+                "list": {
+                    "usage": "ai-orch sessions list [--role <role>] [--status <status>] [--tool <tool>] [--workspace <dir>] [--json]",
+                    "description": "List registered orchestration sessions.",
+                },
+                "show": {
+                    "usage": "ai-orch sessions show [<session_id>] [--role <role>] [--workspace <dir>] [--json]",
+                    "description": "Show details of a session or current role holder.",
+                },
+                "cursor": {
+                    "usage": "ai-orch sessions cursor [<session_id>] [--role <role>] [--seq <n>] [--workspace <dir>] [--json]",
+                    "description": "Get or advance cursor monotonically under session lock.",
+                },
+                "deregister": {
+                    "usage": "ai-orch sessions deregister <session_id> [--reason <reason>] [--workspace <dir>] [--json]",
+                    "description": "Deregister and end a session.",
+                },
+            },
+        },
     },
 }
 
@@ -447,6 +481,10 @@ def main() -> int:
 
     if group == "events":
         proc = subprocess.run([sys.executable, str(ORCH_EVENTS_SCRIPT), *rest], check=False)
+        return proc.returncode
+
+    if group in ("sessions", "session"):
+        proc = subprocess.run([sys.executable, str(ORCH_SESSIONS_SCRIPT), *rest], check=False)
         return proc.returncode
 
     if group == "render-agents-md":

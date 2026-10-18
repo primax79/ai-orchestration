@@ -33,6 +33,7 @@ The owner writes quick notes and reports in the UI, with screenshots pasted or d
 | `about` | optional: paths, repos or task ids the note refers to, comma-separated, or `-` |
 | `produced` | ids produced by processing (`T014, T015`, a spec path, `Q005`), or `-` |
 | `processed-by` | `owner`, `<tool>:<profile> (run <run_id>)`, or `-` |
+| `origin-session` | session id or role (`orchestrator`) when created by a registered session, else `-` |
 
 The body follows the header. Images are referenced in Markdown as `![](attachments/01-screen.png)`; the UI inserts these references when an image is pasted.
 
@@ -114,3 +115,7 @@ The owner opens bugs and features from the Inbox, and needs to attach more than 
 - **Attachments on tasks.** An emergent task folder (`<category>/T###-<slug>/`) may hold `attachments/` with the same rules. Engine: `tasks attach T### --file PATH [--name N]` and `tasks detach T### --name N`, under the task-write lock, changing the task bundle hash. Initiative tasks (`NN.T` inside `plan.md`) have no folder and take no attachments; attach to the initiative's folder later if needed (out of scope here).
 - **Convert keeps the evidence.** `tasks new --from-note N###` copies the note's attachments into the new task's `attachments/` and rewrites the references in the copied body, so the task stays self-contained after the note moves to `analyzed/`.
 - **UI.** The note editor and the task detail show attachments by class: thumbnails for images, a chip that opens a text viewer for text, a download chip for PDFs. Paste, drop and picker accept all allowed types; refused types show the reason.
+
+## 8. Amendment (2026-10-18, spec 12 E10): `origin-session` header field
+
+The `note.md` header gains `origin-session` directly after `processed-by` (values: session id, role name like `orchestrator`, or `-` when absent). This links notes created by an orchestration session back to that session, enabling event filtering and notifications for the originating session. When both an origin run and an origin role exist, the run takes precedence for `resume-origin`.
