@@ -46,12 +46,12 @@
 
 ### 12.5 - Headless orchestrator role (sessions, queue, turns, succession, bounds)
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.5-orchestrator-role) · **Size:** L · **Depends on:** 12.1, 12.3, 12.13
+- **Status:** `delivered` (2026-10-18; claude; merged; 160 tests, no real CLI; unattended turns run in triage (read-only) mode, 15-min timeout, generation-fenced succession; live run with a real orchestrator session pending) · **Size:** L · **Depends on:** 12.1, 12.3, 12.13
 - **Goal:** §0, E2, E4, E5, E6, E8 and E9.
 
 ### 12.9 - Orchestrator configuration: reassignment as succession, `ai-orch setup` engine shared with the `orchestration-setup` skill
 
-- **Status:** `open` · **Size:** M · **Depends on:** 12.5
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.9-orchestrator-config) · **Size:** M · **Depends on:** 12.5
 - **Goal:** §0b, core part.
 
 ### 12.6 - UI: event and queue streams, notification area, Triggers page, session chips, "awaiting application" group
