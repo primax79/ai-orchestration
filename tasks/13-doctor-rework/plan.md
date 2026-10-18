@@ -41,12 +41,12 @@
 
 ### 13.6 - P2-b + P2-c: Kilo effective view; install respects plugins and policy
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/13.6-kilo-view) · **Size:** M
+- **Status:** `delivered` (2026-10-18; claude; merged; 62 env tests; live: kilo_effective 47 skills with shadowing; install-skills dry-run skips 6 plugin-provided skills with reasons) · **Size:** M
 - **Goal:**
   - a Kilo view covering every folder Kilo reads (including `~/.claude/skills` and `~/.config/kilo/skills`);
   - `install-skills` skips skills that a plugin provides or that the conflict policy would remove, so install and resolve no longer undo each other.
 
 ### 13.7 - P3-a..d: stray-file and redundant-MCP actions, `register-mcp` idempotency, agents in the Doctor, trigger-conflict generalization
 
-- **Status:** `open` · **Size:** M
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/13.7-stray-mcp) · **Size:** M
 - **Goal:** Report §P3.
