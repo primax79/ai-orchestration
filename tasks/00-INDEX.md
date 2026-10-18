@@ -57,7 +57,7 @@ Evolutions and refinements to the orchestration skills (`orchestration-methodolo
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T021 (Binding template drift) | P2 | [Precedence between orchestration-workflow and kilo-mcp-orchestrator; fix binding template drift](methodology/T021-precedence-between-orchestration-workflow-and-kilo.md) | delivered | kilo | - |
-| T025 (Short title field) | P2 | [Short title field for tasks and questions](methodology/T025-short-title-field-for-tasks-and-questions.md) | in progress | kilo | - |
+| T025 (Short title field) | P2 | [Short title field for tasks and questions](methodology/T025-short-title-field-for-tasks-and-questions.md) | delivered | kilo | - |
 
 ### server-and-bindings
 
