@@ -44,6 +44,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--question", action="append", default=None, help="Print a ```ai-orch-question block with JSON in the final message")
     parser.add_argument("--earlier-question", action="append", default=None, help="Print a ```ai-orch-question block with JSON in an earlier message")
 
+    # 07.11 extensions (batch runs: custom commits per microtask)
+    parser.add_argument("--commit-msg", action="append", default=None, help="Make git commit(s) with custom message(s)")
+
     # Consume known args, ignore all other adapter flags (-m, -C, -f, --dir, --output-format, etc.)
     args, unknown = parser.parse_known_args(argv)
 
@@ -91,7 +94,16 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.flush()
 
     # Git operations in cwd if requested
-    if args.commit:
+    if args.commit_msg:
+        for idx, msg in enumerate(args.commit_msg):
+            artifact = pathlib.Path(f"stub_artifact_{idx}.txt")
+            artifact.write_text(f"Stub work for {msg} at {time.time()}\n", encoding="utf-8")
+            subprocess.run(["git", "add", str(artifact)], check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=StubAgent", "-c", "user.email=stub@test.com", "commit", "-m", msg],
+                check=True,
+            )
+    elif args.commit:
         artifact = pathlib.Path("stub_artifact.txt")
         artifact.write_text(f"Stub agent work at {time.time()}\n", encoding="utf-8")
         subprocess.run(["git", "add", "stub_artifact.txt"], check=True)

@@ -127,7 +127,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 VALID_RUN_ID_RE = re.compile(
-    r"^[0-9]{8}-[0-9]{6}-[TN][0-9]{3,}-(kilo|claude|codex)-[0-9a-f]{4}$"
+    r"^[0-9]{8}-[0-9]{6}-(?:[TN][0-9]{3,}|batch)-(kilo|claude|codex)-[0-9a-f]{4}$"
 )
 
 VALID_MODES = {"orchestrate", "execute", "verify", "triage"}
@@ -1336,6 +1336,9 @@ def resolve_task_by_id(tasks_dir: pathlib.Path, task_id: str) -> dict[str, Any] 
                     "parent_id": node.parent,
                     "block_text": node.block_text,
                     "parent_file": node.file_path if node.block_text else None,
+                    "node_type": getattr(node, "node_type", "leaf"),
+                    "category": getattr(node, "category", "") or fields.get("category", ""),
+                    "folder_category": getattr(node, "folder_category", ""),
                 }
         except Exception:
             pass
@@ -1464,7 +1467,10 @@ def check_same_task_active(
     if force:
         return True, None
     for run in active_runs:
-        if run.get("task_id") == task_id and run.get("status") in ACTIVE_STATES:
+        is_match = (run.get("task_id") == task_id)
+        if not is_match and run.get("is_batch"):
+            is_match = task_id in (run.get("batch_members") or [])
+        if is_match and run.get("status") in ACTIVE_STATES:
             return False, f"Task '{task_id}' already has an active run: {run.get('run_id')}"
     return True, None
 
@@ -2415,6 +2421,122 @@ def build_triage_prompt(
     return "\n".join(blocks).rstrip() + "\n"
 
 
+def is_microtask(task: dict[str, Any]) -> bool:
+    """Check if a task is a microtask (reduced header, under tasks/micro/)."""
+    if task.get("node_type") == "microtask":
+        return True
+    if task.get("category") == "micro" or task.get("folder_category") == "micro":
+        return True
+    rel = str(task.get("rel_path", ""))
+    if rel.startswith("micro/") or rel.startswith("tasks/micro/") or "/micro/" in rel:
+        return True
+    fp = str(task.get("file_path", ""))
+    if "/micro/" in fp:
+        return True
+    return False
+
+
+def extract_what_section(task: dict[str, Any]) -> str:
+    """Extract the ## What section body from a microtask."""
+    content = load_task_files_content(task)
+    m = re.search(r"^##\s+What\b", content, re.MULTILINE)
+    if not m:
+        return content.strip()
+    rest = content[m.end():]
+    lines = rest.splitlines()
+    what_lines: list[str] = []
+    for line in lines:
+        if line.startswith("## "):
+            break
+        what_lines.append(line)
+    extracted = "\n".join(what_lines).strip()
+    return extracted if extracted else content.strip()
+
+
+def build_batch_prompt(
+    tasks: list[dict[str, Any]],
+    instructions: str | None = None,
+    mode: str = "execute",
+    target_commit: str | None = None,
+) -> str:
+    """Deterministic prompt builder for batch runs (timeline-gantt §5)."""
+    ids_str = ", ".join(t.get("id", "UNKNOWN") for t in tasks)
+    blocks: list[str] = [
+        f"# Batch Run: {ids_str}",
+        "",
+        "## Microtasks",
+        "",
+    ]
+    for t in tasks:
+        tid = t.get("id", "UNKNOWN")
+        title = t.get("title", "")
+        kind = t.get("kind") or (t.get("fields", {}).get("kind", {}).get("value") if isinstance(t.get("fields"), dict) else None) or "chore"
+        paths = t.get("paths") or "-"
+        what = extract_what_section(t)
+        blocks.extend([
+            f"### Microtask {tid} — {title}",
+            "",
+            f"- **ID**: {tid}",
+            f"- **Title**: {title}",
+            f"- **Kind**: {kind}",
+            f"- **Paths**: {paths}",
+            "",
+            "#### What",
+            "",
+            what,
+            "",
+        ])
+
+    if mode == "execute":
+        blocks.extend([
+            "## Executor Contract",
+            "",
+            "- Zero interactivity: You are running headlessly in an isolated background run. Do not ask questions or offer choices. Make the most reasonable technical decision based on the instructions.",
+            "- Scope discipline: Implement exactly what the microtasks require. Do not add unrequested features, abstractions, or refactors.",
+            f"- One commit per microtask: You must create exactly one atomic git commit per microtask for all microtasks in this batch: {ids_str}.",
+            "- Commit message prefix: Each commit message MUST start with the prefix `T###:` corresponding to that microtask (e.g. `T001: fix issue`).",
+            "- Conclude your final message with a `## Final Report` matching exactly this structure:",
+            "  ```markdown",
+            "  ## Final Report",
+            "  - **Outcome**: `success` | `partial` | `failed`",
+            "  - **Files changed**:",
+            "    - `path/to/file` — summary of changes",
+            "  - **Verification**:",
+            "    - Command: `<runnable command>`",
+            "    - Output: `<actual output and exit code>`",
+            "  - **Issues**:",
+            "    - `None` (or description of blockers/deviations)",
+            "  ```",
+            "- If you encounter a blocking decision or critical ambiguity, file a blocking question using the ```ai-orch-question fenced block format instead of guessing.",
+            "",
+        ])
+    elif mode == "verify":
+        commit_str = target_commit or "HEAD"
+        blocks.extend([
+            "## Verification Guidelines",
+            "",
+            "- You are acting as an independent verifier in a detached throwaway worktree checking the batch of microtasks.",
+            f"- Artifact commit being verified: `{commit_str}`.",
+            "- Verify all microtasks in this batch against the changes introduced on the branch.",
+            "- Do not modify code on the branch. This is an evaluation run.",
+            "- Conclude your final message with the mandatory verdict block:",
+            "  ```ai-orch-verdict",
+            '  {"verdict": "verified" | "bounced", "findings": [{"id": "B1", "severity": "blocker|major|minor", "text": "..."}], "checks": [{"step": "...", "result": "pass|fail", "evidence": "..."}]}',
+            "  ```",
+            "",
+        ])
+
+    if instructions and instructions.strip():
+        blocks.extend([
+            "## Additional Instructions",
+            "",
+            instructions.strip(),
+            "",
+        ])
+
+    return "\n".join(blocks).rstrip() + "\n"
+
+
 def build_prompt(
     mode: str,
     task: dict[str, Any],
@@ -2693,12 +2815,18 @@ def create_run_record(
     note_bundle_sha256: str | None = None,
     attachment_paths: list[str] | None = None,
     created_worktree: str | bool | None = None,
+    is_batch: bool = False,
+    batch_members: list[str] | None = None,
+    members: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Initialize a run.json record structure (Spec §5.1, R2, R3, R8, Task 09.4)."""
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     return {
         "run_id": run_id,
         "task_id": task_id,
+        "is_batch": is_batch,
+        "batch_members": list(batch_members or []),
+        "members": dict(members or {}),
         "note_id": note_id,
         "mode": mode,
         "tool": tool,
@@ -2835,8 +2963,12 @@ def list_run_records(
         except Exception:
             continue
 
-        if task_id and record.get("task_id") != task_id and record.get("note_id") != task_id:
-            continue
+        if task_id:
+            matched = (record.get("task_id") == task_id or record.get("note_id") == task_id)
+            if not matched and record.get("is_batch"):
+                matched = task_id in record.get("batch_members", [])
+            if not matched:
+                continue
         if active_only and record.get("status") not in ACTIVE_STATES:
             continue
         results.append(record)
@@ -3066,8 +3198,307 @@ def validate_run_request(
     if plat_err:
         return False, (plat_err, "Runs engine is supported on macOS and Linux only (fcntl required)"), None
 
+    batch_arg = getattr(args, "batch", None)
     note_id_arg = getattr(args, "note", None)
     task_id_arg = getattr(args, "task", None)
+
+    targets_given = sum(1 for x in (bool(batch_arg), bool(note_id_arg), bool(task_id_arg)) if x)
+    if targets_given > 1:
+        return False, ("mutually-exclusive-targets", "--batch, --task, and --note are mutually exclusive"), None
+
+    if not batch_arg and not note_id_arg and not task_id_arg:
+        return False, ("missing-target", "Either --task, --note, or --batch is required"), None
+
+    ws = pathlib.Path(args.workspace or ".").resolve()
+    tasks_dir = ws / "tasks"
+    if not tasks_dir.is_dir():
+        return False, ("tasks-dir-not-found", f"Tasks directory not found at {tasks_dir}"), None
+
+    if batch_arg:
+        raw_ids = [x.strip() for x in batch_arg.split(",") if x.strip()]
+        if not raw_ids:
+            return False, ("empty-batch", "--batch cannot be empty"), None
+
+        batch_ids: list[str] = []
+        for tid in raw_ids:
+            if tid not in batch_ids:
+                batch_ids.append(tid)
+
+        member_tasks_with_repo: list[tuple[dict[str, Any], pathlib.Path]] = []
+        req_mode = getattr(args, "mode", None)
+        mode = req_mode or "execute"
+        if mode not in ("execute", "verify"):
+            return False, ("invalid-mode-for-batch", f"Batch runs only support mode 'execute' or 'verify', got '{mode}'"), None
+
+        for tid in batch_ids:
+            valid_task, task_err = check_task_id(tid)
+            if not valid_task:
+                return False, ("invalid-task-id", task_err or f"Invalid task ID '{tid}'"), None
+
+            task = resolve_task_by_id(tasks_dir, tid)
+            if not task:
+                return False, ("task-not-found", f"Task '{tid}' not found in tasks directory"), None
+
+            if not is_microtask(task):
+                return False, ("non-microtask-refused", f"Task '{tid}' is not a microtask; --batch only accepts microtasks"), None
+
+            cstate = task.get("canonical_state", "open")
+            if mode == "verify":
+                if cstate != "delivered":
+                    return False, ("invalid-task-state", f"Microtask '{tid}' is in state '{cstate}', expected 'delivered' for verify mode"), None
+            else:
+                if cstate not in ("open", "bounced"):
+                    return False, ("invalid-task-state", f"Microtask '{tid}' is in state '{cstate}', expected 'open' or 'bounced'"), None
+
+            t_repo, _, repo_err = resolve_target_repo(ws, task.get("paths"))
+            if repo_err:
+                return False, ("multi-repo-paths", repo_err), None
+            member_tasks_with_repo.append((task, (t_repo or ws).resolve()))
+
+        first_repo = member_tasks_with_repo[0][1]
+        for t_item, r_item in member_tasks_with_repo[1:]:
+            if r_item != first_repo:
+                repos_str = ", ".join(f"'{str(r)}'" for r in sorted({r for _, r in member_tasks_with_repo}))
+                return False, ("mixed-target-repos", f"Microtasks in batch resolve to different target repositories: [{repos_str}]"), None
+
+        target_repo = first_repo
+        task_list = [t for t, _ in member_tasks_with_repo]
+
+        gpath = getattr(args, "global_config", None)
+        merged_cfg, _ = resolve_config(gpath, ws)
+        project_cfg_path = find_project_config_path(ws, gpath)
+        project_cfg = load_toml_file(project_cfg_path) if project_cfg_path.exists() else None
+        global_cfg = load_toml_file(gpath or default_global_config_path())
+
+        tool, chosen_entry = resolve_tool(
+            mode=mode,
+            requested_tool=args.tool,
+            task=task_list[0],
+            merged_cfg=merged_cfg,
+            project_cfg=project_cfg,
+            global_cfg=global_cfg,
+        )
+        if not tool:
+            return False, ("tool-resolution-failed", "Could not resolve a suitable tool for batch run"), None
+
+        tool_cfg = merged_cfg.get("tools", {}).get(tool, {})
+        avail, _, avail_err = check_tool_availability(tool, tool_cfg)
+        if not avail:
+            reason = "tool-disabled" if "disabled" in (avail_err or "") else "tool-not-installed"
+            return False, (reason, avail_err or f"Tool '{tool}' is not available"), None
+
+        profile = resolve_profile(
+            mode=mode,
+            requested_profile=args.profile,
+            task=task_list[0],
+            merged_cfg=merged_cfg,
+            project_cfg=project_cfg,
+            global_cfg=global_cfg,
+            chosen_cross_order_entry=chosen_entry,
+            tool=tool,
+        )
+
+        model, variant, effort = resolve_model_and_variants(
+            tool=tool,
+            profile=profile,
+            requested_model=args.model,
+            requested_variant=args.variant,
+            requested_effort=args.effort,
+            merged_cfg=merged_cfg,
+        )
+        if not model:
+            return False, ("model-not-configured", f"No model configured for tool '{tool}' profile '{profile}'"), None
+
+        if tool == "kilo" and not args.model and (mode == "verify" or getattr(args, "profile", None)):
+            kilo_configured = False
+            if project_cfg and "tools" in project_cfg and "kilo" in project_cfg["tools"] and "profiles" in project_cfg["tools"]["kilo"]:
+                k_profs = project_cfg["tools"]["kilo"]["profiles"]
+                if profile in k_profs and isinstance(k_profs[profile], dict) and k_profs[profile].get("model"):
+                    kilo_configured = True
+            elif global_cfg and "tools" in global_cfg and "kilo" in global_cfg["tools"] and "profiles" in global_cfg["tools"]["kilo"]:
+                k_profs = global_cfg["tools"]["kilo"]["profiles"]
+                if profile in k_profs and isinstance(k_profs[profile], dict) and k_profs[profile].get("model"):
+                    kilo_configured = True
+
+            if not kilo_configured:
+                return False, (
+                    "model-not-configured",
+                    f"No model configured for tool 'kilo' profile '{profile}' in project or global config; refusing built-in default '{model}'",
+                ), None
+
+        isolation = args.isolation or ("worktree" if mode == "execute" else "none")
+        run_batch_slug = f"batch-{'-'.join(batch_ids[:3])}" if len(batch_ids) <= 3 else "batch"
+        planned_branch = None
+        planned_worktree = None
+        if mode == "execute":
+            if isolation == "worktree":
+                planned_branch = f"run/{run_batch_slug}"
+                planned_worktree = str(target_repo.parent / ".worktrees" / target_repo.name / f"run-{run_batch_slug}")
+                cwd = planned_worktree
+            else:
+                cwd = str(target_repo)
+        elif mode == "verify":
+            planned_branch = None
+            planned_worktree = str(target_repo.parent / ".worktrees" / target_repo.name / f"verify-{run_batch_slug}")
+            cwd = planned_worktree
+        else:
+            cwd = str(ws)
+
+        all_runs = list_run_records(ws)
+        active_runs = [r for r in all_runs if r.get("status") in ACTIVE_STATES]
+        for tid in batch_ids:
+            task_act_valid, task_act_err = check_same_task_active(tid, active_runs, force=args.force)
+            if not task_act_valid:
+                return False, ("same-task-active", task_act_err or f"Task '{tid}' already has an active run"), None
+
+        cwd_act_valid, cwd_act_err = check_same_cwd_active(cwd, isolation, active_runs)
+        if not cwd_act_valid:
+            return False, ("same-cwd-active", cwd_act_err or "Working directory already has an active run with isolation 'none'"), None
+
+        target_run_id = None
+        target_run_tool = None
+        target_commit = None
+        if mode == "verify":
+            target_run_id = args.target_run
+            if not target_run_id:
+                succeeded_runs = [
+                    r for r in all_runs if r.get("mode") == "execute" and r.get("status") == "succeeded" and (r.get("is_batch") or any(tid in r.get("batch_members", []) for tid in batch_ids))
+                ]
+                if succeeded_runs:
+                    target_run_id = succeeded_runs[0]["run_id"]
+                    target_run_tool = succeeded_runs[0].get("tool")
+                    target_commit = succeeded_runs[0].get("final_commit")
+                else:
+                    target_run_id = "none"
+            elif target_run_id != "none":
+                matched_run = next((r for r in all_runs if r.get("run_id") == target_run_id), None)
+                if not matched_run:
+                    return False, ("target-run-not-found", f"Target run '{target_run_id}' not found"), None
+                if matched_run.get("status") != "succeeded":
+                    return False, (
+                        "target-run-not-succeeded",
+                        f"Target run '{target_run_id}' status is '{matched_run.get('status')}', must be 'succeeded'",
+                    ), None
+                target_run_tool = matched_run.get("tool")
+                if not matched_run.get("final_commit"):
+                    return False, ("missing-final-commit", f"Target run '{target_run_id}' has no final_commit recorded"), None
+                target_commit = matched_run.get("final_commit")
+
+        warnings: list[str] = []
+        if mode == "execute" and isolation == "worktree":
+            is_clean, dirty_files = check_repo_clean(target_repo)
+            if not is_clean:
+                is_start_cmd = getattr(args, "cmd", None) == "start"
+                if is_start_cmd and not getattr(args, "allow_dirty_base", False):
+                    dirty_list_str = ", ".join(dirty_files)
+                    return False, ("dirty-repo", f"Target repository '{target_repo}' has uncommitted changes: {dirty_list_str}. Pass --allow-dirty-base to proceed from HEAD."), None
+                warnings.append(
+                    f"Target repository has uncommitted changes that will not be present in the worktree ({len(dirty_files)} dirty files)."
+                )
+
+        headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
+        allowed_tools = None
+        allowed_tools_source = None
+        if tool == "claude":
+            pm = headless_cfg.get("permission_mode")
+            if pm in ("bypassPermissions", "--dangerously-skip-permissions"):
+                warnings.append(f"Tool 'claude' has elevated permission mode '{pm}'.")
+            allowed_tools, allowed_tools_source = resolve_claude_allowed_tools(headless_cfg, mode)
+            ok_at, _ = check_claude_allowed_tools(headless_cfg, mode)
+            if not ok_at:
+                warnings.append(
+                    f"Claude has empty 'allowed_tools' for mode '{mode}' under [tools.claude.headless]; launch will be refused."
+                )
+
+        prompt = build_batch_prompt(task_list, instructions=args.instructions, mode=mode, target_commit=target_commit)
+        prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+        raw_argv = build_adapter_argv(
+            tool=tool,
+            tool_cfg=tool_cfg,
+            mode=mode,
+            cwd=cwd,
+            model=model,
+            variant=variant,
+            effort=effort,
+            session_id="{session_id}",
+            prompt_file="{prompt_file}",
+            git_common_dir=(
+                git_common_dir_of(target_repo)
+                if tool == "codex" and mode == "execute" and isolation == "worktree"
+                else None
+            ),
+        )
+        argv_display = redact_argv(raw_argv)
+
+        canonical_request = {
+            "allow_same_tool": bool(args.allow_same_tool),
+            "batch": ",".join(batch_ids),
+            "effort": effort,
+            "instructions": args.instructions or "",
+            "isolation": isolation,
+            "mode": mode,
+            "model": model,
+            "profile": profile,
+            "target_run": target_run_id or "none",
+            "task": ",".join(batch_ids),
+            "tool": tool,
+            "variant": variant,
+        }
+
+        bundle_hash = hashlib.sha256("".join(sorted(t.get("bundle_sha256", "") for t in task_list)).encode("utf-8")).hexdigest()
+        repo_head = get_repo_head(target_repo)
+        plan_hash = compute_plan_hash(
+            canonical_request=canonical_request,
+            task_bundle_hash=bundle_hash,
+            effective_argv_redacted=argv_display,
+            prompt=prompt,
+            repo_head=repo_head,
+            effective_config=merged_cfg,
+        )
+
+        data = {
+            "is_batch": True,
+            "batch_members": batch_ids,
+            "member_tasks": task_list,
+            "task_id": "batch",
+            "task": {"id": ",".join(batch_ids), "title": f"Batch run for {', '.join(batch_ids)}"},
+            "canonical_state": "open",
+            "mode": mode,
+            "ws": ws,
+            "merged_cfg": merged_cfg,
+            "project_cfg": project_cfg,
+            "global_cfg": global_cfg,
+            "target_repo": target_repo,
+            "target_run_id": target_run_id,
+            "target_run_tool": target_run_tool,
+            "target_commit": target_commit,
+            "tool": tool,
+            "tool_cfg": tool_cfg,
+            "profile": profile,
+            "model": model,
+            "variant": variant,
+            "effort": effort,
+            "isolation": isolation,
+            "cwd": cwd,
+            "planned_branch": planned_branch,
+            "planned_worktree": planned_worktree,
+            "prompt": prompt,
+            "prompt_sha256": prompt_sha256,
+            "raw_argv": raw_argv,
+            "argv_display": argv_display,
+            "canonical_request": canonical_request,
+            "bundle_hash": bundle_hash,
+            "repo_head": repo_head,
+            "plan_hash": plan_hash,
+            "warnings": warnings,
+            "allowed_tools": allowed_tools,
+            "allowed_tools_source": allowed_tools_source,
+            "verification_mode": None,
+            "attachment_paths": [],
+        }
+        return True, None, data
+
     target_is_note = False
     if note_id_arg:
         target_is_note = True
@@ -3077,13 +3508,6 @@ def validate_run_request(
         target_id = task_id_arg.strip()
     elif task_id_arg:
         target_id = task_id_arg.strip()
-    else:
-        return False, ("missing-target", "Either --task or --note is required"), None
-
-    ws = pathlib.Path(args.workspace or ".").resolve()
-    tasks_dir = ws / "tasks"
-    if not tasks_dir.is_dir():
-        return False, ("tasks-dir-not-found", f"Tasks directory not found at {tasks_dir}"), None
 
     if target_is_note:
         valid_note, note_err = check_note_id(target_id)
@@ -3642,10 +4066,15 @@ def cmd_preview(args: argparse.Namespace) -> int:
         "allowed_tools": data.get("allowed_tools"),  # type: ignore
         "allowed_tools_source": data.get("allowed_tools_source"),  # type: ignore
     }
+    if data.get("is_batch"):
+        payload["is_batch"] = True
+        payload["batch_members"] = data["batch_members"]
 
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
+        if data.get("is_batch"):
+            print(f"Batch Members   : {', '.join(data['batch_members'])}")  # type: ignore
         print(f"Mode            : {data['mode']}")  # type: ignore
         print(f"Tool / Profile  : {data['tool']} / {data['profile']}")  # type: ignore
         print(f"Model           : {data['model']}")  # type: ignore
@@ -3874,8 +4303,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         return 0
 
     # --- Normal launch flow ---
-    if not getattr(args, "task", None) and not getattr(args, "note", None):
-        print_error(args.json, "missing-target", "Either --task or --note is required for run start")
+    if not getattr(args, "task", None) and not getattr(args, "note", None) and not getattr(args, "batch", None):
+        print_error(args.json, "missing-target", "Either --task, --note, or --batch is required for run start")
         return 1
 
     if req_by in ("ui", "vscode") and not getattr(args, "expect_plan_hash", None):
@@ -3915,13 +4344,21 @@ def cmd_start(args: argparse.Namespace) -> int:
     target_repo = data["target_repo"]  # type: ignore
 
     with run_lock(ws):
-        all_runs = list_run_records(ws, task_id=task_id)
-        active_runs = [r for r in all_runs if r.get("status") in ACTIVE_STATES]
-
-        task_act_ok, task_act_err = check_same_task_active(task_id, active_runs, force=args.force)
-        if not task_act_ok:
-            print_error(args.json, "same-task-active", task_act_err or "Task already has an active run")
-            return 1
+        if data.get("is_batch"):
+            all_runs = list_run_records(ws)
+            active_runs = [r for r in all_runs if r.get("status") in ACTIVE_STATES]
+            for m_id in data.get("batch_members", []):
+                task_act_ok, task_act_err = check_same_task_active(m_id, active_runs, force=args.force)
+                if not task_act_ok:
+                    print_error(args.json, "same-task-active", task_act_err or f"Task '{m_id}' already has an active run")
+                    return 1
+        else:
+            all_runs = list_run_records(ws, task_id=task_id)
+            active_runs = [r for r in all_runs if r.get("status") in ACTIVE_STATES]
+            task_act_ok, task_act_err = check_same_task_active(task_id, active_runs, force=args.force)
+            if not task_act_ok:
+                print_error(args.json, "same-task-active", task_act_err or "Task already has an active run")
+                return 1
 
         cwd_act_ok, cwd_act_err = check_same_cwd_active(data["cwd"], data["isolation"], active_runs)  # type: ignore
         if not cwd_act_ok:
@@ -4053,8 +4490,11 @@ def cmd_start(args: argparse.Namespace) -> int:
                 print(f"Panel {panel_id} started with {len(run_ids)} runs: {', '.join(run_ids)}.")
             return 0
 
-        # Single run launch
-        run_id = generate_run_id(task_id, data["tool"])  # type: ignore
+        # Single or batch run launch
+        if data.get("is_batch"):
+            run_id = generate_run_id("batch", data["tool"])
+        else:
+            run_id = generate_run_id(task_id, data["tool"])  # type: ignore
         run_dir = ws / ".ai-orchestration" / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -4143,9 +4583,24 @@ def cmd_start(args: argparse.Namespace) -> int:
         )
         argv_display = redact_argv(raw_argv)
 
+        members_map = None
+        if data.get("is_batch"):
+            members_map = {}
+            for m_task in data.get("member_tasks", []):
+                mid = m_task["id"]
+                members_map[mid] = {
+                    "id": mid,
+                    "title": m_task.get("title", ""),
+                    "state": m_task.get("canonical_state", "open"),
+                    "delivered": False,
+                    "commit": None,
+                    "reason": None,
+                    "transition_note": None,
+                }
+
         record = create_run_record(
             run_id=run_id,
-            task_id=task_id,
+            task_id="batch" if data.get("is_batch") else task_id,
             mode=data["mode"],  # type: ignore
             tool=data["tool"],  # type: ignore
             profile=data["profile"],  # type: ignore
@@ -4170,6 +4625,9 @@ def cmd_start(args: argparse.Namespace) -> int:
             note_bundle_sha256=data.get("bundle_hash") if data["mode"] == "triage" else None,
             attachment_paths=data.get("attachment_paths"),
             created_worktree=created_worktree,
+            is_batch=bool(data.get("is_batch")),
+            batch_members=data.get("batch_members"),
+            members=members_map,
         )
         if session_id:
             record["session_id"] = session_id
@@ -4196,9 +4654,16 @@ def cmd_start(args: argparse.Namespace) -> int:
         )
 
     if args.json:
-        print(json.dumps({"ok": True, "run_id": run_id, "status": "starting", "plan_hash": data["plan_hash"]}, indent=2))  # type: ignore
+        out_obj = {"ok": True, "run_id": run_id, "status": "starting", "plan_hash": data["plan_hash"]}
+        if data.get("is_batch"):
+            out_obj["is_batch"] = True
+            out_obj["batch_members"] = data["batch_members"]
+        print(json.dumps(out_obj, indent=2))  # type: ignore
     else:
-        print(f"Run {run_id} started (status: starting).")
+        if data.get("is_batch"):
+            print(f"Batch run {run_id} started ({len(data['batch_members'])} microtasks: {', '.join(data['batch_members'])}).")
+        else:
+            print(f"Run {run_id} started (status: starting).")
     return 0
 
 
@@ -4324,18 +4789,36 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         try:
             tasks_dir = workspace / "tasks"
             if tasks_dir.is_dir() and transition_task:
-                t = resolve_task_by_id(tasks_dir, record["task_id"])
-                state = t.get("canonical_state") if t else None
-                if state in ("open", "bounced"):
-                    ok, trans_res = transition_task(
-                        tasks_dir=tasks_dir,
-                        task_id=record["task_id"],
-                        new_state="in progress",
-                        actor=record.get("tool"),
-                    )
-                    if not ok:
-                        record["task_transition_error"] = trans_res.get("error") or str(trans_res)
-                        save_run_record(workspace, record)
+                if record.get("is_batch"):
+                    for m_id in record.get("batch_members", []):
+                        t = resolve_task_by_id(tasks_dir, m_id)
+                        state = t.get("canonical_state") if t else None
+                        if state in ("open", "bounced"):
+                            ok, trans_res = transition_task(
+                                tasks_dir=tasks_dir,
+                                task_id=m_id,
+                                new_state="in progress",
+                                actor=record.get("tool"),
+                            )
+                            if ok:
+                                if "members" in record and isinstance(record["members"], dict) and m_id in record["members"]:
+                                    record["members"][m_id]["state"] = "in progress"
+                            else:
+                                record.setdefault("task_transition_errors", {})[m_id] = trans_res.get("error") or str(trans_res)
+                    save_run_record(workspace, record)
+                else:
+                    t = resolve_task_by_id(tasks_dir, record["task_id"])
+                    state = t.get("canonical_state") if t else None
+                    if state in ("open", "bounced"):
+                        ok, trans_res = transition_task(
+                            tasks_dir=tasks_dir,
+                            task_id=record["task_id"],
+                            new_state="in progress",
+                            actor=record.get("tool"),
+                        )
+                        if not ok:
+                            record["task_transition_error"] = trans_res.get("error") or str(trans_res)
+                            save_run_record(workspace, record)
         except Exception as e:
             record["task_transition_error"] = str(e)
             save_run_record(workspace, record)
@@ -4630,31 +5113,116 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             else:
                 record["commits_after_base"] = 0
 
+    # Batch run mapping of commits (07.11)
+    if record.get("mode") == "execute" and record.get("status") == "succeeded" and record.get("is_batch"):
+        try:
+            tasks_dir = workspace / "tasks"
+            wt_path = pathlib.Path(record.get("worktree_path") or record.get("cwd"))
+            base_commit = record.get("base_commit")
+            log_range = f"{base_commit}..HEAD" if base_commit else "HEAD"
+            res_log = subprocess.run(
+                ["git", "log", "--format=%H %s", log_range],
+                cwd=str(wt_path),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            mapped_commits: dict[str, str] = {}
+            if res_log.returncode == 0:
+                for line in res_log.stdout.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(" ", 1)
+                    sha = parts[0]
+                    subject = parts[1] if len(parts) > 1 else ""
+                    m = re.match(r"^(T\d{3,}):", subject.strip())
+                    if m:
+                        tid = m.group(1)
+                        if tid not in mapped_commits:
+                            mapped_commits[tid] = sha
+
+            if "members" not in record or not isinstance(record["members"], dict):
+                record["members"] = {}
+
+            for m_id in record.get("batch_members", []):
+                if m_id not in record["members"]:
+                    record["members"][m_id] = {"id": m_id}
+
+                if m_id in mapped_commits:
+                    c_sha = mapped_commits[m_id]
+                    deliv_reason = f"commit {c_sha}"
+                    if tasks_dir.is_dir() and transition_task:
+                        ok_trans, trans_res = transition_task(
+                            tasks_dir=tasks_dir,
+                            task_id=m_id,
+                            new_state="delivered",
+                            actor=record.get("tool"),
+                            reason=deliv_reason,
+                        )
+                        if not ok_trans:
+                            record.setdefault("task_transition_errors", {})[m_id] = trans_res.get("error") or str(trans_res)
+                    record["members"][m_id].update({
+                        "delivered": True,
+                        "state": "delivered",
+                        "commit": c_sha,
+                        "reason": deliv_reason,
+                        "transition_note": deliv_reason,
+                    })
+                else:
+                    no_commit_reason = f"No commit produced with prefix {m_id}: in run {record['run_id']}"
+                    record["members"][m_id].update({
+                        "delivered": False,
+                        "state": "in progress",
+                        "commit": None,
+                        "reason": no_commit_reason,
+                        "transition_note": no_commit_reason,
+                    })
+                    t = resolve_task_by_id(tasks_dir, m_id)
+                    if t and t.get("file_path"):
+                        tf_path = pathlib.Path(t["file_path"])
+                        if tf_path.is_file():
+                            content = tf_path.read_text(encoding="utf-8")
+                            new_content = re.sub(
+                                r"^(- state:\s*in progress)(?:\s*\(.*\))?$",
+                                f"- state: in progress ({no_commit_reason})",
+                                content,
+                                flags=re.MULTILINE,
+                            )
+                            if new_content != content:
+                                tf_path.write_text(new_content, encoding="utf-8")
+            save_run_record(workspace, record)
+        except Exception as e:
+            record["task_transition_error"] = str(e)
+            save_run_record(workspace, record)
+
     # Item 5: Failed execute run sets task to blocked with failure reason
     if record.get("mode") == "execute" and record.get("status") == "failed":
         try:
             tasks_dir = workspace / "tasks"
             if tasks_dir.is_dir() and transition_task:
-                t = resolve_task_by_id(tasks_dir, record["task_id"])
-                state = t.get("canonical_state") if t else None
-                if state == "in progress":
-                    allowed = ALLOWED_TRANSITIONS.get("in progress", set()) if ALLOWED_TRANSITIONS else set()
-                    base_target = "bounced" if "bounced" in allowed else "blocked"
-                    failure_reason = (
-                        record.get("invariant_error")
-                        or record.get("agent_error")
-                        or f"Execute run {record['run_id']} failed with exit code {record.get('exit_code')}"
-                    )
-                    target_state = f"{base_target}: {failure_reason}"
-                    ok_trans, trans_res = transition_task(
-                        tasks_dir=tasks_dir,
-                        task_id=record["task_id"],
-                        new_state=target_state,
-                        actor=record.get("tool"),
-                        reason=failure_reason,
-                    )
-                    if not ok_trans:
-                        record["task_transition_error"] = trans_res.get("error") or str(trans_res)
+                target_ids = record.get("batch_members", []) if record.get("is_batch") else [record["task_id"]]
+                for tid in target_ids:
+                    t = resolve_task_by_id(tasks_dir, tid)
+                    state = t.get("canonical_state") if t else None
+                    if state == "in progress":
+                        allowed = ALLOWED_TRANSITIONS.get("in progress", set()) if ALLOWED_TRANSITIONS else set()
+                        base_target = "bounced" if "bounced" in allowed else "blocked"
+                        failure_reason = (
+                            record.get("invariant_error")
+                            or record.get("agent_error")
+                            or f"Execute run {record['run_id']} failed with exit code {record.get('exit_code')}"
+                        )
+                        target_state = f"{base_target}: {failure_reason}"
+                        ok_trans, trans_res = transition_task(
+                            tasks_dir=tasks_dir,
+                            task_id=tid,
+                            new_state=target_state,
+                            actor=record.get("tool"),
+                            reason=failure_reason,
+                        )
+                        if not ok_trans:
+                            record.setdefault("task_transition_errors", {})[tid] = trans_res.get("error") or str(trans_res)
         except Exception as e:
             record["task_transition_error"] = str(e)
 
@@ -4925,6 +5493,65 @@ def cmd_mark_delivered(args: argparse.Namespace) -> int:
             return 1
 
         # 6. Task transition
+        if record.get("is_batch"):
+            target_member = getattr(args, "member", None)
+            if target_member:
+                if target_member not in record.get("batch_members", []):
+                    print_error(args.json, "member-not-in-batch", f"Task '{target_member}' is not a member of batch run '{run_id}'")
+                    return 1
+                members_to_deliver = [target_member]
+            else:
+                members_to_deliver = list(record.get("batch_members", []))
+
+            transitioned = []
+            for m_id in members_to_deliver:
+                task = resolve_task_by_id(tasks_dir, m_id)
+                if not task:
+                    print_error(args.json, "task-not-found", f"Task '{m_id}' not found in tasks/")
+                    return 1
+                if task.get("canonical_state") == "in progress":
+                    deliv_reason = f"Delivered by run {run_id}"
+                    final_commit = record.get("final_commit")
+                    if final_commit:
+                        deliv_reason += f" in commit {final_commit}"
+                    ok, trans_res = transition_task(
+                        tasks_dir=tasks_dir,
+                        task_id=m_id,
+                        new_state="delivered",
+                        actor=record.get("tool"),
+                        reason=deliv_reason,
+                        expect_task_hash=getattr(args, "expect_task_hash", None),
+                    )
+                    if not ok:
+                        err_msg = trans_res.get("error") or str(trans_res)
+                        print_error(args.json, "transition-failed", f"Failed to transition task {m_id}: {err_msg}")
+                        return 1
+                    if "members" in record and isinstance(record["members"], dict) and m_id in record["members"]:
+                        record["members"][m_id]["delivered"] = True
+                        record["members"][m_id]["state"] = "delivered"
+                        record["members"][m_id]["reason"] = deliv_reason
+                        record["members"][m_id]["transition_note"] = deliv_reason
+                    transitioned.append(m_id)
+                elif task.get("canonical_state") == "delivered":
+                    transitioned.append(m_id)
+                else:
+                    print_error(args.json, "invalid-task-state", f"Task '{m_id}' is in state '{task.get('canonical_state')}', expected 'in progress'")
+                    return 1
+
+            save_run_record(ws, record)
+            if args.json:
+                print(json.dumps({"ok": True, "run_id": run_id, "members": transitioned, "state": "delivered"}, indent=2))
+            else:
+                if target_member:
+                    print(f"Task {target_member} transitioned to delivered (run {run_id}).")
+                else:
+                    print(f"Batch tasks {', '.join(transitioned)} transitioned to delivered (run {run_id}).")
+            return 0
+
+        if getattr(args, "member", None):
+            print_error(args.json, "member-not-batch", "--member can only be specified for batch runs")
+            return 1
+
         task = resolve_task_by_id(tasks_dir, record["task_id"])
         if not task:
             print_error(args.json, "task-not-found", f"Task '{record['task_id']}' not found in tasks/")
@@ -5000,6 +5627,41 @@ def cmd_apply_verdict(args: argparse.Namespace) -> int:
         if verdict_val not in ("verified", "bounced"):
             print_error(args.json, "invalid-verdict", f"Verdict '{verdict_val}' must be 'verified' or 'bounced'")
             return 1
+
+        if record.get("is_batch"):
+            target_ids = record.get("batch_members", [])
+            verifier = f"{record['tool']}:{record.get('profile', 'deep-reasoning')}"
+            findings = verdict_obj.get("findings", [])
+            findings_str = "; ".join(f"{f.get('id', '')}: {f.get('text', '')}" for f in findings) or "Verification bounced"
+            transitioned_members = []
+            with safe_task_write_lock(tasks_dir):
+                for tid in target_ids:
+                    task = resolve_task_by_id(tasks_dir, tid)
+                    if not task:
+                        continue
+                    if task.get("canonical_state") == "delivered":
+                        if verdict_val == "verified":
+                            ok, trans_res = transition_task(
+                                tasks_dir=tasks_dir,
+                                task_id=tid,
+                                new_state="verified",
+                                verifier=verifier,
+                            )
+                        else:
+                            ok, trans_res = transition_task(
+                                tasks_dir=tasks_dir,
+                                task_id=tid,
+                                new_state="bounced",
+                                reason=findings_str,
+                            )
+                        if ok:
+                            transitioned_members.append(tid)
+
+            if args.json:
+                print(json.dumps({"ok": True, "task_id": "batch", "members": transitioned_members, "state": verdict_val, "run_id": run_id}, indent=2))
+            else:
+                print(f"Verdict applied: Batch tasks {', '.join(transitioned_members)} transitioned to {verdict_val} (run {run_id}).")
+            return 0
 
         task = resolve_task_by_id(tasks_dir, record["task_id"])
         if not task:
@@ -5469,7 +6131,10 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     target_repo = ws
     tasks_dir = ws / "tasks"
     if tasks_dir.is_dir():
-        task = resolve_task_by_id(tasks_dir, record["task_id"])
+        if record.get("is_batch") and record.get("batch_members"):
+            task = resolve_task_by_id(tasks_dir, record["batch_members"][0])
+        else:
+            task = resolve_task_by_id(tasks_dir, record.get("task_id", ""))
         if task:
             tr, _, _ = resolve_target_repo(ws, task.get("paths"))
             if tr:
@@ -5569,6 +6234,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_prev = sub.add_parser("preview", help="Validate launch request and return binding preview")
     p_prev.add_argument("--task", default=None, help="Task ID (e.g. T007) or inbox note ID (e.g. N001)")
     p_prev.add_argument("--note", default=None, help="Inbox note ID (e.g. N001)")
+    p_prev.add_argument("--batch", default=None, help="Comma-separated microtask IDs for batch run (e.g. T001,T002)")
     p_prev.add_argument("--mode", choices=("orchestrate", "execute", "verify", "triage"), default=None)
     p_prev.add_argument("--tool", default=None, help="Target tool (kilo, claude, codex)")
     p_prev.add_argument("--profile", default=None, help="Role profile")
@@ -5591,6 +6257,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start = sub.add_parser("start", help="Start agent run with supervisor")
     p_start.add_argument("--task", default=None, help="Task ID (e.g. T007) or inbox note ID (e.g. N001)")
     p_start.add_argument("--note", default=None, help="Inbox note ID (e.g. N001)")
+    p_start.add_argument("--batch", default=None, help="Comma-separated microtask IDs for batch run (e.g. T001,T002)")
     p_start.add_argument("--continue", dest="continue_run_id", default=None, help="Continue a terminal run")
     p_start.add_argument("--mode", choices=("orchestrate", "execute", "verify", "triage"), default=None)
     p_start.add_argument("--tool", default=None, help="Target tool (kilo, claude, codex)")
@@ -5615,6 +6282,7 @@ def build_parser() -> argparse.ArgumentParser:
     # mark-delivered
     p_deliv = sub.add_parser("mark-delivered", help="Transition task to delivered after successful execute run")
     p_deliv.add_argument("run_id", help="Run ID")
+    p_deliv.add_argument("--member", default=None, help="Microtask member ID to mark delivered in a batch run (e.g. T001)")
     p_deliv.add_argument("--expect-task-hash", "--expect-task-sha256", dest="expect_task_hash", default=None, help="Expected task bundle hash")
     p_deliv.add_argument("--workspace", default=None, help="Project workspace root")
     p_deliv.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)

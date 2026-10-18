@@ -64,6 +64,7 @@ from orchestration_runs import (
     resolve_claude_allowed_tools,
     check_claude_allowed_tools,
     DEFAULT_CLAUDE_ALLOWED_TOOLS,
+    resolve_task_by_id,
 )
 
 SCRIPT = pathlib.Path(__file__).resolve().parent / "orchestration_runs.py"
@@ -4653,3 +4654,356 @@ def test_t022_verify_without_profile_uses_configured_profile(tmp_path: pathlib.P
     data_dr = json.loads(res_dr.stdout)
     assert data_dr["ok"] is False
     assert data_dr["reason"] == "model-not-configured"
+
+
+# ---------------------------------------------------------------------------
+# Task 07.11: Batch runs for microtasks
+# ---------------------------------------------------------------------------
+
+def create_microtask(
+    ws: pathlib.Path,
+    task_id: str,
+    title: str,
+    paths: str = "-",
+    state: str = "open",
+    kind: str = "chore",
+) -> pathlib.Path:
+    micro_dir = ws / "tasks" / "micro"
+    micro_dir.mkdir(parents=True, exist_ok=True)
+    readme = micro_dir / "README.md"
+    if not readme.exists():
+        readme.write_text("# micro tasks\n", encoding="utf-8")
+    slug = title.lower().replace(" ", "-")
+    task_file = micro_dir / f"{task_id}-{slug}.md"
+    content = (
+        f"# {task_id} {title}\n\n"
+        f"- id: {task_id}\n"
+        f"- title: {title}\n"
+        f"- kind: {kind}\n"
+        f"- priority: P2\n"
+        f"- state: {state}\n"
+        f"- executor: kilo\n"
+        f"- paths: {paths}\n"
+        f"- depends-on: -\n"
+        f"- size: XS\n"
+        f"- labels: -\n\n"
+        f"## What\n\n"
+        f"Implementation details for {title}.\n"
+    )
+    task_file.write_text(content, encoding="utf-8")
+    return task_file
+
+
+def test_batch_run_validation_mixed_repo_refused(sample_workspace: pathlib.Path, tmp_path: pathlib.Path):
+    other_repo = tmp_path / "other_repo"
+    other_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=str(other_repo), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.local"], cwd=str(other_repo), check=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=str(other_repo), check=True)
+    other_file = other_repo / "foo.py"
+    other_file.write_text("print('other')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(other_repo), check=True)
+    subprocess.run(["git", "commit", "-m", "init other"], cwd=str(other_repo), check=True)
+
+    create_microtask(sample_workspace, "T011", "First microtask", paths="-")
+    create_microtask(sample_workspace, "T012", "Second microtask", paths=str(other_file))
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "add microtasks"], cwd=str(sample_workspace), check=True)
+
+    cmd = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--batch",
+        "T011,T012",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    assert res.returncode != 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is False
+    assert data["reason"] == "mixed-target-repos"
+
+
+def test_batch_run_validation_non_micro_refused(sample_workspace: pathlib.Path):
+    create_microtask(sample_workspace, "T013", "Third microtask")
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "add T013"], cwd=str(sample_workspace), check=True)
+
+    cmd = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--batch",
+        "T013,T007",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    assert res.returncode != 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is False
+    assert data["reason"] == "non-microtask-refused"
+
+
+def test_batch_run_validation_exclusivity_and_state(sample_workspace: pathlib.Path):
+    create_microtask(sample_workspace, "T014", "Task 14", state="open")
+    create_microtask(sample_workspace, "T015", "Task 15", state="open")
+    create_microtask(sample_workspace, "T016", "Task 16", state="delivered")
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "add microtasks"], cwd=str(sample_workspace), check=True)
+
+    # Exclusivity with --task
+    cmd_excl = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--batch",
+        "T014,T015",
+        "--task",
+        "T014",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_excl = subprocess.run(cmd_excl, capture_output=True, text=True, check=False)
+    assert res_excl.returncode != 0
+    data_excl = json.loads(res_excl.stdout)
+    assert data_excl["reason"] == "mutually-exclusive-targets"
+
+    # State not open or bounced
+    cmd_state = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--batch",
+        "T014,T016",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_state = subprocess.run(cmd_state, capture_output=True, text=True, check=False)
+    assert res_state.returncode != 0
+    data_state = json.loads(res_state.stdout)
+    assert data_state["reason"] == "invalid-task-state"
+
+
+def test_batch_run_execution_all_delivered(sample_workspace: pathlib.Path):
+    create_microtask(sample_workspace, "T021", "Task 21")
+    create_microtask(sample_workspace, "T022", "Task 22")
+    create_microtask(sample_workspace, "T023", "Task 23")
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit-msg", "T021: work on 21", "--commit-msg", "T022: work on 22", "--commit-msg", "T023: work on 23", "--final-report", "--exit-code", "0"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "setup batch 21-23"], cwd=str(sample_workspace), check=True)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--batch",
+        "T021,T022,T023",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    data_start = json.loads(res_start.stdout)
+    assert data_start["ok"] is True
+    assert data_start["is_batch"] is True
+    assert data_start["batch_members"] == ["T021", "T022", "T023"]
+    run_id = data_start["run_id"]
+
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+    assert rec["is_batch"] is True
+    assert rec["commits_after_base"] == 3
+    assert rec["members"]["T021"]["delivered"] is True
+    assert rec["members"]["T022"]["delivered"] is True
+    assert rec["members"]["T023"]["delivered"] is True
+
+    tasks_dir = sample_workspace / "tasks"
+    for tid in ("T021", "T022", "T023"):
+        t = resolve_task_by_id(tasks_dir, tid)
+        assert t is not None
+        assert t["canonical_state"] == "delivered"
+
+
+def test_batch_run_execution_partial_commit_and_mark_delivered(sample_workspace: pathlib.Path):
+    create_microtask(sample_workspace, "T031", "Task 31")
+    create_microtask(sample_workspace, "T032", "Task 32")
+    create_microtask(sample_workspace, "T033", "Task 33")
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit-msg", "T031: work on 31", "--commit-msg", "T033: work on 33", "--final-report", "--exit-code", "0"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "setup batch 31-33"], cwd=str(sample_workspace), check=True)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--batch",
+        "T031,T032,T033",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res_start.stdout)["run_id"]
+
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+    assert rec["members"]["T031"]["delivered"] is True
+    assert rec["members"]["T033"]["delivered"] is True
+    assert rec["members"]["T032"]["delivered"] is False
+    assert "No commit produced with prefix T032:" in rec["members"]["T032"]["reason"]
+
+    tasks_dir = sample_workspace / "tasks"
+    t31 = resolve_task_by_id(tasks_dir, "T031")
+    t32 = resolve_task_by_id(tasks_dir, "T032")
+    t33 = resolve_task_by_id(tasks_dir, "T033")
+    assert t31["canonical_state"] == "delivered"
+    assert t33["canonical_state"] == "delivered"
+    assert t32["canonical_state"] == "in progress"
+    assert "No commit produced with prefix T032:" in t32["state"]
+
+    # Mark delivered per member
+    cmd_deliv = [
+        str(BIN_AI_ORCH),
+        "run",
+        "mark-delivered",
+        run_id,
+        "--member",
+        "T032",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_deliv = subprocess.run(cmd_deliv, capture_output=True, text=True, check=True)
+    data_deliv = json.loads(res_deliv.stdout)
+    assert data_deliv["ok"] is True
+    assert "T032" in data_deliv["members"]
+
+    t32_after = resolve_task_by_id(tasks_dir, "T032")
+    assert t32_after["canonical_state"] == "delivered"
+
+    rec_after = load_run_record(sample_workspace, run_id)
+    assert rec_after["members"]["T032"]["delivered"] is True
+
+
+def test_batch_run_verify_per_member_and_whole_batch(sample_workspace: pathlib.Path):
+    create_microtask(sample_workspace, "T041", "Task 41")
+    create_microtask(sample_workspace, "T042", "Task 42")
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit-msg", "T041: 41", "--commit-msg", "T042: 42", "--final-report", "--exit-code", "0"]\n'
+        + f'[tools.claude.headless]\nallowed_tools = ["test"]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--verdict", "verified"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "setup batch 41-42"], cwd=str(sample_workspace), check=True)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--batch",
+        "T041,T042",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    exec_run_id = json.loads(res_start.stdout)["run_id"]
+
+    rec_exec = wait_for_terminal(sample_workspace, exec_run_id)
+    assert rec_exec["status"] == "succeeded"
+
+    tasks_dir = sample_workspace / "tasks"
+    assert resolve_task_by_id(tasks_dir, "T041")["canonical_state"] == "delivered"
+    assert resolve_task_by_id(tasks_dir, "T042")["canonical_state"] == "delivered"
+
+    # 1. Verify per member: T041
+    cmd_ver_single = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T041",
+        "--mode",
+        "verify",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_ver_single = subprocess.run(cmd_ver_single, capture_output=True, text=True, check=True)
+    ver_run_id = json.loads(res_ver_single.stdout)["run_id"]
+    rec_ver = wait_for_terminal(sample_workspace, ver_run_id)
+    assert rec_ver["status"] == "succeeded"
+    assert rec_ver["target_run"] == exec_run_id
+
+    cmd_app = [
+        str(BIN_AI_ORCH),
+        "run",
+        "apply-verdict",
+        ver_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_app = subprocess.run(cmd_app, capture_output=True, text=True, check=True)
+    assert json.loads(res_app.stdout)["ok"] is True
+    assert resolve_task_by_id(tasks_dir, "T041")["canonical_state"] == "verified"
+
+    # 2. Whole batch verify: T042
+    cmd_ver_batch = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--batch",
+        "T042",
+        "--mode",
+        "verify",
+        "--target-run",
+        exec_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_ver_batch = subprocess.run(cmd_ver_batch, capture_output=True, text=True, check=True)
+    batch_ver_run_id = json.loads(res_ver_batch.stdout)["run_id"]
+    rec_bver = wait_for_terminal(sample_workspace, batch_ver_run_id)
+    assert rec_bver["status"] == "succeeded"
+    assert rec_bver["is_batch"] is True
+
+    cmd_app_batch = [
+        str(BIN_AI_ORCH),
+        "run",
+        "apply-verdict",
+        batch_ver_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_app_b = subprocess.run(cmd_app_batch, capture_output=True, text=True, check=True)
+    assert json.loads(res_app_b.stdout)["ok"] is True
+    assert resolve_task_by_id(tasks_dir, "T042")["canonical_state"] == "verified"
+
