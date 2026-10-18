@@ -45,6 +45,7 @@ ORCH_RUNS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_runs.py"
 ORCH_EVENTS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_events.py"
 ORCH_SESSIONS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_sessions.py"
 ORCH_TRIGGERS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_triggers.py"
+ORCH_ORCHESTRATOR_SCRIPT = REPO_ROOT / "scripts" / "orchestration_orchestrator.py"
 
 CLI_DESCRIPTION: dict[str, Any] = {
     "name": "ai-orch",
@@ -453,6 +454,57 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
             },
         },
+        "orchestrator": {
+            "script": str(ORCH_ORCHESTRATOR_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch orchestrator <subcommand> [options] [--json]",
+            "description": "Headless orchestrator role engine (turns, queue, bounds, rotation, fenced succession).",
+            "subcommands": {
+                "status": {
+                    "usage": "ai-orch orchestrator status [--workspace <dir>] [--json]",
+                    "description": "Display status of the orchestrator role and queue.",
+                },
+                "start": {
+                    "usage": "ai-orch orchestrator start [--tool <tool>] [--model <model>] [--force] [--workspace <dir>] [--json]",
+                    "description": "Start the orchestrator role session.",
+                },
+                "stop": {
+                    "usage": "ai-orch orchestrator stop [--workspace <dir>] [--json]",
+                    "description": "Stop the orchestrator role and retire its session.",
+                },
+                "pause": {
+                    "usage": "ai-orch orchestrator pause [--workspace <dir>] [--json]",
+                    "description": "Pause the orchestrator role.",
+                },
+                "resume": {
+                    "usage": "ai-orch orchestrator resume [--workspace <dir>] [--json]",
+                    "description": "Resume the paused orchestrator role.",
+                },
+                "queue": {
+                    "usage": "ai-orch orchestrator queue [--state <state>] [--workspace <dir>] [--json]",
+                    "description": "List turn queue items.",
+                },
+                "enqueue": {
+                    "usage": "ai-orch orchestrator enqueue [--message <text>] [--type <type>] [--priority <priority>] [--workspace <dir>] [--json]",
+                    "description": "Enqueue a turn request.",
+                },
+                "run-next": {
+                    "usage": "ai-orch orchestrator run-next [--timeout <sec>] [--workspace <dir>] [--json]",
+                    "description": "Drain and run the next turn from the queue.",
+                },
+                "rotate": {
+                    "usage": "ai-orch orchestrator rotate [--tool <tool>] [--model <model>] [--reason <reason>] [--no-handoff] [--workspace <dir>] [--json]",
+                    "description": "Rotate orchestrator role to next generation with handoff.",
+                },
+                "hand-off": {
+                    "usage": "ai-orch orchestrator hand-off [--workspace <dir>] [--json]",
+                    "description": "Generate and inspect the handoff prompt.",
+                },
+                "cancel": {
+                    "usage": "ai-orch orchestrator cancel <turn_id> [--workspace <dir>] [--json]",
+                    "description": "Cancel a queued or running turn.",
+                },
+            },
+        },
     },
 }
 
@@ -526,6 +578,10 @@ def main() -> int:
 
     if group in ("triggers", "trigger"):
         proc = subprocess.run([sys.executable, str(ORCH_TRIGGERS_SCRIPT), *rest], check=False)
+        return proc.returncode
+
+    if group in ("orchestrator", "orch"):
+        proc = subprocess.run([sys.executable, str(ORCH_ORCHESTRATOR_SCRIPT), *rest], check=False)
         return proc.returncode
 
     if group == "render-agents-md":
