@@ -130,6 +130,7 @@ DEFAULT_WALL_CLOCK_TIMEOUT_SECONDS = 900.0  # 15 minutes (Spec §0c E5)
 DEFAULT_ROTATE_AFTER_TOKENS = 100_000  # Spec §0c E8
 DEFAULT_MAX_LOG_SIZE = 50 * 1024 * 1024  # 50 MB log cap (Spec §0c E5)
 LEASE_DURATION_SECONDS = 960.0  # 16 minutes (slightly longer than turn timeout)
+DEFAULT_STARTUP_GRACE_PERIOD_SECONDS = 60.0  # 60s startup grace period for claim before pid is written (T027)
 
 # Thread-safety & in-process re-entrancy tracking for orchestrator lock
 _ORCH_LOCK_COUNTS: dict[str, int] = {}
@@ -297,6 +298,32 @@ def _get_timeout_seconds(workspace: pathlib.Path) -> float:
         except (ValueError, TypeError):
             pass
     return DEFAULT_WALL_CLOCK_TIMEOUT_SECONDS
+
+
+def _get_startup_grace_period_seconds(workspace: pathlib.Path) -> float:
+    cfg = _load_merged_config(workspace)
+    orch_cfg = cfg.get("orchestrator", {})
+    if isinstance(orch_cfg, dict):
+        for key in ("startup_grace_period_seconds", "startup_grace_seconds"):
+            if key in orch_cfg:
+                try:
+                    return float(orch_cfg[key])
+                except (ValueError, TypeError):
+                    pass
+    return DEFAULT_STARTUP_GRACE_PERIOD_SECONDS
+
+
+def _parse_iso_dt(dt_str: str | None) -> datetime.datetime | None:
+    if not dt_str:
+        return None
+    try:
+        clean = dt_str.replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(clean)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
 
 
 # Last-resort defaults when the config has no `orchestration` profile for the tool.
@@ -1275,41 +1302,81 @@ def run_next_turn(
         if role_status == "stopped":
             return {"status": "stopped", "message": "Orchestrator role is stopped"}
 
-        # Check for active running turn (Crash-safe recovery per E6)
+        # Check for active running turn (Crash-safe recovery per E6, T027)
         active_items = list_queue(ws)
         for item in active_items:
             if item.get("state") in ("claimed", "running"):
                 pid = item.get("pid")
                 start_time = item.get("start_time")
-                if pid and is_process_alive(pid, start_time):
-                    # Active turn is still executing
-                    return {
-                        "status": "busy",
-                        "turn_id": item.get("turn_id"),
-                        "pid": pid,
-                        "message": "Another turn is currently running",
-                    }
+                if pid:
+                    if is_process_alive(pid, start_time):
+                        # Active turn is still executing
+                        return {
+                            "status": "busy",
+                            "turn_id": item.get("turn_id"),
+                            "pid": pid,
+                            "message": "Another turn is currently running",
+                        }
+                    is_live = False
                 else:
+                    # Child PID not yet written (startup window)
+                    worker_pid = item.get("worker_pid")
+                    worker_alive = bool(worker_pid and is_process_alive(worker_pid))
+
+                    now_dt = datetime.datetime.now(datetime.timezone.utc)
+                    lease_exp = _parse_iso_dt(item.get("lease_expires_at"))
+                    claimed_at = _parse_iso_dt(item.get("claimed_at"))
+                    grace_sec = _get_startup_grace_period_seconds(ws)
+
+                    within_lease = bool(lease_exp and now_dt < lease_exp)
+                    within_grace = bool(claimed_at and (now_dt - claimed_at).total_seconds() < grace_sec)
+
+                    if worker_alive:
+                        # Claiming worker process is still alive and starting the child
+                        return {
+                            "status": "busy",
+                            "turn_id": item.get("turn_id"),
+                            "worker_pid": worker_pid,
+                            "message": "Another turn is currently running",
+                        }
+
+                    # Worker process is not alive (or worker_pid not recorded)
+                    if worker_pid is None:
+                        # Fallback for claims without worker_pid: consider live if lease or grace period holds
+                        if within_lease or within_grace:
+                            return {
+                                "status": "busy",
+                                "turn_id": item.get("turn_id"),
+                                "message": "Another turn is currently running",
+                            }
+                        is_live = False
+                    else:
+                        # worker_pid was recorded and is dead.
+                        # Claiming process is gone; only then recover if not live.
+                        if within_lease and within_grace:
+                            return {
+                                "status": "busy",
+                                "turn_id": item.get("turn_id"),
+                                "message": "Another turn is currently running",
+                            }
+                        is_live = False
+
+                if not is_live:
                     # Stale claim recovery!
                     item_id = item["turn_id"]
                     item_file = q_dir / f"{item_id}.json"
-                    retry_count = item.get("retry_count", 0)
-                    if retry_count < 1:
-                        item["retry_count"] = retry_count + 1
-                        item["state"] = "queued"
+                    turn_type = item.get("type", "owner_chat")
+                    policy = item.get("policy", "orchestrate")
+                    is_mutating = (turn_type == "owner_chat" or policy == "orchestrate")
+
+                    if is_mutating:
+                        # Mutating turn interrupted: becomes outcome_unknown (not retried)
+                        item["state"] = "outcome_unknown"
+                        item["outcome"] = "outcome_unknown"
+                        item["error"] = "Mutating turn interrupted; outcome unknown"
                         item.pop("pid", None)
+                        item.pop("worker_pid", None)
                         item.pop("start_time", None)
-                        _write_json_atomic(item_file, item)
-                        emit(
-                            ws,
-                            "turn.failed",
-                            payload={"turn_id": item_id, "retryable": True, "reason": "worker_crashed_recovered"},
-                            subject=item_id,
-                            origin_session="orchestrator",
-                        )
-                    else:
-                        item["state"] = "dead"
-                        item["error"] = "Worker process terminated unexpectedly; retry exhausted"
                         _write_json_atomic(item_file, item)
                         turn_arch = t_dir / item_id
                         turn_arch.mkdir(parents=True, exist_ok=True)
@@ -1321,13 +1388,62 @@ def run_next_turn(
                         emit(
                             ws,
                             "turn.failed",
-                            payload={"turn_id": item_id, "retryable": False, "reason": "worker_crashed_dead"},
+                            payload={
+                                "turn_id": item_id,
+                                "retryable": False,
+                                "reason": "outcome_unknown",
+                                "state": "outcome_unknown",
+                            },
                             subject=item_id,
                             origin_session="orchestrator",
                         )
                         orch_doc["consecutive_turn_failures"] = orch_doc.get("consecutive_turn_failures", 0) + 1
+                        _write_json_atomic(orch_file, orch_doc)
                         if orch_doc["consecutive_turn_failures"] >= 2:
                             rotate_orchestrator(ws, reason="consecutive_failures")
+                    else:
+                        # Unattended read-only turn: may be retried once as today
+                        retry_count = item.get("retry_count", 0)
+                        if retry_count < 1:
+                            item["retry_count"] = retry_count + 1
+                            item["state"] = "queued"
+                            item.pop("pid", None)
+                            item.pop("worker_pid", None)
+                            item.pop("start_time", None)
+                            item.pop("started_at", None)
+                            item.pop("claimed_by", None)
+                            item.pop("claimed_at", None)
+                            item.pop("lease_expires_at", None)
+                            _write_json_atomic(item_file, item)
+                            emit(
+                                ws,
+                                "turn.failed",
+                                payload={"turn_id": item_id, "retryable": True, "reason": "worker_crashed_recovered"},
+                                subject=item_id,
+                                origin_session="orchestrator",
+                            )
+                        else:
+                            item["state"] = "dead"
+                            item["error"] = "Worker process terminated unexpectedly; retry exhausted"
+                            _write_json_atomic(item_file, item)
+                            turn_arch = t_dir / item_id
+                            turn_arch.mkdir(parents=True, exist_ok=True)
+                            _write_json_atomic(turn_arch / "turn.json", item)
+                            try:
+                                item_file.unlink()
+                            except OSError:
+                                pass
+                            emit(
+                                ws,
+                                "turn.failed",
+                                payload={"turn_id": item_id, "retryable": False, "reason": "worker_crashed_dead"},
+                                subject=item_id,
+                                origin_session="orchestrator",
+                            )
+                            orch_doc["consecutive_turn_failures"] = orch_doc.get("consecutive_turn_failures", 0) + 1
+                            _write_json_atomic(orch_file, orch_doc)
+                            if orch_doc["consecutive_turn_failures"] >= 2:
+                                rotate_orchestrator(ws, reason="consecutive_failures")
 
         # Select next queued turn
         consecutive_owners = orch_doc.get("consecutive_owner_turns", 0)
@@ -1348,6 +1464,7 @@ def run_next_turn(
         selected_turn["state"] = "running"
         selected_turn["claimed_by"] = worker_id or str(uuid.uuid4())
         selected_turn["claimed_at"] = now_dt.isoformat()
+        selected_turn["worker_pid"] = os.getpid()
         selected_turn["lease_expires_at"] = (
             now_dt + datetime.timedelta(seconds=effective_timeout + 60.0)
         ).isoformat()
