@@ -2,6 +2,7 @@
 """Unit tests for orchestration_config.py."""
 from __future__ import annotations
 
+import copy
 import difflib
 import hashlib
 import json
@@ -9,6 +10,7 @@ import pathlib
 import subprocess
 import sys
 import time
+import uuid
 
 import pytest
 
@@ -601,6 +603,87 @@ def test_headless_allowed_tools_validation() -> None:
     }
     errors, _ = oc.validate_config(cfg_scalar)
     assert any("allowed_tools" in e for e in errors)
+
+
+def test_workspace_and_projects_schema_validation() -> None:
+    base_cfg: dict[str, Any] = {
+        "tools": {
+            "kilo": {
+                "enabled": True,
+                "profiles": {p: {"model": "m"} for p in oc.PROFILES},
+            }
+        }
+    }
+
+    # 1. Valid workspace and projects
+    valid_ws_cfg = copy.deepcopy(base_cfg)
+    valid_ws_cfg["workspace"] = {
+        "uuid": str(uuid.uuid4()),
+        "id": "my-workspace-1",
+        "title": "My Workspace Title",
+        "projects": [
+            {
+                "uuid": str(uuid.uuid4()),
+                "id": "_workspace",
+                "path": ".",
+            },
+            {
+                "uuid": str(uuid.uuid4()),
+                "id": "sub-project-a",
+                "path": "packages/sub-a",
+            },
+        ],
+    }
+    errors, warnings = oc.validate_config(valid_ws_cfg)
+    assert errors == [], f"Expected no errors, got: {errors}"
+
+    # 2. Missing uuid and invalid slug in workspace
+    bad_ws_cfg = copy.deepcopy(base_cfg)
+    bad_ws_cfg["workspace"] = {
+        "id": "-InvalidSlug",
+    }
+    errors, _ = oc.validate_config(bad_ws_cfg)
+    assert any("[workspace].uuid is required" in e for e in errors)
+    assert any("lowercase slug" in e for e in errors)
+
+    # 3. Invalid UUID version / format
+    bad_uuid_cfg = copy.deepcopy(base_cfg)
+    bad_uuid_cfg["workspace"] = {
+        "uuid": "not-a-uuid",
+        "id": "valid-slug",
+    }
+    errors, _ = oc.validate_config(bad_uuid_cfg)
+    assert any("valid UUID4" in e for e in errors)
+
+    # 4. Duplicate project id and duplicate project path
+    dup_proj_cfg = copy.deepcopy(base_cfg)
+    p_uuid1 = str(uuid.uuid4())
+    p_uuid2 = str(uuid.uuid4())
+    dup_proj_cfg["workspace"] = {
+        "uuid": str(uuid.uuid4()),
+        "id": "my-ws",
+        "projects": [
+            {"uuid": p_uuid1, "id": "proj-a", "path": "dir/a"},
+            {"uuid": p_uuid2, "id": "proj-a", "path": "dir/a"},
+        ],
+    }
+    errors, _ = oc.validate_config(dup_proj_cfg)
+    assert any("duplicate project id" in e for e in errors)
+    assert any("duplicate project path" in e for e in errors)
+
+    # 5. Duplicate project uuid
+    dup_uuid_cfg = copy.deepcopy(base_cfg)
+    dup_proj_uuid = str(uuid.uuid4())
+    dup_uuid_cfg["workspace"] = {
+        "uuid": str(uuid.uuid4()),
+        "id": "my-ws",
+        "projects": [
+            {"uuid": dup_proj_uuid, "id": "proj-a", "path": "dir/a"},
+            {"uuid": dup_proj_uuid, "id": "proj-b", "path": "dir/b"},
+        ],
+    }
+    errors, _ = oc.validate_config(dup_uuid_cfg)
+    assert any("duplicate project uuid" in e for e in errors)
 
 
 def test_rendered_agents_md_block_names_real_project_config_path(tmp_path: pathlib.Path) -> None:

@@ -47,6 +47,7 @@ ORCH_SESSIONS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_sessions.py"
 ORCH_TRIGGERS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_triggers.py"
 ORCH_ORCHESTRATOR_SCRIPT = REPO_ROOT / "scripts" / "orchestration_orchestrator.py"
 ORCH_BROKER_LOCK_SCRIPT = REPO_ROOT / "scripts" / "orchestration_broker_lock.py"
+ORCH_REGISTRY_SCRIPT = REPO_ROOT / "scripts" / "orchestration_registry.py"
 
 CLI_DESCRIPTION: dict[str, Any] = {
     "name": "ai-orch",
@@ -562,6 +563,44 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
             },
         },
+        "workspace": {
+            "script": str(ORCH_REGISTRY_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch workspace <subcommand> [options] [--json]",
+            "description": "Manage workspace registration, move tracking, and registry queries.",
+            "subcommands": {
+                "register": {
+                    "usage": "ai-orch workspace register [PATH] [--id <slug>] [--title <title>] [--apply] [--expect-hash <hash>] [--json]",
+                    "description": "Register a workspace (creates [workspace] in config if missing, detects moves, verifies paths).",
+                },
+                "unregister": {
+                    "usage": "ai-orch workspace unregister <id> [--apply] [--expect-hash <hash>] [--json]",
+                    "description": "Unregister a workspace from SQLite registry.",
+                },
+                "list": {
+                    "usage": "ai-orch workspace list [--json]",
+                    "description": "List all registered workspaces with stale status.",
+                },
+                "show": {
+                    "usage": "ai-orch workspace show <id> [--json]",
+                    "description": "Show details of a workspace, its projects, and nested sub-workspaces.",
+                },
+            },
+        },
+        "projects": {
+            "script": str(ORCH_REGISTRY_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch projects <subcommand> [options] [--json]",
+            "description": "Discover and list projects and nested sub-workspaces.",
+            "subcommands": {
+                "discover": {
+                    "usage": "ai-orch projects discover [WORKSPACE] [--apply] [--expect-hash <hash>] [--json]",
+                    "description": "Propose [[workspace.projects]] entries for folders with tasks/00-INDEX.md.",
+                },
+                "list": {
+                    "usage": "ai-orch projects list [WORKSPACE] [--json]",
+                    "description": "List registered projects and nested sub-workspaces in a workspace.",
+                },
+            },
+        },
     },
 }
 
@@ -647,6 +686,14 @@ def main() -> int:
 
     if group == "broker":
         proc = subprocess.run([sys.executable, str(ORCH_BROKER_LOCK_SCRIPT), *rest], check=False)
+        return proc.returncode
+
+    if group in ("workspace", "workspaces"):
+        proc = subprocess.run([sys.executable, str(ORCH_REGISTRY_SCRIPT), "workspace", *rest], check=False)
+        return proc.returncode
+
+    if group in ("projects", "project"):
+        proc = subprocess.run([sys.executable, str(ORCH_REGISTRY_SCRIPT), "projects", *rest], check=False)
         return proc.returncode
 
     if group == "render-agents-md":
