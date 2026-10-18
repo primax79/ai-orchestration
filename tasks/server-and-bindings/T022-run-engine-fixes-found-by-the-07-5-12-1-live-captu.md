@@ -6,13 +6,15 @@
 - priority: P1
 - priority-reason: One can delete another run's worktree; others leave tasks stuck or run in empty dirs
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: -
 - paths: scripts/orchestration_runs.py, scripts/test_orchestration_runs.py
 - handoff: Read tasks/server-and-bindings/T022-run-engine-fixes-found-by-the-07-5-12-1-live-captu.md, do the open steps, run the Verification, update the task and the registry.
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
