@@ -62,6 +62,7 @@ OPTIONAL_EXTENSION_FIELDS: tuple[str, ...] = (
     "run-id",
     "use-cases",
     "use_cases",
+    "short",
 )
 
 VALID_KINDS: set[str] = {"feature", "bug", "fix", "chore", "docs", "investigation"}
@@ -78,6 +79,7 @@ MICRO_HEADER_FIELDS: tuple[str, ...] = (
     "depends-on",
     "size",
     "labels",
+    "short",
 )
 
 MICRO_MANDATORY_HEADER_FIELDS: tuple[str, ...] = (
@@ -105,7 +107,7 @@ VERIFICATION_MODES: set[str] = {"self", "independent-session", "cross-agent", "p
 USE_CASE_ID_RE: re.Pattern = re.compile(r"^UC\d{3,}$")
 USE_CASE_STATUSES: set[str] = {"draft", "active", "verified", "failing", "partial"}
 USE_CASE_VERIFICATION_TYPES: set[str] = {"automated-probe", "e2e", "code-audit", "api-probe"}
-USE_CASE_HEADER_FIELDS: tuple[str, ...] = (
+USE_CASE_MANDATORY_HEADER_FIELDS: tuple[str, ...] = (
     "id",
     "title",
     "actor",
@@ -116,6 +118,10 @@ USE_CASE_HEADER_FIELDS: tuple[str, ...] = (
     "last-tested",
     "last-verdict",
 )
+USE_CASE_OPTIONAL_HEADER_FIELDS: tuple[str, ...] = (
+    "short",
+)
+USE_CASE_HEADER_FIELDS: tuple[str, ...] = USE_CASE_MANDATORY_HEADER_FIELDS + USE_CASE_OPTIONAL_HEADER_FIELDS
 
 CANONICAL_STATES: set[str] = {
     "open",
@@ -151,7 +157,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 REQUIRED_SECTIONS: tuple[str, ...] = ("## Goal", "## Steps", "## Verification")
 RESERVED_DIRS: set[str] = {"_inbox", "_reviews", "specs", "done", "merged", "notes", "reviews", "questions", "use-cases"}
 
-QUESTION_HEADER_FIELDS: tuple[str, ...] = (
+QUESTION_MANDATORY_HEADER_FIELDS: tuple[str, ...] = (
     "id",
     "question",
     "status",
@@ -163,13 +169,17 @@ QUESTION_HEADER_FIELDS: tuple[str, ...] = (
     "open-answer",
     "recommended",
 )
+QUESTION_OPTIONAL_HEADER_FIELDS: tuple[str, ...] = (
+    "short",
+)
+QUESTION_HEADER_FIELDS: tuple[str, ...] = QUESTION_MANDATORY_HEADER_FIELDS + QUESTION_OPTIONAL_HEADER_FIELDS
 
 QUESTION_STATUSES: set[str] = {"open", "answered", "withdrawn"}
 QUESTION_ID_RE = re.compile(r"^Q\d{3,}$")
 QUESTION_FILE_RE = re.compile(r"^(Q\d{3,})-([a-z0-9-]+)\.md$")
 OPTION_LINE_RE = re.compile(r"^-\s+\*\*([A-Za-z0-9]+)\*\*\s+[—–-]\s+(.+?)(?::\s*(.*))?$")
 
-NOTE_HEADER_FIELDS: tuple[str, ...] = (
+NOTE_MANDATORY_HEADER_FIELDS: tuple[str, ...] = (
     "id",
     "title",
     "kind",
@@ -180,6 +190,10 @@ NOTE_HEADER_FIELDS: tuple[str, ...] = (
     "produced",
     "processed-by",
 )
+NOTE_OPTIONAL_HEADER_FIELDS: tuple[str, ...] = (
+    "short",
+)
+NOTE_HEADER_FIELDS: tuple[str, ...] = NOTE_MANDATORY_HEADER_FIELDS + NOTE_OPTIONAL_HEADER_FIELDS
 NOTE_KINDS: set[str] = {"note", "bug", "feature", "idea", "request", "question"}
 NOTE_STATUSES: set[str] = {"draft", "ready", "processing", "processed", "discarded"}
 NOTE_ID_RE = re.compile(r"^N\d{3,}$")
@@ -762,6 +776,100 @@ def slugify(text: str) -> str:
     return s.strip("-")
 
 
+SHORT_TITLE_STOP_WORDS: set[str] = {
+    "a", "an", "the", "and", "or", "for", "of", "in", "on", "at", "to", "by",
+    "with", "from", "as", "is", "are", "was", "were", "it", "its", "via",
+    "which", "what", "should", "would", "could", "does", "do",
+}
+SHORT_TITLE_LEADING_STOP_WORDS: set[str] = {
+    "a", "an", "the", "which", "what", "how", "who", "should", "would",
+}
+
+
+def validate_short_title(val: str) -> list[str]:
+    """Validate a short title field value per T025:
+    - 1–5 words
+    - <= 40 chars
+    - no trailing punctuation (.,:;!?—–-)
+    Returns a list of violation descriptions (empty if valid).
+    """
+    if not val or val.strip() == "" or val.strip() == "-":
+        return ["short title cannot be empty"]
+    val_clean = val.strip()
+    issues: list[str] = []
+    if len(val_clean) > 40:
+        issues.append(f"exceeds 40 characters ({len(val_clean)} chars)")
+    words = val_clean.split()
+    if not (1 <= len(words) <= 5):
+        issues.append(f"expected 1-5 words, got {len(words)}")
+    if re.search(r"[.,:;!?—–\-]$", val_clean):
+        issues.append("has trailing punctuation")
+    return issues
+
+
+def derive_short_title(title: str) -> str:
+    """Deterministically derive a 3-4 word short title from a title string.
+    Rules per T025:
+    - drop leading stop words ('the', 'a', 'an', etc.)
+    - strip ids (T###, Q###, UC###, N###, NN.T), backticks, parentheticals
+    - keep first 3–4 significant words (at most 5 words, <= 40 chars, no trailing punctuation)
+    """
+    if not title:
+        return "untitled"
+    # 1. Strip backticks
+    text = title.replace("`", "")
+    # 2. Strip leading ID pattern: T###, Q###, UC###, N###, NN.T, NN
+    text = re.sub(
+        r"^(?:T\d{3,}(?:\.\d+)*|Q\d{3,}|UC\d{3,}|N\d{3,}|\d{2,}(?:\.\d+)*)\s*[:—–-]?\s*",
+        "",
+        text.strip(),
+    )
+    # 3. Strip any embedded markdown links [text](url) -> text
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # 4. Handle parentheticals: if stripping leaves >= 2 words, strip them; else unpack them
+    no_parens = re.sub(r"\([^)]*\)", "", text)
+    no_parens = re.sub(r"\[[^\]]*\]", "", no_parens).strip()
+    words_no_parens = [w for w in re.split(r"\s+", no_parens) if w]
+    if len(words_no_parens) >= 2:
+        text = no_parens
+    else:
+        inner = re.findall(r"\(([^)]+)\)", text) + re.findall(r"\[([^\]]+)\]", text)
+        if inner:
+            text = " ".join(inner).strip()
+        else:
+            text = no_parens or text
+    # 5. Clean individual words of outer punctuation
+    raw_words = text.split()
+    cleaned_words = []
+    for w in raw_words:
+        cw = re.sub(r"^[^\w]+|[^\w]+$", "", w)
+        if cw:
+            cleaned_words.append(cw)
+    # 6. Drop leading stop words
+    while cleaned_words and cleaned_words[0].lower() in SHORT_TITLE_LEADING_STOP_WORDS:
+        cleaned_words.pop(0)
+    if not cleaned_words:
+        return "untitled"
+    # 7. Extract significant words (drop stop words)
+    sig_words = [w for w in cleaned_words if w.lower() not in SHORT_TITLE_STOP_WORDS]
+    if len(sig_words) < 2:
+        sig_words = cleaned_words
+    if len(" ".join(sig_words[:4])) > 40:
+        shorter_sig = [w for w in sig_words if len(w) <= 24]
+        if len(shorter_sig) >= 2:
+            sig_words = shorter_sig
+    # 8. Target 3-4 words (at most 5 words, at least 1 word), keeping length <= 40 chars
+    words_to_use = sig_words[:4]
+    candidate = " ".join(words_to_use)
+    while len(candidate) > 40 and len(words_to_use) > 1:
+        words_to_use.pop()
+        candidate = " ".join(words_to_use)
+    if len(candidate) > 40:
+        candidate = candidate[:40].rstrip()
+    candidate = re.sub(r"[.,:;!?—–\-]+$", "", candidate).strip()
+    return candidate or "untitled"
+
+
 @dataclass
 class BulletSegment:
     raw_key: str | None
@@ -1011,12 +1119,18 @@ class TaskNode:
     handoff: str = ""
     category: str = ""
     slug: str = ""
+    short: str | None = None
+    short_title: str = ""
+    short_title_source: str = "derived"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "kind": self.kind or ("initiative_task" if "." in self.id and not self.id.startswith("T") else ("emergent" if self.id.startswith("T") else "initiative")),
             "id": self.id,
             "title": self.title,
+            "short": self.short,
+            "short_title": self.short_title,
+            "short_title_source": self.short_title_source,
             "parent": self.parent,
             "depth": self.depth,
             "node_type": self.node_type,
@@ -1062,6 +1176,7 @@ def rewrite_block_in_file(
     new_size: str | None = None,
     new_kind: str | None = None,
     new_decider: str | None = None,
+    new_short: str | None = None,
     expect_task_hash: str | None = None,
     status_note: str | None = None,
     dry_run: bool = False,
@@ -1110,6 +1225,7 @@ def rewrite_block_in_file(
     labels_updated = False
     deps_updated = False
     decider_updated = False
+    short_updated = False
     status_line_idx: int | None = None
 
     parsed_lines: list[tuple[str, list[BulletSegment], str, bool, str]] = []
@@ -1171,6 +1287,13 @@ def rewrite_block_in_file(
                         seg.clean_value = new_kind
                         kind_updated = True
 
+            if new_short is not None:
+                for seg in segments:
+                    if seg.key in ("short", "short_title"):
+                        seg.raw_value = new_short
+                        seg.clean_value = new_short
+                        short_updated = True
+
             if new_decider is not None:
                 to_remove = []
                 for s_idx, seg in enumerate(segments):
@@ -1216,6 +1339,12 @@ def rewrite_block_in_file(
             segments.insert(insert_idx, new_seg)
             insert_idx += 1
             priority_updated = True
+
+        if new_short is not None and not short_updated:
+            new_seg = BulletSegment(raw_key="Short", key="short", raw_value=new_short, clean_value=new_short)
+            segments.insert(insert_idx, new_seg)
+            insert_idx += 1
+            short_updated = True
 
         if new_kind is not None and not kind_updated:
             new_seg = BulletSegment(raw_key="Kind", key="kind", raw_value=new_kind, clean_value=new_kind)
@@ -1785,6 +1914,9 @@ def parse_child_blocks(
                 expanded_rel_path=expanded_link,
                 category=parent_category,
                 slug=slugify(ctitle),
+                short=None,
+                short_title=derive_short_title(ctitle),
+                short_title_source="derived",
             )
             nodes.append(c_node)
             if target_readme.is_file():
@@ -1799,6 +1931,10 @@ def parse_child_blocks(
                         if seg.key:
                             sub_own_fields[seg.key] = seg.clean_value
                 c_node.own_fields = sub_own_fields
+                if "short" in sub_own_fields and sub_own_fields["short"] and sub_own_fields["short"] != "-":
+                    c_node.short = str(sub_own_fields["short"]).strip()
+                    c_node.short_title = c_node.short
+                    c_node.short_title_source = "field"
                 if "priority" in sub_own_fields:
                     c_node.priority = sub_own_fields["priority"]
                 if "executor" in sub_own_fields:
@@ -1848,6 +1984,16 @@ def parse_child_blocks(
             p_val = own_fields.get("priority")
             p_src = "own" if p_val else "default"
 
+            leaf_short = own_fields.get("short")
+            if leaf_short and str(leaf_short).strip() and str(leaf_short).strip() != "-":
+                leaf_short_val = str(leaf_short).strip()
+                leaf_st = leaf_short_val
+                leaf_st_src = "field"
+            else:
+                leaf_short_val = None
+                leaf_st = derive_short_title(ctitle)
+                leaf_st_src = "derived"
+
             leaf_node = TaskNode(
                 id=cid,
                 title=ctitle,
@@ -1887,6 +2033,9 @@ def parse_child_blocks(
                 handoff=own_fields.get("handoff", f"Work on task {cid} in {file_path.relative_to(tasks_dir).as_posix()}"),
                 category=parent_category,
                 slug=slugify(ctitle),
+                short=leaf_short_val,
+                short_title=leaf_st,
+                short_title_source=leaf_st_src,
             )
             nodes.append(leaf_node)
 
@@ -2132,6 +2281,16 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                     if seg.key:
                         init_own_fields[seg.key] = seg.clean_value
 
+        init_short = init_own_fields.get("short")
+        if init_short and str(init_short).strip() and str(init_short).strip() != "-":
+            init_short_val = str(init_short).strip()
+            init_st = init_short_val
+            init_st_src = "field"
+        else:
+            init_short_val = None
+            init_st = derive_short_title(t_clean)
+            init_st_src = "derived"
+
         init_node = TaskNode(
             id=num,
             title=t_clean,
@@ -2166,6 +2325,9 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             size_source="default",
             category=slug,
             slug=slug,
+            short=init_short_val,
+            short_title=init_st,
+            short_title_source=init_st_src,
         )
         tree[num] = init_node
 
@@ -2213,6 +2375,16 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             node_size = "XS" if is_micro else "M"
             node_size_source = "default"
 
+        et_short = et.get("short") or et.get("headers", {}).get("short")
+        if et_short and str(et_short).strip() and str(et_short).strip() != "-":
+            node_short_val = str(et_short).strip()
+            node_st = node_short_val
+            node_st_src = "field"
+        else:
+            node_short_val = None
+            node_st = derive_short_title(et["title"])
+            node_st_src = "derived"
+
         node = TaskNode(
             id=tid,
             title=et["title"],
@@ -2251,6 +2423,9 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             handoff=et.get("handoff", ""),
             category=et.get("category", "") or ("micro" if is_micro else ""),
             slug=slugify(et["title"]),
+            short=node_short_val,
+            short_title=node_st,
+            short_title_source=node_st_src,
         )
         tree[tid] = node
         for sn in sub_nodes:
@@ -2276,6 +2451,16 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                         else:
                             node_size = "XS"
                             node_size_source = "default"
+                        m_short = et_parsed.get("short") or et_parsed.get("headers", {}).get("short")
+                        if m_short and str(m_short).strip() and str(m_short).strip() != "-":
+                            m_short_val = str(m_short).strip()
+                            m_st = m_short_val
+                            m_st_src = "field"
+                        else:
+                            m_short_val = None
+                            m_st = derive_short_title(et_parsed["title"])
+                            m_st_src = "derived"
+
                         tree[mid] = TaskNode(
                             id=mid,
                             title=et_parsed["title"],
@@ -2312,8 +2497,9 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                             kind=et_parsed.get("headers", {}).get("kind"),
                             executor=et_parsed.get("executor", "kilo"),
                             handoff=et_parsed.get("handoff", ""),
-                            category="micro",
-                            slug=slugify(et_parsed["title"]),
+                            short=m_short_val,
+                            short_title=m_st,
+                            short_title_source=m_st_src,
                         )
 
     # 4. Connect children
@@ -2418,7 +2604,15 @@ def child_add(
     kind: str = "feature",
     dry_run: bool = False,
     expect_plan_hash: str | None = None,
+    short: str | None = None,
 ) -> dict[str, Any]:
+    if short and short.strip() and short.strip() != "-":
+        issues = validate_short_title(short.strip())
+        if issues:
+            return {"ok": False, "error": f"Invalid short title {short!r}: {'; '.join(issues)}."}
+
+    short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(title.strip())
+
     with task_write_lock(tasks_dir):
         tree = discover_task_tree(tasks_dir)
         if parent_id not in tree:
@@ -2498,15 +2692,15 @@ def child_add(
                 if body_content:
                     readme_lines.append(body_content)
                     readme_lines.append("")
-                readme_lines.extend([
-                    "## Subtasks",
-                    "",
-                    f"### {new_id} - {title}",
-                    "",
-                    f"- **Status:** `open` · **Kind:** {kind}",
-                    f"- **Goal:** {title}",
-                    "",
-                ])
+                    readme_lines.extend([
+                        "## Subtasks",
+                        "",
+                        f"### {new_id} - {title}",
+                        "",
+                        f"- **Status:** `open` · **Short:** {short_val} · **Kind:** {kind}",
+                        f"- **Goal:** {title}",
+                        "",
+                    ])
                 new_folder.mkdir(parents=True, exist_ok=True)
                 _atomic_write_text(new_readme, "\n".join(readme_lines))
 
@@ -2571,7 +2765,7 @@ def child_add(
                     old_text = parent_file.read_text(encoding="utf-8")
                     child_block = (
                         f"\n### {new_id} - {title}\n\n"
-                        f"- **Status:** `open` · **Kind:** {kind}\n"
+                        f"- **Status:** `open` · **Short:** {short_val} · **Kind:** {kind}\n"
                         f"- **Goal:** {title}\n"
                     )
                     new_readme_text = old_text.rstrip() + f"\n\n## Subtasks\n{child_block}"
@@ -2630,7 +2824,7 @@ def child_add(
                     old_text = parent_file.read_text(encoding="utf-8")
                     child_block = (
                         f"\n### {new_id} - {title}\n\n"
-                        f"- **Status:** `open` · **Kind:** {kind}\n"
+                        f"- **Status:** `open` · **Short:** {short_val} · **Kind:** {kind}\n"
                         f"- **Goal:** {title}\n"
                     )
                     if re.search(r"^##\s+Subtasks\b", old_text, re.MULTILINE):
@@ -4078,6 +4272,132 @@ def set_labels(
             }
 
 
+def set_short(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    short_title: str,
+    dry_run: bool = False,
+    expect_task_hash: str | None = None,
+) -> dict[str, Any]:
+    short_title = short_title.strip()
+    issues = validate_short_title(short_title)
+    if issues:
+        return {"ok": False, "error": f"Invalid short title {short_title!r}: {'; '.join(issues)}."}
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        target_file: pathlib.Path | None = None
+        is_block = False
+        target_node: TaskNode | None = None
+
+        if node_id in tree:
+            target_node = tree[node_id]
+            target_file = pathlib.Path(target_node.file_path)
+            is_block = target_node.block_text is not None
+        elif QUESTION_ID_RE.match(node_id):
+            questions = discover_questions(tasks_dir)
+            for q in questions:
+                if q["id"] == node_id:
+                    target_file = pathlib.Path(q["file_path"])
+                    break
+        elif USE_CASE_ID_RE.match(node_id):
+            use_cases = discover_use_cases(tasks_dir)
+            for uc in use_cases:
+                if uc["id"] == node_id:
+                    target_file = pathlib.Path(uc["file_path"])
+                    break
+        elif NOTE_ID_RE.match(node_id):
+            notes = discover_inbox_notes(tasks_dir)
+            for n in notes:
+                if n["id"] == node_id:
+                    target_file = pathlib.Path(n["file_path"])
+                    break
+
+        if not target_file or not target_file.is_file():
+            return {"ok": False, "error": f"Item '{node_id}' not found."}
+
+        actual_hash = target_node.task_hash if target_node else _file_sha256(target_file)
+        if expect_task_hash and expect_task_hash.strip().lower() != actual_hash.strip().lower():
+            return {
+                "ok": False,
+                "error": f"Task hash mismatch: expected {expect_task_hash}, actual {actual_hash}",
+            }
+
+        if is_block:
+            _, new_block_hash, diff_str = rewrite_block_in_file(
+                target_file,
+                node_id,
+                new_short=short_title,
+                expect_task_hash=expect_task_hash,
+                dry_run=dry_run,
+                return_diff=True,
+            )
+            if not dry_run:
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {"field": "short", "value": short_title, "short": short_title},
+                    subject=node_id,
+                )
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "short": short_title,
+                "task_hash": new_block_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+        else:
+            old_text = target_file.read_text(encoding="utf-8")
+            if re.search(r"^-\s+short:\s*.*$", old_text, flags=re.MULTILINE):
+                new_text = re.sub(r"^-\s+short:\s*.*$", f"- short: {short_title}", old_text, flags=re.MULTILINE)
+            elif re.search(r"^\*\*(?:Short):\*\*\s*.*$", old_text, flags=re.MULTILINE):
+                new_text = re.sub(r"^\*\*(?:Short):\*\*\s*.*$", f"**Short:** {short_title}", old_text, flags=re.MULTILINE)
+            else:
+                if re.search(r"^-\s+handoff:\s*.*$", old_text, flags=re.MULTILINE):
+                    new_text = re.sub(r"(^-\s+handoff:\s*.*$)", rf"\1\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)
+                elif re.search(r"^-\s+recommended:\s*.*$", old_text, flags=re.MULTILINE):
+                    new_text = re.sub(r"(^-\s+recommended:\s*.*$)", rf"\1\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)
+                elif re.search(r"^-\s+last-verdict:\s*.*$", old_text, flags=re.MULTILINE):
+                    new_text = re.sub(r"(^-\s+last-verdict:\s*.*$)", rf"\1\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)
+                elif re.search(r"^-\s+processed-by:\s*.*$", old_text, flags=re.MULTILINE):
+                    new_text = re.sub(r"(^-\s+processed-by:\s*.*$)", rf"\1\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)
+                elif re.search(r"^-\s+depends-on:\s*.*$", old_text, flags=re.MULTILINE):
+                    new_text = re.sub(r"(^-\s+depends-on:\s*.*$)", rf"\1\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)
+                elif re.search(r"^-\s+title:\s*.*$", old_text, flags=re.MULTILINE):
+                    new_text = re.sub(r"(^-\s+title:\s*.*$)", rf"\1\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)
+                else:
+                    new_text = re.sub(r"(^#\s+.*$)", rf"\1\n\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)
+
+            diff_lines = list(difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=str(target_file),
+                tofile=str(target_file) if not dry_run else f"{target_file} (dry-run)",
+            ))
+            diff_str = "".join(diff_lines)
+            if not dry_run:
+                _atomic_write_text(target_file, new_text, encoding="utf-8")
+                new_hash = _file_sha256(target_file)
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {"field": "short", "value": short_title, "short": short_title},
+                    subject=node_id,
+                )
+            else:
+                new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "short": short_title,
+                "task_hash": new_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+
+
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
@@ -4178,10 +4498,21 @@ def parse_emergent_task_file(
                         "size": f.stat().st_size,
                     })
 
+    short_field = headers.get("short")
+    if short_field and str(short_field).strip() and str(short_field).strip() != "-":
+        st_val = str(short_field).strip()
+        st_src = "field"
+    else:
+        st_val = derive_short_title(headers.get("title") or h1_text)
+        st_src = "derived"
+
     task_dict = {
         "kind": headers.get("kind") or "emergent",
         "id": headers.get("id", ""),
         "title": headers.get("title", "") or h1_text,
+        "short": short_field if (short_field and str(short_field).strip() != "-") else None,
+        "short_title": st_val,
+        "short_title_source": st_src,
         "h1": h1_text,
         "category": headers.get("category", "") or ("micro" if is_micro else folder_category),
         "folder_category": folder_category,
@@ -4283,6 +4614,7 @@ def format_question_content(
     answered_by: str = "-",
     answered: str = "-",
     text: str | None = None,
+    short: str | None = None,
 ) -> str:
     norm_context = normalize_fenced_text(context.rstrip("\r\n"))
     lines = [
@@ -4298,6 +4630,10 @@ def format_question_content(
         f"- origin-run: {origin_run}",
         f"- open-answer: {open_answer}",
         f"- recommended: {recommended}",
+    ]
+    if short and short.strip() and short.strip() != "-":
+        lines.append(f"- short: {short.strip()}")
+    lines.extend([
         "",
         "## Context",
         "",
@@ -4305,7 +4641,7 @@ def format_question_content(
         "",
         "## Options",
         "",
-    ]
+    ])
     if options:
         for opt in options:
             label, opt_title, consequence = opt
@@ -4423,10 +4759,21 @@ def parse_question_file(
     blocks_raw = headers.get("blocks", "")
     blocks_parsed = parse_blocks_header(blocks_raw)
 
+    short_field = headers.get("short")
+    if short_field and str(short_field).strip() and str(short_field).strip() != "-":
+        q_st_val = str(short_field).strip()
+        q_st_src = "field"
+    else:
+        q_st_val = derive_short_title(title or headers.get("question", ""))
+        q_st_src = "derived"
+
     return {
         "id": headers.get("id", ""),
         "question": headers.get("question", ""),
         "status": headers.get("status", ""),
+        "short": short_field if (short_field and str(short_field).strip() != "-") else None,
+        "short_title": q_st_val,
+        "short_title_source": q_st_src,
         "blocks": blocks_raw,
         "blocks_parsed": blocks_parsed,
         "decider": headers.get("decider", ""),
@@ -4554,9 +4901,20 @@ def parse_use_case_file(file_path: pathlib.Path, tasks_dir: pathlib.Path) -> dic
     criteria = _extract_section("## Acceptance Criteria")
     log = _extract_section("## AI Validation Log") or _extract_section("## Validation History")
 
+    short_field = headers.get("short")
+    if short_field and str(short_field).strip() and str(short_field).strip() != "-":
+        uc_st_val = str(short_field).strip()
+        uc_st_src = "field"
+    else:
+        uc_st_val = derive_short_title(title)
+        uc_st_src = "derived"
+
     return {
         "id": uc_id,
         "title": title,
+        "short": short_field if (short_field and str(short_field).strip() != "-") else None,
+        "short_title": uc_st_val,
+        "short_title_source": uc_st_src,
         "actor": actor,
         "status": status,
         "priority": priority,
@@ -4609,6 +4967,12 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
         fpath = existing[0]
 
     linked_tasks_str = ", ".join(data.get("linked_tasks", [])) or "-"
+    short_val = data.get("short")
+    if short_val and str(short_val).strip() and str(short_val).strip() != "-":
+        short_val = str(short_val).strip()
+    else:
+        short_val = derive_short_title(title)
+
     content = f"""# {uc_id} - {title}
 
 - id: {uc_id}
@@ -4620,6 +4984,7 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
 - verification-type: {data.get("verification_type", "automated-probe")}
 - last-tested: {data.get("last_tested") or "-"}
 - last-verdict: {data.get("last_verdict") or "-"}
+- short: {short_val}
 
 ## Description & Business Value
 {data.get("description", "Describe user value and business context.")}
@@ -4979,9 +5344,11 @@ def _legacy_plan_tasks(
     for sub in sorted(entry.glob(f"{num}.*-*.md")):
         sub_m = re.match(rf"^({re.escape(num)}\.\d+)-(.+)\.md$", sub.name)
         if sub_m:
+            sub_title = sub_m.group(2)
             expanded_tasks.append(
-                {"id": sub_m.group(1), "title": sub_m.group(2), "rel_path": sub.relative_to(tasks_dir).as_posix(),
-                 "state": init_status, "depends_on": "-", "legacy": True}
+                {"id": sub_m.group(1), "title": sub_title, "rel_path": sub.relative_to(tasks_dir).as_posix(),
+                 "state": init_status, "depends_on": "-", "legacy": True,
+                 "short": None, "short_title": derive_short_title(sub_title), "short_title_source": "derived"}
             )
     if expanded_tasks:
         return expanded_tasks
@@ -5003,7 +5370,16 @@ def _legacy_plan_tasks(
                 sub_state = "delivered"
             elif re.search(rf"\b{re.escape(sub_id)}\b.*?\bqueued\b", text, re.IGNORECASE):
                 sub_state = "open"
-        table_tasks.append({"id": sub_id, "title": sub_title, "state": sub_state, "depends_on": "-", "legacy": True})
+        table_tasks.append({
+            "id": sub_id,
+            "title": sub_title,
+            "state": sub_state,
+            "depends_on": "-",
+            "legacy": True,
+            "short": None,
+            "short_title": derive_short_title(sub_title),
+            "short_title_source": "derived",
+        })
     return table_tasks
 
 
@@ -5011,6 +5387,9 @@ def _node_task_dict(cn: "TaskNode") -> dict[str, Any]:
     return {
         "id": cn.id,
         "title": cn.title,
+        "short": cn.short,
+        "short_title": cn.short_title,
+        "short_title_source": cn.short_title_source,
         "parent": cn.parent,
         "depth": cn.depth,
         "node_type": cn.node_type,
@@ -5085,6 +5464,9 @@ def discover_initiatives(tasks_dir: pathlib.Path, tree: dict[str, "TaskNode"] | 
             "slug": n.slug,
             "folder": entry.name,
             "title": n.title,
+            "short": n.short,
+            "short_title": n.short_title,
+            "short_title_source": n.short_title_source,
             "status": status,
             "derived_state": n.derived_state,
             "location": location,
@@ -5218,6 +5600,10 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 for lbl in [l.strip() for l in raw_l.split(",") if l.strip()]:
                     if not LABEL_RE.match(lbl):
                         errors.append(f"{rel}: invalid label {lbl!r} on node {nid} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$').")
+            if "short" in node.own_fields and node.own_fields["short"] and str(node.own_fields["short"]).strip() != "-":
+                s_val = str(node.own_fields["short"]).strip()
+                for v in validate_short_title(s_val):
+                    warnings.append(f"{rel}: short title {s_val!r} on node {nid} violates conventions ({v}).")
 
         cstate = node.canonical_state
         if node.in_done and cstate not in TERMINAL_STATES:
@@ -5306,6 +5692,12 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 for lbl in [l.strip() for l in raw_labels.split(",") if l.strip()]:
                     if not LABEL_RE.match(lbl):
                         errors.append(f"{rel}: invalid label {lbl!r} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$').")
+
+            # Short title (optional)
+            if "short" in task.get("headers", {}) and task["headers"]["short"] and task["headers"]["short"] != "-":
+                s_val = task["headers"]["short"].strip()
+                for v in validate_short_title(s_val):
+                    warnings.append(f"{rel}: microtask short title {s_val!r} violates conventions ({v}).")
 
             # Required section: ## What
             if "## What" not in task.get("found_headings", []):
@@ -5400,6 +5792,12 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 for lbl in [l.strip() for l in raw_labels.split(",") if l.strip()]:
                     if not LABEL_RE.match(lbl):
                         errors.append(f"{rel}: invalid label {lbl!r} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$').")
+
+            # Short title (optional)
+            if "short" in task.get("headers", {}) and task["headers"]["short"] and task["headers"]["short"] != "-":
+                s_val = task["headers"]["short"].strip()
+                for v in validate_short_title(s_val):
+                    warnings.append(f"{rel}: short title {s_val!r} violates conventions ({v}).")
 
             # Legacy decider warning
             raw_dec = task.get("decider", "").strip()
@@ -5512,7 +5910,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
 
             # Validate header fields & order
             keys = q["header_keys"]
-            missing_q_hdr = [k for k in QUESTION_HEADER_FIELDS if k not in keys]
+            missing_q_hdr = [k for k in QUESTION_MANDATORY_HEADER_FIELDS if k not in keys]
             if missing_q_hdr:
                 errors.append(f"{q_rel}: missing mandatory header field(s): {', '.join(missing_q_hdr)}.")
 
@@ -5528,6 +5926,12 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             for k in QUESTION_HEADER_FIELDS:
                 if k in q["headers"] and q["headers"][k] == "":
                     errors.append(f"{q_rel}: header field '{k}' cannot be empty (use '-' when empty).")
+
+            # Short title (optional)
+            if "short" in q.get("headers", {}) and q["headers"]["short"] and q["headers"]["short"] != "-":
+                s_val = q["headers"]["short"].strip()
+                for v in validate_short_title(s_val):
+                    warnings.append(f"{q_rel}: question short title {s_val!r} violates conventions ({v}).")
 
             # Question text
             q_text = q["question"]
@@ -5716,6 +6120,12 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             if vt not in USE_CASE_VERIFICATION_TYPES:
                 errors.append(f"{uc_rel}: invalid verification-type {vt!r} (allowed: {sorted(USE_CASE_VERIFICATION_TYPES)}).")
 
+            # Short title (optional)
+            if "short" in uc.get("headers", {}) and uc["headers"]["short"] and uc["headers"]["short"] != "-":
+                s_val = uc["headers"]["short"].strip()
+                for v in validate_short_title(s_val):
+                    warnings.append(f"{uc_rel}: use case short title {s_val!r} violates conventions ({v}).")
+
             for ltid in uc.get("linked_tasks", []):
                 if ltid not in tree:
                     warnings.append(f"{uc_rel}: linked task {ltid!r} not found in tasks tree.")
@@ -5795,7 +6205,14 @@ def _update_task_file_headers_and_state(
         header_end += 1
 
     if verifier is not None and verifier_line_idx is None and handoff_line_idx is not None:
-        lines.insert(header_end, f"- verifier: {verifier}")
+        insert_pos = header_end
+        fields_after_verifier = {"size", "kind", "labels", "branch", "worktree", "run-id", "use-cases", "use_cases", "short"}
+        for i in range(handoff_line_idx + 1, header_end):
+            m_key = HEADER_LINE_RE.match(lines[i])
+            if m_key and m_key.group(1) in fields_after_verifier:
+                insert_pos = i
+                break
+        lines.insert(insert_pos, f"- verifier: {verifier}")
         header_end += 1
 
     # Manage `verification pending:` line right after header
@@ -6670,17 +7087,19 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     seen_next_ids: set[str] = set()
 
     for row_id, cells, raw_line in existing_next_rows:
-        if re.match(r"^\d{2,}\.\d+$", row_id) or row_id.startswith("INIT-"):
-            seen_next_ids.add(row_id)
+        base_id = re.sub(r"\s*\(.*?\)", "", row_id).strip()
+        if re.match(r"^\d{2,}\.\d+$", base_id) or base_id.startswith("INIT-"):
+            seen_next_ids.add(base_id)
             next_up_lines.append(raw_line)
-        elif row_id in emergent_next_map:
-            t = emergent_next_map[row_id]
-            seen_next_ids.add(row_id)
+        elif base_id in emergent_next_map:
+            t = emergent_next_map[base_id]
+            seen_next_ids.add(base_id)
+            st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
             next_up_lines.append(
-                f"| {t['id']} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |"
+                f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |"
             )
-        elif row_id not in resolved_ids:
-            seen_next_ids.add(row_id)
+        elif base_id not in resolved_ids:
+            seen_next_ids.add(base_id)
             pri = cells[1] if len(cells) > 1 else "P2"
             task_cell = cells[2] if len(cells) > 2 else "-"
             if not task_cell.endswith("(missing)"):
@@ -6692,8 +7111,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     for t in active_tasks:
         if t["next_up"] == "yes" and t["id"] not in seen_next_ids and len(seen_next_ids) < 5:
             seen_next_ids.add(t["id"])
+            st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
             next_up_lines.append(
-                f"| {t['id']} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |"
+                f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |"
             )
 
     next_up_content = "\n".join(next_up_lines)
@@ -6769,15 +7189,17 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         seen_cat_ids: set[str] = set()
 
         for row_id, cells in existing_by_cat.get(cat, []):
-            if row_id in cat_tasks:
-                t = cat_tasks[row_id]
-                seen_cat_ids.add(row_id)
+            base_id = re.sub(r"\s*\(.*?\)", "", row_id).strip()
+            if base_id in cat_tasks:
+                t = cat_tasks[base_id]
+                seen_cat_ids.add(base_id)
+                st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
                 cat_lines.append(
-                    f"| {t['id']} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
+                    f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
                     f"{t['state']} | {t['executor']} | {t['depends_on_raw']} |"
                 )
-            elif row_id not in resolved_ids:
-                seen_cat_ids.add(row_id)
+            elif base_id not in resolved_ids:
+                seen_cat_ids.add(base_id)
                 pri = cells[1] if len(cells) > 1 else "P2"
                 task_cell = cells[2] if len(cells) > 2 else "-"
                 if not task_cell.endswith("(missing)"):
@@ -6791,8 +7213,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         new_cat_tasks.sort(key=lambda t: (PRIORITY_SORT_KEY.get(t["priority"], 99), t["id"]))
         for t in new_cat_tasks:
             seen_cat_ids.add(t["id"])
+            st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
             cat_lines.append(
-                f"| {t['id']} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
+                f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
                 f"{t['state']} | {t['executor']} | {t['depends_on_raw']} |"
             )
 
@@ -6869,8 +7292,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             if not line_s.startswith("|"):
                 continue
             cells = [c.strip() for c in line_s.strip("|").split("|")]
-            if len(cells) >= 4 and re.match(r"^T\d+$", cells[0]):
-                tid, st = cells[0], cells[3]
+            m_t = re.match(r"^(T\d+)(?:\s*\(.*\))?$", cells[0])
+            if len(cells) >= 4 and m_t:
+                tid, st = m_t.group(1), cells[3]
                 if normalize_state(st) in ("waiting", "blocked") and tid not in [r[0] for r in existing_dec_rows]:
                     existing_waiting_ids_without_dec.add(tid)
 
@@ -6962,15 +7386,17 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     seen_done_ids: set[str] = set()
 
     for row_id, cells in existing_done_rows:
-        if row_id in done_tasks_map:
-            dt = done_tasks_map[row_id]
-            seen_done_ids.add(row_id)
+        base_id = re.sub(r"\s*\(.*?\)", "", row_id).strip()
+        if base_id in done_tasks_map:
+            dt = done_tasks_map[base_id]
+            seen_done_ids.add(base_id)
             task_cell = f"[{dt['title']}]({dt['rel_path']})"
             res_val = cells[2] if len(cells) > 2 and cells[2] not in ("", "-") else dt["state"]
             closed_val = cells[3] if len(cells) > 3 and cells[3] not in ("", "-") else _git_closed_date(tasks_dir, dt["rel_path"])
-            done_lines.append(f"| {row_id} | {task_cell} | {res_val} | {closed_val} |")
-        elif row_id not in resolved_ids:
-            seen_done_ids.add(row_id)
+            st_disp = f" ({dt['short_title']})" if dt.get("short_title") else ""
+            done_lines.append(f"| {dt['id']}{st_disp} | {task_cell} | {res_val} | {closed_val} |")
+        elif base_id not in resolved_ids:
+            seen_done_ids.add(base_id)
             task_cell = cells[1] if len(cells) > 1 else "-"
             if not task_cell.endswith("(missing)"):
                 task_cell = f"{task_cell} (missing)"
@@ -6986,7 +7412,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         task_cell = f"[{dt['title']}]({dt['rel_path']})"
         res_val = dt["state"]
         closed_val = _git_closed_date(tasks_dir, dt["rel_path"])
-        done_lines.append(f"| {dt_id} | {task_cell} | {res_val} | {closed_val} |")
+        st_disp = f" ({dt['short_title']})" if dt.get("short_title") else ""
+        done_lines.append(f"| {dt_id}{st_disp} | {task_cell} | {res_val} | {closed_val} |")
 
     done_content = "\n".join(done_lines)
 
@@ -7245,6 +7672,9 @@ def compute_tasks_graph(
             "kind": n.kind or n.own_fields.get("kind") or ("initiative_task" if "." in n.id and not n.id.startswith("T") else ("emergent" if n.id.startswith("T") else "initiative")),
             "labels": list(n.labels),
             "title": n.title,
+            "short": n.short,
+            "short_title": n.short_title,
+            "short_title_source": n.short_title_source,
             "group": _get_group(n),
             "state": n.state,
             "canonical_state": n.canonical_state,
@@ -7390,10 +7820,14 @@ def cmd_list(args: argparse.Namespace) -> int:
                 sub_id = sub_t["id"]
                 if not (sub_id.startswith(init["id"]) or sub_id.startswith("T")):
                     sub_id = f"{init['id']}.{sub_id}"
+                sub_st = sub_t.get("short_title") or derive_short_title(sub_t["title"])
                 all_tasks.append({
                     "kind": "initiative_task",
                     "id": sub_id,
                     "title": sub_t["title"],
+                    "short": sub_t.get("short"),
+                    "short_title": sub_st,
+                    "short_title_source": sub_t.get("short_title_source", "derived"),
                     "category": category,
                     "priority": "P1",
                     "priority_reason": f"Subtask of Initiative #{init['id']}",
@@ -7417,6 +7851,9 @@ def cmd_list(args: argparse.Namespace) -> int:
                 "kind": "initiative",
                 "id": f"INIT-{init['id']}",
                 "title": init["title"],
+                "short": init.get("short"),
+                "short_title": init.get("short_title") or derive_short_title(init["title"]),
+                "short_title_source": init.get("short_title_source", "derived"),
                 "category": category,
                 "priority": "P1",
                 "priority_reason": f"Initiative container #{init['id']}",
@@ -7583,6 +8020,7 @@ def cmd_child_add(args: argparse.Namespace) -> int:
         kind=getattr(args, "kind", "feature"),
         dry_run=dry_run,
         expect_plan_hash=expect_plan_hash,
+        short=getattr(args, "short", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -7871,6 +8309,96 @@ def cmd_set_labels(args: argparse.Namespace) -> int:
     return 0 if res.get("ok") else 1
 
 
+def cmd_set_short(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    expect_task_hash = getattr(args, "expect_task_hash", None)
+    dry_run = getattr(args, "dry_run", False)
+    res = set_short(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        short_title=args.short,
+        dry_run=dry_run,
+        expect_task_hash=expect_task_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            if res.get("dry_run"):
+                print(f"[ok] dry-run: short title for {args.id} would become: {res.get('short')}")
+                if res.get("diff"):
+                    print(res.get("diff"), end="")
+            else:
+                print(f"[ok] updated short title for {args.id}: {res.get('short')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'set-short failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_tasks_next(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    graph_data = compute_tasks_graph(
+        tasks_dir,
+        kind_filter=getattr(args, "kind", None),
+        label_filter=getattr(args, "label", None),
+    )
+    ready_ids = graph_data["ready_queue"]
+    nodes_by_id = graph_data["nodes_by_id"]
+    ready_tasks = [nodes_by_id[qid] for qid in ready_ids if qid in nodes_by_id]
+    payload = {
+        "ok": True,
+        "tasks_dir": str(tasks_dir),
+        "ready_queue": ready_ids,
+        "tasks": ready_tasks,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Ready Queue ({len(ready_tasks)}):")
+        for idx, t in enumerate(ready_tasks, 1):
+            st = t.get("short_title", "")
+            st_disp = f" ({st})" if st else ""
+            print(f"  {idx}. [{t.get('priority', 'P2')}] {t['id']}{st_disp} - {t.get('title', '')} (size: {t.get('size', 'M')})")
+    return 0
+
+
+def _build_index_sync_data(tasks_dir: pathlib.Path) -> dict[str, Any]:
+    emergent = discover_emergent_tasks(tasks_dir)
+    active_tasks = [t for t in emergent if not t.get("in_done") and t.get("canonical_state") not in TERMINAL_STATES]
+    done_tasks = [t for t in emergent if t.get("in_done") or t.get("canonical_state") in TERMINAL_STATES]
+    all_questions = discover_questions(tasks_dir)
+    return {
+        "active_tasks": [
+            {
+                "id": t["id"],
+                "title": t["title"],
+                "short_title": t.get("short_title") or derive_short_title(t["title"]),
+                "short_title_source": t.get("short_title_source", "derived"),
+            }
+            for t in active_tasks
+        ],
+        "done_tasks": [
+            {
+                "id": t["id"],
+                "title": t["title"],
+                "short_title": t.get("short_title") or derive_short_title(t["title"]),
+                "short_title_source": t.get("short_title_source", "derived"),
+            }
+            for t in done_tasks
+        ],
+        "questions": [
+            {
+                "id": q["id"],
+                "title": q.get("title", ""),
+                "question": q["question"],
+                "short_title": q.get("short_title") or derive_short_title(q.get("title") or q["question"]),
+                "short_title_source": q.get("short_title_source", "derived"),
+            }
+            for q in all_questions
+        ],
+    }
+
+
 def cmd_sync_index(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     index_path = tasks_dir / "00-INDEX.md"
@@ -7977,6 +8505,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                                 "adopted": adopt,
                                 "path": str(index_path),
                                 "hash": new_hash,
+                                "sync_data": _build_index_sync_data(tasks_dir),
                             },
                             indent=2,
                         )
@@ -8092,6 +8621,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         "diff": diff_str,
                         "hash": current_hash,
                         "path": str(index_path),
+                        "sync_data": _build_index_sync_data(tasks_dir),
                     },
                     indent=2,
                 )
@@ -8114,6 +8644,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         "diff": diff_str,
                         "hash": current_hash,
                         "path": str(index_path),
+                        "sync_data": _build_index_sync_data(tasks_dir),
                     },
                     indent=2,
                 )
@@ -8140,6 +8671,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         "adopted": adopt,
                         "path": str(index_path),
                         "hash": new_hash,
+                        "sync_data": _build_index_sync_data(tasks_dir),
                     },
                     indent=2,
                 )
@@ -8160,6 +8692,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                     "hash": current_hash,
                     "path": str(index_path),
                     "rendered": rendered,
+                    "sync_data": _build_index_sync_data(tasks_dir),
                 },
                 indent=2,
             )
@@ -8274,6 +8807,7 @@ def ask_question(
     asked_by: str = "owner",
     origin_run: str = "-",
     from_task: str | None = None,
+    short: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -8281,6 +8815,11 @@ def ask_question(
             "error": "unsupported-platform",
             "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
         }
+
+    if short and short.strip() and short.strip() != "-":
+        issues = validate_short_title(short.strip())
+        if issues:
+            return False, {"ok": False, "error": f"Invalid short title {short!r}: {'; '.join(issues)}."}
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     try:
@@ -8445,6 +8984,7 @@ def ask_question(
                 title = question.rstrip("?").strip()
                 today = datetime.date.today().isoformat()
                 blocks_header_val = ", ".join(blocks_entries)
+                short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(title or question)
                 content = format_question_content(
                     id=q_id,
                     title=title,
@@ -8463,6 +9003,7 @@ def ask_question(
                     answered_by="-",
                     answered="-",
                     text=None,
+                    short=short_val,
                 )
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(content)
@@ -8982,6 +9523,7 @@ def cmd_questions_ask(args: argparse.Namespace) -> int:
         asked_by=args.asked_by,
         origin_run=args.origin_run,
         from_task=args.from_task,
+        short=getattr(args, "short", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -9246,6 +9788,7 @@ def cmd_use_cases_create(args: argparse.Namespace) -> int:
         "description": getattr(args, "description", ""),
         "preconditions": getattr(args, "preconditions", ""),
         "scenario": getattr(args, "scenario", ""),
+        "short": getattr(args, "short", None),
     }
     ok, res = create_or_update_use_case(tasks_dir, data)
     if getattr(args, "json", False):
@@ -9472,6 +10015,7 @@ def format_note_content(
     produced: str = "-",
     processed_by: str = "-",
     body: str = "",
+    short: str | None = None,
 ) -> str:
     lines = [
         f"# {id} {title}",
@@ -9485,8 +10029,10 @@ def format_note_content(
         f"- about: {about if about and about.strip() else '-'}",
         f"- produced: {produced if produced and produced.strip() else '-'}",
         f"- processed-by: {processed_by if processed_by and processed_by.strip() else '-'}",
-        "",
     ]
+    if short and short.strip() and short.strip() != "-":
+        lines.append(f"- short: {short.strip()}")
+    lines.append("")
     if body:
         lines.append(body.strip("\r\n"))
         lines.append("")
@@ -9558,9 +10104,20 @@ def parse_note_folder(
 
     bundle_hash = _folder_bundle_sha256(folder_path)
 
+    short_field = headers.get("short")
+    if short_field and str(short_field).strip() and str(short_field).strip() != "-":
+        n_st_val = str(short_field).strip()
+        n_st_src = "field"
+    else:
+        n_st_val = derive_short_title(title)
+        n_st_src = "derived"
+
     return {
         "id": note_id,
         "title": title,
+        "short": short_field if (short_field and str(short_field).strip() != "-") else None,
+        "short_title": n_st_val,
+        "short_title_source": n_st_src,
         "kind": headers.get("kind", "note"),
         "status": headers.get("status", "draft"),
         "created": headers.get("created", ""),
@@ -9616,6 +10173,9 @@ def parse_legacy_note_file(
     return {
         "id": "-",
         "title": title,
+        "short": None,
+        "short_title": derive_short_title(title),
+        "short_title_source": "derived",
         "kind": "note",
         "status": status,
         "created": created,
@@ -9743,6 +10303,7 @@ def inbox_add(
     about: str = "-",
     author: str = "owner",
     status: str = "draft",
+    short: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -9750,6 +10311,11 @@ def inbox_add(
             "error": "unsupported-platform",
             "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
         }
+
+    if short and short.strip() and short.strip() != "-":
+        issues = validate_short_title(short.strip())
+        if issues:
+            return False, {"ok": False, "error": f"Invalid short title {short!r}: {'; '.join(issues)}."}
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     if not title or not title.strip():
@@ -9815,6 +10381,7 @@ def inbox_add(
                     next_num += 1
 
             created_iso = now.isoformat()
+            short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(title.strip())
             content = format_note_content(
                 id=note_id,
                 title=title,
@@ -9826,6 +10393,7 @@ def inbox_add(
                 produced="-",
                 processed_by="-",
                 body=body_text,
+                short=short_val,
             )
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -10695,6 +11263,7 @@ def tasks_new_from_note(
     sources: str | None = None,
     paths: str | None = None,
     parent: str | None = None,
+    short: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Create an emergent task `T###`, from an inbox note (`from_note`) or standalone
     (then `goal` and `priority_reason` are required), or as a child under `parent`."""
@@ -10704,6 +11273,11 @@ def tasks_new_from_note(
             "error": "unsupported-platform",
             "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
         }
+
+    if short and short.strip() and short.strip() != "-":
+        issues = validate_short_title(short.strip())
+        if issues:
+            return False, {"ok": False, "error": f"Invalid short title {short!r}: {'; '.join(issues)}."}
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     from_note = (from_note or "").strip()
@@ -10746,7 +11320,8 @@ def tasks_new_from_note(
             new_id = allocate_child_id(tree, parent, tasks_dir)
             parent_file = pathlib.Path(p_node.file_path)
             slug = slugify(p_node.title)
-            child_block = f"\n### {new_id} - {t_title}\n\n- **Status:** `open` · **Kind:** {kind}\n- **Goal:** {g_text}\n"
+            short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(t_title)
+            child_block = f"\n### {new_id} - {t_title}\n\n- **Status:** `open` · **Short:** {short_val} · **Kind:** {kind}\n- **Goal:** {g_text}\n"
 
             if p_node.is_leaf:
                 if p_node.block_text is not None:
@@ -10774,7 +11349,7 @@ def tasks_new_from_note(
                         "",
                         f"### {new_id} - {t_title}",
                         "",
-                        f"- **Status:** `open` · **Kind:** {kind}",
+                        f"- **Status:** `open` · **Short:** {short_val} · **Kind:** {kind}",
                         f"- **Goal:** {g_text}",
                         "",
                     ])
@@ -10959,6 +11534,7 @@ def tasks_new_from_note(
                 paths = (paths or "").strip() or "-"
             goal = _rewrite_attachment_references_to_local(goal.strip())
 
+            short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(title.strip())
             task_content = f"""# {t_id} {title.strip()}
 
 - id: {t_id}
@@ -10974,6 +11550,7 @@ def tasks_new_from_note(
 - sources: {sources}
 - paths: {paths}
 - handoff: {handoff}
+- short: {short_val}
 
 ## Goal
 
@@ -11051,6 +11628,7 @@ def tasks_micro(
     size: str | None = None,
     executor: str = "kilo",
     what: str | None = None,
+    short: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -11058,6 +11636,11 @@ def tasks_micro(
             "error": "unsupported-platform",
             "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
         }
+
+    if short and short.strip() and short.strip() != "-":
+        issues = validate_short_title(short.strip())
+        if issues:
+            return False, {"ok": False, "error": f"Invalid short title {short!r}: {'; '.join(issues)}."}
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     if not title or not title.strip():
@@ -11142,6 +11725,8 @@ def tasks_micro(
                 hdr_lines.append(f"- size: {size_clean}")
             if clean_labels:
                 hdr_lines.append(f"- labels: {', '.join(clean_labels)}")
+            short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(title.strip())
+            hdr_lines.append(f"- short: {short_val}")
 
             what_body = (what.strip() if what and what.strip() else f"What to change for {title.strip()}.")
             content = "\n".join(hdr_lines) + f"\n\n## What\n\n{what_body}\n"
@@ -11619,6 +12204,7 @@ def cmd_inbox_add(args: argparse.Namespace) -> int:
         about=getattr(args, "about", "-"),
         author=getattr(args, "author", "owner"),
         status=getattr(args, "status", "draft"),
+        short=getattr(args, "short", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -11796,6 +12382,7 @@ def cmd_tasks_new(args: argparse.Namespace) -> int:
         sources=getattr(args, "sources", None),
         paths=getattr(args, "paths", None),
         parent=getattr(args, "parent", None),
+        short=getattr(args, "short", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -11820,6 +12407,7 @@ def cmd_tasks_micro(args: argparse.Namespace) -> int:
         size=getattr(args, "size", None),
         executor=getattr(args, "executor", "kilo"),
         what=getattr(args, "what", None),
+        short=getattr(args, "short", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -11963,6 +12551,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_qa.add_argument("--asked-by", default="owner", help="Who asked the question")
     p_qa.add_argument("--origin-run", default="-", help="Origin run ID or -")
     p_qa.add_argument("--from-task", default=None, help="Convert legacy decider header from task T###")
+    p_qa.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
     p_qa.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_qa.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_qa.set_defaults(func=cmd_questions_ask)
@@ -12040,6 +12629,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ia.add_argument("--about", default="-", help="About paths, repos or task IDs")
     p_ia.add_argument("--author", default="owner", help="Author of the note")
     p_ia.add_argument("--status", choices=["draft", "ready"], default="draft", help="Initial status")
+    p_ia.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
     p_ia.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_ia.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_ia.set_defaults(func=cmd_inbox_add)
@@ -12117,6 +12707,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--next-up", choices=sorted(NEXT_UP_VALUES), default="no", help="Next up flag")
     p_new.add_argument("--depends-on", default="-", help="Dependencies")
     p_new.add_argument("--decider", default="-", help="Decider")
+    p_new.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
     p_new.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_new.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_new.set_defaults(func=cmd_tasks_new)
@@ -12150,6 +12741,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cadd.add_argument("parent", help="Parent ID (e.g. '07' or '07.4')")
     p_cadd.add_argument("--title", required=True, help="Child task title")
     p_cadd.add_argument("--kind", default="feature", help="Child task kind")
+    p_cadd.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
     p_cadd.add_argument("--dry-run", action="store_true", help="Compute plan without writing")
     p_cadd.add_argument("--expect-plan-hash", default=None, help="Expected plan hash")
     p_cadd.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
@@ -12211,6 +12803,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_graph.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_graph.set_defaults(func=cmd_graph)
 
+    # tasks next
+    p_next = sub.add_parser("next", help="Show ready queue / next actionable tasks")
+    p_next.add_argument("--kind", action="append", default=None, help="Filter by kind (repeatable, OR within field)")
+    p_next.add_argument("--label", action="append", default=None, help="Filter by label (repeatable, OR within field)")
+    p_next.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_next.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_next.set_defaults(func=cmd_tasks_next)
+
     # tasks set-priority
     p_sp = sub.add_parser("set-priority", help="Set priority for a task")
     p_sp.add_argument("id", help="Node ID")
@@ -12267,6 +12867,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_sl.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_sl.set_defaults(func=cmd_set_labels)
 
+    # tasks set-short
+    p_sshort = sub.add_parser("set-short", help="Set short title (1-5 words, <=40 chars) for an item")
+    p_sshort.add_argument("id", help="Node or item ID (e.g. T001, 08.1, Q004, UC001, N001)")
+    p_sshort.add_argument("short", help="Short title (1-5 words, <=40 chars, no trailing punctuation)")
+    p_sshort.add_argument("--dry-run", action="store_true", help="Print diff without writing")
+    p_sshort.add_argument("--expect-task-hash", "--expect-plan-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task block/file/plan hash")
+    p_sshort.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_sshort.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_sshort.set_defaults(func=cmd_set_short)
+
     # tasks labels
     p_lbls = sub.add_parser("labels", help="List all labels in use with their counts")
     p_lbls.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
@@ -12284,6 +12894,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_micro.add_argument("--size", choices=sorted(VALID_SIZES), default=None, help="Size (default: XS)")
     p_micro.add_argument("--executor", default="kilo", help="Assigned executor (default: kilo)")
     p_micro.add_argument("--what", default=None, help="What section body")
+    p_micro.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
     p_micro.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_micro.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_micro.set_defaults(func=cmd_tasks_micro)
@@ -12326,6 +12937,7 @@ def build_parser() -> argparse.ArgumentParser:
     uc_create.add_argument("--description", default="")
     uc_create.add_argument("--preconditions", default="")
     uc_create.add_argument("--scenario", default="")
+    uc_create.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
     uc_create.add_argument("--tasks-dir", default="tasks")
     uc_create.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     uc_create.set_defaults(func=cmd_use_cases_create)

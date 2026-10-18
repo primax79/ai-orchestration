@@ -15,6 +15,7 @@ Every work item in `tasks/` is part of a first-class task hierarchy of arbitrary
 - **Inheritance:** `Executor`, `Priority`, `Profile`, `Repo`, and `Paths` are inherited from the nearest ancestor setting them; `Labels` are the union of own and ancestor labels; `Depends on` is additive across ancestors.
 - **Dependencies & Questions:** Any node may be a dependency (container dependencies expand to all their leaf descendants; cycles on the expanded graph are refused). Blocking questions accept any leaf ID (`T###` or dotted leaf), refusing containers.
 - **Closed Placement:** Closed work lives apart from open work (blocks in `## Closed`, folders in `done/`). The logical tree includes open and archived nodes.
+- **Short Titles & Citations:** Every work item (emergent task, plan task, initiative, question, use case, note) carries or derives a 3-4 word short title (1–5 words, ≤40 chars, no trailing punctuation). When citing tasks or questions in conversation, summaries, reports, or question headers, always cite as `ID (short title)` (see methodology T025).
 
 Every work item shares the **same state lifecycle, role profiles, and verification gate**:
 
@@ -62,6 +63,8 @@ Permitted by `task-pipeline` ("A project that needs extra fields lists them in `
 - `branch`: Git branch name of the isolated worktree assigned to this task (e.g. `feat/08-t1-app-shell` or `kilo/t012-scraper`).
 - `worktree`: Relative or absolute physical filesystem path to the active worktree checkout (e.g. `.kilo/worktrees/08-t1-app-shell`).
 - `run-id`: Unique identifier of the executing run or background MCP task handle (e.g. `ctask_123` or `ses_abc`).
+- `use-cases`: Comma-separated list of linked use-case IDs (e.g. `UC001, UC004`).
+- `short`: `1–5 words, ≤40 chars, no trailing punctuation` (a concise 3-4 word label stored with the item and used in citations: `ID (short title)`). Optional for existing files; deterministically derived via `derive_short_title` when omitted. Validation reports violations as warnings.
 
 ### 2.3 Required Body Sections (Full Tasks)
 1. `## Goal`
@@ -72,9 +75,9 @@ Permitted by `task-pipeline` ("A project that needs extra fields lists them in `
 
 A lightweight emergent task for very small work (bug, fix, chore, docs touch-up) that shares the same ID space (`T###`), state machine, and dependency semantics as full tasks:
 - **Location:** `tasks/micro/T###-<slug>.md` (or `tasks/done/micro/` when terminal).
-- **Header:** closed set in exact canonical order: `id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`.
+- **Header:** closed set in exact canonical order: `id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, `short`.
   - Mandatory fields: `id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`.
-  - Optional extensions: `size` (defaults to `XS`), `labels`.
+  - Optional extensions: `size` (defaults to `XS`), `labels`, `short`.
 - **Body:** one required section, `## What`. No `Goal`/`Steps`/`Verification` skeleton needed.
 - **Commands:**
   - `ai-orch tasks micro --title <title> [--kind <kind>] [--priority <P0-P3>] [--label <label>...] [--paths <paths>]`: creates a microtask under task-write lock.

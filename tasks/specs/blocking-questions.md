@@ -107,6 +107,7 @@ run anything on this machine. A middle ground is an explicit `allowed_tools` lis
 | `origin-session` | yes | session id or role (`orchestrator`) when asked from a registered session, else `-` |
 | `open-answer` | yes | `yes` or `no`: whether free text is accepted instead of, or in addition to, an option |
 | `recommended` | yes | an option label, or `-` |
+| `short` | no | 1–5 words, ≤40 chars, no trailing punctuation. Optional header field (placed after `recommended`); derived deterministically via `derive_short_title` when omitted. |
 
 **Sections** (all required, in this order):
 
