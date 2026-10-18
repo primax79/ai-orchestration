@@ -130,8 +130,10 @@ Copy-paste skeletons for every file kind are in
    spec(s)/initiative(s) it produced.
 3. **Plan.** Each spec **generates new** initiatives or **updates/restructures
    existing** ones. `NN-<slug>/plan.md` is the *how*.
-4. **Ship.** On completion add `NN-<slug>/summary.md`, `git mv` the folder into
-   `done/`, fix the handful of links the move shifts, and update `00-INDEX.md`.
+4. **Ship.** On completion, run `ai-orch tasks ship NN` (preview with `--dry-run`,
+   apply with `--expect-plan-hash <hash>`). This creates `NN-<slug>/summary.md` skeleton,
+   moves the folder into `tasks/done/`, and automatically rewrites references in
+   specs and `00-INDEX.md`.
 
 ## Emergent tasks: capture work the moment it appears
 
@@ -577,6 +579,15 @@ python3 scripts/tasks_engine.py [--json] attach <task_id> --file <path> [--name 
 python3 scripts/tasks_engine.py [--json] detach <task_id> --name <filename> [--expect-task-hash <hash>]
 python3 scripts/tasks_engine.py [--json] inbox attach <note_id> --file <path> [--name <stem>] [--expect-hash <hash>]
 python3 scripts/tasks_engine.py [--json] inbox detach <note_id> --name <filename> [--expect-hash <hash>]
+
+# Ship a completed initiative (creates summary.md skeleton, moves to done/, rewrites references)
+python3 scripts/tasks_engine.py [--json] ship <id> [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir tasks]
+
+# Fix misplaced closed items at every level (blocks to ## Closed, folder children and tasks to done/)
+python3 scripts/tasks_engine.py [--json] archive [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir tasks]
+
+# Reopen a closed leaf task (restores ancestors from done/ if needed)
+python3 scripts/tasks_engine.py [--json] reopen <id> --reason "..." [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir tasks]
 
 # Upgrade an older tasks/ tree to the latest task-pipeline convention
 python3 scripts/tasks_engine.py [--json] upgrade [--tasks-dir tasks]

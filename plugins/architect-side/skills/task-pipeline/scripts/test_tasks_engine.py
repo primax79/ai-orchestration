@@ -6407,3 +6407,462 @@ def test_questions_apply_and_ledger_validation(tmp_path: pathlib.Path) -> None:
     assert val_data["errors"] == []
 
 
+# ---------------------------------------------------------------------------
+# Task 11.4: Closed-Apart Placement at Every Level (Ship, Archive, Closed Sections, Reopen)
+# ---------------------------------------------------------------------------
+
+
+def test_11_4_leaf_block_closing_moves_to_closed_and_reopen_moves_back(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "07-sample"
+    init_dir.mkdir()
+    plan = init_dir / "plan.md"
+    plan.write_text(
+        """# 07 - Sample
+
+- **Goal:** Sample goal.
+
+## Tasks
+
+### 07.1 - First task
+- **Status:** `delivered`
+- **Goal:** Goal 1.
+
+### 07.2 - Second task
+- **Status:** `open`
+- **Goal:** Goal 2.
+""",
+        encoding="utf-8",
+    )
+
+    # Transition 07.1 to verified, then to done
+    ok, res = te.transition_task(tasks_dir, "07.1", "verified", actor="owner")
+    assert ok is True
+    ok, res = te.transition_task(tasks_dir, "07.1", "done", actor="owner")
+    assert ok is True
+
+    text = plan.read_text(encoding="utf-8")
+    assert "## Closed" in text
+    m_tasks = re.search(r"^##\s+Tasks", text, re.MULTILINE)
+    m_closed = re.search(r"^##\s+Closed", text, re.MULTILINE)
+    m_071 = re.search(r"^###\s+07\.1", text, re.MULTILINE)
+    m_072 = re.search(r"^###\s+07\.2", text, re.MULTILINE)
+    assert m_tasks is not None and m_closed is not None and m_071 is not None and m_072 is not None
+    assert m_tasks.start() < m_072.start() < m_closed.start() < m_071.start()
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["07.1"].canonical_state == "done"
+    assert tree["07.1"].in_closed_section is True
+    assert tree["07.2"].canonical_state == "open"
+    assert tree["07.2"].in_closed_section is False
+
+    assert te.check_markdown_links(tasks_dir) == []
+
+    # Reopening 07.1 moves it back to open section before 07.2, and removes empty ## Closed
+    res_dry = te.reopen_node(tasks_dir, "07.1", reason="Need recheck", dry_run=True)
+    assert res_dry["ok"] is True
+    assert res_dry["dry_run"] is True
+    plan_hash = res_dry["plan_hash"]
+
+    # Refuse wrong hash
+    res_fail = te.reopen_node(tasks_dir, "07.1", reason="Need recheck", expect_plan_hash="bad" + plan_hash[3:])
+    assert res_fail["ok"] is False
+    assert "Plan hash mismatch" in res_fail["error"]
+
+    res_apply = te.reopen_node(tasks_dir, "07.1", reason="Need recheck", expect_plan_hash=plan_hash)
+    assert res_apply["ok"] is True
+
+    text2 = plan.read_text(encoding="utf-8")
+    assert "## Closed" not in text2
+    m_071_new = re.search(r"^###\s+07\.1", text2, re.MULTILINE)
+    m_072_new = re.search(r"^###\s+07\.2", text2, re.MULTILINE)
+    assert m_071_new is not None and m_072_new is not None
+    assert m_071_new.start() < m_072_new.start()
+    assert "- **Status:** `open`" in text2
+    assert "Need recheck" in text2
+
+    tree2 = te.discover_task_tree(tasks_dir)
+    assert tree2["07.1"].canonical_state == "open"
+    assert tree2["07.1"].in_closed_section is False
+
+
+def test_11_4_folder_child_closing_moves_to_done_under_parent(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "07-hierarchy"
+    init_dir.mkdir()
+    plan = init_dir / "plan.md"
+    plan.write_text(
+        """# 07 - Hierarchy
+
+- **Goal:** Hierarchy goal.
+
+## Tasks
+
+### 07.1 - Folder Container
+- **Expanded:** [07.1-sub/](07.1-sub/README.md)
+""",
+        encoding="utf-8",
+    )
+
+    sub_dir = init_dir / "07.1-sub"
+    sub_dir.mkdir()
+    sub_readme = sub_dir / "README.md"
+    sub_readme.write_text(
+        """# 07.1 - Folder Container
+
+- **Goal:** Sub goal.
+
+## Subtasks
+
+### 07.1.1 - Leaf one
+- **Status:** `delivered`
+- **Goal:** L1.
+
+### 07.1.2 - Leaf two
+- **Status:** `delivered`
+- **Goal:** L2.
+""",
+        encoding="utf-8",
+    )
+
+    # Close 07.1.1
+    te.transition_task(tasks_dir, "07.1.1", "verified", actor="owner")
+    te.transition_task(tasks_dir, "07.1.1", "done", actor="owner")
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["07.1"].in_done is False
+    assert (init_dir / "07.1-sub").is_dir()
+
+    # Close 07.1.2 -> now all children are done! Container closes on derivation
+    te.transition_task(tasks_dir, "07.1.2", "verified", actor="owner")
+    ok, res = te.transition_task(tasks_dir, "07.1.2", "done", actor="owner")
+    assert ok is True
+
+    # Folder child should have moved to done/07.1-sub
+    assert not (init_dir / "07.1-sub").exists()
+    done_sub = init_dir / "done" / "07.1-sub"
+    assert done_sub.is_dir()
+    assert (done_sub / "README.md").is_file()
+
+    # In parent plan.md, expanded bullet points to done/ and block is in ## Closed
+    plan_t = plan.read_text(encoding="utf-8")
+    assert "[done/07.1-sub/](done/07.1-sub/README.md)" in plan_t
+    m_cl = re.search(r"^##\s+Closed", plan_t, re.MULTILINE)
+    m_blk = re.search(r"^###\s+07\.1", plan_t, re.MULTILINE)
+    assert m_cl is not None and m_blk is not None
+    assert m_cl.start() < m_blk.start()
+
+    tree_done = te.discover_task_tree(tasks_dir)
+    assert tree_done["07.1"].in_done is True
+    assert tree_done["07.1.1"].in_done is True
+    assert tree_done["07.1.2"].in_done is True
+
+    assert te.check_markdown_links(tasks_dir) == []
+
+    # Now reopen 07.1.1 -> folder should restore back to 07.1-sub, and block out of ## Closed
+    res_dry = te.reopen_node(tasks_dir, "07.1.1", reason="Need fix in leaf 1", dry_run=True)
+    assert res_dry["ok"] is True
+    res_apply = te.reopen_node(tasks_dir, "07.1.1", reason="Need fix in leaf 1", expect_plan_hash=res_dry["plan_hash"])
+    assert res_apply["ok"] is True
+
+    assert (init_dir / "07.1-sub").is_dir()
+    assert not (init_dir / "done" / "07.1-sub").exists()
+    plan_t2 = plan.read_text(encoding="utf-8")
+    assert "[07.1-sub/](07.1-sub/README.md)" in plan_t2
+    assert "done/07.1-sub" not in plan_t2
+
+    tree_rest = te.discover_task_tree(tasks_dir)
+    assert tree_rest["07.1"].in_done is False
+    assert tree_rest["07.1.1"].canonical_state == "open"
+    assert te.check_markdown_links(tasks_dir) == []
+
+
+def test_11_4_ship_initiative_creates_summary_rewrites_links_and_reopen_restores(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "11-subtasks"
+    init_dir.mkdir()
+    plan = init_dir / "plan.md"
+    plan.write_text(
+        """# 11 - Subtasks
+
+> **Derived from spec:** [`../specs/subtasks.md`](../specs/subtasks.md)
+> **Status:** `done`
+
+- **Goal:** Complete subtasks.
+
+## Tasks
+
+### 11.1 - Leaf task
+- **Status:** `done` (2026-10-18)
+- **Goal:** G1.
+""",
+        encoding="utf-8",
+    )
+
+    specs_dir = tasks_dir / "specs"
+    specs_dir.mkdir()
+    spec = specs_dir / "subtasks.md"
+    spec.write_text(
+        """# Subtasks Spec
+
+Drives: initiative [11](../11-subtasks/plan.md)
+""",
+        encoding="utf-8",
+    )
+
+    index = tasks_dir / "00-INDEX.md"
+    index.write_text(
+        """# Index
+
+| Priority | # | Initiative | Status | Depends on | Size |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 11 | [Subtasks](11-subtasks/plan.md) | done | - | M |
+""",
+        encoding="utf-8",
+    )
+
+    # 1. Preview with dry-run
+    res_dry = te.ship_initiative(tasks_dir, "11", dry_run=True)
+    assert res_dry["ok"] is True
+    assert res_dry["dry_run"] is True
+    assert (init_dir / "plan.md").is_file()
+    plan_hash = res_dry["plan_hash"]
+
+    # 2. Refuse without plan hash
+    res_no_hash = te.ship_initiative(tasks_dir, "11")
+    assert res_no_hash["ok"] is False
+    assert "Applying ship requires --expect-plan-hash" in res_no_hash["error"]
+
+    # 3. Apply ship with plan hash
+    res_ship = te.ship_initiative(tasks_dir, "11", expect_plan_hash=plan_hash)
+    assert res_ship["ok"] is True
+    assert not init_dir.exists()
+    done_init = tasks_dir / "done" / "11-subtasks"
+    assert done_init.is_dir()
+    assert (done_init / "plan.md").is_file()
+    assert (done_init / "summary.md").is_file()
+
+    # summary.md skeleton content
+    sum_t = (done_init / "summary.md").read_text(encoding="utf-8")
+    assert "# Summary: 11 - Subtasks" in sum_t
+    assert "## Outcome" in sum_t
+    assert "## Deviations" in sum_t
+    assert "## Follow-ups" in sum_t
+
+    # In spec: link rewritten to ../done/11-subtasks/plan.md
+    spec_t = spec.read_text(encoding="utf-8")
+    assert "[11](../done/11-subtasks/plan.md)" in spec_t
+
+    # In 00-INDEX.md: link rewritten to done/11-subtasks/plan.md
+    index_t = index.read_text(encoding="utf-8")
+    assert "[Subtasks](done/11-subtasks/plan.md)" in index_t
+
+    # In plan.md: link to ../specs/ adjusted to ../../specs/
+    plan_done_t = (done_init / "plan.md").read_text(encoding="utf-8")
+    assert "[`../specs/subtasks.md`](../../specs/subtasks.md)" in plan_done_t
+
+    # All relative links resolve
+    broken = te.check_markdown_links(tasks_dir)
+    assert broken == []
+
+    # 4. Reopen leaf 11.1 -> restores initiative back to tasks/11-subtasks
+    res_reop_dry = te.reopen_node(tasks_dir, "11.1", reason="Found regression", dry_run=True)
+    assert res_reop_dry["ok"] is True
+    res_reop = te.reopen_node(tasks_dir, "11.1", reason="Found regression", expect_plan_hash=res_reop_dry["plan_hash"])
+    assert res_reop["ok"] is True
+
+    assert init_dir.is_dir()
+    assert not done_init.exists()
+
+    sum_rest = (init_dir / "summary.md").read_text(encoding="utf-8")
+    assert "- **Reopened:**" in sum_rest and "Found regression" in sum_rest
+
+    spec_rest = spec.read_text(encoding="utf-8")
+    assert "[11](../11-subtasks/plan.md)" in spec_rest
+
+    index_rest = index.read_text(encoding="utf-8")
+    assert "[Subtasks](11-subtasks/plan.md)" in index_rest
+
+    plan_rest = (init_dir / "plan.md").read_text(encoding="utf-8")
+    assert "[`../specs/subtasks.md`](../specs/subtasks.md)" in plan_rest
+
+    assert te.check_markdown_links(tasks_dir) == []
+
+
+def test_11_4_questions_never_move(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    q_dir = tasks_dir / "questions"
+    q_dir.mkdir()
+
+    # Ask question Q001
+    ok_ask, res_ask = te.ask_question(
+        tasks_dir,
+        question="Sample question?",
+        context="Context for Q001.",
+        options=[("A", "Yes", "Proceed"), ("B", "No", "Abort")],
+        blocks="-",
+    )
+    assert ok_ask is True
+    qid = res_ask["id"]
+
+    # Answer question
+    ok_ans, res_ans = te.answer_question(tasks_dir, qid, choice="A", text="Chose A")
+    assert ok_ans is True
+    q_file = pathlib.Path(res_ask["file_path"])
+    assert q_file.is_file()
+    assert not (q_dir / "closed").exists()
+
+    # Running archive does not move questions
+    res_arch = te.archive_misplaced(tasks_dir, dry_run=True)
+    assert res_arch["ok"] is True
+    for op in res_arch["plan"]:
+        assert "questions" not in op["path"]
+
+    assert q_file.is_file()
+    assert not (q_dir / "closed").exists()
+
+
+def test_11_4_tasks_archive_dry_run_and_apply(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "08-misplaced"
+    init_dir.mkdir()
+    plan = init_dir / "plan.md"
+    plan.write_text(
+        """# 08 - Misplaced
+
+- **Goal:** Test archive.
+
+## Tasks
+
+### 08.1 - Done block in open section
+- **Status:** `done` (2026-10-17)
+- **Goal:** G1.
+
+### 08.2 - Open block
+- **Status:** `open`
+- **Goal:** G2.
+""",
+        encoding="utf-8",
+    )
+
+    # Emergent task done in open category
+    feat_dir = tasks_dir / "features"
+    feat_dir.mkdir()
+    em_file = feat_dir / "T001-feature.md"
+    _write_sample_task(em_file, task_id="T001")
+    te.transition_task(tasks_dir, "T001", "in progress")
+    te.transition_task(tasks_dir, "T001", "delivered")
+    te.transition_task(tasks_dir, "T001", "verified", actor="owner")
+    em_text = em_file.read_text(encoding="utf-8")
+    em_text = re.sub(r"^- state:\s*.*$", "- state: done", em_text, flags=re.MULTILINE)
+    em_file.write_text(em_text, encoding="utf-8")
+
+    # Dry-run archive
+    res_dry = te.archive_misplaced(tasks_dir, dry_run=True)
+    assert res_dry["ok"] is True
+    assert res_dry["dry_run"] is True
+    assert res_dry["archived_count"] == 2
+    assert "08.1" in res_dry["misplaced_blocks"]
+    assert "T001" in res_dry["misplaced_emergent"]
+
+    assert em_file.is_file()
+    assert "## Closed" not in plan.read_text(encoding="utf-8")
+
+    # Apply archive
+    res_apply = te.archive_misplaced(tasks_dir, expect_plan_hash=res_dry["plan_hash"])
+    assert res_apply["ok"] is True
+    assert res_apply["archived_count"] == 2
+
+    # Verify 08.1 moved to ## Closed in plan.md
+    plan_t = plan.read_text(encoding="utf-8")
+    assert "## Closed" in plan_t
+    m_cl = re.search(r"^##\s+Closed", plan_t, re.MULTILINE)
+    m_081 = re.search(r"^###\s+08\.1", plan_t, re.MULTILINE)
+    m_082 = re.search(r"^###\s+08\.2", plan_t, re.MULTILINE)
+    assert m_082.start() < m_cl.start() < m_081.start()
+
+    # Verify T001 moved to tasks/done/features/
+    assert not em_file.exists()
+    assert (tasks_dir / "done" / "features" / "T001-feature.md").is_file()
+
+    # Second archive reports nothing to do
+    res_dry2 = te.archive_misplaced(tasks_dir, dry_run=True)
+    assert res_dry2["ok"] is True
+    assert res_dry2["archived_count"] == 0
+    assert res_dry2["plan"] == []
+
+
+def test_11_4_validation_closed_apart_rules(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "09-validation"
+    init_dir.mkdir()
+    plan = init_dir / "plan.md"
+    plan.write_text(
+        """# 09 - Validation
+
+- **Goal:** Test validation.
+
+## Tasks
+
+### 09.1 - Open block
+- **Status:** `open`
+- **Goal:** G1.
+
+## Closed
+
+### 09.2 - Open in closed section
+- **Status:** `open`
+- **Goal:** G2.
+""",
+        encoding="utf-8",
+    )
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("in ## Closed but state is 'open'" in e for e in errors)
+
+
+def test_11_4_cli_ship_and_archive(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    init_dir = tasks_dir / "12-cli"
+    init_dir.mkdir()
+    plan = init_dir / "plan.md"
+    plan.write_text(
+        """# 12 - CLI Ship
+
+- **Goal:** Test CLI ship.
+
+## Tasks
+
+### 12.1 - Task 1
+- **Status:** `done` (2026-10-18)
+- **Goal:** G1.
+""",
+        encoding="utf-8",
+    )
+
+    # Dry-run CLI ship
+    res_dry = run_cli("ship", "12", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry.returncode == 0
+    data_dry = json.loads(res_dry.stdout)
+    assert data_dry["ok"] is True
+    plan_hash = data_dry["plan_hash"]
+
+    # Apply CLI ship
+    res_ship = run_cli("ship", "12", "--expect-plan-hash", plan_hash, "--tasks-dir", str(tasks_dir))
+    assert res_ship.returncode == 0
+    assert "[ok] shipped initiative 12 -> done/12-cli" in res_ship.stdout
+
+    # CLI archive
+    res_arch = run_cli("archive", "--dry-run", "--tasks-dir", str(tasks_dir))
+    assert res_arch.returncode == 0
+    assert "[ok] Nothing to archive." in res_arch.stdout
+
+
+

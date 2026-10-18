@@ -1270,6 +1270,417 @@ def rewrite_block_in_file(
     return new_block_text, new_hash
 
 
+def move_block_to_closed(
+    file_path: pathlib.Path,
+    task_id: str,
+    new_status: str | None = None,
+    status_note: str | None = None,
+) -> tuple[str, str]:
+    """Move a block ### task_id to the ## Closed section of file_path.
+    If new_status is given, the status line is updated first.
+    Appends the block to ## Closed (creating ## Closed at end of file if not present).
+    """
+    if new_status is not None:
+        rewrite_block_in_file(file_path, task_id, new_status=new_status, status_note=status_note)
+
+    text = file_path.read_text(encoding="utf-8")
+    heading_re = re.compile(
+        rf"^###\s+{re.escape(task_id)}\s+[—–-]\s+.*$",
+        re.MULTILINE,
+    )
+    m = heading_re.search(text)
+    if not m:
+        raise ValueError(f"Block for task '{task_id}' not found in {file_path}")
+
+    start_pos = m.start()
+    scanned_lines, _ = scan_markdown_blocks(text)
+    heading_line_num = text[:start_pos].count("\n") + 1
+    heading_sline_idx = next(
+        (i for i, sl in enumerate(scanned_lines) if sl.line_number == heading_line_num),
+        None,
+    )
+
+    end_pos = len(text)
+    if heading_sline_idx is not None:
+        for idx in range(heading_sline_idx + 1, len(scanned_lines)):
+            sl = scanned_lines[idx]
+            if not sl.is_fenced and (sl.text.startswith("### ") or sl.text.startswith("## ")):
+                end_pos = sum(len(sl2.text) + 1 for sl2 in scanned_lines[:idx])
+                break
+
+    block_text = text[start_pos:end_pos]
+    m_closed = re.search(r"^##\s+Closed\b.*$", text, re.MULTILINE)
+    if m_closed and start_pos > m_closed.start():
+        # Already under ## Closed
+        return block_text, hashlib.sha256(block_text.encode("utf-8")).hexdigest()
+
+    before = text[:start_pos].rstrip("\n")
+    after = text[end_pos:].lstrip("\n")
+    if before and after:
+        text_without = before + "\n\n" + after
+    elif before:
+        text_without = before + "\n"
+    else:
+        text_without = after
+
+    m_closed2 = re.search(r"^##\s+Closed\b.*$", text_without, re.MULTILINE)
+    if m_closed2:
+        post = text_without[m_closed2.end():]
+        m_next = re.search(r"^##\s+", post, re.MULTILINE)
+        if m_next:
+            sec_end = m_closed2.end() + m_next.start()
+            pre_sec = text_without[:sec_end].rstrip("\n")
+            post_sec = text_without[sec_end:].lstrip("\n")
+            new_text = pre_sec + "\n\n" + block_text.strip() + "\n\n" + post_sec
+        else:
+            new_text = text_without.rstrip("\n") + "\n\n" + block_text.strip() + "\n"
+    else:
+        new_text = text_without.rstrip("\n") + "\n\n## Closed\n\n" + block_text.strip() + "\n"
+
+    _atomic_write_text(file_path, new_text, encoding="utf-8")
+    new_h = hashlib.sha256(block_text.encode("utf-8")).hexdigest()
+    return block_text, new_h
+
+
+def move_block_to_open(
+    file_path: pathlib.Path,
+    task_id: str,
+    new_status: str = "open",
+    status_note: str | None = None,
+) -> tuple[str, str]:
+    """Move a block ### task_id out of ## Closed back into the open section of file_path.
+    Inserts in sorted ID order among open sibling blocks.
+    Removes ## Closed if no blocks remain in it.
+    """
+    new_block_text, new_h = rewrite_block_in_file(
+        file_path, task_id, new_status=new_status, status_note=status_note
+    )
+    text = file_path.read_text(encoding="utf-8")
+    heading_re = re.compile(
+        rf"^###\s+{re.escape(task_id)}\s+[—–-]\s+.*$",
+        re.MULTILINE,
+    )
+    m = heading_re.search(text)
+    if not m:
+        return new_block_text, new_h
+
+    start_pos = m.start()
+    scanned_lines, _ = scan_markdown_blocks(text)
+    heading_line_num = text[:start_pos].count("\n") + 1
+    heading_sline_idx = next(
+        (i for i, sl in enumerate(scanned_lines) if sl.line_number == heading_line_num),
+        None,
+    )
+
+    end_pos = len(text)
+    if heading_sline_idx is not None:
+        for idx in range(heading_sline_idx + 1, len(scanned_lines)):
+            sl = scanned_lines[idx]
+            if not sl.is_fenced and (sl.text.startswith("### ") or sl.text.startswith("## ")):
+                end_pos = sum(len(sl2.text) + 1 for sl2 in scanned_lines[:idx])
+                break
+
+    m_closed = re.search(r"^##\s+Closed\b.*$", text, re.MULTILINE)
+    if not m_closed or start_pos < m_closed.start():
+        return new_block_text, new_h
+
+    before = text[:start_pos].rstrip("\n")
+    after = text[end_pos:].lstrip("\n")
+    if before and after:
+        text_without = before + "\n\n" + after
+    elif before:
+        text_without = before + "\n"
+    else:
+        text_without = after
+
+    m_closed2 = re.search(r"^##\s+Closed\b.*$", text_without, re.MULTILINE)
+    closed_start = m_closed2.start() if m_closed2 else len(text_without)
+
+    open_headings = list(re.finditer(
+        r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+)+)\s+[—–-]\s+",
+        text_without[:closed_start],
+        re.MULTILINE,
+    ))
+
+    def _split_id(tid: str) -> list[Any]:
+        res = []
+        for p in tid.split("."):
+            try:
+                res.append(int(p))
+            except ValueError:
+                res.append(p)
+        return res
+
+    target_key = _split_id(task_id)
+    insert_pos = None
+    for oh in open_headings:
+        if _split_id(oh.group(1)) > target_key:
+            insert_pos = oh.start()
+            break
+
+    if insert_pos is not None:
+        pre = text_without[:insert_pos].rstrip("\n")
+        post = text_without[insert_pos:].lstrip("\n")
+        new_text = pre + "\n\n" + new_block_text.strip() + "\n\n" + post
+    else:
+        pre = text_without[:closed_start].rstrip("\n")
+        post = text_without[closed_start:].lstrip("\n")
+        if post:
+            new_text = pre + "\n\n" + new_block_text.strip() + "\n\n" + post
+        else:
+            new_text = pre + "\n\n" + new_block_text.strip() + "\n"
+
+    # Check if ## Closed section is now empty
+    m_closed3 = re.search(r"^##\s+Closed\b.*$", new_text, re.MULTILINE)
+    if m_closed3:
+        post_c = new_text[m_closed3.end():]
+        m_next = re.search(r"^##\s+", post_c, re.MULTILINE)
+        c_body = post_c[:m_next.start()] if m_next else post_c
+        if not re.search(r"^###\s+", c_body, re.MULTILINE):
+            pre_c = new_text[:m_closed3.start()].rstrip("\n")
+            if m_next:
+                new_text = pre_c + "\n\n" + post_c[m_next.start():].lstrip("\n")
+            else:
+                new_text = pre_c + "\n"
+
+    _atomic_write_text(file_path, new_text, encoding="utf-8")
+    new_h = hashlib.sha256(new_block_text.encode("utf-8")).hexdigest()
+    return new_block_text, new_h
+
+
+def rewrite_relative_markdown_links(
+    text: str,
+    old_target_rel: str,
+    new_target_rel: str,
+) -> str:
+    """Rewrite Markdown links [label](url) where url targets old_target_rel to new_target_rel."""
+    old_clean = old_target_rel.rstrip("/")
+    new_clean = new_target_rel.rstrip("/")
+
+    def _replace_link(m: re.Match) -> str:
+        label = m.group(1)
+        url = m.group(2)
+        if url.startswith(("http://", "https://", "mailto:", "#")):
+            return m.group(0)
+
+        url_path, sep, anchor = url.partition("#")
+        if new_clean == f"done/{old_clean}":
+            pat = rf"(^|(?<!done/)/)({re.escape(old_clean)})(?:/|$)"
+            sub_pat = rf"(^|(?<!done/)/){re.escape(old_clean)}(/|$)"
+        else:
+            pat = rf"(^|/)({re.escape(old_clean)})(?:/|$)"
+            sub_pat = rf"(^|/){re.escape(old_clean)}(/|$)"
+
+        if re.search(pat, url_path):
+            new_url_path = re.sub(
+                sub_pat,
+                rf"\g<1>{new_clean}\g<2>",
+                url_path,
+            )
+            return f"[{label}]({new_url_path}{sep}{anchor})"
+        return m.group(0)
+
+    link_re = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+    return link_re.sub(_replace_link, text)
+
+
+def adjust_markdown_link_depth(text: str, depth_delta: int) -> str:
+    """Adjust depth of relative links reaching outside the current folder.
+    depth_delta = +1: folder moved 1 level deeper (e.g. into done/); ../ becomes ../../.
+    depth_delta = -1: folder moved 1 level shallower; ../../ becomes ../.
+    """
+    if depth_delta == 0:
+        return text
+
+    def _replace_link(m: re.Match) -> str:
+        label = m.group(1)
+        url = m.group(2)
+        if url.startswith(("http://", "https://", "mailto:", "#")):
+            return m.group(0)
+
+        url_path, sep, anchor = url.partition("#")
+        if depth_delta > 0:
+            if url_path.startswith("../"):
+                new_path = ("../" * depth_delta) + url_path
+                return f"[{label}]({new_path}{sep}{anchor})"
+        elif depth_delta < 0:
+            remove_count = abs(depth_delta)
+            prefix = "../" * remove_count
+            if url_path.startswith(prefix):
+                new_path = url_path[len(prefix):]
+                return f"[{label}]({new_path}{sep}{anchor})"
+        return m.group(0)
+
+    link_re = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+    return link_re.sub(_replace_link, text)
+
+
+def rewrite_links_in_text(text: str, old_rel: str, new_rel: str) -> str:
+    """Rewrite both markdown links and sources:/produced: header lines."""
+    text = rewrite_relative_markdown_links(text, old_rel, new_rel)
+    old_clean = old_rel.rstrip("/")
+    new_clean = new_rel.rstrip("/")
+    lines = text.splitlines(keepends=True)
+    new_lines = []
+    for line in lines:
+        if re.match(r"^\s*[-*]?\s*(?:sources|produced):", line, re.IGNORECASE):
+            if new_clean == f"done/{old_clean}":
+                pat = rf"(^|[/\s](?<!done/))({re.escape(old_clean)})(?:/|[\s]|$)"
+                sub_pat = rf"(^|[/\s](?<!done/)){re.escape(old_clean)}(/|[\s]|$)"
+            else:
+                pat = rf"(^|[/\s])({re.escape(old_clean)})(?:/|[\s]|$)"
+                sub_pat = rf"(^|[/\s]){re.escape(old_clean)}(/|[\s]|$)"
+            if re.search(pat, line):
+                line = re.sub(
+                    sub_pat,
+                    rf"\g<1>{new_clean}\g<2>",
+                    line,
+                )
+        new_lines.append(line)
+    return "".join(new_lines)
+
+
+def check_markdown_links(tasks_dir: pathlib.Path) -> list[str]:
+    """Check all relative markdown links in tasks_dir to ensure targets exist."""
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    broken: list[str] = []
+    link_re = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+    for md_file in tasks_dir.rglob("*.md"):
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        for m in link_re.finditer(text):
+            url = m.group(2).strip()
+            if url.startswith(("http://", "https://", "mailto:", "#")):
+                continue
+            url_path = url.split("#")[0].strip()
+            if not url_path:
+                continue
+            resolved = (md_file.parent / url_path).resolve()
+            if not resolved.exists():
+                broken.append(
+                    f"{md_file.relative_to(tasks_dir).as_posix()}: link '{url}' does not resolve to existing path"
+                )
+    return broken
+
+
+def move_folder_child_to_done(parent_dir: pathlib.Path, folder_child_id: str, tasks_dir: pathlib.Path) -> pathlib.Path:
+    """Move an expanded folder child <parent_dir>/<id>-<slug> into <parent_dir>/done/<id>-<slug>."""
+    parent_dir = pathlib.Path(parent_dir).resolve()
+    matches = [
+        d for d in parent_dir.iterdir()
+        if d.is_dir() and (d.name == folder_child_id or d.name.startswith(f"{folder_child_id}-"))
+    ]
+    if not matches:
+        raise ValueError(f"Folder child '{folder_child_id}' not found in {parent_dir}")
+    src_folder = matches[0]
+    folder_name = src_folder.name
+
+    done_dir = parent_dir / "done"
+    done_dir.mkdir(parents=True, exist_ok=True)
+    dest_folder = done_dir / folder_name
+
+    # Adjust link depth for markdown files inside folder (+1 depth delta)
+    for md in src_folder.rglob("*.md"):
+        old_t = md.read_text(encoding="utf-8")
+        new_t = adjust_markdown_link_depth(old_t, depth_delta=1)
+        if new_t != old_t:
+            _atomic_write_text(md, new_t, encoding="utf-8")
+
+    res = subprocess.run(
+        ["git", "mv", str(src_folder), str(dest_folder)],
+        cwd=str(tasks_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if res.returncode != 0:
+        shutil.move(str(src_folder), str(dest_folder))
+
+    parent_md = parent_dir / "plan.md" if (parent_dir / "plan.md").is_file() else parent_dir / "README.md"
+    if parent_md.is_file():
+        p_text = parent_md.read_text(encoding="utf-8")
+        old_bullet = f"- **Expanded:** [{folder_name}/]({folder_name}/README.md)"
+        new_bullet = f"- **Expanded:** [done/{folder_name}/](done/{folder_name}/README.md)"
+        if old_bullet in p_text:
+            p_text = p_text.replace(old_bullet, new_bullet)
+            _atomic_write_text(parent_md, p_text, encoding="utf-8")
+        move_block_to_closed(parent_md, folder_child_id)
+
+    rel_old = src_folder.relative_to(tasks_dir).as_posix()
+    rel_new = dest_folder.relative_to(tasks_dir).as_posix()
+    for md in tasks_dir.rglob("*.md"):
+        if md.is_relative_to(dest_folder) or md == parent_md:
+            continue
+        md_text = md.read_text(encoding="utf-8")
+        new_md_text = rewrite_links_in_text(md_text, rel_old, rel_new)
+        if new_md_text != md_text:
+            _atomic_write_text(md, new_md_text, encoding="utf-8")
+
+    return dest_folder / "README.md"
+
+
+def move_folder_child_to_open(parent_dir: pathlib.Path, folder_child_id: str, tasks_dir: pathlib.Path) -> pathlib.Path:
+    """Move an expanded folder child back from <parent_dir>/done/<id>-<slug> to <parent_dir>/<id>-<slug>."""
+    parent_dir = pathlib.Path(parent_dir).resolve()
+    done_dir = parent_dir / "done"
+    matches = [
+        d for d in done_dir.iterdir()
+        if d.is_dir() and (d.name == folder_child_id or d.name.startswith(f"{folder_child_id}-"))
+    ]
+    if not matches:
+        raise ValueError(f"Folder child '{folder_child_id}' not found in {done_dir}")
+    src_folder = matches[0]
+    folder_name = src_folder.name
+    dest_folder = parent_dir / folder_name
+
+    # Adjust link depth for markdown files inside folder (-1 depth delta)
+    for md in src_folder.rglob("*.md"):
+        old_t = md.read_text(encoding="utf-8")
+        new_t = adjust_markdown_link_depth(old_t, depth_delta=-1)
+        if new_t != old_t:
+            _atomic_write_text(md, new_t, encoding="utf-8")
+
+    res = subprocess.run(
+        ["git", "mv", str(src_folder), str(dest_folder)],
+        cwd=str(tasks_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if res.returncode != 0:
+        shutil.move(str(src_folder), str(dest_folder))
+
+    parent_md = parent_dir / "plan.md" if (parent_dir / "plan.md").is_file() else parent_dir / "README.md"
+    if parent_md.is_file():
+        move_block_to_open(parent_md, folder_child_id)
+        p_text = parent_md.read_text(encoding="utf-8")
+        old_bullet = f"- **Expanded:** [done/{folder_name}/](done/{folder_name}/README.md)"
+        new_bullet = f"- **Expanded:** [{folder_name}/]({folder_name}/README.md)"
+        if old_bullet in p_text:
+            p_text = p_text.replace(old_bullet, new_bullet)
+            _atomic_write_text(parent_md, p_text, encoding="utf-8")
+
+    if done_dir.is_dir() and not list(done_dir.iterdir()):
+        try:
+            done_dir.rmdir()
+        except Exception:
+            pass
+
+    rel_old = src_folder.relative_to(tasks_dir).as_posix()
+    rel_new = dest_folder.relative_to(tasks_dir).as_posix()
+    for md in tasks_dir.rglob("*.md"):
+        if md.is_relative_to(dest_folder) or md == parent_md:
+            continue
+        md_text = md.read_text(encoding="utf-8")
+        new_md_text = rewrite_links_in_text(md_text, rel_old, rel_new)
+        if new_md_text != md_text:
+            _atomic_write_text(md, new_md_text, encoding="utf-8")
+
+    return dest_folder / "README.md"
+
+
 def _status_value(raw: str) -> str:
     """The state written in a Status bullet, without its code span and parenthesised note:
     '`in progress` (2026-10-17; kilo)' -> 'in progress'; 'done with a caveat: x' is kept whole."""
@@ -1306,7 +1717,7 @@ def parse_child_blocks(
             continue
         if sline.text.startswith("## "):
             m_sec = re.match(r"^##\s+(Closed\b.*)", sline.text, re.IGNORECASE)
-            current_closed = m_sec is not None
+            current_closed = in_closed_section or (m_sec is not None)
         elif sline.text.startswith("### "):
             m_head = re.match(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+)+)\s+[—–-]\s+(.+?)\s*$", sline.text)
             if m_head:
@@ -1341,6 +1752,7 @@ def parse_child_blocks(
         if expanded_link:
             target_readme = file_path.parent / expanded_link
             rel_readme = target_readme.relative_to(tasks_dir).as_posix() if target_readme.is_relative_to(tasks_dir) else str(target_readme)
+            is_done_readme = in_done or ("done" in target_readme.parts)
             c_node = TaskNode(
                 id=cid,
                 title=ctitle,
@@ -1366,7 +1778,7 @@ def parse_child_blocks(
                 file_path=str(target_readme),
                 rel_path=rel_readme,
                 is_folder=True,
-                in_done=in_done,
+                in_done=is_done_readme,
                 in_closed_section=is_closed,
                 task_hash=block_hash,
                 block_text=None,
@@ -1403,7 +1815,7 @@ def parse_child_blocks(
                     parent_id=cid,
                     parent_depth=parent_depth + 1,
                     tasks_dir=tasks_dir,
-                    in_done=in_done,
+                    in_done=is_done_readme,
                     in_closed_section=is_closed,
                     parent_category=parent_category,
                 )
@@ -1587,7 +1999,10 @@ def evaluate_container_states(tree: dict[str, TaskNode], node_id: str) -> None:
     else:
         child_nodes = [tree[cid] for cid in node.children if cid in tree]
         child_states = [c.state for c in child_nodes]
-        derived = derive_container_state(child_states)
+        if not child_nodes and node.node_type == "initiative" and node.in_done:
+            derived = "done"
+        else:
+            derived = derive_container_state(child_states)
         node.derived_state = derived
         node.state = derived
         node.canonical_state = normalize_state(derived)
@@ -2512,20 +2927,86 @@ def reopen_node(
                 "ok": False,
                 "error": f"Task '{node_id}' is in state '{node.state}' (not a terminal state).",
             }
-        if node.in_done or node.in_closed_section:
-            return {
-                "ok": False,
-                "error": "not-implemented-until-11.4",
-            }
 
         file_path = pathlib.Path(node.file_path)
-        operations = [
-            {
+
+        # Check if inside a shipped initiative
+        shipped_init: TaskNode | None = None
+        curr_p = node.parent
+        while curr_p and curr_p in tree:
+            if tree[curr_p].node_type == "initiative" and tree[curr_p].in_done:
+                shipped_init = tree[curr_p]
+                break
+            curr_p = tree[curr_p].parent
+
+        # Check if inside a closed folder child
+        closed_folder: TaskNode | None = None
+        curr_p = node.parent
+        while curr_p and curr_p in tree:
+            if tree[curr_p].is_folder and tree[curr_p].node_type != "initiative" and tree[curr_p].in_done:
+                closed_folder = tree[curr_p]
+                break
+            curr_p = tree[curr_p].parent
+
+        operations: list[dict[str, Any]] = []
+
+        if shipped_init:
+            init_dir = pathlib.Path(shipped_init.file_path).parent
+            init_name = init_dir.name
+            for f in init_dir.rglob("*"):
+                if f.is_file():
+                    operations.append({
+                        "action": "modify",
+                        "path": f.relative_to(tasks_dir).as_posix(),
+                        "before_hash": _file_sha256(f),
+                    })
+            index_path = tasks_dir / "00-INDEX.md"
+            if index_path.is_file() and not any(op["path"] == "00-INDEX.md" for op in operations):
+                operations.append({
+                    "action": "modify",
+                    "path": "00-INDEX.md",
+                    "before_hash": _file_sha256(index_path),
+                })
+            for md in tasks_dir.rglob("*.md"):
+                if md.is_relative_to(init_dir) or md == index_path:
+                    continue
+                if f"done/{init_name}" in md.read_text(encoding="utf-8"):
+                    rel = md.relative_to(tasks_dir).as_posix()
+                    if not any(op["path"] == rel for op in operations):
+                        operations.append({
+                            "action": "modify",
+                            "path": rel,
+                            "before_hash": _file_sha256(md),
+                        })
+
+        if closed_folder:
+            fld_dir = pathlib.Path(closed_folder.file_path).parent
+            for f in fld_dir.rglob("*"):
+                if f.is_file():
+                    rel = f.relative_to(tasks_dir).as_posix()
+                    if not any(op["path"] == rel for op in operations):
+                        operations.append({
+                            "action": "modify",
+                            "path": rel,
+                            "before_hash": _file_sha256(f),
+                        })
+            if closed_folder.parent and closed_folder.parent in tree:
+                parent_f = pathlib.Path(tree[closed_folder.parent].file_path)
+                rel_pf = parent_f.relative_to(tasks_dir).as_posix()
+                if not any(op["path"] == rel_pf for op in operations):
+                    operations.append({
+                        "action": "modify",
+                        "path": rel_pf,
+                        "before_hash": _file_sha256(parent_f),
+                    })
+
+        rel_fp = file_path.relative_to(tasks_dir).as_posix()
+        if not any(op["path"] == rel_fp for op in operations):
+            operations.append({
                 "action": "modify",
-                "path": file_path.relative_to(tasks_dir).as_posix(),
+                "path": rel_fp,
                 "before_hash": _file_sha256(file_path),
-            }
-        ]
+            })
 
         ancestors_to_restore: list[tuple[TaskNode, str]] = []
         old_st = node.state
@@ -2582,15 +3063,96 @@ def reopen_node(
         reason_clean = reason.strip() if reason else "reopened"
         status_note = f"{today}; {reason_clean}"
 
+        # 1. Restore shipped initiative if applicable
+        if shipped_init:
+            init_dir = pathlib.Path(shipped_init.file_path).parent
+            init_name = init_dir.name
+            restored_dir = tasks_dir / init_name
+            res = subprocess.run(
+                ["git", "mv", str(init_dir), str(restored_dir)],
+                cwd=str(tasks_dir),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode != 0:
+                shutil.move(str(init_dir), str(restored_dir))
+
+            summary_f = restored_dir / "summary.md"
+            if summary_f.is_file():
+                s_text = summary_f.read_text(encoding="utf-8")
+                s_text = s_text.rstrip() + f"\n- **Reopened:** {today} ({reason_clean})\n"
+                _atomic_write_text(summary_f, s_text, encoding="utf-8")
+
+            for md in restored_dir.rglob("*.md"):
+                if md == summary_f:
+                    continue
+                old_t = md.read_text(encoding="utf-8")
+                new_t = adjust_markdown_link_depth(old_t, depth_delta=-1)
+                if new_t != old_t:
+                    _atomic_write_text(md, new_t, encoding="utf-8")
+
+            index_p = tasks_dir / "00-INDEX.md"
+            if index_p.is_file():
+                idx_t = index_p.read_text(encoding="utf-8")
+                new_idx_t = rewrite_links_in_text(idx_t, f"done/{init_name}", init_name)
+                if new_idx_t != idx_t:
+                    _atomic_write_text(index_p, new_idx_t, encoding="utf-8")
+
+            for md in tasks_dir.rglob("*.md"):
+                if md.is_relative_to(restored_dir) or md == index_p:
+                    continue
+                m_t = md.read_text(encoding="utf-8")
+                new_m_t = rewrite_links_in_text(m_t, f"done/{init_name}", init_name)
+                if new_m_t != m_t:
+                    _atomic_write_text(md, new_m_t, encoding="utf-8")
+
+            rel_in_init = file_path.relative_to(init_dir)
+            file_path = restored_dir / rel_in_init
+
+        # 2. Restore closed folder child if applicable
+        if closed_folder:
+            parent_node = tree[closed_folder.parent]
+            p_dir = pathlib.Path(parent_node.file_path).parent
+            if shipped_init:
+                p_dir = tasks_dir / init_name
+            new_readme = move_folder_child_to_open(p_dir, closed_folder.id, tasks_dir)
+            fld_orig_parent = pathlib.Path(closed_folder.file_path).parent
+            if str(file_path).startswith(str(fld_orig_parent)):
+                file_path = new_readme.parent / file_path.name
+
+        # 3. Reopen the leaf block or task
         if node.block_text is not None:
-            rewrite_block_in_file(file_path, node_id, new_status="open", status_note=status_note)
+            if node.in_closed_section:
+                move_block_to_open(file_path, node_id, new_status="open", status_note=status_note)
+            else:
+                rewrite_block_in_file(file_path, node_id, new_status="open", status_note=status_note)
         else:
-            _update_task_file_headers_and_state(file_path, "open")
+            if node.in_done:
+                emergent = discover_emergent_tasks(tasks_dir)
+                target = next((t for t in emergent if t["id"] == node_id), None)
+                cat = (target.get("category") or "features") if target else "features"
+                target_dir = tasks_dir / cat
+                target_dir.mkdir(parents=True, exist_ok=True)
+                dest_file = target_dir / file_path.name
+                shutil.move(str(file_path), str(dest_file))
+                file_path = dest_file
+                _update_task_file_headers_and_state(file_path, "open")
+                if target:
+                    target["in_done"] = False
+                    target["rel_path"] = dest_file.relative_to(tasks_dir).as_posix()
+                    _update_index_task_path(tasks_dir, target, old_rel=node.rel_path)
+            else:
+                _update_task_file_headers_and_state(file_path, "open")
             t_dict = node.to_dict() if hasattr(node, "to_dict") else vars(node)
             _append_progress_log(t_dict, old_st, "open", actor="owner", verifier=None, reason=reason_clean)
 
         for anc, new_anc_state in ancestors_to_restore:
             anc_file = pathlib.Path(anc.file_path)
+            if shipped_init:
+                if anc_file.is_relative_to(tasks_dir / "done"):
+                    rel_done = anc_file.relative_to(tasks_dir / "done")
+                    anc_file = tasks_dir / rel_done
             _update_task_file_headers_and_state(anc_file, new_anc_state)
             anc_dict = anc.to_dict() if hasattr(anc, "to_dict") else vars(anc)
             _append_progress_log(
@@ -2629,6 +3191,307 @@ def reopen_node(
             )
 
         return {"ok": True, "task_id": node_id, "new_state": "open", "plan_hash": plan_hash}
+
+
+def ship_initiative(
+    tasks_dir: pathlib.Path,
+    init_id: str,
+    dry_run: bool = False,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    """Ship a completed initiative to tasks/done/NN-slug/ with summary.md skeleton and link rewriting."""
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if init_id not in tree:
+            return {"ok": False, "error": f"Initiative '{init_id}' not found."}
+        node = tree[init_id]
+        if node.node_type != "initiative":
+            return {"ok": False, "error": f"Node '{init_id}' is not an initiative."}
+        if node.in_done:
+            return {"ok": False, "error": f"Initiative '{init_id}' is already shipped (in done/)."}
+
+        st = node.derived_state or node.state
+        if normalize_state(st) not in TERMINAL_STATES:
+            return {
+                "ok": False,
+                "error": f"Cannot ship initiative '{init_id}': derived state is '{st}' (not closed).",
+            }
+
+        plan_path = pathlib.Path(node.file_path)
+        init_dir = plan_path.parent
+        init_name = init_dir.name
+        done_dir = tasks_dir / "done"
+        target_dir = done_dir / init_name
+        summary_path = target_dir / "summary.md"
+
+        operations: list[dict[str, Any]] = []
+
+        for f in init_dir.rglob("*"):
+            if f.is_file():
+                rel = f.relative_to(tasks_dir).as_posix()
+                operations.append({
+                    "action": "modify",
+                    "path": rel,
+                    "before_hash": _file_sha256(f),
+                })
+
+        operations.append({
+            "action": "create",
+            "path": summary_path.relative_to(tasks_dir).as_posix(),
+            "before_hash": "",
+        })
+
+        index_path = tasks_dir / "00-INDEX.md"
+        if index_path.is_file():
+            operations.append({
+                "action": "modify",
+                "path": "00-INDEX.md",
+                "before_hash": _file_sha256(index_path),
+            })
+
+        other_files_to_rewrite: list[pathlib.Path] = []
+        for md in tasks_dir.rglob("*.md"):
+            if md == index_path or md.is_relative_to(init_dir):
+                continue
+            text = md.read_text(encoding="utf-8")
+            if init_name in text:
+                other_files_to_rewrite.append(md)
+                rel = md.relative_to(tasks_dir).as_posix()
+                if not any(op["path"] == rel for op in operations):
+                    operations.append({
+                        "action": "modify",
+                        "path": rel,
+                        "before_hash": _file_sha256(md),
+                    })
+
+        plan, plan_hash = compute_operation_plan(operations)
+        if dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "initiative_id": init_id,
+                "folder": f"done/{init_name}",
+            }
+        if not expect_plan_hash:
+            return {
+                "ok": False,
+                "error": "Applying ship requires --expect-plan-hash <hash>. Run with --dry-run to obtain the plan hash.",
+                "plan_hash": plan_hash,
+            }
+        if expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
+                "plan_hash": plan_hash,
+            }
+
+        today = datetime.date.today().isoformat()
+        summary_text = (
+            f"# Summary: {init_id} - {node.title}\n\n"
+            f"- **Shipped:** {today}\n"
+            f"- **Plan:** [`plan.md`](plan.md)\n\n"
+            f"## Outcome\n<outcome description: what landed, net effect>\n\n"
+            f"## Deviations\n<deviations from original plan, if any>\n\n"
+            f"## Follow-ups\n<follow-up tasks, unresolved questions or notes>\n"
+        )
+        init_summary = init_dir / "summary.md"
+        _atomic_write_text(init_summary, summary_text, encoding="utf-8")
+
+        for f in init_dir.rglob("*.md"):
+            old_t = f.read_text(encoding="utf-8")
+            new_t = adjust_markdown_link_depth(old_t, depth_delta=1)
+            if new_t != old_t:
+                _atomic_write_text(f, new_t, encoding="utf-8")
+
+        done_dir.mkdir(parents=True, exist_ok=True)
+        res = subprocess.run(
+            ["git", "mv", str(init_dir), str(target_dir)],
+            cwd=str(tasks_dir),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            shutil.move(str(init_dir), str(target_dir))
+
+        if index_path.is_file():
+            idx_text = index_path.read_text(encoding="utf-8")
+            new_idx_text = rewrite_links_in_text(
+                idx_text,
+                old_rel=init_name,
+                new_rel=f"done/{init_name}",
+            )
+            if new_idx_text != idx_text:
+                _atomic_write_text(index_path, new_idx_text, encoding="utf-8")
+
+        for md in other_files_to_rewrite:
+            md_text = md.read_text(encoding="utf-8")
+            new_md_text = rewrite_links_in_text(
+                md_text,
+                old_rel=init_name,
+                new_rel=f"done/{init_name}",
+            )
+            if new_md_text != md_text:
+                _atomic_write_text(md, new_md_text, encoding="utf-8")
+
+        _emit_event(
+            tasks_dir,
+            "task.shipped",
+            {
+                "initiative_id": init_id,
+                "folder": f"done/{init_name}",
+            },
+            subject=init_id,
+            actor="owner",
+        )
+
+        return {
+            "ok": True,
+            "plan_hash": plan_hash,
+            "initiative_id": init_id,
+            "folder": f"done/{init_name}",
+        }
+
+
+def archive_misplaced(
+    tasks_dir: pathlib.Path,
+    dry_run: bool = False,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    """Fix misplaced closed items at every level with dry-run plan."""
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        emergent = discover_emergent_tasks(tasks_dir)
+
+        misplaced_emergent = [
+            t for t in emergent
+            if not t["in_done"] and t["canonical_state"] in TERMINAL_STATES
+        ]
+
+        misplaced_blocks: list[TaskNode] = []
+        for n in tree.values():
+            if n.is_leaf and n.block_text is not None and not n.in_done and not n.in_closed_section:
+                if n.canonical_state in TERMINAL_STATES:
+                    misplaced_blocks.append(n)
+
+        misplaced_folders: list[TaskNode] = []
+        for n in tree.values():
+            if n.is_folder and n.parent is not None and not n.in_done:
+                if n.canonical_state in TERMINAL_STATES:
+                    misplaced_folders.append(n)
+
+        total_misplaced = len(misplaced_emergent) + len(misplaced_blocks) + len(misplaced_folders)
+        if total_misplaced == 0:
+            plan, plan_hash = compute_operation_plan([])
+            return {
+                "ok": True,
+                "dry_run": dry_run,
+                "plan": [],
+                "plan_hash": plan_hash,
+                "message": "Nothing to archive.",
+                "archived_count": 0,
+            }
+
+        operations: list[dict[str, Any]] = []
+        for t in misplaced_emergent:
+            fpath = pathlib.Path(t["file_path"])
+            operations.append({
+                "action": "modify",
+                "path": fpath.relative_to(tasks_dir).as_posix(),
+                "before_hash": _file_sha256(fpath),
+            })
+
+        files_with_blocks: set[pathlib.Path] = set()
+        for b in misplaced_blocks:
+            files_with_blocks.add(pathlib.Path(b.file_path))
+        for f in files_with_blocks:
+            operations.append({
+                "action": "modify",
+                "path": f.relative_to(tasks_dir).as_posix(),
+                "before_hash": _file_sha256(f),
+            })
+
+        for fld in misplaced_folders:
+            fpath = pathlib.Path(fld.file_path)
+            operations.append({
+                "action": "modify",
+                "path": fpath.relative_to(tasks_dir).as_posix(),
+                "before_hash": _file_sha256(fpath),
+            })
+            if fld.parent and fld.parent in tree:
+                parent_f = pathlib.Path(tree[fld.parent].file_path)
+                rel_pf = parent_f.relative_to(tasks_dir).as_posix()
+                if not any(op["path"] == rel_pf for op in operations):
+                    operations.append({
+                        "action": "modify",
+                        "path": rel_pf,
+                        "before_hash": _file_sha256(parent_f),
+                    })
+
+        plan, plan_hash = compute_operation_plan(operations)
+        if dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "archived_count": total_misplaced,
+                "misplaced_blocks": [b.id for b in misplaced_blocks],
+                "misplaced_folders": [f.id for f in misplaced_folders],
+                "misplaced_emergent": [e["id"] for e in misplaced_emergent],
+            }
+        if not expect_plan_hash:
+            return {
+                "ok": False,
+                "error": "Applying archive requires --expect-plan-hash <hash>. Run with --dry-run to obtain the plan hash.",
+                "plan_hash": plan_hash,
+            }
+        if expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
+                "plan_hash": plan_hash,
+            }
+
+        for b in misplaced_blocks:
+            move_block_to_closed(pathlib.Path(b.file_path), b.id)
+            _emit_event(
+                tasks_dir,
+                "task.archived",
+                {"task_id": b.id, "type": "block", "file": b.rel_path},
+                subject=b.id,
+                actor="owner",
+            )
+
+        for fld in misplaced_folders:
+            if fld.parent and fld.parent in tree:
+                parent_dir = pathlib.Path(tree[fld.parent].file_path).parent
+                move_folder_child_to_done(parent_dir, fld.id, tasks_dir)
+                _emit_event(
+                    tasks_dir,
+                    "task.archived",
+                    {"task_id": fld.id, "type": "folder", "id": fld.id},
+                    subject=fld.id,
+                    actor="owner",
+                )
+
+        for e in misplaced_emergent:
+            dest = _move_task_to_done(e, tasks_dir)
+            _emit_event(
+                tasks_dir,
+                "task.archived",
+                {"task_id": e["id"], "type": "emergent", "to": dest.relative_to(tasks_dir).as_posix()},
+                subject=e["id"],
+                actor="owner",
+            )
+
+        return {
+            "ok": True,
+            "plan_hash": plan_hash,
+            "archived_count": total_misplaced,
+        }
 
 
 def set_priority(
@@ -4356,6 +5219,14 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                     if not LABEL_RE.match(lbl):
                         errors.append(f"{rel}: invalid label {lbl!r} on node {nid} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$').")
 
+        cstate = node.canonical_state
+        if node.in_done and cstate not in TERMINAL_STATES:
+            errors.append(f"{rel}: task {nid} is under done/ but state is {node.state!r} (not terminal).")
+        if node.in_closed_section and cstate not in TERMINAL_STATES:
+            errors.append(f"{rel}: task {nid} is in ## Closed but state is {node.state!r} (not terminal).")
+        if node.is_folder and node.parent is not None and not node.in_done and cstate in TERMINAL_STATES:
+            warnings.append(f"{rel}: folder child {nid} has terminal state {node.state!r} but has not been moved to done/ (run 'ai-orch tasks archive' to fix).")
+
     for ce in check_dependency_cycles(tree):
         errors.append(ce)
 
@@ -4421,7 +5292,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             if task["in_done"] and cstate not in TERMINAL_STATES:
                 errors.append(f"{rel}: task is under done/ but state is {task['state']!r} (not terminal).")
             if not task["in_done"] and cstate in TERMINAL_STATES:
-                warnings.append(f"{rel}: task has terminal state {task['state']!r} but has not been moved to done/.")
+                warnings.append(f"{rel}: task has terminal state {task['state']!r} but has not been moved to done/ (run 'ai-orch tasks archive' to fix).")
 
             # Size (optional)
             if "size" in task.get("headers", {}) and task["headers"]["size"] and task["headers"]["size"] != "-":
@@ -4500,7 +5371,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             if task["in_done"] and cstate not in TERMINAL_STATES:
                 errors.append(f"{rel}: task is under done/ but state is {task['state']!r} (not terminal).")
             if not task["in_done"] and cstate in TERMINAL_STATES:
-                warnings.append(f"{rel}: task has terminal state {task['state']!r} but has not been moved to done/.")
+                warnings.append(f"{rel}: task has terminal state {task['state']!r} but has not been moved to done/ (run 'ai-orch tasks archive' to fix).")
 
             # Optional extension fields
             if task["profile"] and task["profile"] != "-" and task["profile"] not in PROFILES:
@@ -5172,9 +6043,35 @@ def transition_task(
                 if reason and reason.strip() and reason.strip() not in effective_state:
                     note_parts.append(reason.strip())
                 file_path = pathlib.Path(node.file_path)
-                _, new_h = rewrite_block_in_file(
-                    file_path, task_id, new_status=effective_state, status_note="; ".join(note_parts)
-                )
+                if new_canon in TERMINAL_STATES:
+                    _, new_h = move_block_to_closed(
+                        file_path, task_id, new_status=effective_state, status_note="; ".join(note_parts)
+                    )
+                    if node.parent and node.parent in tree:
+                        parent_node = tree[node.parent]
+                        if parent_node.is_folder and parent_node.parent is not None:
+                            sub_tree = discover_task_tree(tasks_dir)
+                            if node.parent in sub_tree:
+                                p_derived = sub_tree[node.parent].derived_state
+                                if p_derived and normalize_state(p_derived) in TERMINAL_STATES and not sub_tree[node.parent].in_done:
+                                    p_dir = pathlib.Path(sub_tree[parent_node.parent].file_path).parent if parent_node.parent in sub_tree else file_path.parent.parent
+                                    move_folder_child_to_done(p_dir, node.parent, tasks_dir)
+                                    _emit_event(
+                                        tasks_dir,
+                                        "task.transitioned",
+                                        {
+                                            "from": parent_node.state,
+                                            "to": p_derived,
+                                            "actor": actor or "owner",
+                                            "reason": f"All children closed on child {task_id} closing",
+                                        },
+                                        subject=node.parent,
+                                        actor=actor or "owner",
+                                    )
+                else:
+                    _, new_h = rewrite_block_in_file(
+                        file_path, task_id, new_status=effective_state, status_note="; ".join(note_parts)
+                    )
                 _emit_event(
                     tasks_dir,
                     "task.transitioned",
@@ -6759,6 +7656,51 @@ def cmd_reopen(args: argparse.Namespace) -> int:
             print(f"[ok] {action} {args.id}")
         else:
             print(f"[FAIL] {res.get('error', 'reopen failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_ship(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    res = ship_initiative(
+        tasks_dir=tasks_dir,
+        init_id=args.id,
+        dry_run=dry_run,
+        expect_plan_hash=expect_plan_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            action = "planned shipping of" if dry_run else "shipped"
+            print(f"[ok] {action} initiative {args.id} -> {res.get('folder')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'ship failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_archive(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    res = archive_misplaced(
+        tasks_dir=tasks_dir,
+        dry_run=dry_run,
+        expect_plan_hash=expect_plan_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            if res.get("plan"):
+                action = "planned archiving of" if dry_run else "archived"
+                count = res.get("archived_count", len(res["plan"]))
+                print(f"[ok] {action} {count} item(s)")
+            else:
+                print(f"[ok] {res.get('message', 'Nothing to archive.')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'archive failed')}", file=sys.stderr)
     return 0 if res.get("ok") else 1
 
 
@@ -11241,6 +12183,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_reop_task.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_reop_task.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_reop_task.set_defaults(func=cmd_reopen)
+
+    # tasks ship
+    p_ship = sub.add_parser("ship", help="Ship a completed initiative to tasks/done/NN-slug/ with summary.md skeleton and link rewriting")
+    p_ship.add_argument("id", help="Initiative ID to ship (e.g. 01, 15)")
+    p_ship.add_argument("--dry-run", action="store_true", help="Compute plan without writing")
+    p_ship.add_argument("--expect-plan-hash", default=None, help="Expected plan hash")
+    p_ship.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_ship.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_ship.set_defaults(func=cmd_ship)
+
+    # tasks archive
+    p_arch = sub.add_parser("archive", help="Fix misplaced closed items at every level with dry-run plan")
+    p_arch.add_argument("--dry-run", action="store_true", help="Compute plan without writing")
+    p_arch.add_argument("--expect-plan-hash", default=None, help="Expected plan hash")
+    p_arch.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_arch.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_arch.set_defaults(func=cmd_archive)
 
     # tasks graph
     p_graph = sub.add_parser("graph", help="Compute abstract timeline dependency graph")

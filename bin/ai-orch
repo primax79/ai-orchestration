@@ -218,6 +218,14 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks reopen <id> --reason <text> [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
                     "description": "Reopen a terminal leaf task back to open.",
                 },
+                "ship": {
+                    "usage": "ai-orch tasks ship <id> [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Ship a completed initiative to tasks/done/NN-slug/ with summary.md skeleton and link rewriting.",
+                },
+                "archive": {
+                    "usage": "ai-orch tasks archive [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Fix misplaced closed items at every level (blocks to ## Closed, folder children and tasks to done/).",
+                },
                 "graph": {
                     "usage": "ai-orch tasks graph [--kind <kind>...] [--label <label>...] [--tasks-dir <dir>] [--mermaid] [--all] [--json]",
                     "description": "Compute abstract timeline dependency graph with columns, ready queue, heaviest chain, and Mermaid flowchart.",
