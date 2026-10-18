@@ -14,6 +14,7 @@
 - paths: ../ai-orchestration-ui/frontend/src/components/DecisionsTab.tsx
 - handoff: Read tasks/micro/T013-answer-dialog-wording.md and fix it.
 - verifier: claude:orchestration
+- short: Answer dialog wording
 
 ## Goal
 

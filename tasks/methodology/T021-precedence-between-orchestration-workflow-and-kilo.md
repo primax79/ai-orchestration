@@ -13,6 +13,7 @@
 - sources: -
 - paths: plugins/architect-side/skills/orchestration-workflow/, ../kilo-mcp/bindings/orchestration-workflow.json, ../kilo-mcp/plugins/architect-side/skills/kilo-mcp-orchestrator/
 - handoff: Read tasks/methodology/T021-precedence-between-orchestration-workflow-and-kilo.md, do the open steps, run the Verification, update the task and the registry.
+- short: Binding template drift
 
 verification pending: run Verification checks (independent verifier)
 

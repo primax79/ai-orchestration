@@ -13,6 +13,7 @@
 - sources: -
 - paths: -
 - handoff: Read tasks/env-doctor/T017-apply-q002-remove-the-untracked-project-scope-skil.md, do the open steps, run the Verification, update the task and the registry.
+- short: Remove project skill copies
 
 verification pending: run Verification checks (independent verifier)
 

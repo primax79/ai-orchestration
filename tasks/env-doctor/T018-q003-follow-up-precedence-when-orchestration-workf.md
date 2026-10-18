@@ -13,6 +13,7 @@
 - sources: -
 - paths: -
 - handoff: Read tasks/env-doctor/T018-q003-follow-up-precedence-when-orchestration-workf.md, do the open steps, run the Verification, update the task and the registry.
+- short: Orchestration skill precedence
 
 verification pending: run Verification checks (independent verifier)
 

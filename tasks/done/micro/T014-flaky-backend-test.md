@@ -14,6 +14,7 @@
 - paths: ../ai-orchestration-ui/backend/test_server.py
 - handoff: Read tasks/micro/T014-flaky-backend-test.md and fix it.
 - verifier: claude:orchestration
+- short: Flaky backend test
 
 ## Goal
 

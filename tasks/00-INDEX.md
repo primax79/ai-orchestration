@@ -16,11 +16,11 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](06-control-plane-safety/plan.md) | in progress (done: 06.1–06.8, 06.10; to verify: 06.9) | 05 | L |
 | 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | in progress (done: 07.1–07.4, 07.6–07.8, 07.10, 07.12; to verify: 07.5, 07.9, 07.11) | 05, 06 | L |
 | 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1–08.4; to verify: 08.5–08.7) | 06 | M |
-| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1–09.3, 09.7; running: 09.10; to verify: 09.4–09.6, 09.8–09.9, 09.11) | 06 (07 for agent triage) | M |
+| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1–09.3, 09.7; to verify: 09.4–09.6, 09.8–09.11) | 06 (07 for agent triage) | M |
 | 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | in progress (done: 10.1, 10.4; to verify: 10.2–10.3, 10.5–10.6) | 06, 09.1 | S |
 | 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | in progress (done: 11.1–11.2, 11.5–11.6; to verify: 11.3–11.4) | 06, 09.1 | M |
-| 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | in progress (done: 12.3–12.4, 12.11–12.14; running: 12.7–12.8; to verify: 12.1, 12.5–12.6, 12.9) | 07, 08, 11 | L |
-| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (done: 13.1, 13.4; running: 13.7; to verify: 13.2–13.3, 13.5–13.6) | 06 | M |
+| 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | in progress (done: 12.3–12.4, 12.11–12.14; to verify: 12.1, 12.5–12.10, 12.15–12.17) | 07, 08, 11 | L |
+| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (done: 13.1, 13.4; to verify: 13.2–13.3, 13.5–13.7) | 06 | M |
 | 15 | 15 | [Use-Case Driven Specification, Task Definition & Product Validation](15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 
 ## Specs
@@ -44,7 +44,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 <!-- ai-orch:generated next-up -->
 | Id | Priority | Task | Executor | Handoff |
 | --- | --- | --- | --- | --- |
-| T016 | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | claude | `Read tasks/env-doctor/T016-doctor-findings-study.md and produce the report in tasks/env-doctor/notes/.` |
+| T016 (Doctor findings study) | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | claude | `Read tasks/env-doctor/T016-doctor-findings-study.md and produce the report in tasks/env-doctor/notes/.` |
 <!-- /ai-orch:generated next-up -->
 
 ## Tasks by category
@@ -56,7 +56,8 @@ Evolutions and refinements to the orchestration skills (`orchestration-methodolo
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T021 | P2 | [Precedence between orchestration-workflow and kilo-mcp-orchestrator; fix binding template drift](methodology/T021-precedence-between-orchestration-workflow-and-kilo.md) | delivered | kilo | - |
+| T021 (Binding template drift) | P2 | [Precedence between orchestration-workflow and kilo-mcp-orchestrator; fix binding template drift](methodology/T021-precedence-between-orchestration-workflow-and-kilo.md) | delivered | kilo | - |
+| T025 (Short title field) | P2 | [Short title field for tasks and questions](methodology/T025-short-title-field-for-tasks-and-questions.md) | in progress | kilo | - |
 
 ### server-and-bindings
 
@@ -64,8 +65,8 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T022 | P1 | [Run engine fixes found by the 07.5/12.1 live capture](server-and-bindings/T022-run-engine-fixes-found-by-the-07-5-12-1-live-captu.md) | delivered | kilo | - |
-| T024 | P2 | [Confirm or reject trigger-proposed actions (engine + UI wiring)](server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md) | open | kilo | - |
+| T022 (Run engine fixes) | P1 | [Run engine fixes found by the 07.5/12.1 live capture](server-and-bindings/T022-run-engine-fixes-found-by-the-07-5-12-1-live-captu.md) | delivered | kilo | - |
+| T024 (Proposal confirm engine) | P2 | [Confirm or reject trigger-proposed actions (engine + UI wiring)](server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md) | delivered | kilo | - |
 
 ### micro
 
@@ -73,7 +74,7 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T023 | P2 | [VS Code parity for the Tree (11.3) and microtask (10.5) messages](micro/T023-vs-code-parity-for-the-tree-11-3-and-microtask-10.md) | delivered | kilo | - |
+| T023 (VS Code tree parity) | P2 | [VS Code parity for the Tree (11.3) and microtask (10.5) messages](micro/T023-vs-code-parity-for-the-tree-11-3-and-microtask-10.md) | delivered | kilo | - |
 
 ### env-doctor
 
@@ -81,10 +82,10 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T016 | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | delivered | claude | - |
-| T017 | P2 | [Apply Q002: remove the untracked project-scope skill copies in ai-orchestration](env-doctor/T017-apply-q002-remove-the-untracked-project-scope-skil.md) | delivered | claude | - |
-| T018 | P2 | [Q003 follow-up: precedence when orchestration-workflow and the generic orchestration skill coexist](env-doctor/T018-q003-follow-up-precedence-when-orchestration-workf.md) | delivered | claude | - |
-| T019 | P3 | [Apply Q005: per-skill diff of the gcube-jenkins, gcube-security-audit and frontend-design copies](env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md) | waiting | claude | - |
+| T016 (Doctor findings study) | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | delivered | claude | - |
+| T017 (Remove project skill copies) | P2 | [Apply Q002: remove the untracked project-scope skill copies in ai-orchestration](env-doctor/T017-apply-q002-remove-the-untracked-project-scope-skil.md) | delivered | claude | - |
+| T018 (Orchestration skill precedence) | P2 | [Q003 follow-up: precedence when orchestration-workflow and the generic orchestration skill coexist](env-doctor/T018-q003-follow-up-precedence-when-orchestration-workf.md) | delivered | claude | - |
+| T019 (Duplicate skills alignment) | P3 | [Apply Q005: per-skill diff of the gcube-jenkins, gcube-security-audit and frontend-design copies](env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md) | delivered | claude | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -92,9 +93,7 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 <!-- ai-orch:generated decisions -->
 | Key | Question | Blocks | Decider | Recommended |
 | --- | --- | --- | --- | --- |
-| [Q006](questions/Q006-gcube-jenkins-should-the-gcube-developer-tools-plu.md) | gcube-jenkins: should the gcube-developer-tools plugin become the canonical copy, with the env examples ported into it? | T019 | owner | A |
-| [Q007](questions/Q007-gcube-security-audit-should-the-0-3-0-branch-be-me.md) | gcube-security-audit: should the 0.3.0 branch be merged and released so the plugin becomes the canonical copy? | T019 | owner | A |
-| [Q008](questions/Q008-frontend-design-should-third-party-skills-agentic.md) | frontend-design: should third-party-skills@agentic-coding-kit stay the canonical copy, with Kilo's copy kept in sync? | T019 | owner | A |
+| - | None. | - | - | - |
 <!-- /ai-orch:generated decisions -->
 
 ## Done
@@ -102,22 +101,22 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 <!-- ai-orch:generated done -->
 | Id | Task | Result | Closed |
 | --- | --- | --- | --- |
-| T010 | [Core skill renames decision (docs/06 taxonomy vs. current skill names)](done/methodology/T010-core-skill-naming-decision.md) | done | 2026-10-15 |
-| T009 | [Product & per-skill usability, quickstart playbook, and instruction clarity](done/methodology/T009-usability-and-complete-documentation.md) | done | 2026-10-15 |
-| T005 | [Hardening headless-executor-contract and evaluating Kilo agent mode](done/methodology/T005-headless-contract-and-agent-mode.md) | done | 2026-10-15 |
-| T004 | [Rework conflict-resolver for Architect audience and incompatible designs](done/methodology/T004-conflict-resolver-rework.md) | done | 2026-10-15 |
-| T003 | [Phase 5 explicit decision point and worktree lifecycle closure](done/methodology/T003-phase5-decision-and-worktree-cleanup.md) | done | 2026-10-15 |
-| T002 | [Decision telemetry (kilo_log_decision) and ROI analysis rework](done/server-and-bindings/T002-decision-telemetry-and-roi-rework.md) | done | 2026-10-15 |
-| T001 | [Task completion wait (kilo_task_wait) and watcher guidance](done/server-and-bindings/T001-task-completion-wait-and-watcher.md) | done | 2026-10-15 |
-| T011 | [render-agents-md: render rules that match the actual orchestrator/executor topology](done/methodology/T011-render-agents-md-topology.md) | done | 2026-10-17 |
-| T013 | [Answer confirmation dialog says "No modifications required"](done/micro/T013-answer-dialog-wording.md) | done | 2026-10-17 |
-| T014 | [One backend test failed once in eleven runs](done/micro/T014-flaky-backend-test.md) | done | 2026-10-17 |
-| T006 | [Extract incident narratives to references/incidents.md (progressive disclosure)](done/methodology/T006-incidents-progressive-disclosure.md) | done | 2026-10-17 |
-| T007 | [Structured verification gate tool in kilo-mcp](done/server-and-bindings/T007-verification-gate-tool.md) | done | 2026-10-17 |
-| T008 | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](done/server-and-bindings/T008-claude-mcp-phase1-spike.md) | done | 2026-10-17 |
-| T020 | [Flaky run-engine tests under load](done/micro/T020-flaky-run-engine-tests-under-load.md) | done | 2026-10-17 |
-| T015 | [Navbar labels wrap on narrow widths](done/micro/T015-navbar-narrow-width.md) | done | 2026-10-18 |
-| T012 | [kilo-mcp: detect kilo run processes that hang after finishing](done/server-and-bindings/T012-kilo-run-hangs-after-completion.md) | done | 2026-10-18 |
+| T010 (Skill renames decision) | [Core skill renames decision (docs/06 taxonomy vs. current skill names)](done/methodology/T010-core-skill-naming-decision.md) | done | 2026-10-15 |
+| T009 (Usability and quickstart) | [Product & per-skill usability, quickstart playbook, and instruction clarity](done/methodology/T009-usability-and-complete-documentation.md) | done | 2026-10-15 |
+| T005 (Executor contract hardening) | [Hardening headless-executor-contract and evaluating Kilo agent mode](done/methodology/T005-headless-contract-and-agent-mode.md) | done | 2026-10-15 |
+| T004 (Conflict-resolver rework) | [Rework conflict-resolver for Architect audience and incompatible designs](done/methodology/T004-conflict-resolver-rework.md) | done | 2026-10-15 |
+| T003 (Phase 5 closure) | [Phase 5 explicit decision point and worktree lifecycle closure](done/methodology/T003-phase5-decision-and-worktree-cleanup.md) | done | 2026-10-15 |
+| T002 (Decision telemetry rework) | [Decision telemetry (kilo_log_decision) and ROI analysis rework](done/server-and-bindings/T002-decision-telemetry-and-roi-rework.md) | done | 2026-10-15 |
+| T001 (Task wait guidance) | [Task completion wait (kilo_task_wait) and watcher guidance](done/server-and-bindings/T001-task-completion-wait-and-watcher.md) | done | 2026-10-15 |
+| T011 (render-agents-md topology) | [render-agents-md: render rules that match the actual orchestrator/executor topology](done/methodology/T011-render-agents-md-topology.md) | done | 2026-10-17 |
+| T013 (Answer dialog wording) | [Answer confirmation dialog says "No modifications required"](done/micro/T013-answer-dialog-wording.md) | done | 2026-10-17 |
+| T014 (Flaky backend test) | [One backend test failed once in eleven runs](done/micro/T014-flaky-backend-test.md) | done | 2026-10-17 |
+| T006 (Incident narratives extraction) | [Extract incident narratives to references/incidents.md (progressive disclosure)](done/methodology/T006-incidents-progressive-disclosure.md) | done | 2026-10-17 |
+| T007 (Verification gate tool) | [Structured verification gate tool in kilo-mcp](done/server-and-bindings/T007-verification-gate-tool.md) | done | 2026-10-17 |
+| T008 (claude-mcp spike) | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](done/server-and-bindings/T008-claude-mcp-phase1-spike.md) | done | 2026-10-17 |
+| T020 (Flaky run tests) | [Flaky run-engine tests under load](done/micro/T020-flaky-run-engine-tests-under-load.md) | done | 2026-10-17 |
+| T015 (Navbar label wrapping) | [Navbar labels wrap on narrow widths](done/micro/T015-navbar-narrow-width.md) | done | 2026-10-18 |
+| T012 (Hung kilo runs) | [kilo-mcp: detect kilo run processes that hang after finishing](done/server-and-bindings/T012-kilo-run-hangs-after-completion.md) | done | 2026-10-18 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

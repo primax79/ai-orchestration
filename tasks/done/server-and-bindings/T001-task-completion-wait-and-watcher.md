@@ -14,6 +14,7 @@
 - paths: ../kilo-mcp/server.py, ../kilo-mcp/test_server.py, ../kilo-mcp/bindings/orchestration-methodology.json, ../ai-architect-executor/plugins/architect-side/skills/orchestration-methodology/SKILL.template.md
 - handoff: Read tasks/server-and-bindings/T001-task-completion-wait-and-watcher.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: orchestrator:deep-reasoning
+- short: Task wait guidance
 
 ## Goal
 

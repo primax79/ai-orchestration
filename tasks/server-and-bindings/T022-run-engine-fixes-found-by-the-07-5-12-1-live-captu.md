@@ -13,6 +13,7 @@
 - sources: -
 - paths: scripts/orchestration_runs.py, scripts/test_orchestration_runs.py
 - handoff: Read tasks/server-and-bindings/T022-run-engine-fixes-found-by-the-07-5-12-1-live-captu.md, do the open steps, run the Verification, update the task and the registry.
+- short: Run engine fixes
 
 verification pending: run Verification checks (independent verifier)
 

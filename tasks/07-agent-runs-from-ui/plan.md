@@ -1,5 +1,7 @@
 # 07 - Agent runs from the control plane (choose who does the work)
 
+- short: Agent runs
+
 > **Derived from:** [`../specs/agent-runs-from-ui.md`](../specs/agent-runs-from-ui.md) (v2). Read the spec first; this plan does not repeat it.
 >
 > **Requires:** initiative 06 for every UI task (07.7+). The core tasks (07.1–07.6) can start as soon as their file dependencies allow.
@@ -18,7 +20,7 @@
 
 ### 07.1 - `config set-routing`, surgical TOML updater, `[tools.<t>.headless]` schema, correct project-config path text
 
-- **Status:** `done` (2026-10-16) · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-16) · **Short:** Routing config · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py`, `.../scripts/test_orchestration_config.py`, `bin/ai-orch` (catalog text), `docs/05-orchestration-config-schema.md`
 - **Goal:** Implement spec §9:
   - a surgical updater used by both `set-routing` and `set-profile`;
@@ -31,7 +33,7 @@
 
 ### 07.2 - Run engine A: registry, locking, records, request validation, prompts, `options`/`preview`/`list`/`show`
 
-- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 07.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Run engine registry · **Profile:** `deep-reasoning` · **Depends on:** 07.1 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py` (new), `scripts/test_orchestration_runs.py` (new), `bin/ai-orch`
 - **Goal:** Spec §3 (resolution, modes, prompts, `T###`-only scope), §4 (`options`, `preview`, `list`, `show`), §5.1, §5.2 (lock, guards, monotonic records). No process spawning yet.
 - **Verification:** Tests:
@@ -43,7 +45,7 @@
 
 ### 07.3 - Run engine B: supervisor, adapters (prompt via stdin/file), cancel and lost reconciliation with process-group kill
 
-- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 07.2 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Run supervisor and adapters · **Profile:** `deep-reasoning` · **Depends on:** 07.2 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`, `scripts/fixtures/runs/stub_agent.py` (new)
 - **Goal:** Spec §4 (`start`, `logs`, `cancel`), §5.3, §5.7 (adapters, with the stub agent configured through `[tools.<t>.headless]`), and the task transition to `in progress` on a successful execute spawn (§3 "Task state ownership").
 - **Verification:** Tests against the stub agent (which can sleep, spawn a grandchild, write events, and exit 0 or 1):
@@ -56,7 +58,7 @@
 
 ### 07.4 - Run engine C: worktree isolation, verify target, verdict parsing and `apply-verdict`, continue invariants, `cleanup`
 
-- **Status:** `done` (2026-10-17) · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 07.3 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Run worktrees and verdicts · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 07.3 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:** Spec §5.4, §5.5, §5.6, and `run cleanup`.
 - **Verification:** Tests in temp git repos:
@@ -72,7 +74,7 @@
 
 ### 07.5 - Live capture with the real CLIs: session ids, Final Report, verdict, continue; flag table correction
 
-- **Status:** `delivered` (2026-10-18; claude; merged 2e76ee0 (claude subagent): live execute/continue/verify for kilo, claude, codex; fixtures; parser fixes (session ids, Final Report, verdict, usage E8); spec 5.7 corrected; 90 tests) · **Size:** M · **Profile:** `deep-reasoning` · **Executor:** `self` (orchestrator: needs the real CLIs and auth) · **Depends on:** 07.4 · **Repo:** `ai-orchestration/`
+- **Status:** `delivered` (2026-10-18; claude; merged 2e76ee0 (claude subagent): live execute/continue/verify for kilo, claude, codex; fixtures; parser fixes (session ids, Final Report, verdict, usage E8); spec 5.7 corrected; 90 tests) · **Short:** Live CLI capture · **Size:** M · **Profile:** `deep-reasoning` · **Executor:** `self` (orchestrator: needs the real CLIs and auth) · **Depends on:** 07.4 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/fixtures/runs/{claude,kilo,codex}-*.jsonl` (new), `scripts/test_orchestration_runs.py`, `tasks/specs/agent-runs-from-ui.md` (§5.7 table)
 - **Goal:** In a scratch git repo with a one-step task, do per tool:
   - one `execute`, one `--continue` and one `verify`;
@@ -83,7 +85,7 @@
 
 ### 07.6 - UI backend: run and config endpoints
 
-- **Status:** `done` (2026-10-17) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 07.4, 06.7 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Short:** Run and config endpoints · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 07.4, 06.7 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Spec §6.
 - **Verification:**
@@ -92,7 +94,7 @@
 
 ### 07.7 - Frontend: Run dialog with live preview, task runs panel, Runs tab
 
-- **Status:** `done` (2026-10-17) · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Short:** Run dialog and Runs tab · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Spec §7, except the Config tab.
 - **Verification:**
@@ -106,14 +108,14 @@
 
 ### 07.8 - Frontend: Config tab editing (routing and profile/model matrix)
 
-- **Status:** `done` (2026-10-17) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Short:** Config tab editing · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/components/OrchestrationConfigurator.tsx`, `frontend/src/api.ts`, `frontend/src/types.ts`, `frontend/dist/**`
 - **Goal:** Spec §7 "Config tab".
 - **Verification:** Live: edit routing and one profile in project scope; the `.ai-orchestration.local.toml` diff shows only those values.
 
 ### 07.9 - VS Code: run handlers and run watcher
 
-- **Status:** `delivered` (2026-10-17; claude; vscode 0.2.6: run handlers mirror the web backend; live check by the owner pending) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.7, 07.8, 06.9 · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-17; claude; vscode 0.2.6: run handlers mirror the web backend; live check by the owner pending) · **Short:** VS Code run handlers · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.7, 07.8, 06.9 · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/views/dashboard-panel.ts`, `src/extension.ts`, `dist-webview/**`
 - **Goal:** Spec §8.
 - **Verification:**
@@ -150,7 +152,7 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
 
 ### 07.10 - Core: run supervisor files blocking questions (R14, spec 08 Q8)
 
-- **Status:** `done` (2026-10-17) · **Size:** S · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 08.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Runs file questions · **Size:** S · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 08.1 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:**
   - At the end of a run, parse ` ```ai-orch-question ` blocks from the **final** assistant message.
@@ -167,7 +169,7 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
 
 ### 07.11 - Batch runs for microtasks
 
-- **Status:** `delivered` (2026-10-18; claude; merged; 103 run tests twice; batch verify is one run for the whole batch against the final commit) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 10.4 · **Repo:** `ai-orchestration/`
+- **Status:** `delivered` (2026-10-18; claude; merged; 103 run tests twice; batch verify is one run for the whole batch against the final commit) · **Short:** Microtask batch runs · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 10.4 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:** `../specs/timeline-gantt.md` §5 "Batch runs":
   - `run start --batch IDS` takes microtasks of one target repo only (refused otherwise);
@@ -180,7 +182,7 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
 
 ### 07.12 - Built-in per-mode Claude allow-list (Q001 decision A)
 
-- **Status:** `done` (2026-10-17) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.10 (same file) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Claude allow-list · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.10 (same file) · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`, `plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py` (headless schema: `allowed_tools` may be per mode), `docs/05-orchestration-config-schema.md`
 - **Goal:**
   - Q001 answer A: the Claude adapter ships a default `allowed_tools` per mode, used when the config sets none, so a launch is no longer refused (R11) for lack of an allow-list.

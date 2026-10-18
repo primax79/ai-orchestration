@@ -14,6 +14,7 @@
 - paths: README.md, docs/00-QUICKSTART-AND-PLAYBOOK.md, plugins/*/skills/*/SKILL.md, plugins/*/skills/*/SKILL.template.md
 - handoff: Read tasks/methodology/T009-usability-and-complete-documentation.md and tasks/01-repo-consolidation/plan.md (01.3), write docs/00-QUICKSTART-AND-PLAYBOOK.md, overhaul README.md, and add Quick Reference headers to each skill, then run Verification and update the registry.
 - verifier: orchestrator:deep-reasoning
+- short: Usability and quickstart
 
 ## Goal
 

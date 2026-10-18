@@ -13,6 +13,7 @@
 - sources: -
 - paths: ../vscode-ai-orchestration/src/views/dashboard-panel.ts
 - handoff: Read tasks/micro/T023-vs-code-parity-for-the-tree-11-3-and-microtask-10.md, do the open steps, run the Verification, update the task and the registry.
+- short: VS Code tree parity
 
 verification pending: run Verification checks (independent verifier)
 

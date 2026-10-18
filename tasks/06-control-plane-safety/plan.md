@@ -1,5 +1,7 @@
 # 06 - Control-plane safety (Doctor, index, UI backend, VS Code bridge)
 
+- short: Control-plane safety
+
 > **Derived from:** [`../specs/control-plane-safety.md`](../specs/control-plane-safety.md). Read the spec first; this plan does not repeat it. Finding ids (E*, I*, U*, V*) refer to its §1.
 
 E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable MCP configs) were fixed inline in `ai-orchestration@2ca3377`, with regression tests.
@@ -18,7 +20,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.1 - Lossless `sync-index` with generated-region markers (I1–I4)
 
-- **Status:** `done` (2026-10-16) · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-16) · **Short:** Lossless sync-index · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../scripts/test_tasks_engine.py`, `.../scripts/fixtures/index-regression/` (new), `tasks/00-INDEX.md` (adopt markers)
 - **Goal:** Implement spec §2.2 completely:
   - markers, plus `--adopt`;
@@ -39,7 +41,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.2 - Doctor: `--dry-run` plans with hash, no-clobber install, trash instead of delete, explicit obsolete cleanup (E4, E6, E7)
 
-- **Status:** `done` (2026-10-16) · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-16) · **Short:** Doctor safe plans · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_env.py`, `scripts/test_orchestration_env.py`
 - **Goal:** Implement spec §2.1:
   - the "Every mutating `env` command" and "No clobbering" bullets: `--dry-run` with `plan` + `plan_hash`, `--expect-plan-hash`, `--overwrite`, `.ai-orch-trash/`;
@@ -58,7 +60,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.3 - Doctor: plugin-aware inventory and conflicts (E5)
 
-- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 06.2 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Plugin-aware inventory · **Profile:** `deep-reasoning` · **Depends on:** 06.2 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_env.py`, `scripts/test_orchestration_env.py`
 - **Goal:** Implement spec §2.1 "Plugin-aware inventory":
   - Claude plugin skills from `~/.claude/plugins/installed_plugins.json`;
@@ -72,7 +74,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.4 - Doctor: MCP registration and status through the real config files (E3)
 
-- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 06.3 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** MCP registration status · **Profile:** `deep-reasoning` · **Depends on:** 06.3 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_env.py`, `scripts/test_orchestration_env.py`
 - **Goal:** Implement spec §2.1 "MCP registration through the real configs":
   - Claude via `claude mcp add`;
@@ -89,7 +91,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.5 - UI backend: auth, non-blocking CLI calls, fixed workspace, watcher (U1, U4, U5, U6)
 
-- **Status:** `done` (2026-10-16) · **Profile:** `bulk-execution` · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-16) · **Short:** UI backend hardening · **Profile:** `bulk-execution` · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`, `start.sh`, `README.md`, `frontend/src/api.ts`, `frontend/index.html`
 - **Goal:** Implement spec §2.3:
   - "Auth" (persisted token, meta injection with `no-store`, header and WS query checks, Host allowlist, CORS removed);
@@ -109,14 +111,14 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.6 - Core: `render-agents-md --diff` with hash precondition
 
-- **Status:** `done` (2026-10-16) · **Profile:** `bulk-execution` · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-16) · **Short:** render-agents-md diff · **Profile:** `bulk-execution` · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py`, `.../scripts/test_orchestration_config.py`
 - **Goal:** `render-agents-md --diff` returns `{diff, hash}` (hash of the current `AGENTS.md`, or of empty when the file is missing). `--apply --expect-hash H` refuses on mismatch. The write is atomic.
 - **Verification:** Tests: a diff for a missing block, a present block and an up-to-date block; a hash mismatch is refused and the file is unchanged.
 
 ### 06.7 - UI backend: preview/apply endpoints; transitions no longer write the index (U2, U3)
 
-- **Status:** `done` (2026-10-17) · **Profile:** `bulk-execution` · **Depends on:** 06.1, 06.2, 06.5, 06.6 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Short:** Preview/apply endpoints · **Profile:** `bulk-execution` · **Depends on:** 06.1, 06.2, 06.5, 06.6 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Implement spec §2.3:
   - "Transitions no longer write the index";
@@ -127,7 +129,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.8 - Frontend: confirmation modal with previews, safer installer defaults, Doctor origins, error banners, WS reconnect (U3, U7, V3)
 
-- **Status:** `done` (2026-10-17) · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 06.7 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Short:** Confirmation modals · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 06.7 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Implement spec §2.4; rebuild `dist/`.
 - **Verification:**
@@ -140,7 +142,7 @@ E1 and E2 (path traversal in `remove-skill`, wholesale overwrite of unparseable 
 
 ### 06.9 - VS Code bridge: complete handler map, non-zero rejection, `dist-webview` sync, no hard-coded paths, multi-root choice (V1, V2)
 
-- **Status:** `delivered` (2026-10-17; merged; awaiting live check in an Extension Development Host) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 06.8 · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-17; merged; awaiting live check in an Extension Development Host) · **Short:** VS Code bridge completion · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 06.8 · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/cli-client.ts`, `src/views/dashboard-panel.ts`, `src/extension.ts`, `package.json`, `esbuild.config.mjs`, `dist-webview/**`
 - **Goal:** Implement spec §2.5.
 - **Verification:**
@@ -168,7 +170,7 @@ The spec now opens with §0 "Amendments after review 2" (A1–A12). These change
 
 ### 06.10 - Core: task-write lock, `--expect-task-hash`, atomic writes (A9)
 
-- **Status:** `done` (2026-10-17) · **Profile:** `deep-reasoning` · **Depends on:** 06.1 (same file) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Task-write lock · **Profile:** `deep-reasoning` · **Depends on:** 06.1 (same file) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../scripts/test_tasks_engine.py`, `README.md` (platform note)
 - **Goal:**
   - Spec A9: an exclusive `flock` on `<tasks_dir>/.ai-orch.lock` around every mutating command;

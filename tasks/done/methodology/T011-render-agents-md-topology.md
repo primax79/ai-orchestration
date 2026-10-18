@@ -14,6 +14,7 @@
 - paths: plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py
 - handoff: Read tasks/methodology/T011-render-agents-md-topology.md, do the open steps, run the Verification, update the task and tasks/00-INDEX.md.
 - verifier: claude:orchestration
+- short: render-agents-md topology
 
 ## Goal
 

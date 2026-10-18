@@ -14,6 +14,7 @@
 - paths: ../kilo-mcp/server.py, ../kilo-mcp/test_server.py, ../kilo-mcp/kilo-mcp.example.toml, ../ai-architect-executor/plugins/architect-side/skills/delegation-roi-analysis/SKILL.template.md, ../kilo-mcp/bindings/delegation-roi-analysis.json
 - handoff: Read tasks/server-and-bindings/T002-decision-telemetry-and-roi-rework.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: orchestrator:deep-reasoning
+- short: Decision telemetry rework
 
 ## Goal
 

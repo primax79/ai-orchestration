@@ -14,6 +14,7 @@
 - paths: ../claude-mcp/
 - handoff: Read tasks/server-and-bindings/T008-claude-mcp-phase1-spike.md and ../claude-mcp/SPEC.md, run the Phase 1 spike, record findings, and update the task and the registry.
 - verifier: orchestrator:deep-reasoning
+- short: claude-mcp spike
 
 ## Goal
 

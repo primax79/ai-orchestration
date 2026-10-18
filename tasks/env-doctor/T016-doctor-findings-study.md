@@ -13,6 +13,7 @@
 - sources: owner request (2026-10-17): "a lot of findings that do not resolve; check whether they are false alarms or whether we must change how we handle them"
 - paths: scripts/orchestration_env.py, ../ai-orchestration-ui/frontend/src/components/EnvironmentDoctor.tsx
 - handoff: Read tasks/env-doctor/T016-doctor-findings-study.md and produce the report in tasks/env-doctor/notes/.
+- short: Doctor findings study
 
 ## Goal
 

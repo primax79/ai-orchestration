@@ -1,12 +1,14 @@
 # 03 - Configuration & Task Management Skill + Python Scripts
 
+- short: Config and task scripts
+
 > **Derived from specs:** [`../specs/orchestration-config-and-agents-md.md`](../../specs/orchestration-config-and-agents-md.md), [`../specs/task-and-state-model.md`](../../specs/task-and-state-model.md)
 
 ## Tasks
 
 ### 03.1 - Complete `orchestration_config.py`, Unit Tests, and `interactive-role-setup` Skill Update
 - **Profile:** `bulk-execution`
-- **Status:** `done` (2026-10-15)
+- **Status:** `done` (2026-10-15) · **Short:** Config engine completion
 - **Focus files:** `plugins/shared/skills/interactive-role-setup/scripts/orchestration_config.py`, `plugins/shared/skills/interactive-role-setup/scripts/test_orchestration_config.py`, `plugins/shared/skills/interactive-role-setup/SKILL.md`
 - **Steps:**
   1. Write comprehensive `pytest` unit tests in `plugins/shared/skills/interactive-role-setup/scripts/test_orchestration_config.py` testing:
@@ -22,7 +24,7 @@
 
 ### 03.2 - Implement `tasks_engine.py` (Deterministic Task Parser, Validator, State Transitions & `00-INDEX.md` Sync)
 - **Profile:** `deep-reasoning`
-- **Status:** `done` (2026-10-15)
+- **Status:** `done` (2026-10-15) · **Short:** Tasks engine
 - **Focus files:** `plugins/architect-side/skills/macroplan-authoring/scripts/tasks_engine.py`, `plugins/architect-side/skills/macroplan-authoring/scripts/test_tasks_engine.py`
 - **Steps:**
   1. Implement `tasks_engine.py` (stdlib-only Python, `--json` support on all subcommands):

@@ -14,6 +14,7 @@
 - paths: ../ai-architect-executor/plugins/architect-side/skills/conflict-resolver/SKILL.template.md, ../kilo-mcp/bindings/conflict-resolver.json
 - handoff: Read tasks/methodology/T004-conflict-resolver-rework.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: orchestrator:deep-reasoning
+- short: Conflict-resolver rework
 
 ## Goal
 

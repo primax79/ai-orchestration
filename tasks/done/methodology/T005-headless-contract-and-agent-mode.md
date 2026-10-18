@@ -14,6 +14,7 @@
 - paths: ../ai-architect-executor/plugins/executor-side/skills/headless-executor-contract/SKILL.template.md, ../kilo-mcp/bindings/headless-executor-contract.json
 - handoff: Read tasks/methodology/T005-headless-contract-and-agent-mode.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: orchestrator:deep-reasoning
+- short: Executor contract hardening
 
 ## Goal
 

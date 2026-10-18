@@ -14,6 +14,7 @@
 - paths: docs/06-naming-taxonomy-and-coherence.md, plugins/, ../kilo-mcp/bindings/
 - handoff: Read docs/06-naming-taxonomy-and-coherence.md and tasks/methodology/T010-core-skill-naming-decision.md, record the owner's decision on whether to execute or defer the core skill renames, and update the registry.
 - verifier: owner
+- short: Skill renames decision
 
 ## Goal
 

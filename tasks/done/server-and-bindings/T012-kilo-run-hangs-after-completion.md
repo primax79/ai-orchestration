@@ -14,6 +14,7 @@
 - paths: ../kilo-mcp/server.py
 - handoff: Read tasks/server-and-bindings/T012-kilo-run-hangs-after-completion.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: claude:orchestration
+- short: Hung kilo runs
 
 ## Goal
 

@@ -6,13 +6,14 @@
 - priority: P2
 - priority-reason: Owner request 2026-10-18: bare ids (T007, 12.16) in agent chat are unreadable
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: -
 - paths: -
 - handoff: Read tasks/methodology/T025-short-title-field-for-tasks-and-questions.md, do the open steps, run the Verification, update the task and the registry.
+- short: Short title field
 
 ## Goal
 

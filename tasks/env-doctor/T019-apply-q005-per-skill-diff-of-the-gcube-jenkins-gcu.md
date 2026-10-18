@@ -13,6 +13,7 @@
 - sources: -
 - paths: -
 - handoff: Read tasks/env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md, do the open steps, run the Verification, update the task and the registry.
+- short: Duplicate skills alignment
 
 verification pending: run Verification checks (independent verifier)
 

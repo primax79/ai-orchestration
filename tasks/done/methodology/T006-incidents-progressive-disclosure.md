@@ -14,6 +14,7 @@
 - paths: ../ai-architect-executor/plugins/architect-side/skills/orchestration-methodology/, ../kilo-mcp/bindings/orchestration-methodology.json
 - handoff: Read tasks/methodology/T006-incidents-progressive-disclosure.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: orchestrator:deep-reasoning
+- short: Incident narratives extraction
 
 ## Goal
 

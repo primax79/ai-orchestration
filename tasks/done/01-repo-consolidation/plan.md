@@ -1,12 +1,14 @@
 # 01 - Consolidate Orchestration & Task Skills into `ai-orchestration`
 
+- short: Consolidate into ai-orchestration
+
 > **Goal:** Make `ai-orchestration` the single, self-contained repository for all task-definition and orchestration skills, templates, and bindings, leaving `kilo-mcp` and `claude-mcp` as pure standalone MCP server repos.
 
 ## Tasks
 
 ### 01.1 - Rename `ai-architect-executor` → `ai-orchestration` across Repo Manifests, Scripts & Docs
 - **Profile:** `bulk-execution`
-- **Status:** `done` (2026-10-15)
+- **Status:** `done` (2026-10-15) · **Short:** Repo rename
 - **Focus files:** `.claude-plugin/marketplace.json`, `.kilo/marketplace.json`, `marketplace-skills.json`, `README.md`, `AGENTS.md`, `scripts/generate_skill_indices.py`, `plugins/*/.claude-plugin/plugin.json`, `plugins/*/skills/*/SKILL.md`
 - **Steps:**
   1. Update all repository URLs, marketplace names, and prose references from `ai-architect-executor` to `ai-orchestration` across `README.md`, `AGENTS.md`, `.claude-plugin/marketplace.json`, `.kilo/marketplace.json`, and `plugins/`.
@@ -19,7 +21,7 @@
 
 ### 01.2 - Consolidate `macroplan-authoring` into `ai-orchestration`
 - **Profile:** `orchestration`
-- **Status:** `done` (2026-10-15)
+- **Status:** `done` (2026-10-15) · **Short:** Merge macroplan-authoring
 - **Focus files:** `../agentic-coding-kit/plugins/common-tools/skills/macroplan-authoring/`, `plugins/architect-side/skills/`, `plugins/architect-side/skill-requirements.json`, `plugins/architect-side/dependencies.json`
 - **Steps:**
   1. Copy `macroplan-authoring` (`SKILL.md`, `references/template.md`) into `ai-orchestration/plugins/architect-side/skills/macroplan-authoring/` so `architect-side` includes task-pipeline authoring out of the box without an external repo dependency.
@@ -31,7 +33,7 @@
 
 ### 01.3 - Product-Level & Per-Skill Usability, Documentation, and Operator Playbook
 - **Profile:** `deep-reasoning`
-- **Status:** `done` (2026-10-15)
+- **Status:** `done` (2026-10-15) · **Short:** Usability and playbook
 - **Focus files:** `README.md`, `docs/00-QUICKSTART-AND-PLAYBOOK.md`, `plugins/*/skills/*/SKILL.md` (`SKILL.template.md`)
 - **Steps:**
   1. Rewrite `README.md` as a crystal-clear product entry point: what `ai-orchestration` is, how the 3 layers work (Config & Bootstrap → Task Pipeline & State Machine → Architect/Executor Delegation & Cross-Verification), complete table of plugins/skills/scripts, and installation instructions for Claude Code, Kilo Code, and AI Swissknife.

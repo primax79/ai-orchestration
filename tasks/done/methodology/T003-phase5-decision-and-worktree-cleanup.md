@@ -14,6 +14,7 @@
 - paths: ../ai-architect-executor/plugins/architect-side/skills/orchestration-methodology/SKILL.template.md, ../kilo-mcp/bindings/orchestration-methodology.json, ../kilo-mcp/plugins/architect-side/agents/mcp-orchestrator-agent.md
 - handoff: Read tasks/methodology/T003-phase5-decision-and-worktree-cleanup.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: orchestrator:deep-reasoning
+- short: Phase 5 closure
 
 ## Goal
 

@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
+- short: Security-audit release
 
 ## Context
 

@@ -13,6 +13,7 @@
 - sources: -
 - paths: scripts/orchestration_triggers.py, ../ai-orchestration-ui/backend/server.py
 - handoff: Read tasks/server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md, do the open steps, run the Verification, update the task and the registry.
+- short: Proposal confirm engine
 
 verification pending: run Verification checks (independent verifier)
 

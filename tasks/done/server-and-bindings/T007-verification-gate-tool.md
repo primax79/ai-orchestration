@@ -14,6 +14,7 @@
 - paths: ../kilo-mcp/server.py, ../kilo-mcp/test_server.py
 - handoff: Read tasks/server-and-bindings/T007-verification-gate-tool.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: orchestrator:deep-reasoning
+- short: Verification gate tool
 
 ## Goal
 

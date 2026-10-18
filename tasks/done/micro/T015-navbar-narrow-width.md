@@ -13,6 +13,7 @@
 - sources: owner screenshot in the VS Code Simple Browser (2026-10-17)
 - paths: ../ai-orchestration-ui/frontend/src/components/Navbar.tsx
 - handoff: Read tasks/micro/T015-navbar-narrow-width.md and fix it.
+- short: Navbar label wrapping
 
 ## Goal
 

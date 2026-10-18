@@ -1,12 +1,14 @@
 # 02 - Formal Task Model, State Machine & `orchestration.toml` Specification
 
+- short: Formal task model
+
 > **Derived from specs:** [`../specs/task-and-state-model.md`](../../specs/task-and-state-model.md), [`../specs/orchestration-config-and-agents-md.md`](../../specs/orchestration-config-and-agents-md.md)
 
 ## Tasks
 
 ### 02.1 - Align `macroplan-authoring` and `orchestration-methodology` with the Unified Task & Verification Spec
 - **Profile:** `deep-reasoning`
-- **Status:** `done` (2026-10-15)
+- **Status:** `done` (2026-10-15) · **Short:** Align methodology skills
 - **Focus files:** `tasks/specs/task-and-state-model.md`, `plugins/architect-side/skills/macroplan-authoring/SKILL.md`, `plugins/architect-side/skills/macroplan-authoring/references/template.md`, `plugins/architect-side/skills/orchestration-methodology/SKILL.template.md`
 - **Steps:**
   1. Update `macroplan-authoring/SKILL.md` and `references/template.md` to include the unified state machine (`bounced` transition, optional `profile`, `verification-mode: self | cross-agent | panel | owner`, `verifier` fields after `handoff`).

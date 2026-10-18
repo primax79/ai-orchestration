@@ -1,12 +1,14 @@
 # 10 - Abstract timeline: dependencies and priorities
 
+- short: Abstract timeline
+
 > **Derived from:** [`../specs/timeline-gantt.md`](../specs/timeline-gantt.md). Lane order: see `../06-control-plane-safety/plan.md`.
 
 ## Tasks (One Task = One Commit)
 
 ### 10.1 - Engine: `tasks graph` (columns, ready queue, heaviest chain, Mermaid), `size` field, `tasks set-priority`, `tasks set-size`, `tasks set-deps`, cycle check
 
-- **Status:** `done` (2026-10-18; claude; merged) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (child parser; same file, `tasks_engine.py` lane) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Task graph engine · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (child parser; same file, `tasks_engine.py` lane) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md` (the `size` extension field)
 - **Goal:** Spec §2. Also add `**Size:**` to the open tasks of the plans 06–10, using these estimates: 06.8 L, 06.9 M, 07.4 L, 07.5 M, 07.6 M, 07.7 L, 07.8 M, 07.9 S, 07.10 S, 08.3 S, 08.4 M, 08.5 S, 08.6 S, 09.1 M, 09.2 M, 09.3 L, 09.4 M, 09.5 M, 09.6 S, 10.1 M, 10.2 L, 10.3 S.
 - **Verification:**
@@ -23,7 +25,7 @@
 
 ### 10.2 - UI: graph and edit endpoints and the Timeline tab (arrows, ready queue, priority and dependency editing)
 
-- **Status:** `delivered` (2026-10-18; claude; merged (rebased); 48 backend tests; Kilo Playwright evidence on a scratch copy (.tmp/timeline-gantt-10.2.png); VS Code handlers added in extension 0.3.2; owner live check pending) · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 10.1, 06.8 (frontend lane; can run before 08.4 when 08.3 is late) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `delivered` (2026-10-18; claude; merged (rebased); 48 backend tests; Kilo Playwright evidence on a scratch copy (.tmp/timeline-gantt-10.2.png); VS Code handlers added in extension 0.3.2; owner live check pending) · **Short:** Timeline tab · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 10.1, 06.8 (frontend lane; can run before 08.4 when 08.3 is late) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`, `frontend/src/**`
 - **Goal:** Spec §3. Endpoints: `GET /api/tasks/graph`, and `POST /api/tasks/{id}/priority`, `/size` and `/deps`, each with a `/preview` variant.
 - **Verification:** Live with the Playwright MCP on a scratch copy of this repo's `tasks/`:
@@ -37,14 +39,14 @@
 
 ### 10.3 - VS Code: Timeline in the webview
 
-- **Status:** `delivered` (2026-10-18; claude; extension 0.3.2: Timeline view synced into the webview, getGraph/set-priority/size/deps handlers, parity test green; owner live check pending) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 10.2, 06.9 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-18; claude; extension 0.3.2: Timeline view synced into the webview, getGraph/set-priority/size/deps handlers, parity test green; owner live check pending) · **Short:** VS Code Timeline · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 10.2, 06.9 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/views/dashboard-panel.ts`, `src/cli-client.ts`, `dist-webview/**`
 - **Goal:** Spec §3 "VS Code".
 - **Verification:** Live in an Extension Development Host.
 
 ### 10.4 - Engine: microtasks (`micro` category, reduced schema, `tasks micro`, `tasks promote`, XS size), kind and labels
 
-- **Status:** `done` (2026-10-18; claude; merged) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 10.1 (same file) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Microtasks engine · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 10.1 (same file) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md`, `plugins/architect-side/skills/task-pipeline/SKILL.md` (document the microtask form)
 - **Goal:** Spec §5 (everything except batch runs and UI) and spec §6 engine part:
   - `kind` and `labels` fields (`T###` header extensions, `NN.T` bullets);
@@ -57,14 +59,14 @@
 
 ### 10.5 - UI: microtask quick-add, XS pills, "Promote", kind and labels, shared filter bar
 
-- **Status:** `delivered` (2026-10-18; claude; merged (screenshots removed from the commit, .tmp ignored); 52 backend tests; Kilo Playwright evidence: XS pill, promote, kind/label filters, group by label) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 10.4, 10.2 (frontend lane) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `delivered` (2026-10-18; claude; merged (screenshots removed from the commit, .tmp ignored); 52 backend tests; Kilo Playwright evidence: XS pill, promote, kind/label filters, group by label) · **Short:** Microtask UI · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 10.4, 10.2 (frontend lane) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `frontend/src/**`
 - **Goal:** Spec §5 "Creation" (UI) and the timeline pill, plus spec §6 UI: kind icons, label chips, the shared filter bar, the label editor with autocomplete, group by label. Also: in the inbox tab (09.3), "Convert to microtask" for `bug` notes, when 09.3 has landed.
 - **Verification:** Live with Playwright: quick-add a bug microtask → it appears as an XS pill in the ready queue → Promote → it becomes a full card.
 
 ### 10.6 - Backlog views: compact "Next up", separate view switcher (Queue, Kanban, Tree, Timeline)
 
-- **Status:** `delivered` (2026-10-17; merged and checked live with Playwright: Queue/Kanban/Tree views, Done hidden, Delivered+Verified column, Tree state filter, Waiting-first Kanban) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 06.8 (frontend lane; can run before 10.1 and enhance once 10.1 and 11.3 land) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `delivered` (2026-10-17; merged and checked live with Playwright: Queue/Kanban/Tree views, Done hidden, Delivered+Verified column, Tree state filter, Waiting-first Kanban) · **Short:** Backlog view switcher · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 06.8 (frontend lane; can run before 10.1 and enhance once 10.1 and 11.3 land) · **Repo:** `ai-orchestration-ui/`
 - **Origin:** owner feedback (2026-10-17). "Next Up Focus" was unclear and huge: it listed every `NN.T`, because initiative tasks inherited the initiative state, and it sat on the same page as the Kanban.
 - **Goal:**
   - The Backlog tab gets a view switcher: **Queue**, **Kanban**, **Tree** (11.3), **Timeline** (10.2). The last chosen view is remembered (localStorage).
