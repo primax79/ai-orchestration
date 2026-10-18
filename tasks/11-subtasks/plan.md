@@ -39,7 +39,7 @@
 
 ### 11.3 - UI: collapsible tree at any depth, node detail with inheritance, add child, expand, move, breadcrumbs
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, ai-orchestration-ui worktree task/11.3-tree-ui) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 11.1, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `delivered` (2026-10-18; claude; merged; 51 backend tests; Kilo Playwright on a scratch copy (tree, progress bars, add subtask T050.1); prior TaskDetailModal features preserved (Structured/Raw, attachments, runs, questions); owner live check pending) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 11.1, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `frontend/src/**`
 - **Goal:** Spec §4.
 - **Verification:** Live with Playwright on a scratch copy of this repo's `tasks/`: the tree shows 06–11 with progress bars; transitioning a child updates its block and the roll-up; "Add subtask" on a folder task creates `T###.1`.

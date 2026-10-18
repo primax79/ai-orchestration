@@ -6,13 +6,15 @@
 - priority: P2
 - priority-reason: Owner's open answer to Q003: are they incompatible or only worded so; wants a priority rule or prompt-level guidance
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: claude
 - depends-on: -
 - decider: -
 - sources: -
 - paths: -
 - handoff: Read tasks/env-doctor/T018-q003-follow-up-precedence-when-orchestration-workf.md, do the open steps, run the Verification, update the task and the registry.
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
