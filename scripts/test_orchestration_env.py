@@ -11,9 +11,9 @@ import sys
 SCRIPT = pathlib.Path(__file__).resolve().parent / "orchestration_env.py"
 
 
-def run_env(args: list[str], home: pathlib.Path) -> dict:
+def run_env(args: list[str], home: pathlib.Path, env: dict | None = None) -> dict:
     cmd = [sys.executable, str(SCRIPT), "--home", str(home), "--json", *args]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)
     return json.loads(res.stdout)
 
 
@@ -24,16 +24,21 @@ def test_install_skills_and_status_across_kilo_claude_codex(tmp_path: pathlib.Pa
     fake_ws.mkdir()
 
     # 1. Install skills globally across all 3 assistants (kilo, claude, codex)
-    inst = run_env(["install-skills", "--assistants", "all", "--scope", "global"], fake_home)
+    inst = run_env(["install-skills", "--assistants", "all", "--scope", "global", "--force"], fake_home)
     assert inst["ok"] is True
     assert inst["installed_count"] >= 24  # 8 skills * 3 assistants
 
     # 2. Verify status reports all 8 skills as up-to-date in kilo, claude, and codex
     st = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    assert "kilo_effective" in st
+    assert len(st["kilo_effective"]) == 8
     for assistant in ("kilo", "claude", "codex"):
         g_env = st["environments"][assistant]["global"]
         assert g_env["installed_count"] == 8
-        assert g_env["conflicts"] == []
+        if assistant in ("claude", "codex"):
+            assert g_env["conflicts"] == []
+        else:
+            assert len(g_env["conflicts"]) == 8  # kilo sees cross-root duplicates with claude
         for sname, sdata in g_env["skills"].items():
             assert sdata["state"] == "up-to-date", f"{assistant}/{sname} not up-to-date"
 
@@ -52,7 +57,7 @@ def test_conflict_detection_when_generic_and_bound_both_installed(tmp_path: path
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration", "--force"], fake_home)
     run_env(["install-skills", "--assistants", "claude", "--repo", "kilo-mcp"], fake_home)
 
     st = run_env(["status"], fake_home)
@@ -98,9 +103,9 @@ def test_register_mcp_across_kilo_claude_codex(tmp_path: pathlib.Path) -> None:
     assert "kilo-mcp" in st["environments"]["codex"]["global"]["registered_mcps"]
 
 
-def run_env_raw(args: list[str], home: pathlib.Path) -> subprocess.CompletedProcess[str]:
+def run_env_raw(args: list[str], home: pathlib.Path, env: dict | None = None) -> subprocess.CompletedProcess[str]:
     cmd = [sys.executable, str(SCRIPT), "--home", str(home), "--json", *args]
-    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+    return subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
 
 
 def test_remove_skill_rejects_path_traversal(tmp_path: pathlib.Path) -> None:
@@ -342,7 +347,7 @@ def test_expect_plan_hash_validation(tmp_path: pathlib.Path) -> None:
     )
     assert res_good["ok"] is True
     assert res_good["plan_hash"] == expected_hash
-    assert res_good["installed_count"] >= 8
+    assert res_good["installed_count"] >= 7
 
     # Stale expect-plan-hash on second run -> recomputed plan now has 'replace' instead of 'create', so mismatch
     res_stale = run_env_raw(
@@ -418,7 +423,7 @@ def test_remove_skill_and_resolve_conflicts_trash_instead_of_delete(tmp_path: pa
     fake_home.mkdir()
 
     # Install generic and bound skills to induce conflict in claude
-    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration", "--force"], fake_home)
     run_env(["install-skills", "--assistants", "claude", "--repo", "kilo-mcp"], fake_home)
 
     claude_skills = fake_home / ".claude" / "skills"
@@ -462,8 +467,8 @@ claude = "generic"
     )
 
     # Install both generic and bound for kilo and claude
-    run_env(["install-skills", "--assistants", "kilo", "claude", "--repo", "ai-orchestration"], fake_home)
-    run_env(["install-skills", "--assistants", "kilo", "claude", "--repo", "kilo-mcp"], fake_home)
+    run_env(["install-skills", "--assistants", "kilo", "claude", "--repo", "ai-orchestration", "--force"], fake_home)
+    run_env(["install-skills", "--assistants", "kilo", "claude", "--repo", "kilo-mcp", "--force"], fake_home)
 
     rc = run_env(["resolve-conflicts"], fake_home)
     assert rc["ok"] is True
@@ -684,15 +689,15 @@ def test_env_lock_held_during_execution(tmp_path: pathlib.Path) -> None:
 def test_reinstall_of_identical_skills_is_a_noop(tmp_path: pathlib.Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    run_env(["install-skills", "--assistants", "claude", "--scope", "global"], fake_home)
+    run_env(["install-skills", "--assistants", "claude", "--scope", "global", "--force"], fake_home)
     trash_root = fake_home / ".config" / "ai-orchestration" / "trash"
     before = sorted(p for p in trash_root.rglob("*")) if trash_root.exists() else []
 
-    plan = run_env(["install-skills", "--dry-run", "--assistants", "claude", "--scope", "global"], fake_home)
+    plan = run_env(["install-skills", "--dry-run", "--assistants", "claude", "--scope", "global", "--force"], fake_home)
     skill_actions = {e["action"] for e in plan["plan"] if "/skills/" in e["path"]}
     assert skill_actions == {"noop"}, skill_actions
 
-    run_env(["install-skills", "--assistants", "claude", "--scope", "global"], fake_home)
+    run_env(["install-skills", "--assistants", "claude", "--scope", "global", "--force"], fake_home)
     after = sorted(p for p in trash_root.rglob("*")) if trash_root.exists() else []
     assert after == before
 
@@ -815,7 +820,7 @@ def test_duplicate_name_conflict_between_standalone_and_plugin(tmp_path: pathlib
     fake_home.mkdir()
 
     # Install standalone orchestration-workflow
-    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration", "--force"], fake_home)
 
     # Set up enabled plugin providing orchestration-workflow
     plugins_cache = fake_home / ".claude" / "plugins" / "cache"
@@ -854,7 +859,7 @@ def test_resolve_conflicts_plan_never_contains_non_advise_action_on_plugin_path(
     fake_home.mkdir()
 
     # Install standalone orchestration-workflow
-    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration", "--force"], fake_home)
 
     # Set up plugin providing kilo-mcp-orchestrator AND plugin providing orchestration-workflow
     plugins_cache = fake_home / ".claude" / "plugins" / "cache"
@@ -1046,7 +1051,7 @@ def test_trigger_conflict_standalone_dropped_vs_plugin_only_dropped(tmp_path: pa
     fake_home_a = tmp_path / "home_a"
     fake_home_a.mkdir()
 
-    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home_a)
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration", "--force"], fake_home_a)
 
     plugins_cache_a = fake_home_a / ".claude" / "plugins" / "cache"
     p_bound_a = plugins_cache_a / "kilo-mcp" / "architect-side" / "0.2.2" / "skills"
@@ -1484,7 +1489,7 @@ def test_doctor_fixable_finding_carries_flag_and_actions(tmp_path: pathlib.Path)
     fake_home.mkdir()
 
     # Install generic and bound skills globally in claude
-    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration", "--force"], fake_home)
     run_env(["install-skills", "--assistants", "claude", "--repo", "kilo-mcp"], fake_home)
 
     # 1. Status inspection: conflict carries fixable=True, actions non-empty, scope='global'
@@ -1609,7 +1614,7 @@ def test_doctor_project_scope_does_not_repeat_global_findings(tmp_path: pathlib.
     fake_ws.mkdir()
 
     # Install global trigger conflict in claude
-    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration", "--force"], fake_home)
     run_env(["install-skills", "--assistants", "claude", "--repo", "kilo-mcp"], fake_home)
 
     # 1. Status with project workspace:
@@ -2861,6 +2866,199 @@ def test_duplicate_name_open_questions_q006_to_q008_never_autoresolve(tmp_path: 
     assert rc_apply["applied"] == 0
     for name, _ in test_cases:
         assert (fake_home / ".claude" / "skills" / name).is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Task 13.6: Kilo effective view; install respects plugins and policy (P2-b + P2-c)
+# ---------------------------------------------------------------------------
+
+
+def test_kilo_shadowing_order_across_roots(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_ws = tmp_path / "ws"
+    fake_home.mkdir()
+    fake_ws.mkdir()
+
+    sname = "my-custom-skill"
+    claude_dir = fake_home / ".claude" / "skills" / sname
+    config_dir = fake_home / ".config" / "kilo" / "skills" / sname
+    kilo_home_dir = fake_home / ".kilo" / "skills" / sname
+    kilo_proj_dir = fake_ws / ".kilo" / "skills" / sname
+
+    # Step 1: Only in ~/.claude/skills
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "SKILL.md").write_text("# Claude copy\n")
+    st1 = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    eff1 = st1["kilo_effective"]
+    assert sname in eff1
+    assert eff1[sname]["winning"] == str(claude_dir)
+    assert eff1[sname]["shadowed"] == []
+
+    # Step 2: Add ~/.config/kilo/skills -> shadows ~/.claude/skills
+    config_dir.mkdir(parents=True)
+    (config_dir / "SKILL.md").write_text("# Config copy\n")
+    st2 = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    eff2 = st2["kilo_effective"]
+    assert eff2[sname]["winning"] == str(config_dir)
+    assert str(claude_dir) in eff2[sname]["shadowed"]
+
+    # Step 3: Add ~/.kilo/skills -> shadows ~/.config/kilo/skills and ~/.claude/skills
+    kilo_home_dir.mkdir(parents=True)
+    (kilo_home_dir / "SKILL.md").write_text("# Kilo home copy\n")
+    st3 = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    eff3 = st3["kilo_effective"]
+    assert eff3[sname]["winning"] == str(kilo_home_dir)
+    assert str(config_dir) in eff3[sname]["shadowed"]
+    assert str(claude_dir) in eff3[sname]["shadowed"]
+
+    # Step 4: Add project .kilo/skills -> shadows all global copies
+    kilo_proj_dir.mkdir(parents=True)
+    (kilo_proj_dir / "SKILL.md").write_text("# Kilo project copy\n")
+    st4 = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+    eff4 = st4["kilo_effective"]
+    assert eff4[sname]["winning"] == str(kilo_proj_dir)
+    assert str(kilo_home_dir) in eff4[sname]["shadowed"]
+    assert str(config_dir) in eff4[sname]["shadowed"]
+    assert str(claude_dir) in eff4[sname]["shadowed"]
+
+
+def test_kilo_skill_in_claude_and_kilo_resolved_per_precedence(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    sname = "shared-skill"
+    claude_skill = fake_home / ".claude" / "skills" / sname
+    kilo_skill = fake_home / ".kilo" / "skills" / sname
+    claude_skill.mkdir(parents=True)
+    (claude_skill / "SKILL.md").write_text("# Claude version\n")
+    kilo_skill.mkdir(parents=True)
+    (kilo_skill / "SKILL.md").write_text("# Kilo version\n")
+
+    st = run_env(["status"], fake_home)
+    assert "kilo_effective" in st
+    eff = st["kilo_effective"]
+    assert sname in eff
+    # Kilo precedence: ~/.kilo/skills beats ~/.claude/skills
+    assert eff[sname]["winning"] == str(kilo_skill)
+    assert eff[sname]["shadowed"] == [str(claude_skill)]
+
+    # Kilo environment reflects cross-root duplicate finding
+    k_conflicts = st["environments"]["kilo"]["global"]["conflicts"]
+    assert any(sname in c and "standalone:~/.claude/skills" in c and "standalone:~/.kilo/skills" in c for c in k_conflicts)
+
+    # With KILO_DISABLE_CLAUDE_CODE_SKILLS=1, ~/.claude is excluded from Kilo's view
+    env_dis = os.environ.copy()
+    env_dis["KILO_DISABLE_CLAUDE_CODE_SKILLS"] = "1"
+    st_dis = run_env_raw(["status", "--json"], fake_home, env=env_dis)
+    assert st_dis.returncode == 0
+    data_dis = json.loads(st_dis.stdout)
+    eff_dis = data_dis["kilo_effective"]
+    assert eff_dis[sname]["winning"] == str(kilo_skill)
+    assert eff_dis[sname]["shadowed"] == []
+    k_conflicts_dis = data_dis["environments"]["kilo"]["global"]["conflicts"]
+    assert not any(sname in c for c in k_conflicts_dis)
+
+
+def test_install_skills_skips_plugin_provided_and_policy_removed_with_reasons(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Set up enabled Claude plugin providing task-pipeline
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_skills = plugins_cache / "ai-orchestration" / "architect-side" / "0.3.0" / "skills"
+    (p_skills / "task-pipeline").mkdir(parents=True)
+    (p_skills / "task-pipeline" / "SKILL.md").write_text("# Plugin Task Pipeline\n")
+
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_skills.parent),
+                }
+            ]
+        }
+    }))
+
+    # Dry-run install
+    dry = run_env(["install-skills", "--dry-run", "--assistants", "all", "--scope", "global"], fake_home)
+    assert dry["ok"] is True
+    plan = dry["plan"]
+
+    # In Claude: task-pipeline skipped (provided by enabled plugin)
+    # and orchestration-workflow skipped (removed by conflict policy 'bound')
+    claude_tp = next(
+        item for item in plan
+        if ".claude" in item["path"] and item["path"].endswith("/task-pipeline")
+    )
+    assert claude_tp["action"] == "skip"
+    assert "provided by enabled plugin 'architect-side@ai-orchestration'" in claude_tp["reason"]
+
+    claude_ow = next(
+        item for item in plan
+        if ".claude" in item["path"] and item["path"].endswith("/orchestration-workflow")
+    )
+    assert claude_ow["action"] == "skip"
+    assert "removed by conflict policy ('bound')" in claude_ow["reason"]
+
+    # In Codex: orchestration-workflow skipped (removed by conflict policy 'bound')
+    codex_ow = next(
+        item for item in plan
+        if ".codex" in item["path"] and item["path"].endswith("/orchestration-workflow")
+    )
+    assert codex_ow["action"] == "skip"
+    assert "removed by conflict policy ('bound')" in codex_ow["reason"]
+
+    # Apply install without force
+    apply_res = run_env(["install-skills", "--assistants", "all", "--scope", "global"], fake_home)
+    assert apply_res["ok"] is True
+    assert not (fake_home / ".claude" / "skills" / "task-pipeline").exists()
+    assert not (fake_home / ".claude" / "skills" / "orchestration-workflow").exists()
+    assert not (fake_home / ".codex" / "skills" / "orchestration-workflow").exists()
+
+    # --force overrides both skips
+    force_res = run_env(["install-skills", "--assistants", "all", "--scope", "global", "--force"], fake_home)
+    assert force_res["ok"] is True
+    assert (fake_home / ".claude" / "skills" / "task-pipeline").is_dir()
+    assert (fake_home / ".claude" / "skills" / "orchestration-workflow").is_dir()
+    assert (fake_home / ".codex" / "skills" / "orchestration-workflow").is_dir()
+
+
+def test_resolve_then_install_leaves_no_new_finding(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Install both generic and bound for Claude with --force to induce conflict
+    run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration", "--force"], fake_home)
+    run_env(["install-skills", "--assistants", "claude", "--repo", "kilo-mcp"], fake_home)
+
+    # Verify conflict exists
+    st_before = run_env(["status"], fake_home)
+    assert len(st_before["environments"]["claude"]["global"]["structured_conflicts"]) == 1
+
+    # Resolve conflicts -> removes generic 'orchestration-workflow' per bound policy
+    rc = run_env(["resolve-conflicts", "--apply"], fake_home)
+    assert rc["ok"] is True
+    assert rc["resolved_count"] == 1
+    assert rc["resolved"][0]["removed"] == "orchestration-workflow"
+    assert not (fake_home / ".claude" / "skills" / "orchestration-workflow").exists()
+
+    # Re-run install-skills: skips 'orchestration-workflow' due to bound policy
+    inst = run_env(["install-skills", "--assistants", "claude", "--repo", "ai-orchestration"], fake_home)
+    assert inst["ok"] is True
+    plan = inst["plan"]
+    ow_plan = next(item for item in plan if item["path"].endswith("/orchestration-workflow"))
+    assert ow_plan["action"] == "skip"
+    assert "removed by conflict policy ('bound')" in ow_plan["reason"]
+    assert not (fake_home / ".claude" / "skills" / "orchestration-workflow").exists()
+
+    # Verify status reports no findings for Claude
+    st_after = run_env(["status"], fake_home)
+    assert st_after["environments"]["claude"]["global"]["conflicts"] == []
+    assert st_after["environments"]["claude"]["global"]["structured_conflicts"] == []
 
 
 

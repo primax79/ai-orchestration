@@ -1432,6 +1432,201 @@ def read_kilo_merged_mcps(
     return servers
 
 
+def read_kilo_skill_paths(
+    home: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+) -> list[pathlib.Path]:
+    """Read custom skill paths declared in Kilo config files (skills.paths)."""
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+    paths: list[pathlib.Path] = []
+
+    cfg_dir = h / ".config" / "kilo"
+    candidates = [
+        cfg_dir / "config.json",
+        cfg_dir / "kilo.json",
+        cfg_dir / "kilo.jsonc",
+        cfg_dir / "opencode.json",
+        cfg_dir / "opencode.jsonc",
+    ]
+    if ws is not None:
+        candidates.extend([
+            ws / "config.json",
+            ws / "kilo.json",
+            ws / "kilo.jsonc",
+            ws / ".kilo" / "config.json",
+            ws / ".kilo" / "kilo.json",
+            ws / ".kilo" / "kilo.jsonc",
+            ws / "opencode.json",
+            ws / "opencode.jsonc",
+            ws / ".kilo" / "opencode.json",
+            ws / ".kilo" / "opencode.jsonc",
+        ])
+
+    for cand in candidates:
+        if not cand.is_file():
+            continue
+        try:
+            raw_text = cand.read_text(encoding="utf-8")
+            data = parse_jsonc(raw_text)
+            if not isinstance(data, dict):
+                continue
+            skills_cfg = data.get("skills", {})
+            if not isinstance(skills_cfg, dict):
+                continue
+            sp_list = skills_cfg.get("paths", [])
+            if not isinstance(sp_list, list):
+                continue
+            for item in sp_list:
+                if isinstance(item, str):
+                    if item.startswith("~/"):
+                        p = h / item[2:]
+                    elif pathlib.Path(item).is_absolute():
+                        p = pathlib.Path(item)
+                    elif ws is not None:
+                        p = ws / item
+                    else:
+                        p = h / item
+                    if p not in paths:
+                        paths.append(p)
+        except Exception:
+            continue
+    return paths
+
+
+def kilo_skill_roots(
+    home: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+    scope: str | None = None,
+) -> list[tuple[pathlib.Path, str, str]]:
+    """Return all roots Kilo reads for skills in ascending precedence order (lowest first, highest last).
+
+    Returns list of tuples: (root_path, scope, root_tag)
+    where root_tag is e.g. '~/.kilo/skills', '~/.claude/skills', '.kilo/skills'.
+    """
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+
+    disable_claude = (
+        os.environ.get("KILO_DISABLE_CLAUDE_CODE_SKILLS") in ("1", "true", "yes")
+        or os.environ.get("KILO_DISABLE_CLAUDE_CODE") in ("1", "true", "yes")
+    )
+    disable_external = os.environ.get("KILO_DISABLE_EXTERNAL_SKILLS") in ("1", "true", "yes")
+    disable_project = os.environ.get("KILO_DISABLE_PROJECT_CONFIG") in ("1", "true", "yes")
+
+    raw_roots: list[tuple[pathlib.Path, str, str]] = []
+
+    # 1. Global external roots (lowest precedence)
+    if not disable_external:
+        raw_roots.append((h / ".agents" / "skills", "global", "~/.agents/skills"))
+        if not disable_claude:
+            raw_roots.append((h / ".claude" / "skills", "global", "~/.claude/skills"))
+
+    # 2. Global config roots
+    raw_roots.append((h / ".config" / "kilo" / "skills", "global", "~/.config/kilo/skills"))
+    raw_roots.append((h / ".config" / "kilo" / "skill", "global", "~/.config/kilo/skill"))
+    raw_roots.append((h / ".kilocode" / "skills", "global", "~/.kilocode/skills"))
+    raw_roots.append((h / ".kilocode" / "skill", "global", "~/.kilocode/skill"))
+    raw_roots.append((h / ".kilo" / "skills", "global", "~/.kilo/skills"))
+    raw_roots.append((h / ".kilo" / "skill", "global", "~/.kilo/skill"))
+
+    # 3. Project external roots (if workspace)
+    if ws is not None and not disable_external:
+        raw_roots.append((ws / ".agents" / "skills", "project", ".agents/skills"))
+        if not disable_claude:
+            raw_roots.append((ws / ".claude" / "skills", "project", ".claude/skills"))
+
+    # 4. Project config roots (if workspace)
+    if ws is not None and not disable_project:
+        raw_roots.append((ws / ".kilocode" / "skills", "project", ".kilocode/skills"))
+        raw_roots.append((ws / ".kilocode" / "skill", "project", ".kilocode/skill"))
+        raw_roots.append((ws / ".kilo" / "skills", "project", ".kilo/skills"))
+        raw_roots.append((ws / ".kilo" / "skill", "project", ".kilo/skill"))
+
+    # 5. KILO_CONFIG_DIR override (if set)
+    kilo_cfg_env = os.environ.get("KILO_CONFIG_DIR")
+    if kilo_cfg_env:
+        cfg_d = pathlib.Path(kilo_cfg_env).expanduser()
+        raw_roots.append((cfg_d / "skills", "global", f"{cfg_d.name}/skills"))
+        raw_roots.append((cfg_d / "skill", "global", f"{cfg_d.name}/skill"))
+
+    # 6. Custom skills.paths from merged Kilo config
+    custom_paths = read_kilo_skill_paths(h, ws)
+    for p in custom_paths:
+        p_scope = "project" if ws is not None and (p == ws or p.is_relative_to(ws)) else "global"
+        tag = f"~/{p.relative_to(h)}" if p.is_relative_to(h) else (f"./{p.relative_to(ws)}" if ws and p.is_relative_to(ws) else str(p))
+        raw_roots.append((p, p_scope, tag))
+
+    # Filter by scope if requested
+    if scope == "global":
+        filtered = [r for r in raw_roots if r[1] == "global"]
+    elif scope == "project":
+        filtered = [r for r in raw_roots if r[1] == "project"]
+    else:
+        filtered = raw_roots
+
+    # Deduplicate while preserving order (last occurrence wins in precedence)
+    seen_paths: set[pathlib.Path] = set()
+    deduped_reversed: list[tuple[pathlib.Path, str, str]] = []
+    for item in reversed(filtered):
+        p_resolved = item[0].resolve()
+        if p_resolved not in seen_paths:
+            seen_paths.add(p_resolved)
+            deduped_reversed.append(item)
+    return list(reversed(deduped_reversed))
+
+
+def compute_kilo_effective(
+    home: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Compute Kilo effective skills across all roots Kilo reads, resolving shadowing by precedence."""
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+    roots = kilo_skill_roots(h, ws, scope=None)
+
+    skills_by_name: dict[str, list[dict[str, Any]]] = {}
+
+    for rdir, rscope, rtag in roots:
+        if not rdir.is_dir():
+            continue
+        for child in sorted(rdir.iterdir()):
+            if child.name.startswith("."):
+                continue
+            if not (child.is_dir() or child.is_symlink()):
+                continue
+            if not (child / "SKILL.md").is_file():
+                continue
+            sname = child.name
+            try:
+                fm, _ = parse_frontmatter_and_body((child / "SKILL.md").read_text(encoding="utf-8"))
+                if fm and isinstance(fm, dict) and fm.get("name"):
+                    sname = str(fm["name"])
+            except Exception:
+                pass
+
+            skills_by_name.setdefault(sname, []).append({
+                "path": child,
+                "root_dir": rdir,
+                "root_scope": rscope,
+                "root_tag": rtag,
+            })
+
+    effective: dict[str, dict[str, Any]] = {}
+    for sname in sorted(skills_by_name.keys()):
+        locs = skills_by_name[sname]
+        winner = locs[-1]
+        shadowed = locs[:-1]
+        effective[sname] = {
+            "winning": str(winner["path"]),
+            "winning_path": str(winner["path"]),
+            "path": str(winner["path"]),
+            "shadowed": [str(loc["path"]) for loc in shadowed],
+            "shadowed_paths": [str(loc["path"]) for loc in shadowed],
+        }
+    return effective
+
+
 def read_claude_mcps(
     scope: str,
     workspace: pathlib.Path | None = None,
@@ -2022,6 +2217,11 @@ def plan_for_conflict(
 
         to_remove_entries = [e for e in entries if e.get("name") == to_remove_name]
         standalone_to_remove = [e for e in to_remove_entries if not e.get("origin", "").startswith("plugin:")]
+        if assistant == "kilo":
+            standalone_to_remove = [
+                e for e in standalone_to_remove
+                if not (".claude" in e.get("origin", "") or ".agents" in e.get("origin", ""))
+            ]
         plugin_to_remove = [e for e in to_remove_entries if e.get("origin", "").startswith("plugin:")]
 
         if standalone_to_remove:
@@ -2341,7 +2541,8 @@ def plan_for_conflict(
                     )
                 )
 
-                is_fixable_p2d = has_current_and_legacy_or_identical or all_identical
+                has_project_and_global = any(it["scope"] == "project" for it in entry_info) and any(it["scope"] == "global" for it in entry_info)
+                is_fixable_p2d = (has_current_and_legacy_or_identical or all_identical) and has_project_and_global
 
                 if is_fixable_p2d:
                     keep_scope = policy.get("keep_scope", "global")
@@ -2384,16 +2585,25 @@ def plan_for_conflict(
                                 "reason": p_item["reason"],
                             })
                 else:
-                    target_path_str = entry_info[0]["path_str"] if entry_info else ""
-                    if target_path_str and target_path_str not in seen:
-                        seen.add(target_path_str)
+                    target_item = (
+                        next((it for it in entry_info if ".kilo" in it.get("entry", {}).get("origin", "")), entry_info[0])
+                        if assistant == "kilo" and entry_info else (entry_info[0] if entry_info else None)
+                    )
+                    target_path_str = target_item["path_str"] if target_item else ""
+                    if target_path_str:
                         target_path = pathlib.Path(target_path_str)
                         diff_info = compare_skill_dirs(entry_info[0]["path"], entry_info[1]["path"]) if len(entry_info) >= 2 else {"diff_files": ["SKILL.md"], "changed_fm_keys": [], "body_differs": True}
                         diff_summary = format_diff_summary(diff_info)
+                        if has_project_and_global:
+                            reason = f"duplicate standalone skill '{skill_name}' across scopes with differing contents: review and remove one manually"
+                        else:
+                            origins_list = sorted({e.get("origin", "") for e in entries if e.get("origin")})
+                            origins_display = ", ".join(origins_list) if origins_list else "roots"
+                            reason = f"duplicate standalone skill '{skill_name}' across origins ({origins_display}): review and remove one manually"
                         p_item = {
                             "action": "advise",
                             "path": target_path_str,
-                            "reason": f"duplicate standalone skill '{skill_name}' across scopes with differing contents: review and remove one manually",
+                            "reason": reason,
                             "current_state": "conflict",
                             "before_sha256": compute_target_hash(target_path),
                             "after_sha256": None,
@@ -2562,26 +2772,70 @@ def inspect_environment(
 
             # Build list-shaped skill_entries
             skill_entries: list[dict[str, Any]] = []
-            for sname, sdata in installed_skills.items():
-                child_path = sdir / sname
-                s_state = sdata["state"]
-                if s_state == "unmanaged":
-                    s_sev = "info"
-                elif s_state in ("up-to-date", "plugin"):
-                    s_sev = "neutral"
-                elif s_state in ("outdated-legacy", "up-to-date-legacy", "modified-or-outdated", "foreign") or s_state.startswith("obsolete-"):
-                    s_sev = "warning"
-                else:
-                    s_sev = "info"
-                skill_entries.append({
-                    "name": sname,
-                    "origin": "standalone",
-                    "scope": scope,
-                    "path": str(child_path),
-                    "enabled": True,
-                    "state": s_state,
-                    "severity": s_sev,
-                })
+            if assistant == "kilo":
+                seen_entry_paths: set[str] = set()
+                k_roots = kilo_skill_roots(h, ws, scope=scope)
+                for rdir, rscope, rtag in k_roots:
+                    if not rdir.is_dir():
+                        continue
+                    for child in sorted(rdir.iterdir()):
+                        if child.name.startswith("."):
+                            continue
+                        if not (child.is_dir() or child.is_symlink()):
+                            continue
+                        skill_md = child / "SKILL.md"
+                        if not skill_md.is_file():
+                            continue
+                        cp_str = str(child)
+                        if cp_str in seen_entry_paths:
+                            continue
+                        seen_entry_paths.add(cp_str)
+                        sname = child.name
+                        try:
+                            fm, _ = parse_frontmatter_and_body(skill_md.read_text(encoding="utf-8"))
+                            if fm and isinstance(fm, dict) and fm.get("name"):
+                                sname = str(fm["name"])
+                        except Exception:
+                            pass
+                        s_state, _, _ = detect_skill_state(child, catalog, h)
+                        if s_state == "unmanaged":
+                            s_sev = "info"
+                        elif s_state in ("up-to-date", "plugin"):
+                            s_sev = "neutral"
+                        elif s_state in ("outdated-legacy", "up-to-date-legacy", "modified-or-outdated", "foreign") or s_state.startswith("obsolete-"):
+                            s_sev = "warning"
+                        else:
+                            s_sev = "info"
+                        skill_entries.append({
+                            "name": sname,
+                            "origin": f"standalone:{rtag}",
+                            "scope": scope,
+                            "path": cp_str,
+                            "enabled": True,
+                            "state": s_state,
+                            "severity": s_sev,
+                        })
+            else:
+                for sname, sdata in installed_skills.items():
+                    child_path = sdir / sname
+                    s_state = sdata["state"]
+                    if s_state == "unmanaged":
+                        s_sev = "info"
+                    elif s_state in ("up-to-date", "plugin"):
+                        s_sev = "neutral"
+                    elif s_state in ("outdated-legacy", "up-to-date-legacy", "modified-or-outdated", "foreign") or s_state.startswith("obsolete-"):
+                        s_sev = "warning"
+                    else:
+                        s_sev = "info"
+                    skill_entries.append({
+                        "name": sname,
+                        "origin": "standalone",
+                        "scope": scope,
+                        "path": str(child_path),
+                        "enabled": True,
+                        "state": s_state,
+                        "severity": s_sev,
+                    })
 
             if assistant == "claude":
                 if scope == "global":
@@ -2655,7 +2909,7 @@ def inspect_environment(
             # per assistant+scope view; project view = standalone global + standalone project + enabled plugins
             if scope == "project":
                 global_entries = environments[assistant].get("global", {}).get("skill_entries", [])
-                standalone_global = [e for e in global_entries if e["origin"] == "standalone" and e["enabled"]]
+                standalone_global = [e for e in global_entries if e.get("origin", "").startswith("standalone") and e["enabled"]]
                 enabled_for_conflicts = [e for e in skill_entries if e["enabled"]] + standalone_global
             else:
                 enabled_for_conflicts = [e for e in skill_entries if e["enabled"]]
@@ -2804,7 +3058,13 @@ def inspect_environment(
                 elif len(unique_entries) == 1:
                     e = unique_entries[0]
                     e_state = e.get("state")
-                    if e.get("origin") == "standalone" and e_state in ("outdated-legacy", "up-to-date-legacy", "foreign"):
+                    if e.get("origin", "").startswith("standalone") and e_state in ("outdated-legacy", "up-to-date-legacy", "foreign"):
+                        # For Kilo: only report single-entry legacy/foreign conflicts for skills in Kilo's own roots,
+                        # not for external roots like ~/.claude/skills which belong to Claude!
+                        if assistant == "kilo":
+                            orig = e.get("origin", "")
+                            if ".claude" in orig or ".agents" in orig:
+                                continue
                         # If a project workspace is active and we are inspecting global scope,
                         # do not treat as an isolated skill if it also exists in project scope (cross-scope duplicate)
                         if scope == "global" and ws is not None:
@@ -3079,6 +3339,10 @@ def inspect_environment(
         "total_groups": len(finding_groups),
     }
 
+    kilo_effective = compute_kilo_effective(h, ws)
+    if "kilo" in environments:
+        environments["kilo"]["kilo_effective"] = kilo_effective
+
     return {
         "clis": clis,
         "source_repos": repos_status,
@@ -3089,6 +3353,7 @@ def inspect_environment(
         "groups": finding_groups,
         "summary": summary,
         "severity_counts": summary,
+        "kilo_effective": kilo_effective,
     }
 
 
@@ -3246,6 +3511,7 @@ def install_skills(
     dry_run: bool = False,
     expect_plan_hash: str | None = None,
     overwrite: list[str] | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     h = home or get_home_dir()
     ws = workspace.resolve() if workspace else pathlib.Path.cwd()
@@ -3260,6 +3526,9 @@ def install_skills(
     def _build_plan() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         catalog = discover_available_skills(h)
         catalog_agents = discover_available_agents(h)
+        claude_plugins = discover_claude_plugin_skills(h, ws)
+        global_plugin_enabled, project_plugin_enabled = load_claude_plugin_settings(h, ws)
+        policy = load_conflict_policy(h, ws)
         p: list[dict[str, Any]] = []
         ops: list[dict[str, Any]] = []
 
@@ -3373,15 +3642,64 @@ def install_skills(
                     target_dir = dest_skills_dir / sname
                     src_hash = hash_directory(src_dir)
                     is_existing = target_dir.exists() or target_dir.is_symlink()
-                    if not is_existing:
+                    cur_state = "missing"
+                    before_sha256 = None
+                    if is_existing:
+                        cur_state, s_repo, s_hash = detect_skill_state(target_dir, catalog, h)
+                        before_sha256 = compute_target_hash(target_dir)
+
+                    skip_due_to_plugin = False
+                    plugin_skip_reason = ""
+                    skip_due_to_policy = False
+                    policy_skip_reason = ""
+
+                    if not force and not (sname in overwrite_set or overwrite_all):
+                        # Check 1: Claude target provided by enabled plugin
+                        if assistant == "claude":
+                            for ps in claude_plugins:
+                                if ps.get("skill_name") == sname:
+                                    pid = ps.get("plugin_id", "")
+                                    if scope == "global" and ps.get("scope") == "user":
+                                        if global_plugin_enabled.get(pid, True):
+                                            skip_due_to_plugin = True
+                                            plugin_skip_reason = f"provided by enabled plugin '{pid}'"
+                                            break
+                                    elif scope == "project" and ws is not None:
+                                        if ps.get("scope") == "user" and project_plugin_enabled.get(pid, True):
+                                            skip_due_to_plugin = True
+                                            plugin_skip_reason = f"provided by enabled plugin '{pid}'"
+                                            break
+                                        elif ps.get("scope") in ("project", "local"):
+                                            p_path = ps.get("project_path")
+                                            if p_path and pathlib.Path(p_path).resolve() == ws and project_plugin_enabled.get(pid, True):
+                                                skip_due_to_plugin = True
+                                                plugin_skip_reason = f"provided by enabled plugin '{pid}'"
+                                                break
+
+                        # Check 2: Skip names that conflict policy would remove
+                        asst_policy = policy.get(assistant, "generic" if assistant == "kilo" else "bound")
+                        if asst_policy == "bound" and sname == "orchestration-workflow":
+                            skip_due_to_policy = True
+                            policy_skip_reason = f"removed by conflict policy ('{asst_policy}')"
+                        elif asst_policy == "generic" and sname == "kilo-mcp-orchestrator":
+                            skip_due_to_policy = True
+                            policy_skip_reason = f"removed by conflict policy ('{asst_policy}')"
+
+                    if skip_due_to_plugin:
+                        action = "skip"
+                        reason = plugin_skip_reason
+                        after_sha256 = None
+                    elif skip_due_to_policy:
+                        action = "skip"
+                        reason = policy_skip_reason
+                        after_sha256 = None
+                    elif not is_existing:
                         action = "create"
                         cur_state = "missing"
                         reason = f"Install skill '{sname}' from {repo_name}/{p_name}"
                         before_sha256 = None
                         after_sha256 = src_hash
                     else:
-                        cur_state, s_repo, s_hash = detect_skill_state(target_dir, catalog, h)
-                        before_sha256 = compute_target_hash(target_dir)
                         if cur_state in ("unmanaged", "modified-or-outdated", "foreign"):
                             if overwrite_all or sname in overwrite_set:
                                 action = "replace"
@@ -4179,7 +4497,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             for sname, sdata in sinfo["skills"].items():
                 print(f"  - {sname:<30} [{sdata['state']}] (source: {sdata['source_repo'] or 'local'})")
             for entry in sinfo.get("skill_entries", []):
-                if entry.get("origin") != "standalone":
+                if entry.get("origin") not in ("standalone", "standalone:~/.kilo/skills", "standalone:.kilo/skills"):
                     en_str = "enabled" if entry.get("enabled") else "disabled"
                     print(f"  - {entry['name']:<30} [{entry['state']}] ({entry['origin']}, {en_str})")
             if sinfo.get("mcp_servers"):
@@ -4240,6 +4558,7 @@ def cmd_install_skills(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             expect_plan_hash=args.expect_plan_hash,
             overwrite=args.overwrite,
+            force=getattr(args, "force", False),
         )
     except FileNotFoundError as exc:
         if args.json:
@@ -4615,6 +4934,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_is.add_argument("--dry-run", action="store_true", default=False, help="Compute and output execution plan without modifying disk")
     p_is.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
     p_is.add_argument("--overwrite", nargs="*", default=None, help="Skill names to overwrite even if unmanaged, modified-or-outdated, or foreign")
+    p_is.add_argument("--force", action="store_true", default=False, help="Force install even if provided by plugin or removed by conflict policy")
     p_is.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
     p_is.set_defaults(func=cmd_install_skills)
 
