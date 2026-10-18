@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Gemini review 2026-10-18: Kilo event turns run with full tools; untrusted data can close its own delimiter
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -

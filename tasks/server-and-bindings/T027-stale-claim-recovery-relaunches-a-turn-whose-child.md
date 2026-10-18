@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Gemini review 2026-10-18: violates 'never two resumptions of the same session at the same time'
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -

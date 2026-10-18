@@ -22,7 +22,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | in progress (done: 12.3–12.4, 12.11–12.14; to verify: 12.1, 12.5–12.10, 12.15–12.17) | 07, 08, 11 | L |
 | 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (done: 13.1, 13.4; to verify: 13.2–13.3, 13.5–13.7) | 06 | M |
 | 15 | 15 | [Use-Case Driven Specification, Task Definition & Product Validation](15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
-| 16 | 16 | [Orchestration broker: one MCP server per user, workspaces, projects, mail](16-orchestration-broker/plan.md) | open (planned 2026-10-18; prerequisites T026–T028) | T026, T027, T028 | L |
+| 16 | 16 | [Orchestration broker: one MCP server per user, workspaces, projects, mail](16-orchestration-broker/plan.md) | in progress (running: 16.1) | T026, T027, T028 | L |
 
 ## Specs
 
@@ -68,9 +68,9 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | --- | --- | --- | --- | --- | --- |
 | T022 (Run engine fixes) | P1 | [Run engine fixes found by the 07.5/12.1 live capture](server-and-bindings/T022-run-engine-fixes-found-by-the-07-5-12-1-live-captu.md) | delivered | kilo | - |
 | T024 (Proposal confirm engine) | P2 | [Confirm or reject trigger-proposed actions (engine + UI wiring)](server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md) | delivered | kilo | - |
-| T026 (Trigger enqueue race) | P1 | [Trigger enqueue races the orchestrator queue and advances the role cursor too early](server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md) | in progress | kilo | - |
-| T027 (Duplicate turn resumption) | P1 | [Stale-claim recovery relaunches a turn whose child process has not written its pid yet](server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md) | open | kilo | - |
-| T028 (Unattended turn hardening) | P1 | [Unattended turns: enforce reduced capability on every tool and harden the untrusted-data delimiters](server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md) | open | kilo | - |
+| T026 (Trigger enqueue race) | P1 | [Trigger enqueue races the orchestrator queue and advances the role cursor too early](server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md) | delivered | kilo | - |
+| T027 (Duplicate turn resumption) | P1 | [Stale-claim recovery relaunches a turn whose child process has not written its pid yet](server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md) | in progress | kilo | - |
+| T028 (Unattended turn hardening) | P1 | [Unattended turns: enforce reduced capability on every tool and harden the untrusted-data delimiters](server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md) | in progress | kilo | - |
 
 ### micro
 

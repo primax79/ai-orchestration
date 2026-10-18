@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Found by the Codex review of 2026-10-18: a trigger can overwrite a queued turn and events can be lost
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: -
 - handoff: Read tasks/server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md, do the open steps, run the Verification, update the task and the registry.
 - short: Trigger enqueue race
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
