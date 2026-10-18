@@ -212,13 +212,17 @@ def test_coalesce_event_batches(ws: pathlib.Path):
 
 
 # ---------------------------------------------------------------------------
-# 3. Crash Recovery Tests (Spec §0c E6)
+# 3. Crash Recovery Tests (Spec §0c E6, T027)
 # ---------------------------------------------------------------------------
 
 def test_stale_claim_crash_recovery(ws: pathlib.Path):
-    """A crashed worker holding an active turn is recovered and retried once (Spec §0, E6)."""
+    """An unattended read-only turn holding an active turn is recovered and retried once (Spec §0, E6, T027)."""
     orch.start_orchestrator(ws)
-    turn = orch.enqueue_turn(ws, message="turn to recover")["turn"]
+    turn = orch.enqueue_turn(
+        ws,
+        turn_type="event_batch",
+        events=[{"id": "ev1", "seq": 1, "type": "task.created"}],
+    )["turn"]
     turn_id = turn["turn_id"]
 
     # Simulate a crash: mark state as 'running' with a dead PID
@@ -239,6 +243,136 @@ def test_stale_claim_crash_recovery(ws: pathlib.Path):
     fail_evs = [e for e in evs if e["type"] == "turn.failed"]
     assert len(fail_evs) >= 1
     assert fail_evs[0]["payload"]["retryable"] is True
+
+
+def test_duplicate_turn_resumption_concurrent_drains_guard(ws: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+    """Spec §0, T027: two concurrent drains against a stub agent that starts slowly -> exactly one resumption."""
+    orch.start_orchestrator(ws)
+    t1 = orch.enqueue_turn(ws, message="turn 1")["turn_id"]
+
+    orig_start = orch.SupervisedInvocation.start
+
+    def slow_start(self, on_started=None):
+        time.sleep(0.3)
+        return orig_start(self, on_started=on_started)
+
+    monkeypatch.setattr(orch.SupervisedInvocation, "start", slow_start)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(orch.run_next_turn, ws)
+        time.sleep(0.05)  # Ensure f1 claims the turn first
+        f2 = pool.submit(orch.run_next_turn, ws)
+        r1 = f1.result()
+        r2 = f2.result()
+
+    # One drain completed the turn, the other returned busy
+    statuses = {r1.get("status"), r2.get("status")}
+    assert "done" in statuses
+    assert "busy" in statuses
+
+    # Exactly one turn was started, never two resumptions
+    evs = events.read_events(ws)
+    started_evs = [e for e in evs if e["type"] == "turn.started"]
+    assert len(started_evs) == 1
+    assert started_evs[0]["payload"]["turn_id"] == t1
+
+
+def test_dead_worker_claim_recovered_after_lease_expires(ws: pathlib.Path):
+    """Spec §0, T027: a claim whose worker process is dead and lease expired is recovered."""
+    import datetime
+    orch.start_orchestrator(ws)
+    turn = orch.enqueue_turn(
+        ws,
+        turn_type="event_batch",
+        events=[{"id": "ev1", "seq": 1, "type": "task.created"}],
+    )["turn"]
+    turn_id = turn["turn_id"]
+
+    q_file = orch.get_queue_dir(ws) / f"{turn_id}.json"
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    turn["state"] = "running"
+    turn["worker_pid"] = 999999  # Guaranteed dead PID
+    turn["claimed_at"] = (now_dt - datetime.timedelta(seconds=120)).isoformat()
+    turn["lease_expires_at"] = (now_dt - datetime.timedelta(seconds=60)).isoformat()
+    orch._write_json_atomic(q_file, turn)
+
+    # run_next_turn detects that claiming worker is gone and lease has expired -> recovers turn
+    res = orch.run_next_turn(ws)
+    assert res["status"] == "done"
+    assert res["turn_id"] == turn_id
+
+    # Verify recovery event
+    evs = events.read_events(ws)
+    fail_evs = [e for e in evs if e["type"] == "turn.failed"]
+    assert len(fail_evs) >= 1
+    assert fail_evs[0]["payload"]["retryable"] is True
+    assert fail_evs[0]["payload"]["reason"] == "worker_crashed_recovered"
+
+    # Also verify: while worker_pid is alive, it is considered live and NOT recovered
+    turn2 = orch.enqueue_turn(
+        ws,
+        turn_type="event_batch",
+        events=[{"id": "ev2", "seq": 2, "type": "task.created"}],
+    )["turn"]
+    t2_file = orch.get_queue_dir(ws) / f"{turn2['turn_id']}.json"
+    turn2["state"] = "running"
+    turn2["worker_pid"] = os.getpid()  # Alive process
+    turn2["claimed_at"] = (now_dt - datetime.timedelta(seconds=120)).isoformat()
+    turn2["lease_expires_at"] = (now_dt - datetime.timedelta(seconds=60)).isoformat()
+    orch._write_json_atomic(t2_file, turn2)
+
+    res2 = orch.run_next_turn(ws)
+    assert res2["status"] == "busy"
+
+
+def test_mutating_turn_interrupted_becomes_outcome_unknown(ws: pathlib.Path):
+    """Spec §0, T027: a mutating turn (owner_chat / orchestrate policy) interrupted becomes outcome_unknown."""
+    import datetime
+    orch.start_orchestrator(ws)
+    turn = orch.enqueue_turn(ws, message="mutating owner turn")["turn"]
+    turn_id = turn["turn_id"]
+
+    q_file = orch.get_queue_dir(ws) / f"{turn_id}.json"
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    turn["state"] = "running"
+    turn["worker_pid"] = 999999  # Dead process
+    turn["claimed_at"] = (now_dt - datetime.timedelta(seconds=120)).isoformat()
+    turn["lease_expires_at"] = (now_dt - datetime.timedelta(seconds=60)).isoformat()
+    orch._write_json_atomic(q_file, turn)
+
+    # run_next_turn recovers the claim; mutating turn must NOT be retried
+    res = orch.run_next_turn(ws)
+    assert res["status"] == "empty"
+
+    # Queue should be empty (not requeued)
+    q_items = orch.list_queue(ws)
+    assert not any(it["turn_id"] == turn_id for it in q_items)
+
+    # Archived turn record must be outcome_unknown
+    arch_file = orch.get_turns_dir(ws) / turn_id / "turn.json"
+    assert arch_file.is_file()
+    arch_doc = orch._read_json_safe(arch_file)
+    assert arch_doc["state"] == "outcome_unknown"
+    assert arch_doc.get("outcome") == "outcome_unknown"
+
+    # Event turn.failed must be non-retryable with reason outcome_unknown
+    evs = events.read_events(ws)
+    fail_evs = [e for e in evs if e["type"] == "turn.failed"]
+    assert len(fail_evs) >= 1
+    assert fail_evs[-1]["payload"]["turn_id"] == turn_id
+    assert fail_evs[-1]["payload"]["retryable"] is False
+    assert fail_evs[-1]["payload"]["reason"] == "outcome_unknown"
+
+
+def test_startup_grace_period_configurable(ws: pathlib.Path):
+    """Spec §0, T027: startup grace period defaults to 60s and is configurable via orchestrator config."""
+    assert orch._get_startup_grace_period_seconds(ws) == 60.0
+
+    cfg_file = ws / ".ai-orchestration.local.toml"
+    current_cfg = cfg_file.read_text(encoding="utf-8")
+    cfg_file.write_text(current_cfg.replace("[orchestrator]\n", "[orchestrator]\nstartup_grace_period_seconds = 12.5\n"), encoding="utf-8")
+
+    assert orch._get_startup_grace_period_seconds(ws) == 12.5
 
 
 # ---------------------------------------------------------------------------
