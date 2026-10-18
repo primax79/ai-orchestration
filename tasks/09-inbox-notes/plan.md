@@ -88,7 +88,7 @@
 
 ### 09.10 - Edit proposed tasks before accepting a triage proposal
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/09.10-edit-proposals (engine part)) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 09.4, 09.5 · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
+- **Status:** `delivered` (2026-10-18) · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 09.4, 09.5 · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
 - **Origin:** 09.4/09.5 dispatch (2026-10-17): `run accept-triage` takes `--only` but no edits, while spec §4 says each proposed task can be edited before acceptance.
 - **Goal:** `run accept-triage ... --edits-file F` (JSON: per proposed task index, overridden title/category/priority/priority_reason/goal/steps/verification, validated like the proposal); the review panel's cards become editable and send the edits.
 - **Verification:** engine tests (edited fields land in the created task, invalid edits refused); live: edit one proposed task, accept, the task has the edited title.
