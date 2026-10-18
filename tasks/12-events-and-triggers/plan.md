@@ -71,7 +71,14 @@
 
 ### 12.7 - VS Code: event watcher and notifications
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, vscode worktree task/12.7-vscode-events) · **Size:** S · **Depends on:** 12.6, VS Code lane after 10.3
+- **Status:** `delivered` (2026-10-18) · **Size:** S · **Depends on:** 12.6, VS Code lane after 10.3
 - **Goal:** §1 "Reading" (E13) and §6.
 
 > 2026-10-17: tasks `12.2a`–`12.2d` renumbered `12.11`–`12.14` (letter-suffixed ids are not task ids; validate flagged them and their dependencies were invisible).
+
+### 12.15 - VS Code: parity handlers for the 12.6 message types (sessions, triggers, proposed actions, notifications, awaiting application)
+
+- **Status:** `in progress` (2026-10-18) · **Kind:** feature · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 12.6, 12.7 · **Repo:** `vscode-ai-orchestration/`
+- **Origin:** 12.7 review (2026-10-18): `scripts/test-bridge-parity.mjs` lists 18 message types the 12.6 frontend sends that the extension bridge does not handle yet (`pending126Types`).
+- **Goal:** the dashboard webview inside VS Code supports every 12.6 view (sessions, Triggers page, proposed actions, notifications, questions awaiting application, orchestrator queue) by mapping each message to the same `ai-orch` command the web backend runs; `pending126Types` becomes empty.
+- **Verification:** `npm test` green with the parity check reporting no pending 12.6 types; handler tests for argv building and mutating actions requiring `--expect-*-hash` where the engine does.
