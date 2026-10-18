@@ -19,7 +19,7 @@
 
 ### 16.3 - Registry: workspace uuid/slug, explicit projects, nesting, discover
 
-- **Status:** `in progress` (2026-10-18) · **Short:** Workspace and project registry · **Size:** M · **Depends on:** 16.2 · **Repo:** `ai-orchestration/`
+- **Status:** `delivered` (2026-10-18) · **Short:** Workspace and project registry · **Size:** M · **Depends on:** 16.2 · **Repo:** `ai-orchestration/`
 - **Goal:** spec §1–§2: `[workspace] uuid, id`, `[[workspace.projects]]`, the nesting rule (nearest registered workspace owns the trees; sub-workspaces listed read-only), registry in SQLite under the global config dir (respects `AI_ORCHESTRATION_CONFIG`), path move with confirmation, symlink/inode checks, `projects discover` proposing entries only.
 
 ### 16.4 - QualifiedTaskRef, coordinates: links and the placement rule
