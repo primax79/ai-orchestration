@@ -92,7 +92,7 @@
 
 ### 12.17 - VS Code: parity handlers for the 12.8, 12.10 and 12.16 message types (orchestrator chat, Config card and wizard, proposal confirm/reject)
 
-- **Status:** `in progress` (2026-10-18) · **Kind:** feature · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 12.8, 12.10, 12.16 · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-18) · **Kind:** feature · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 12.8, 12.10, 12.16 · **Repo:** `vscode-ai-orchestration/`
 - **Origin:** 12.15 merge (2026-10-18): the parity check marks the nine 12.8 chat message types pending (`pending128Types`); 12.10 and 12.16 will add more, and the 12.15 confirm/reject handlers still mirror the old `not-implemented` backend stubs.
 - **Goal:** every message the web frontend sends after 12.8, 12.10 and 12.16 has a VS Code bridge handler building the same `ai-orch` argv as the backend; `pending128Types` is removed.
 - **Verification:** `npm test` green with no pending types; handler tests.
