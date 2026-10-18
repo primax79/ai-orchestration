@@ -20,7 +20,7 @@
 
 ### 12.12 - Emit events from `tasks_engine.py`
 
-- **Status:** `open` · **Size:** M · **Depends on:** 12.11
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.12-engine-events) · **Size:** M · **Depends on:** 12.11
 - **Goal:** Events for tasks, questions and the inbox, through the outbox; the E11 application ledger with `questions apply`.
 
 ### 12.13 - Emit events from `orchestration_runs.py` and extract the supervised-invocation primitive
