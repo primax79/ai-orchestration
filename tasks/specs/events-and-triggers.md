@@ -44,6 +44,39 @@
   - **References survive succession:** `origin-session` on questions, runs and notes points to the **role** (`orchestrator`), not to a tool session id, so `resume-origin` always reaches the current generation.
 - **`origin-session`** on questions, runs and notes is `orchestrator` (the role) when the orchestrator created them. `resume-origin` therefore means "enqueue a turn for the orchestrator", or "continue the run" when the origin is a run.
 
+## 0a. Amendment: who brings the orchestrator to life (owner decision, 2026-10-18; normative)
+
+Found on 2026-10-18: no workspace had an orchestrator. `orchestrator start` registers the role but nothing drains the
+queue (only a manual `run-next`), and in practice the "orchestrators" were interactive sessions the owner opened, which
+the engine does not know about. Decisions:
+
+- **The role stays headless**, one per workspace (§0 unchanged). It is never blocked by interactive conversations:
+  interactive sessions are **consoles**. They talk to the role asynchronously (`orchestrator enqueue`, peer mail,
+  questions) and never hold its lock or wait on its turns; the role never waits on them.
+- **A worker drains the queue on its own.** `ai-orch orchestrator serve` is a long-running, single-instance worker
+  (pid file + lock under `.ai-orchestration/orchestrator/`, heartbeat in `orchestrator.json`) that runs `run-next`
+  whenever the queue is not empty and the role is not paused, respecting the §0 rate limits and the trigger kill switch.
+  It also runs the trigger evaluation that `triggers daemon` does today, so one process per workspace is enough. It exits
+  cleanly on `orchestrator stop`; a stale pid (process gone, heartbeat older than a threshold) is reported by `status`
+  and the Doctor.
+- **`ai-orch orchestrator ensure`** (idempotent, preview → apply with a hash, like every write) brings a workspace to a
+  working orchestrator:
+  1. no project config → runs the setup engine (§0b) with the defaults from the global config (today: Claude as
+     orchestrator) and shows the diff;
+  2. role not started → `start`;
+  3. worker not running → starts `serve` detached;
+  4. prints what it did and the role's status.
+  `--dry-run` prints the plan without writing; `--check` exits non-zero when anything is missing (for hooks and the UI).
+- **Any session instructs it.** The orchestration skills (generic template and bindings) tell every session: when the
+  owner asks to use the task mechanism, or when a task-related command finds no orchestrator, run
+  `orchestrator ensure --dry-run`, show the plan in one line, and apply it unless it would write global config (that
+  needs the owner's yes). Sessions do not become orchestrators themselves.
+- **A standard interaction session (optional, later):** a predefined interactive console per workspace (for example a
+  Claude Code window started with a role prompt), registered as `kind: interactive, role: console`, which shows the
+  orchestrator's transcript and relays the owner's messages. Not required for the mechanism to work.
+- The UI and the VS Code extension show "orchestrator: missing / stopped / running (worker alive) / paused" and offer
+  "Ensure" with the preview.
+
 ## 0b. Orchestrator configuration and reassignment (owner request, 2026-10-17; normative)
 
 - **`routing.default_orchestrator` names the tool that holds the orchestrator role**, and `routing.default_executor` the default executor that the orchestrator delegates to. The Config tab shows them in an "Orchestrator" card, together with the current role holder: tool, generation, session id, turns, last usage, and status (`active`, `paused`, `rotating`).
