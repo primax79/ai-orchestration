@@ -57,7 +57,7 @@
 
 ### 10.5 - UI: microtask quick-add, XS pills, "Promote", kind and labels, shared filter bar
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, ai-orchestration-ui worktree task/10.5-microtask-ui) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 10.4, 10.2 (frontend lane) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `delivered` (2026-10-18; claude; merged (screenshots removed from the commit, .tmp ignored); 52 backend tests; Kilo Playwright evidence: XS pill, promote, kind/label filters, group by label) · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 10.4, 10.2 (frontend lane) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `frontend/src/**`
 - **Goal:** Spec §5 "Creation" (UI) and the timeline pill, plus spec §6 UI: kind icons, label chips, the shared filter bar, the label editor with autocomplete, group by label. Also: in the inbox tab (09.3), "Convert to microtask" for `bug` notes, when 09.3 has landed.
 - **Verification:** Live with Playwright: quick-add a bug microtask → it appears as an XS pill in the ready queue → Promote → it becomes a full card.

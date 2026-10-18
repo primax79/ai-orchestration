@@ -36,12 +36,12 @@
 
 ### 12.3 - Session registry and identifiers
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.3-sessions) · **Size:** M · **Depends on:** 12.12, 12.13
+- **Status:** `done` (2026-10-18; claude; merged) · **Size:** M · **Depends on:** 12.12, 12.13
 - **Goal:** §2 and E10, including the header amendments in specs 08 and 09.
 
 ### 12.4 - Trigger engine
 
-- **Status:** `open` · **Size:** L · **Depends on:** 12.3
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.4-triggers) · **Size:** L · **Depends on:** 12.3
 - **Goal:** §5, E7, and the reduced-capability policy for unattended turns (E3).
 
 ### 12.5 - Headless orchestrator role (sessions, queue, turns, succession, bounds)
