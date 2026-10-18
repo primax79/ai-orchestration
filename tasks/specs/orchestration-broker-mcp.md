@@ -33,11 +33,19 @@ user (one broker process)
   inner one as a *sub-workspace* (read-only view, mail goes to the inner orchestrator), never as its own project, so
   one task tree always has exactly one orchestrator. Registering an inner workspace moves ownership of its projects
   out of the outer one, shown in the registration preview; unregistering gives them back.
+- **Placement rule (owner, 2026-10-18):** a project's tasks live in the project. The workspace tree (`_workspace`) holds
+  only **coordination** tasks: work that spans several projects (a cross-repo initiative, a coordinated release, a
+  decision affecting more than one project). A coordination task names what it coordinates with
+  `coordinates: project/ID, …`; its progress view is derived from those tasks (read-only), and it does not duplicate
+  their content. `validate` warns when a workspace task coordinates nothing or touches a single project's paths
+  ("move it to the project"); `ai-orch tasks move ID --to-project P` relocates a task with a preview, rewriting its id
+  in the target tree and leaving a pointer behind.
 - **Qualified references (C2-5, G2-3):** one grammar, `QualifiedTaskRef = [workspace ":"] [project "/"] ID`, with a
   single parser/canonicaliser in the engine. Malformed prefixes are errors, never prose. **v1 scope:** the broker and
   chat use qualified refs for addressing and citation (`ai-coding-tools:ai-orchestration/T025 (short title field)`);
-  on-disk `depends-on` stays project-local (bare ids) — cross-project dependencies are v2, so the existing parsers and
-  `validate` are untouched in v1.
+  on-disk `depends-on` stays project-local (bare ids). The one cross-tree link in v1 is `coordinates:` from the
+  workspace tree to its own projects (`project/ID`, resolved read-only by the broker and by the CLI). General
+  cross-project `depends-on` and cross-workspace links are v2.
 
 ## 2. The broker process
 
@@ -63,7 +71,8 @@ user (one broker process)
   - every mutating MCP call carries an idempotency key; the broker stores its terminal result, so a client that lost
     the response gets the same result on retry;
   - `ai-orch broker stop --drain T` stops claiming work and waits for running turns.
-- Start: on demand by the shim/CLI/UI, or at login (owner question Q-a).
+- Start: on demand by the shim, the CLI or the UI (owner decision Q-a); no login service. While nothing is open,
+  orchestrators do not run and mail waits.
 
 ## 3. MCP surface (v1)
 
@@ -139,7 +148,8 @@ the fallback.
    Codex: simultaneous shim starts, broker down/up, reconnect, long tickets, text-content notices. The plan continues
    only if all three work; otherwise the spec is amended.
 3. Shared on-disk locking and idempotency keys in the engine; broker singleton and readiness.
-4. Registry: workspace uuid/slug, explicit projects, `projects discover` (proposals only), `QualifiedTaskRef` parser.
+4. Registry: workspace uuid/slug, explicit projects, `projects discover` (proposals only), `QualifiedTaskRef` parser,
+   `coordinates:` links and the placement rule (`validate` warning, `tasks move --to-project`).
 5. Read-only broker tools; then deterministic writes (CAS, idempotency, confirm tokens for destructive actions).
 6. Skills switched incrementally to the broker, CLI fallback kept.
 7. Orchestrator workers inside the broker, recovery/re-attachment, `orchestrator.ask` tickets.
@@ -151,5 +161,5 @@ attachments, other machines.
 
 ## 9. Open questions for the owner
 
-- Q-a: start the broker at login (launchd unit) or only on demand (first shim/CLI/UI use)?
+- Q-a: decided (2026-10-18): on demand (first shim/CLI/UI use); no login service.
 - Q-c: decided (2026-10-18): both allowed, the nearest registered workspace owns the task trees (§1).
