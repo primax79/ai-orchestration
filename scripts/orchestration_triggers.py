@@ -820,7 +820,10 @@ def execute_action(
         subcmd = cmd_list[1] if len(cmd_list) > 1 else ""
         subsub = cmd_list[2] if len(cmd_list) > 2 else ""
 
-        is_safe_command = (
+        # Only `ai-orch` itself may run unattended: the sub-command checks below are
+        # meaningless for any other program (e.g. ["rm", "events", "x"]).
+        is_ai_orch = bool(cmd_list) and os.path.basename(str(cmd_list[0])) == "ai-orch"
+        is_safe_command = is_ai_orch and (
             subcmd in ("events", "sessions", "session", "describe")
             or (subcmd == "tasks" and subsub in ("list", "validate", "graph", "labels"))
             or (subcmd == "inbox" and subsub in ("list", "show"))
@@ -830,8 +833,11 @@ def execute_action(
 
         if is_safe_command:
             try:
+                # Run this repo's ai-orch with the current interpreter, not whatever
+                # `ai-orch` the rule names or PATH resolves.
+                own_bin = pathlib.Path(__file__).resolve().parent.parent / "bin" / "ai-orch"
                 res = subprocess.run(
-                    cmd_list,
+                    [sys.executable, str(own_bin), *[str(a) for a in cmd_list[1:]]],
                     cwd=str(workspace),
                     capture_output=True,
                     text=True,

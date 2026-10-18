@@ -733,3 +733,16 @@ enabled = true
     assert data["ok"] is True
     assert len(data["firings"]) == 1
     assert data["firings"][0]["rule_name"] == "cli-test-rule"
+
+
+def test_command_action_runs_only_ai_orch_read_commands(tmp_path):
+    import orchestration_triggers as ot
+
+    ws = tmp_path
+    event = {"id": "e1", "seq": 1, "type": "task.transitioned", "subject": "T001", "data": {}}
+    # A non-ai-orch program with "safe-looking" sub-commands must be proposed, not executed.
+    res = ot.execute_action(ws, {"name": "r", "action": "command", "command": ["rm", "events", "x"]}, event, "f1")
+    assert res["status"] == "proposed"
+    # A read-only ai-orch command runs.
+    res = ot.execute_action(ws, {"name": "r", "action": "command", "command": ["ai-orch", "events", "stats", "--workspace", str(ws), "--json"]}, event, "f2")
+    assert res["status"] == "executed"
