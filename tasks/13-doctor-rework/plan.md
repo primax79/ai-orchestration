@@ -17,7 +17,7 @@
 
 ### 13.2 - P1-b: severity model, cross-assistant grouping, persistent acknowledge
 
-- **Status:** `open` · **Size:** M
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/13.2-severity) · **Size:** M
 - **Goal:**
   - four severity levels;
   - findings grouped across assistants and scopes;
