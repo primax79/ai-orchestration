@@ -780,6 +780,8 @@ SHORT_TITLE_STOP_WORDS: set[str] = {
     "a", "an", "the", "and", "or", "for", "of", "in", "on", "at", "to", "by",
     "with", "from", "as", "is", "are", "was", "were", "it", "its", "via",
     "which", "what", "should", "would", "could", "does", "do",
+    "before", "after", "that", "this", "into", "when", "where", "be", "but",
+    "not", "than", "then", "so", "if", "all", "each", "every",
 }
 SHORT_TITLE_LEADING_STOP_WORDS: set[str] = {
     "a", "an", "the", "which", "what", "how", "who", "should", "would",
@@ -850,8 +852,22 @@ def derive_short_title(title: str) -> str:
         cleaned_words.pop(0)
     if not cleaned_words:
         return "untitled"
-    # 7. Extract significant words (drop stop words)
-    sig_words = [w for w in cleaned_words if w.lower() not in SHORT_TITLE_STOP_WORDS]
+    # 6b. Drop a short code prefix such as "P1-a:" or "P3-a..d:" (kept only if nothing else remains)
+    m = re.match(r"^\s*[A-Z]\d+[-\w.]*:\s+(.*)$", text)
+    if m:
+        rest = [re.sub(r"^[^\w]+|[^\w]+$", "", w) for w in m.group(1).split()]
+        rest = [w for w in rest if w]
+        if len(rest) >= 2:
+            cleaned_words = rest
+    # 7. Extract significant words (drop stop words and case-insensitive repeats)
+    sig_words = []
+    seen_words: set[str] = set()
+    for w in cleaned_words:
+        lw = w.lower()
+        if lw in SHORT_TITLE_STOP_WORDS or lw in seen_words:
+            continue
+        seen_words.add(lw)
+        sig_words.append(w)
     if len(sig_words) < 2:
         sig_words = cleaned_words
     if len(" ".join(sig_words[:4])) > 40:
