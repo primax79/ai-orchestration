@@ -28,8 +28,11 @@ user (one broker process)
   workspace's top-level `tasks/` is the project `_workspace`. `ai-orch projects discover` only **proposes** entries
   (it skips hidden folders, git-ignored paths, build/dependency/scratch/fixture folders, worktrees and other registered
   workspaces); nothing is picked up silently.
-- **Nesting:** a project belongs to exactly one workspace. A folder can be a project of an outer workspace **or** a
-  workspace of its own, not both (owner question Q-c).
+- **Nesting (owner decision Q-c, 2026-10-18):** a folder may be registered as a workspace even inside another
+  workspace; the **nearest registered workspace owns** every task tree under it. The outer workspace then lists the
+  inner one as a *sub-workspace* (read-only view, mail goes to the inner orchestrator), never as its own project, so
+  one task tree always has exactly one orchestrator. Registering an inner workspace moves ownership of its projects
+  out of the outer one, shown in the registration preview; unregistering gives them back.
 - **Qualified references (C2-5, G2-3):** one grammar, `QualifiedTaskRef = [workspace ":"] [project "/"] ID`, with a
   single parser/canonicaliser in the engine. Malformed prefixes are errors, never prose. **v1 scope:** the broker and
   chat use qualified refs for addressing and citation (`ai-coding-tools:ai-orchestration/T025 (short title field)`);
@@ -149,5 +152,4 @@ attachments, other machines.
 ## 9. Open questions for the owner
 
 - Q-a: start the broker at login (launchd unit) or only on demand (first shim/CLI/UI use)?
-- Q-c: may a folder be both a project of an outer workspace and a workspace of its own (for example `ai-orchestration`
-  opened alone), with the nesting rule deciding, or must it be one or the other?
+- Q-c: decided (2026-10-18): both allowed, the nearest registered workspace owns the task trees (§1).
