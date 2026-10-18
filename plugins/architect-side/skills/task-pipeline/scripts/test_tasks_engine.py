@@ -7342,3 +7342,21 @@ def test_set_short_keeps_optional_field_order(tmp_path: pathlib.Path) -> None:
     text = t_path.read_text(encoding="utf-8")
     assert text.index("- verifier: claude") < text.index("- short: feature one")
     assert run_cli("validate", "--tasks-dir", str(tasks_dir)).returncode == 0
+
+
+def test_set_short_on_initiative_is_read_back(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    init_dir = tasks_dir / "07-agent-runs"
+    init_dir.mkdir(parents=True)
+    (init_dir / "plan.md").write_text(
+        "# 07 - Agent runs from the control plane\n\n"
+        "## Tasks\n\n### 07.1 - First task\n\n- **Status:** `open`\n- **Goal:** Do it.\n",
+        encoding="utf-8",
+    )
+    dry = json.loads(run_cli("set-short", "07", "Agent runs", "--dry-run", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    assert json.loads(run_cli("set-short", "07", "Agent runs", "--expect-task-hash", dry["task_hash"],
+                              "--tasks-dir", str(tasks_dir), "--json").stdout)["ok"] is True
+    assert "- **Short:** Agent runs" in (init_dir / "plan.md").read_text(encoding="utf-8")
+    listing = json.loads(run_cli("list", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    blob = json.dumps(listing)
+    assert '"short_title": "Agent runs"' in blob and '"short_title_source": "field"' in blob

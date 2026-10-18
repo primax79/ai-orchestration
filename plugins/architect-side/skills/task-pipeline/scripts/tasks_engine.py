@@ -2296,6 +2296,9 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                 for seg in segs:
                     if seg.key:
                         init_own_fields[seg.key] = seg.clean_value
+                m_plain_short = re.match(r"^[-*]\s+short:\s*(.+?)\s*$", sline.text, flags=re.IGNORECASE)
+                if m_plain_short and "short" not in init_own_fields:
+                    init_own_fields["short"] = m_plain_short.group(1)
 
         init_short = init_own_fields.get("short")
         if init_short and str(init_short).strip() and str(init_short).strip() != "-":
@@ -4393,6 +4396,8 @@ def set_short(
                     new_text = re.sub(r"(^-\s+depends-on:\s*.*$)", rf"\1\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)
                 elif re.search(r"^-\s+title:\s*.*$", old_text, flags=re.MULTILINE):
                     new_text = re.sub(r"(^-\s+title:\s*.*$)", rf"\1\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)
+                elif target_file.name == "plan.md":
+                    new_text = re.sub(r"(^#\s+.*$)", rf"\1\n\n- **Short:** {short_title}", old_text, count=1, flags=re.MULTILINE)
                 else:
                     new_text = re.sub(r"(^#\s+.*$)", rf"\1\n\n- short: {short_title}", old_text, count=1, flags=re.MULTILINE)
 
