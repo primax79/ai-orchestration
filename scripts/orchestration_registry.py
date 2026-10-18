@@ -348,13 +348,31 @@ def check_device_inode(path: pathlib.Path) -> tuple[int, int]:
     return st1.st_dev, st1.st_ino
 
 
+def _git_repo_root(path: pathlib.Path) -> pathlib.Path | None:
+    """Nearest enclosing git repository root of `path` (the folder itself included), or None."""
+    for cand in [path, *path.parents]:
+        if (cand / ".git").exists():
+            return cand
+    return None
+
+
 def is_git_ignored(path: pathlib.Path, ws_path: pathlib.Path) -> bool:
-    """Check if path is ignored by git within ws_path."""
+    """Check whether `path` is ignored by git, asked of the repository that owns it.
+
+    A workspace often groups nested repositories (each sub-project its own repo) under an outer repo whose
+    .gitignore is an allowlist; the outer repo then "ignores" every nested repo. A nested repository root is
+    therefore never ignored, and a path inside a nested repository is checked against that repository only.
+    """
     try:
-        rel = path.relative_to(ws_path)
+        if (path / ".git").exists():
+            return False
+        repo = _git_repo_root(path)
+        if repo is None:
+            return False
+        rel = path.relative_to(repo)
         proc = subprocess.run(
             ["git", "check-ignore", "-q", str(rel)],
-            cwd=str(ws_path),
+            cwd=str(repo),
             capture_output=True,
             check=False,
         )

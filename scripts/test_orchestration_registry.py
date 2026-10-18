@@ -499,3 +499,24 @@ def test_cli_dispatch_through_bin_ai_orch(isolated_env: pathlib.Path, tmp_path: 
     plist_data = json.loads(res_plist.stdout)
     assert plist_data["ok"] is True
     assert plist_data["workspace"] == "cli-ws"
+
+
+def test_discover_finds_nested_repos_under_an_allowlist_gitignore(isolated_env: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """A workspace that groups nested repositories under an outer repo whose .gitignore is an allowlist
+    (ignore everything, re-include a few files) must still find the nested repos' task trees."""
+    ws = tmp_path / "umbrella"
+    (ws / "tasks").mkdir(parents=True)
+    (ws / "tasks" / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+    (ws / ".gitignore").write_text("/*\n!.gitignore\n!tasks/\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
+    sub = ws / "subproject"
+    (sub / "tasks").mkdir(parents=True)
+    (sub / "tasks" / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=sub, check=True)
+    (sub / ".gitignore").write_text("scratch/\n", encoding="utf-8")
+    ignored = sub / "scratch" / "copy"
+    (ignored / "tasks").mkdir(parents=True)
+    (ignored / "tasks" / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    assert reg.is_git_ignored(sub, ws) is False
+    assert reg.is_git_ignored(ignored, ws) is True
