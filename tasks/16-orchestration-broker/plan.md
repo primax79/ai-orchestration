@@ -14,12 +14,12 @@
 
 ### 16.2 - Shared on-disk locks, CAS and idempotency keys in the engine
 
-- **Status:** `in progress` (2026-10-18) · **Short:** Shared locks and idempotency · **Size:** M · **Depends on:** T026 · **Repo:** `ai-orchestration/`
+- **Status:** `delivered` (2026-10-18) · **Short:** Shared locks and idempotency · **Size:** M · **Depends on:** T026 · **Repo:** `ai-orchestration/`
 - **Goal:** spec §2 "Locks are on disk": every task mutation (CLI or broker) under `tasks/.ai-orch.lock` with file-hash CAS; idempotency keys with stored terminal results for mutating calls; broker singleton (`broker.lock`) and the CLI's routing rule (lock held → through the broker or "busy"; never an HTTP-timeout guess); `config_lock` CAS for setup/ensure (C7).
 
 ### 16.3 - Registry: workspace uuid/slug, explicit projects, nesting, discover
 
-- **Status:** `open` · **Short:** Workspace and project registry · **Size:** M · **Depends on:** 16.2 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-18) · **Short:** Workspace and project registry · **Size:** M · **Depends on:** 16.2 · **Repo:** `ai-orchestration/`
 - **Goal:** spec §1–§2: `[workspace] uuid, id`, `[[workspace.projects]]`, the nesting rule (nearest registered workspace owns the trees; sub-workspaces listed read-only), registry in SQLite under the global config dir (respects `AI_ORCHESTRATION_CONFIG`), path move with confirmation, symlink/inode checks, `projects discover` proposing entries only.
 
 ### 16.4 - QualifiedTaskRef, coordinates: links and the placement rule
