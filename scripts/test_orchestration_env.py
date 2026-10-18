@@ -2496,6 +2496,373 @@ def test_doctor_json_backward_compatibility(tmp_path: pathlib.Path) -> None:
     assert expected_env_keys.issubset(set(kilo_env.keys()))
 
 
+# ---------------------------------------------------------------------------
+# Initiative 13.3 Tests: Smarter Duplicate Resolution (Equality & History)
+# ---------------------------------------------------------------------------
+
+def test_duplicate_name_reserialized_frontmatter_resolves_to_trash(tmp_path: pathlib.Path) -> None:
+    """Standalone copy with re-serialized/flattened frontmatter (equal to plugin after normalization) auto-resolves to trash."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_skills = plugins_cache / "gcube-ai-toolkit" / "gcube-developer-tools" / "0.2.1" / "skills"
+    (p_skills / "gcube-component-release").mkdir(parents=True)
+    plugin_skill_md = p_skills / "gcube-component-release" / "SKILL.md"
+    plugin_skill_md.write_text(
+        "---\n"
+        "name: gcube-component-release\n"
+        "description: \"Release gcube components\"\n"
+        "metadata:\n"
+        "  author: Alfredo Oliviero\n"
+        "  version: 1.0.0\n"
+        "---\n\n"
+        "# gCube Component Release\n\n"
+        "Release lifecycle documentation.\n"
+    )
+
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "gcube-developer-tools@gcube-ai-toolkit": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_skills.parent),
+                }
+            ]
+        }
+    }))
+
+    standalone_dir = fake_home / ".claude" / "skills" / "gcube-component-release"
+    standalone_dir.mkdir(parents=True)
+    standalone_skill_md = standalone_dir / "SKILL.md"
+    # Flattened metadata (metadata: "") written by early installer
+    standalone_skill_md.write_text(
+        "---\n"
+        "name: gcube-component-release\n"
+        "description: \"Release gcube components\"\n"
+        "metadata: \"\"\n"
+        "author: Alfredo Oliviero\n"
+        "version: 1.0.0\n"
+        "---\n\n"
+        "# gCube Component Release\n\n"
+        "Release lifecycle documentation.\n"
+    )
+
+    st = run_env(["status"], fake_home)
+    dup_scs = [sc for sc in st["environments"]["claude"]["global"]["structured_conflicts"] if sc["kind"] == "duplicate-name"]
+    assert len(dup_scs) == 1
+    dup_sc = dup_scs[0]
+    assert dup_sc["fixable"] is True
+    assert dup_sc["actionable"] is True
+    assert len(dup_sc["actions"]) == 1
+    assert dup_sc["actions"][0]["action"] == "trash"
+    assert dup_sc["actions"][0]["path"] == str(standalone_dir)
+
+    # Dry-run writes nothing
+    rc_dry = run_env(["resolve-conflicts", "--dry-run"], fake_home)
+    assert rc_dry["ok"] is True
+    assert rc_dry["dry_run"] is True
+    assert rc_dry["applied"] == 0
+    assert standalone_dir.exists()
+
+    # Apply trashes standalone and keeps plugin
+    rc_apply = run_env(["resolve-conflicts", "--apply"], fake_home)
+    assert rc_apply["ok"] is True
+    assert rc_apply["applied"] == 1
+    assert not standalone_dir.exists()
+    assert plugin_skill_md.is_file()
+
+
+def test_duplicate_name_folded_description_and_whitespace_resolves_to_trash(tmp_path: pathlib.Path) -> None:
+    """Folded description (>-) vs quoted string, CRLF vs LF line endings, and trailing whitespace normalize equal."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_skills = plugins_cache / "ai-orchestration" / "architect-side" / "0.4.0" / "skills"
+    (p_skills / "demo-folded-skill").mkdir(parents=True)
+    (p_skills / "demo-folded-skill" / "SKILL.md").write_text(
+        "---\n"
+        "name: demo-folded-skill\n"
+        "description: >-\n"
+        "  Create distinctive frontend interfaces\n"
+        "  with high design quality.\n"
+        "license: Apache-2.0\n"
+        "---\n\n"
+        "# Body content line 1\n"
+        "# Body content line 2\n"
+    )
+
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_skills.parent),
+                }
+            ]
+        }
+    }))
+
+    standalone_dir = fake_home / ".claude" / "skills" / "demo-folded-skill"
+    standalone_dir.mkdir(parents=True)
+    # Quoted description on single line, CRLF line endings, trailing spaces on lines
+    (standalone_dir / "SKILL.md").write_text(
+        "---\r\n"
+        "name: demo-folded-skill\r\n"
+        "description: \"Create distinctive frontend interfaces with high design quality.\"\r\n"
+        "license: Apache-2.0   \r\n"
+        "---\r\n\r\n"
+        "# Body content line 1  \r\n"
+        "# Body content line 2\r\n\r\n"
+    )
+
+    st = run_env(["status"], fake_home)
+    dup_scs = [sc for sc in st["environments"]["claude"]["global"]["structured_conflicts"] if sc["kind"] == "duplicate-name"]
+    assert len(dup_scs) == 1
+    assert dup_scs[0]["fixable"] is True
+    assert dup_scs[0]["actions"][0]["action"] == "trash"
+
+
+def test_duplicate_name_older_cached_plugin_resolves_to_trash(tmp_path: pathlib.Path) -> None:
+    """Standalone copy matching an earlier cached version of the plugin resolves to trash."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Cached plugin has 0.1.0 and 0.2.0
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache" / "agentic-coding-kit" / "agent-tooling-meta"
+    p_010 = plugins_cache / "0.1.0" / "skills" / "framework-skillset-generator"
+    p_020 = plugins_cache / "0.2.0" / "skills" / "framework-skillset-generator"
+    p_010.mkdir(parents=True)
+    p_020.mkdir(parents=True)
+
+    (p_010 / "SKILL.md").write_text("# Framework Skillset Generator v1.0\nLegacy initial draft.\n")
+    (p_020 / "SKILL.md").write_text("# Framework Skillset Generator v2.0\nModern overhauled version.\n")
+
+    # Active install in installed_plugins.json points to 0.2.0
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "agent-tooling-meta@agentic-coding-kit": [
+                {
+                    "scope": "user",
+                    "installPath": str(plugins_cache / "0.2.0"),
+                    "version": "0.2.0",
+                }
+            ]
+        }
+    }))
+
+    # Standalone copy matches older cached version 0.1.0
+    standalone_dir = fake_home / ".claude" / "skills" / "framework-skillset-generator"
+    standalone_dir.mkdir(parents=True)
+    (standalone_dir / "SKILL.md").write_text("# Framework Skillset Generator v1.0\nLegacy initial draft.\n")
+
+    st = run_env(["status"], fake_home)
+    dup_scs = [sc for sc in st["environments"]["claude"]["global"]["structured_conflicts"] if sc["kind"] == "duplicate-name"]
+    assert len(dup_scs) == 1
+    dup_sc = dup_scs[0]
+    assert dup_sc["fixable"] is True
+    assert dup_sc["actionable"] is True
+    assert dup_sc["actions"][0]["action"] == "trash"
+    assert dup_sc["actions"][0]["path"] == str(standalone_dir)
+
+    rc_apply = run_env(["resolve-conflicts", "--apply"], fake_home)
+    assert rc_apply["ok"] is True
+    assert rc_apply["applied"] == 1
+    assert not standalone_dir.exists()
+
+
+def test_duplicate_name_older_git_history_copy_resolves_to_trash(tmp_path: pathlib.Path) -> None:
+    """Standalone copy matching an earlier commit in source repo history resolves to trash."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    repo, shas = _setup_mock_source_repo_with_history(fake_home, "task-spec-authoring")
+    # Commit plugin.json in repo so plugin is recognized as up to date (not stale)
+    p_repo_dir = repo / "plugins" / "architect-side"
+    (p_repo_dir / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (p_repo_dir / ".claude-plugin" / "plugin.json").write_text(json.dumps({"version": "0.5.4"}))
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "Add plugin.json"], check=True)
+    head_sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_skills = plugins_cache / "ai-orchestration" / "architect-side" / "0.5.4" / "skills"
+    p_sdir = p_skills / "task-spec-authoring"
+    p_sdir.mkdir(parents=True)
+    (p_sdir / "SKILL.md").write_text("# Demo Legacy Skill v3 (HEAD)\n")
+    (p_skills.parent / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (p_skills.parent / ".claude-plugin" / "plugin.json").write_text(json.dumps({"version": "0.5.4"}))
+
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_skills.parent),
+                    "version": "0.5.4",
+                    "gitCommitSha": head_sha,
+                }
+            ]
+        }
+    }))
+
+    # Standalone copy matches Commit 1 (older commit in git history)
+    standalone_dir = fake_home / ".claude" / "skills" / "task-spec-authoring"
+    standalone_dir.mkdir(parents=True)
+    (standalone_dir / "SKILL.md").write_text("# Demo Legacy Skill v1\n")
+
+    st = run_env(["status"], fake_home)
+    dup_scs = [sc for sc in st["environments"]["claude"]["global"]["structured_conflicts"] if sc["kind"] == "duplicate-name"]
+    assert len(dup_scs) == 1
+    dup_sc = dup_scs[0]
+    assert dup_sc["fixable"] is True
+    assert dup_sc["actionable"] is True
+    assert dup_sc["actions"][0]["action"] == "trash"
+    assert dup_sc["actions"][0]["path"] == str(standalone_dir)
+
+    rc_apply = run_env(["resolve-conflicts", "--apply"], fake_home)
+    assert rc_apply["ok"] is True
+    assert rc_apply["applied"] == 1
+    assert not standalone_dir.exists()
+
+
+def test_duplicate_name_real_divergence_stays_advice_with_diff_summary(tmp_path: pathlib.Path) -> None:
+    """Real divergences stay advice, with a short diff summary (files and changed frontmatter keys)."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_skills = plugins_cache / "ai-orchestration" / "architect-side" / "0.5.4" / "skills"
+    (p_skills / "custom-workflow").mkdir(parents=True)
+    (p_skills / "custom-workflow" / "SKILL.md").write_text(
+        "---\n"
+        "name: custom-workflow\n"
+        "description: \"Standard workflow description\"\n"
+        "version: 1.0.0\n"
+        "---\n\n"
+        "# Standard Workflow Body\n"
+    )
+
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_skills.parent),
+                }
+            ]
+        }
+    }))
+
+    standalone_dir = fake_home / ".claude" / "skills" / "custom-workflow"
+    standalone_dir.mkdir(parents=True)
+    # Standalone has different version, different body, and extra file
+    (standalone_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: custom-workflow\n"
+        "description: \"Standard workflow description\"\n"
+        "version: 2.5.0\n"
+        "---\n\n"
+        "# Diverged Workflow Body\n"
+    )
+    (standalone_dir / "extra-script.py").write_text("print('extra file')\n")
+
+    st = run_env(["status"], fake_home)
+    dup_scs = [sc for sc in st["environments"]["claude"]["global"]["structured_conflicts"] if sc["kind"] == "duplicate-name"]
+    assert len(dup_scs) == 1
+    dup_sc = dup_scs[0]
+    assert dup_sc["fixable"] is False
+    assert dup_sc["actionable"] is False
+    assert len(dup_sc["actions"]) == 0
+    assert len(dup_sc["advice"]) == 1
+
+    diff_summary = dup_sc.get("diff_summary")
+    assert diff_summary is not None
+    assert "extra-script.py" in diff_summary
+    assert "version" in diff_summary
+
+    # Apply refuses to touch real divergence
+    rc_apply = run_env(["resolve-conflicts", "--apply"], fake_home)
+    assert rc_apply["ok"] is True
+    assert rc_apply["applied"] == 0
+    assert standalone_dir.exists()
+    assert (standalone_dir / "extra-script.py").is_file()
+
+
+def test_duplicate_name_open_questions_q006_to_q008_never_autoresolve(tmp_path: pathlib.Path) -> None:
+    """Questions Q006-Q008 (gcube-jenkins, gcube-security-audit, frontend-design) are NEVER auto-resolved."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_skills = plugins_cache / "gcube-ai-toolkit" / "gcube-developer-tools" / "0.2.1" / "skills"
+
+    test_cases = [
+        ("gcube-jenkins", "Q006"),
+        ("gcube-security-audit", "Q007"),
+        ("frontend-design", "Q008"),
+    ]
+
+    for name, qid in test_cases:
+        p_dir = p_skills / name
+        p_dir.mkdir(parents=True, exist_ok=True)
+        (p_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Test\n---\n# {name}\n")
+
+        s_dir = fake_home / ".claude" / "skills" / name
+        s_dir.mkdir(parents=True, exist_ok=True)
+        # Even if byte-identical or normalized-equal, open questions must NOT auto-resolve
+        (s_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Test\n---\n# {name}\n")
+
+    plugins_reg_file = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    plugins_reg_file.parent.mkdir(parents=True, exist_ok=True)
+    plugins_reg_file.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "gcube-developer-tools@gcube-ai-toolkit": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_skills.parent),
+                }
+            ]
+        }
+    }))
+
+    st = run_env(["status"], fake_home)
+    dup_scs = [sc for sc in st["environments"]["claude"]["global"]["structured_conflicts"] if sc["kind"] == "duplicate-name"]
+    assert len(dup_scs) == 3
+
+    for dup_sc in dup_scs:
+        name = dup_sc["names"][0]
+        expected_qid = dict(test_cases)[name]
+        assert dup_sc["fixable"] is False
+        assert dup_sc["actionable"] is False
+        assert len(dup_sc["actions"]) == 0
+        assert any(expected_qid in adv for adv in dup_sc["advice"])
+
+    # Apply makes zero changes
+    rc_apply = run_env(["resolve-conflicts", "--apply"], fake_home)
+    assert rc_apply["ok"] is True
+    assert rc_apply["applied"] == 0
+    for name, _ in test_cases:
+        assert (fake_home / ".claude" / "skills" / name).is_dir()
+
+
 
 
 

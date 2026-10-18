@@ -31,6 +31,10 @@ try:
     import tomllib
 except ImportError:
     import tomli as tomllib  # type: ignore
+try:
+    import yaml
+except ImportError:
+    yaml = None
 from typing import Any, Callable
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -59,6 +63,12 @@ OBSOLETE_SKILL_RENAMES = {
 
 OBSOLETE_AGENT_RENAMES = {
     "mcp-orchestrator-agent.md": "kilo-mcp-orchestrator-agent.md",
+}
+
+OPEN_DUPLICATE_QUESTIONS: dict[str, str] = {
+    "gcube-jenkins": "Q006",
+    "gcube-security-audit": "Q007",
+    "frontend-design": "Q008",
 }
 
 # A skill name is a single directory name: no separators, no "." / ".." components.
@@ -403,6 +413,322 @@ def skill_has_precedence_section(skill_path: pathlib.Path | str) -> bool:
         return False
 
 
+def parse_frontmatter_and_body(content: str) -> tuple[dict[str, Any] | None, str]:
+    """Parse YAML-ish frontmatter and body from a Markdown document (e.g. SKILL.md)."""
+    content = content.lstrip("\ufeff")
+    m = re.match(r"^\s*---\r?\n(.*?)\r?\n(?:---|\.\.\.)(?:\r?\n(.*))?$", content, re.DOTALL)
+    if not m:
+        return None, content
+    fm_raw = m.group(1)
+    body = m.group(2) or ""
+    try:
+        if yaml is not None:
+            data = yaml.safe_load(fm_raw)
+            if isinstance(data, dict):
+                return data, body
+            return None, body
+    except Exception:
+        pass
+    parsed: dict[str, Any] = {}
+    current_key: str | None = None
+    for line in fm_raw.splitlines():
+        line_s = line.strip()
+        if not line_s or line_s.startswith("#"):
+            continue
+        if ":" in line_s and not line.startswith(" ") and not line.startswith("\t"):
+            k, v = line_s.split(":", 1)
+            current_key = k.strip()
+            parsed[current_key] = v.strip().strip("\"'")
+        elif current_key and (line.startswith(" ") or line.startswith("\t")):
+            if isinstance(parsed[current_key], str):
+                parsed[current_key] += " " + line_s
+    return parsed, body
+
+
+def normalize_frontmatter(fm: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize frontmatter dictionary:
+    - Merges flattened vs nested `metadata` maps
+    - Drops empty values (None, empty string, empty dict/list)
+    - Normalizes string whitespace (including multiline/folded description)
+    - Normalizes scalar representations
+    """
+    if not isinstance(fm, dict):
+        return {}
+
+    result: dict[str, Any] = {}
+    meta = fm.get("metadata")
+    meta_dict = meta if isinstance(meta, dict) else {}
+
+    def _is_empty(val: Any) -> bool:
+        return val is None or val == "" or val == {} or val == []
+
+    def _clean_val(key: str, val: Any) -> Any:
+        if isinstance(val, str):
+            val_s = val.strip()
+            if key == "description":
+                val_s = re.sub(r"\s+", " ", val_s)
+            return val_s
+        elif isinstance(val, (int, float, bool)):
+            return str(val)
+        elif isinstance(val, dict):
+            res = {}
+            for sub_k, sub_v in val.items():
+                if not _is_empty(sub_v):
+                    res[sub_k] = _clean_val(sub_k, sub_v)
+            return res
+        elif isinstance(val, list):
+            res = []
+            for item in val:
+                if not _is_empty(item):
+                    res.append(_clean_val(key, item))
+            return res
+        return val
+
+    # 1. Process top-level keys (skipping metadata key itself)
+    for k, v in fm.items():
+        if k == "metadata" or _is_empty(v):
+            continue
+        result[k] = _clean_val(k, v)
+
+    # 2. Merge metadata subkeys into top-level
+    for k, v in meta_dict.items():
+        if _is_empty(v):
+            continue
+        if k not in result or _is_empty(result[k]):
+            result[k] = _clean_val(k, v)
+
+    return {k: v for k, v in result.items() if not _is_empty(v)}
+
+
+def normalize_body(body: str) -> str:
+    """Normalize markdown body by standardizing line endings and trailing whitespace."""
+    body = body.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip() for line in body.split("\n")]
+    return "\n".join(lines).strip()
+
+
+def compare_skill_md(text_a: str, text_b: str) -> tuple[bool, list[str], bool]:
+    """Compare two SKILL.md contents using normalized frontmatter and normalized body.
+    Returns (is_equal, changed_fm_keys, body_differs).
+    """
+    fm_a_raw, body_a = parse_frontmatter_and_body(text_a)
+    fm_b_raw, body_b = parse_frontmatter_and_body(text_b)
+
+    norm_fm_a = normalize_frontmatter(fm_a_raw)
+    norm_fm_b = normalize_frontmatter(fm_b_raw)
+
+    changed_fm_keys = sorted(
+        k for k in (set(norm_fm_a.keys()) | set(norm_fm_b.keys()))
+        if norm_fm_a.get(k) != norm_fm_b.get(k)
+    )
+
+    norm_body_a = normalize_body(body_a)
+    norm_body_b = normalize_body(body_b)
+    body_differs = (norm_body_a != norm_body_b)
+
+    is_equal = (len(changed_fm_keys) == 0 and not body_differs)
+    return is_equal, changed_fm_keys, body_differs
+
+
+def compare_skill_dirs(dir_a: pathlib.Path, dir_b: pathlib.Path) -> dict[str, Any]:
+    """Compare two skill directories with normalized frontmatter/body.
+    Returns:
+        {
+            "equivalent": bool,
+            "diff_files": list[str],
+            "changed_fm_keys": list[str],
+            "body_differs": bool,
+        }
+    """
+    if not (dir_a.exists() or dir_a.is_symlink()) or not (dir_b.exists() or dir_b.is_symlink()):
+        return {
+            "equivalent": False,
+            "diff_files": ["<missing-path>"],
+            "changed_fm_keys": [],
+            "body_differs": False,
+        }
+
+    p_a = dir_a.resolve() if dir_a.is_symlink() else dir_a
+    p_b = dir_b.resolve() if dir_b.is_symlink() else dir_b
+
+    def _collect_files(d: pathlib.Path) -> dict[str, pathlib.Path]:
+        res: dict[str, pathlib.Path] = {}
+        if d.is_file():
+            res[d.name] = d
+            return res
+        for root, dirs, files in os.walk(d):
+            dirs[:] = sorted(x for x in dirs if not x.startswith(".") and x != "__pycache__")
+            for fname in sorted(files):
+                if fname.startswith(".") or fname.endswith(".pyc") or fname in ("index.json", ".ai-orch-source.json"):
+                    continue
+                fpath = pathlib.Path(root) / fname
+                rel = fpath.relative_to(d).as_posix()
+                res[rel] = fpath
+        return res
+
+    files_a = _collect_files(p_a)
+    files_b = _collect_files(p_b)
+
+    set_a = set(files_a.keys())
+    set_b = set(files_b.keys())
+
+    only_in_a = sorted(set_a - set_b)
+    only_in_b = sorted(set_b - set_a)
+    common = sorted(set_a & set_b)
+
+    diff_files = list(only_in_a + only_in_b)
+    changed_fm_keys: list[str] = []
+    body_differs = False
+
+    for rel in common:
+        path_a = files_a[rel]
+        path_b = files_b[rel]
+        if rel == "SKILL.md":
+            try:
+                text_a = path_a.read_text(encoding="utf-8", errors="replace")
+                text_b = path_b.read_text(encoding="utf-8", errors="replace")
+                is_eq, fm_keys, b_diff = compare_skill_md(text_a, text_b)
+                if not is_eq:
+                    diff_files.append(rel)
+                    changed_fm_keys = fm_keys
+                    body_differs = b_diff
+            except Exception:
+                diff_files.append(rel)
+        else:
+            try:
+                bytes_a = path_a.read_bytes()
+                bytes_b = path_b.read_bytes()
+                if bytes_a != bytes_b:
+                    text_eq = False
+                    try:
+                        t_a = bytes_a.decode("utf-8").replace("\r\n", "\n")
+                        t_b = bytes_b.decode("utf-8").replace("\r\n", "\n")
+                        if t_a == t_b:
+                            text_eq = True
+                    except Exception:
+                        pass
+                    if not text_eq:
+                        diff_files.append(rel)
+            except Exception:
+                diff_files.append(rel)
+
+    diff_files = sorted(set(diff_files))
+    equivalent = (len(diff_files) == 0 and len(changed_fm_keys) == 0 and not body_differs)
+
+    return {
+        "equivalent": equivalent,
+        "diff_files": diff_files,
+        "changed_fm_keys": changed_fm_keys,
+        "body_differs": body_differs,
+    }
+
+
+def skill_equivalent(path_a: pathlib.Path, path_b: pathlib.Path) -> bool:
+    """Check if two skill paths are equivalent (identical or normalized equal)."""
+    if not (path_a.exists() or path_a.is_symlink()) or not (path_b.exists() or path_b.is_symlink()):
+        return False
+    h_a = compute_target_hash(path_a)
+    h_b = compute_target_hash(path_b)
+    if h_a and h_b and h_a == h_b:
+        return True
+    return compare_skill_dirs(path_a, path_b)["equivalent"]
+
+
+def format_diff_summary(diff_info: dict[str, Any]) -> str:
+    """Generate a short diff summary string describing differences between two skills."""
+    parts = []
+    diff_files = diff_info.get("diff_files", [])
+    if diff_files:
+        files_str = ", ".join(diff_files[:5])
+        if len(diff_files) > 5:
+            files_str += f" (+{len(diff_files) - 5} more)"
+        parts.append(f"files: {files_str}")
+    changed_fm_keys = diff_info.get("changed_fm_keys", [])
+    if changed_fm_keys:
+        parts.append(f"frontmatter keys: {', '.join(changed_fm_keys)}")
+    elif diff_info.get("body_differs"):
+        parts.append("body differs")
+    return "; ".join(parts) if parts else "differing contents"
+
+
+def find_matching_cached_plugin_skill(
+    skill_name: str,
+    standalone_path: pathlib.Path,
+    plugin_id: str = "",
+    home: pathlib.Path | None = None,
+) -> tuple[pathlib.Path | None, bool]:
+    """Search ~/.claude/plugins/cache for any cached version of the plugin/skill that matches standalone_path."""
+    h = home or get_home_dir()
+    cache_dir = h / ".claude" / "plugins" / "cache"
+    if not cache_dir.is_dir():
+        return None, False
+
+    pname, mname = "", ""
+    if plugin_id:
+        if "@" in plugin_id:
+            pname, mname = plugin_id.split("@", 1)
+        else:
+            pname = plugin_id
+
+    cand_paths: list[pathlib.Path] = []
+    if mname and pname:
+        cand_paths.extend(cache_dir.glob(f"{mname}/{pname}/*/skills/{skill_name}"))
+        cand_paths.extend(cache_dir.glob(f"{mname}/{pname}/*"))
+    elif pname:
+        cand_paths.extend(cache_dir.glob(f"*/{pname}/*/skills/{skill_name}"))
+        cand_paths.extend(cache_dir.glob(f"*/{pname}/*"))
+    else:
+        cand_paths.extend(cache_dir.glob(f"*/*/*/skills/{skill_name}"))
+
+    all_cands = set(cand_paths)
+    for p in cache_dir.glob(f"*/*/*/skills/{skill_name}"):
+        all_cands.add(p)
+
+    for cand in sorted(all_cands):
+        if not cand.is_dir() or not (cand / "SKILL.md").is_file():
+            continue
+        if skill_equivalent(standalone_path, cand):
+            return cand, True
+
+    return None, False
+
+
+def find_matching_marketplace_plugin_skill(
+    skill_name: str,
+    standalone_path: pathlib.Path,
+    plugin_id: str = "",
+    home: pathlib.Path | None = None,
+) -> tuple[pathlib.Path | None, bool]:
+    """Check marketplace clone for matching skill copy."""
+    h = home or get_home_dir()
+    mname, pname = "", ""
+    if "@" in plugin_id:
+        pname, mname = plugin_id.split("@", 1)
+    else:
+        pname = plugin_id
+
+    mkt_names = [mname] if mname else ["ai-orchestration", "kilo-mcp", "claude-mcp", "gcube-ai-toolkit", "agentic-coding-kit"]
+
+    for m in mkt_names:
+        clone = find_marketplace_clone(m, h)
+        if not clone or not clone.is_dir():
+            continue
+        s_pdir = find_plugin_source_dir(clone, pname) if pname else None
+        cands = []
+        if s_pdir and s_pdir.is_dir():
+            cands.append(s_pdir / "skills" / skill_name)
+            cands.append(s_pdir)
+        cands.extend(clone.glob(f"*/skills/{skill_name}"))
+        cands.extend(clone.glob(f"plugins/*/skills/{skill_name}"))
+
+        for cand in cands:
+            if cand.is_dir() and (cand / "SKILL.md").is_file():
+                if skill_equivalent(standalone_path, cand):
+                    return cand, True
+
+    return None, False
+
+
 def compute_group_key(kind: str, names: list[str], entries: list[dict[str, Any]] | None = None) -> str:
     sorted_names = sorted(names)
     names_str = ",".join(sorted_names)
@@ -721,7 +1047,7 @@ def detect_skill_state(
 
     # No receipt: check if hash matches any catalog entry (legacy copies matching current source)
     for entry in matching_entries:
-        if inst_hash and inst_hash == entry["hash"]:
+        if (inst_hash and inst_hash == entry["hash"]) or skill_equivalent(child, pathlib.Path(entry["path"])):
             return ("up-to-date-legacy", entry["repo"], entry["hash"])
 
     # No receipt: check if hash matches any earlier commit in source git history
@@ -1669,6 +1995,7 @@ def plan_for_conflict(
     policy: dict[str, str],
     catalog: dict[str, Any],
     seen_paths: set[str] | None = None,
+    home: pathlib.Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute resolution plan and executable actions for a single conflict finding.
 
@@ -1677,6 +2004,7 @@ def plan_for_conflict(
         plan_items: list of plan dicts (action: trash, advise, etc.)
         conflict_items: list of executable action dicts (consumed by trash_path during apply)
     """
+    h = home or get_home_dir()
     seen = seen_paths if seen_paths is not None else set()
     p_items: list[dict[str, Any]] = []
     c_items: list[dict[str, Any]] = []
@@ -1751,7 +2079,45 @@ def plan_for_conflict(
         standalone_entries = [e for e in entries if not e.get("origin", "").startswith("plugin:")]
         plugin_entries = [e for e in entries if e.get("origin", "").startswith("plugin:")]
 
-        if standalone_entries and plugin_entries:
+        skill_name = sc.get("names", [""])[0] or (
+            standalone_entries[0].get("name", "") if standalone_entries else (
+                plugin_entries[0].get("name", "") if plugin_entries else ""
+            )
+        )
+
+        qid = OPEN_DUPLICATE_QUESTIONS.get(skill_name)
+        if qid:
+            for se in standalone_entries:
+                sp_str = se.get("path")
+                if not sp_str or sp_str in seen:
+                    continue
+                seen.add(sp_str)
+                sp = pathlib.Path(sp_str)
+                s_hash = compute_target_hash(sp)
+
+                diff_summary = ""
+                if plugin_entries and plugin_entries[0].get("path"):
+                    diff_info = compare_skill_dirs(sp, pathlib.Path(plugin_entries[0]["path"]))
+                    diff_summary = format_diff_summary(diff_info)
+                elif len(standalone_entries) >= 2:
+                    other_sp = next((pathlib.Path(o["path"]) for o in standalone_entries if o.get("path") != sp_str), None)
+                    if other_sp:
+                        diff_info = compare_skill_dirs(sp, other_sp)
+                        diff_summary = format_diff_summary(diff_info)
+
+                reason = f"canonical choice for '{skill_name}' is open ({qid}): review question before resolving"
+                p_item = {
+                    "action": "advise",
+                    "path": str(sp),
+                    "reason": reason,
+                    "current_state": "conflict",
+                    "before_sha256": s_hash,
+                    "after_sha256": None,
+                    "diff_summary": diff_summary,
+                }
+                p_items.append(p_item)
+
+        elif standalone_entries and plugin_entries:
             plugin_hashes: dict[str, str] = {}
             for pe in plugin_entries:
                 pp = pe.get("path")
@@ -1760,12 +2126,14 @@ def plan_for_conflict(
                     if ph:
                         plugin_hashes[pp] = ph
 
-            skill_name = sc.get("names", [""])[0] or (standalone_entries[0].get("name", ""))
-            cat_hashes = [
-                entry["hash"]
-                for entry in catalog.values()
-                if entry.get("name") == skill_name and entry.get("hash")
+            cat_entries = [
+                entry for entry in catalog.values()
+                if entry.get("name") == skill_name
             ]
+            cat_hashes = [entry["hash"] for entry in cat_entries if entry.get("hash")]
+
+            stale_plugins = discover_stale_claude_plugins(home=h, scope=scope)
+            stale_plugin_ids = {sp["plugin_id"] for sp in stale_plugins}
 
             for se in standalone_entries:
                 sp_str = se.get("path")
@@ -1784,9 +2152,53 @@ def plan_for_conflict(
                 is_byte_identical = matching_plugin is not None
                 matches_cat = bool(s_hash and s_hash in cat_hashes)
 
-                if is_up_to_date or is_byte_identical or matches_cat:
-                    target_plugin = matching_plugin or plugin_entries[0]
-                    target_plugin_id = target_plugin.get("origin", "").split("plugin:", 1)[1]
+                # Normalized equality against active plugin copies
+                matching_norm_plugin = next(
+                    (pe for pe in plugin_entries if pe.get("path") and compare_skill_dirs(sp, pathlib.Path(pe["path"]))["equivalent"]),
+                    None,
+                )
+                is_norm_identical_plugin = matching_norm_plugin is not None
+
+                # Normalized equality against current catalog source
+                matching_norm_cat = next(
+                    (ce for ce in cat_entries if ce.get("path") and compare_skill_dirs(sp, pathlib.Path(ce["path"]))["equivalent"]),
+                    None,
+                )
+                is_norm_identical_cat = matching_norm_cat is not None
+
+                target_plugin = matching_plugin or matching_norm_plugin or plugin_entries[0]
+                target_plugin_id = target_plugin.get("origin", "").split("plugin:", 1)[1] if target_plugin.get("origin", "").startswith("plugin:") else target_plugin.get("origin", "")
+                is_target_plugin_stale = target_plugin_id in stale_plugin_ids
+
+                # Check cached plugin versions
+                matching_cached_path, is_cached_match = find_matching_cached_plugin_skill(
+                    skill_name, sp, plugin_id=target_plugin_id, home=h
+                )
+
+                # Check marketplace clone
+                matching_mkt_path, is_mkt_match = find_matching_marketplace_plugin_skill(
+                    skill_name, sp, plugin_id=target_plugin_id, home=h
+                )
+
+                # Check git history of source repos
+                cand_git_entries = list(cat_entries)
+                for pe in plugin_entries:
+                    pp = pe.get("path")
+                    if pp and pathlib.Path(pp).is_dir():
+                        cand_git_entries.append({
+                            "name": skill_name,
+                            "repo": pe.get("origin", ""),
+                            "plugin": pe.get("origin", ""),
+                            "path": pp,
+                            "hash": compute_target_hash(pathlib.Path(pp)),
+                        })
+                hist_match = find_historical_skill_match(s_hash, cand_git_entries, home=h)
+                is_historical_match = hist_match is not None
+
+                is_older_copy = (is_cached_match or is_historical_match or is_mkt_match) and not is_target_plugin_stale
+                is_reserialized_copy = is_norm_identical_plugin or (is_norm_identical_cat and not is_target_plugin_stale)
+
+                if is_up_to_date or is_byte_identical or matches_cat or is_reserialized_copy or is_older_copy:
                     p_item = {
                         "action": "trash",
                         "path": str(sp),
@@ -1805,6 +2217,15 @@ def plan_for_conflict(
                         "reason": p_item["reason"],
                     })
                 else:
+                    target_plugin_path = pathlib.Path(target_plugin.get("path")) if target_plugin.get("path") else None
+                    if target_plugin_path and target_plugin_path.exists():
+                        diff_info = compare_skill_dirs(sp, target_plugin_path)
+                    elif cat_entries and pathlib.Path(cat_entries[0]["path"]).exists():
+                        diff_info = compare_skill_dirs(sp, pathlib.Path(cat_entries[0]["path"]))
+                    else:
+                        diff_info = {"diff_files": ["SKILL.md"], "changed_fm_keys": [], "body_differs": True}
+                    diff_summary = format_diff_summary(diff_info)
+
                     if len(plugin_entries) == 1:
                         target_plugin_id = plugin_entries[0].get("origin", "").split("plugin:", 1)[1]
                     else:
@@ -1820,6 +2241,7 @@ def plan_for_conflict(
                         "current_state": "conflict",
                         "before_sha256": s_hash,
                         "after_sha256": None,
+                        "diff_summary": diff_summary,
                     }
                     p_items.append(p_item)
 
@@ -1851,106 +2273,133 @@ def plan_for_conflict(
             cat_entries = [entry for entry in catalog.values() if entry.get("name") == skill_name]
             cat_hashes = [e["hash"] for e in cat_entries if e.get("hash")]
 
-            entry_info: list[dict[str, Any]] = []
-            for se in standalone_entries:
-                sp_str = se.get("path")
-                if not sp_str:
-                    continue
-                sp = pathlib.Path(sp_str)
-                s_hash = compute_target_hash(sp)
-                s_state = se.get("state")
-                is_current = s_state in ("up-to-date", "up-to-date-legacy") or bool(s_hash and s_hash in cat_hashes)
-                is_outdated_legacy = s_state == "outdated-legacy"
-                entry_info.append({
-                    "entry": se,
-                    "path": sp,
-                    "path_str": sp_str,
-                    "hash": s_hash,
-                    "state": s_state,
-                    "is_current": is_current,
-                    "is_outdated_legacy": is_outdated_legacy,
-                    "scope": se.get("scope", scope),
-                })
-
-            current_items = [item for item in entry_info if item["is_current"]]
-            other_items = [item for item in entry_info if not item["is_current"]]
-
-            # Rule P2-d:
-            # When one copy matches the current source and the others are outdated-legacy/identical:
-            # keep the current one and trash the others (fixable).
-            # When all copies are identical to each other (even if not current):
-            # keep one per keep_scope and trash the others (fixable).
-            # Otherwise (differing contents not matching the rule): advice only.
-            all_identical = (
-                len(entry_info) >= 2
-                and len(set(it["hash"] for it in entry_info if it["hash"])) == 1
-            )
-            has_current_and_legacy_or_identical = (
-                len(current_items) >= 1
-                and all(
-                    item["is_outdated_legacy"]
-                    or (item["hash"] and item["hash"] in cat_hashes)
-                    or any(item["hash"] == c["hash"] for c in current_items)
-                    for item in other_items
-                )
-            )
-
-            is_fixable_p2d = has_current_and_legacy_or_identical or all_identical
-
-            if is_fixable_p2d:
-                keep_scope = policy.get("keep_scope", "global")
-                if len(current_items) == 1:
-                    keeper = current_items[0]
-                    to_trash = other_items
-                elif len(current_items) > 1:
-                    if keep_scope == "project":
-                        keeper = next((it for it in current_items if it["scope"] == "project"), current_items[0])
-                    else:
-                        keeper = next((it for it in current_items if it["scope"] == "global"), current_items[0])
-                    to_trash = [it for it in current_items if it is not keeper] + other_items
-                else:
-                    if keep_scope == "project":
-                        keeper = next((it for it in entry_info if it["scope"] == "project"), entry_info[0])
-                    else:
-                        keeper = next((it for it in entry_info if it["scope"] == "global"), entry_info[0])
-                    to_trash = [it for it in entry_info if it is not keeper]
-
-                for item in to_trash:
-                    if item["path_str"] not in seen:
-                        seen.add(item["path_str"])
-                        keep_desc = "current" if keeper in current_items else "identical"
-                        p_item = {
-                            "action": "trash",
-                            "path": item["path_str"],
-                            "reason": f"duplicate standalone skill '{skill_name}': keep {keep_desc} copy in {keeper['scope']}, trash {item['scope']} copy",
-                            "current_state": "conflict",
-                            "before_sha256": item["hash"],
-                            "after_sha256": None,
-                        }
-                        p_items.append(p_item)
-                        c_items.append({
-                            "action": "trash",
-                            "assistant": assistant,
-                            "scope": item["scope"],
-                            "removed": skill_name,
-                            "kept": f"{keeper['scope']} copy",
-                            "path": item["path"],
-                            "reason": p_item["reason"],
-                        })
-            else:
-                target_path_str = entry_info[0]["path_str"] if entry_info else ""
-                if target_path_str and target_path_str not in seen:
-                    seen.add(target_path_str)
-                    target_path = pathlib.Path(target_path_str)
+            qid = OPEN_DUPLICATE_QUESTIONS.get(skill_name)
+            if qid:
+                for se in standalone_entries:
+                    sp_str = se.get("path")
+                    if not sp_str or sp_str in seen:
+                        continue
+                    seen.add(sp_str)
+                    sp = pathlib.Path(sp_str)
+                    s_hash = compute_target_hash(sp)
+                    other_sp = next((pathlib.Path(o["path"]) for o in standalone_entries if o.get("path") != sp_str), None)
+                    diff_summary = ""
+                    if other_sp:
+                        diff_info = compare_skill_dirs(sp, other_sp)
+                        diff_summary = format_diff_summary(diff_info)
+                    reason = f"canonical choice for '{skill_name}' is open ({qid}): review question before resolving"
                     p_item = {
                         "action": "advise",
-                        "path": target_path_str,
-                        "reason": f"duplicate standalone skill '{skill_name}' across scopes with differing contents: review and remove one manually",
+                        "path": str(sp),
+                        "reason": reason,
                         "current_state": "conflict",
-                        "before_sha256": compute_target_hash(target_path),
+                        "before_sha256": s_hash,
                         "after_sha256": None,
+                        "diff_summary": diff_summary,
                     }
                     p_items.append(p_item)
+            else:
+                entry_info: list[dict[str, Any]] = []
+                for se in standalone_entries:
+                    sp_str = se.get("path")
+                    if not sp_str:
+                        continue
+                    sp = pathlib.Path(sp_str)
+                    s_hash = compute_target_hash(sp)
+                    s_state = se.get("state")
+                    is_norm_cat = any(compare_skill_dirs(sp, pathlib.Path(ce["path"]))["equivalent"] for ce in cat_entries if ce.get("path"))
+                    is_current = s_state in ("up-to-date", "up-to-date-legacy") or bool(s_hash and s_hash in cat_hashes) or is_norm_cat
+                    is_outdated_legacy = s_state == "outdated-legacy" or (find_historical_skill_match(s_hash, cat_entries, home=h) is not None)
+                    entry_info.append({
+                        "entry": se,
+                        "path": sp,
+                        "path_str": sp_str,
+                        "hash": s_hash,
+                        "state": s_state,
+                        "is_current": is_current,
+                        "is_outdated_legacy": is_outdated_legacy,
+                        "scope": se.get("scope", scope),
+                    })
+
+                current_items = [item for item in entry_info if item["is_current"]]
+                other_items = [item for item in entry_info if not item["is_current"]]
+
+                all_identical = (
+                    len(entry_info) >= 2
+                    and (
+                        len(set(it["hash"] for it in entry_info if it["hash"])) == 1
+                        or all(skill_equivalent(entry_info[0]["path"], it["path"]) for it in entry_info[1:])
+                    )
+                )
+                has_current_and_legacy_or_identical = (
+                    len(current_items) >= 1
+                    and all(
+                        item["is_outdated_legacy"]
+                        or (item["hash"] and item["hash"] in cat_hashes)
+                        or any(item["hash"] == c["hash"] or skill_equivalent(item["path"], c["path"]) for c in current_items)
+                        for item in other_items
+                    )
+                )
+
+                is_fixable_p2d = has_current_and_legacy_or_identical or all_identical
+
+                if is_fixable_p2d:
+                    keep_scope = policy.get("keep_scope", "global")
+                    if len(current_items) == 1:
+                        keeper = current_items[0]
+                        to_trash = other_items
+                    elif len(current_items) > 1:
+                        if keep_scope == "project":
+                            keeper = next((it for it in current_items if it["scope"] == "project"), current_items[0])
+                        else:
+                            keeper = next((it for it in current_items if it["scope"] == "global"), current_items[0])
+                        to_trash = [it for it in current_items if it is not keeper] + other_items
+                    else:
+                        if keep_scope == "project":
+                            keeper = next((it for it in entry_info if it["scope"] == "project"), entry_info[0])
+                        else:
+                            keeper = next((it for it in entry_info if it["scope"] == "global"), entry_info[0])
+                        to_trash = [it for it in entry_info if it is not keeper]
+
+                    for item in to_trash:
+                        if item["path_str"] not in seen:
+                            seen.add(item["path_str"])
+                            keep_desc = "current" if keeper in current_items else "identical"
+                            p_item = {
+                                "action": "trash",
+                                "path": item["path_str"],
+                                "reason": f"duplicate standalone skill '{skill_name}': keep {keep_desc} copy in {keeper['scope']}, trash {item['scope']} copy",
+                                "current_state": "conflict",
+                                "before_sha256": item["hash"],
+                                "after_sha256": None,
+                            }
+                            p_items.append(p_item)
+                            c_items.append({
+                                "action": "trash",
+                                "assistant": assistant,
+                                "scope": item["scope"],
+                                "removed": skill_name,
+                                "kept": f"{keeper['scope']} copy",
+                                "path": item["path"],
+                                "reason": p_item["reason"],
+                            })
+                else:
+                    target_path_str = entry_info[0]["path_str"] if entry_info else ""
+                    if target_path_str and target_path_str not in seen:
+                        seen.add(target_path_str)
+                        target_path = pathlib.Path(target_path_str)
+                        diff_info = compare_skill_dirs(entry_info[0]["path"], entry_info[1]["path"]) if len(entry_info) >= 2 else {"diff_files": ["SKILL.md"], "changed_fm_keys": [], "body_differs": True}
+                        diff_summary = format_diff_summary(diff_info)
+                        p_item = {
+                            "action": "advise",
+                            "path": target_path_str,
+                            "reason": f"duplicate standalone skill '{skill_name}' across scopes with differing contents: review and remove one manually",
+                            "current_state": "conflict",
+                            "before_sha256": compute_target_hash(target_path),
+                            "after_sha256": None,
+                            "diff_summary": diff_summary,
+                        }
+                        p_items.append(p_item)
 
     elif kind == "outdated-legacy":
         entry = entries[0] if entries else {}
@@ -2256,6 +2705,7 @@ def inspect_environment(
                         scope=scope,
                         policy=policy,
                         catalog=catalog,
+                        home=h,
                     )
                     actions = [item for item in p_items if item["action"] != "advise"]
                     advice: list[str] = []
@@ -2322,9 +2772,12 @@ def inspect_environment(
                             scope=scope,
                             policy=policy,
                             catalog=catalog,
+                            home=h,
                         )
                         actions = [item for item in p_items if item["action"] != "advise"]
                         advice: list[str] = []
+                        diff_summaries = [item.get("diff_summary") for item in p_items if item.get("diff_summary")]
+                        diff_summary = "; ".join(dict.fromkeys(diff_summaries)) if diff_summaries else None
                         for item in p_items:
                             if item["action"] == "advise":
                                 r = item.get("reason", "")
@@ -2341,6 +2794,7 @@ def inspect_environment(
                             "actionable": is_fixable,
                             "actions": actions,
                             "advice": advice,
+                            "diff_summary": diff_summary,
                         }
                         if scope == "global":
                             global_conflict_keys.setdefault(assistant, set()).add(key)
@@ -2376,6 +2830,7 @@ def inspect_environment(
                                 scope=scope,
                                 policy=policy,
                                 catalog=catalog,
+                                home=h,
                             )
                             actions = [item for item in p_items if item["action"] != "advise"]
                             advice: list[str] = []
@@ -2565,6 +3020,9 @@ def inspect_environment(
                 if adv and adv not in all_advice:
                     all_advice.append(adv)
 
+        diff_summaries = [c.get("diff_summary") for _, _, c in items_with_loc if c.get("diff_summary")]
+        group_diff_summary = "; ".join(dict.fromkeys(diff_summaries)) if diff_summaries else None
+
         finding_groups.append({
             "group_key": gkey,
             "kind": kind,
@@ -2577,6 +3035,7 @@ def inspect_environment(
             "actionable": any(c.get("actionable") for _, _, c in items_with_loc),
             "actions": all_actions,
             "advice": all_advice,
+            "diff_summary": group_diff_summary,
             "count": len(locations),
         })
 
@@ -3215,6 +3674,7 @@ def resolve_conflicts(
                         policy=policy,
                         catalog=catalog,
                         seen_paths=seen_paths,
+                        home=h,
                     )
                     p.extend(plan_items)
                     c_items.extend(conflict_items)
