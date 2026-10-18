@@ -46,7 +46,7 @@
 
 ### 11.4 - Engine: closed-apart placement at every level (`tasks ship`, `## Closed` section for blocks, link rewriting, `tasks archive`; questions stay in place per S3)
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/11.4-closed-apart) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (same file) · **Repo:** `ai-orchestration/`
+- **Status:** `delivered` (2026-10-18; claude; merged; 229 tests; archive dry-run on the real tree plans 47 closed blocks into Closed sections (not applied: touches plan 15 of another session; owner decision)) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (same file) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `plugins/architect-side/skills/task-pipeline/SKILL.md` ("Ship" step), `tasks/specs/blocking-questions.md` (closed questions location)
 - **Goal:** Spec §6.
 - **Verification:**
