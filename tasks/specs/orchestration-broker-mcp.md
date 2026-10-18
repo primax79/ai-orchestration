@@ -1,180 +1,153 @@
 # Orchestration broker: one MCP server per user, many workspaces, many projects
 
-- status: draft 2 (2026-10-18). Supersedes `peer-messaging.md` (draft 1, kept for history). To be reviewed by Gemini
-  (kilo-mcp) and Codex before the plan is written.
+- status: draft 4 (2026-10-18): v1 scope after two review rounds. Supersedes `peer-messaging.md`.
 - owner requests (2026-10-18):
-  - a way for the orchestrator of one workspace to talk to the orchestrators of other workspaces, taken from the
-    workspace configuration, across tools (Claude with Kilo, …);
-  - from another workspace one usually talks to the orchestrator, but sometimes to an interactive session;
-  - the orchestrator stays headless, is never blocked by interactive conversations, and any session brings it to life
-    when it is missing (`events-and-triggers.md` §0a);
-  - the `ai-orchestration` backend becomes an MCP server, and task updates, formalisation and similar work are
-    delegated to it (and to the orchestrator behind it) instead of to skills;
-  - it is multi-workspace, and a workspace can contain several projects, each with its own tasks.
-- inputs: Codex and Gemini reviews of draft 1 (2026-10-18, 12 items each), in `../_reviews/2026-10-18-peer-messaging-review-{codex,gemini}.md`; referenced below as C<n> and G<n>.
+  - the orchestrator of one workspace talks to the orchestrators of other workspaces, across tools (Claude, Kilo, Codex);
+  - from another workspace one usually talks to the orchestrator, sometimes to an interactive session;
+  - the orchestrator is headless, never blocked by interactive conversations, and any session brings it to life when it
+    is missing (`events-and-triggers.md` §0a);
+  - the `ai-orchestration` backend becomes an MCP server; task updates and formalisation are delegated to it and to the
+    orchestrator behind it instead of to skills;
+  - multi-workspace, and a workspace can contain several projects with their own tasks.
+- reviews: round 1 on draft 1 (`../_reviews/2026-10-18-peer-messaging-review-{codex,gemini}.md`, C1–C12, G1–G12),
+  round 2 on draft 3 (`../_reviews/2026-10-18-broker-mcp-review-{codex,gemini}.md`, referenced as C2-n and G2-n).
+  Draft 4 adopts Codex's "simpler v1" and the converging items of both reviewers.
 
 ## 1. Model
 
-```
+```text
 user (one broker process)
-└── workspace            a registered folder; owns ONE orchestrator role; the unit of addressing for mail
-    └── project          a task tree (a folder with tasks/00-INDEX.md); one or more per workspace
+└── workspace     registered folder; one headless orchestrator role; the mail address
+    └── project   a task tree (folder with tasks/00-INDEX.md), declared in the workspace config
         └── task / question / note / use case   (ids unique only inside their project)
 ```
 
-- **Workspace:** registered root folder with a stable identity (§2). It owns one headless orchestrator role (§5), one
-  event store and one mailbox. Example: `~/works/ai-coding-tools`.
-- **Project:** a task tree inside the workspace. Discovered (any `tasks/00-INDEX.md` under the root, not inside a
-  `.kilo/worktrees/`, `node_modules/`, `references/` or another registered workspace) and confirmable in the workspace
-  config (`[[workspace.projects]] id, path`). The workspace's own top-level `tasks/` is the project `_workspace`.
-  Example: `ai-coding-tools` has `_workspace` (its registry), `ai-orchestration`, `claude-mcp`, …
-- **Nesting rule:** a project belongs to exactly one workspace, the nearest registered ancestor. A folder registered as
-  a workspace inside another workspace is excluded from the outer one (no double ownership of the same task tree).
-- **Qualified ids:** `workspace:project/ID`, e.g. `ai-coding-tools:ai-orchestration/T025`,
-  `ai-coding-tools:_workspace/T014`. Inside a project the bare id stays valid; across projects or workspaces the
-  qualified form is mandatory. Citations in chat follow the short-title rule: `ai-orchestration/T025 (short title field)`.
-- **Cross-project dependencies:** `depends-on` accepts qualified ids; the graph resolves them through the broker
-  (read-only; a dependency on another workspace is shown, never transitioned from here).
+- **Workspace:** registered root folder, immutable `uuid` + human `slug` in its config (`[workspace] uuid, id`). It owns
+  one orchestrator role, one event store, one mailbox.
+- **Project (v1: explicit, C2-6, G2-8):** `[[workspace.projects]] uuid, id, path` in the workspace config. The
+  workspace's top-level `tasks/` is the project `_workspace`. `ai-orch projects discover` only **proposes** entries
+  (it skips hidden folders, git-ignored paths, build/dependency/scratch/fixture folders, worktrees and other registered
+  workspaces); nothing is picked up silently.
+- **Nesting:** a project belongs to exactly one workspace. A folder can be a project of an outer workspace **or** a
+  workspace of its own, not both (owner question Q-c).
+- **Qualified references (C2-5, G2-3):** one grammar, `QualifiedTaskRef = [workspace ":"] [project "/"] ID`, with a
+  single parser/canonicaliser in the engine. Malformed prefixes are errors, never prose. **v1 scope:** the broker and
+  chat use qualified refs for addressing and citation (`ai-coding-tools:ai-orchestration/T025 (short title field)`);
+  on-disk `depends-on` stays project-local (bare ids) — cross-project dependencies are v2, so the existing parsers and
+  `validate` are untouched in v1.
 
-## 2. Identity and registry
+## 2. The broker process
 
-- Each workspace carries an immutable id in its config: `[workspace] uuid = "<UUIDv4>"` plus a human slug
-  `[workspace] id = "ai-coding-tools"` (`^[a-z0-9][a-z0-9-]{1,47}$`). The uuid is what the broker keys on (C10:
-  folder names collide and renames break lookups); the slug is the address people type.
-- Registry: owned by the broker, stored under the active global config directory (`get_global_config_dir()`, so
-  `AI_ORCHESTRATION_CONFIG` isolates tests; G11) as `broker/registry.sqlite` (or JSON under a lock; the choice is part
-  of the plan), with uuid → slug, canonical path, device/inode, projects, last_seen. A workspace moved to a new folder
-  keeps its uuid; registering it from the new path updates the path after a confirmation (G11).
-- Registration: `workspace.register` (preview → apply), offered by `orchestrator ensure` and by the setup wizard.
-  Before every write into a workspace the broker re-verifies canonical path, device/inode and uuid, and refuses
-  symlinked `.ai-orchestration` components (C10). Stale entries are reported, never deleted silently.
-- Ids are UUIDv4 (stdlib only, no ULID dependency; G10), message ids prefixed `msg-<timestamp>-`.
+- `ai-orch broker serve`: one per user, the evolution of the current UI backend. Single instance guarded by
+  `broker.lock` (`flock LOCK_EX|LOCK_NB`) in the global config dir, readiness written to `broker.json` (pid, port,
+  started_at) after the lock is held (G2-2, G2-4).
+- **Transports:** MCP over streamable HTTP on localhost (token as today) and an **stdio shim** `ai-orch mcp`
+  (Codex only speaks stdio, G2-4). The shim answers `initialize` immediately from static capabilities, takes
+  `broker.launch.lock` before starting a broker (one launcher, others poll readiness), then forwards. `ai-orch mcp
+  --local` serves the same tools in-process for one workspace (tests, CI, broker unavailable) and takes the same
+  on-disk locks.
+- **Locks are on disk and shared with the CLI (C2-2, G2-2):** every task mutation, from the broker or the CLI, takes
+  the project's existing `tasks/.ai-orch.lock` (`task_write_lock`) and checks file hashes (CAS). The CLI never decides
+  "broker down" from an HTTP timeout: if `broker.lock` is held it routes mutating commands through the broker (or
+  fails with "busy"); if not, it writes directly under the same project lock. No split brain.
+- **Store:** registry, mailboxes, tickets and job states in SQLite (WAL) under the global config dir; task trees stay
+  Markdown in the projects.
+- **Recovery (C2-1, G2-1):**
+  - child agent processes (orchestrator turns) run detached (`start_new_session`), with pid, start time, session id and
+    log path persisted before the turn is marked running;
+  - on start, the broker reconciles: a live child is **re-attached** (log tailing resumes), a dead one with a complete
+    transcript is finalised, an interrupted mutating one becomes `outcome_unknown` for the owner;
+  - every mutating MCP call carries an idempotency key; the broker stores its terminal result, so a client that lost
+    the response gets the same result on retry;
+  - `ai-orch broker stop --drain T` stops claiming work and waits for running turns.
+- Start: on demand by the shim/CLI/UI, or at login (owner question Q-a).
 
-## 3. The broker
+## 3. MCP surface (v1)
 
-- **One process per user**, `ai-orch broker serve`, the evolution of the current UI backend (`ai-orchestration-ui`):
-  - **MCP server** (streamable HTTP on localhost, token as today), plus a thin **stdio shim** (`ai-orch mcp`) for
-    clients that only speak stdio; the shim starts the broker if it is not running and forwards to it.
-  - **Web UI and VS Code bridge** keep working on the same process (the UI gains a workspace/project switcher).
-  - **Runs the orchestrator workers** of the registered workspaces (§5), so there is no worker per workspace and no
-    second trigger daemon: trigger evaluation lives in the broker (resolves Codex 6).
-  - **Single writer** for the shared stores (registry, mailboxes, events, queues): every mutation goes through the
-    broker, under its locks, so cross-workspace delivery is a local transaction instead of one process writing into
-    another workspace's files (resolves C3, C4, C11). Locks are always taken in a fixed order (registry → sender
-    workspace → target workspace, by uuid) with deadlines, so two workspaces mailing each other cannot deadlock (G1).
-- The CLI (`ai-orch …`) stays and keeps working without the broker for single-project use (offline, CI); when the
-  broker is running, the CLI's mutating commands go through it (so locks are not bypassed).
-- Start: by `orchestrator ensure`, by the stdio shim, by the UI launcher, or at login (optional launchd/systemd unit,
-  owner's choice).
+Workspace and project are **explicit arguments or bound at console registration**, never inferred from the broker's
+cwd (C2-4). `whoami` reports the binding.
 
-## 4. MCP surface
+- **Read:** `whoami`, `workspaces.list`, `projects.list`, `tasks.list|show|graph|next`, `questions.list`,
+  `inbox.list`, `runs.list`, `events.tail`, `orchestrator.status`, `mail.inbox`.
+- **Deterministic writes (C2-3 vs G2-5, converged):** applied directly, with optimistic concurrency: the caller may pass
+  `expect_hash` (from its last read); the result returns the new hash. `preview: true` returns the plan without
+  writing. Two-step `confirm_token` exists only for destructive or owner-facing actions (drop, bulk rollback, global
+  config): single-use, short expiry, bound to the caller, tool, canonical arguments, uuids and observed file hashes,
+  with a stored terminal receipt for replays. Tools: `tasks.new|transition|set_*|child_add`,
+  `questions.ask|answer|apply`, `inbox.add_note|attach`. The broker enforces the task format.
+- **Delegation:** `orchestrator.ask(workspace, kind, text)` with `kind` in `formalize | update | plan | review | free`
+  enqueues a turn and returns a durable `ticket`; `orchestrator.ticket(id)` returns state and reply. This is how
+  sessions delegate task bookkeeping and formalisation; the orchestrator writes through the same tools.
+- **Mail:** `mail.send|inbox|read|reply|decline`, `mail.poll` (explicit, cheap). Addresses: `workspace` → its
+  orchestrator; `workspace/console` → a registered console (§5).
+- **Lifecycle:** `orchestrator.ensure(workspace, dry_run)` (config writes under `config_lock` with the base hash
+  re-read under the lock, C7), `orchestrator.pause|resume`, `console.register`.
 
-Tools (all scoped by `workspace` and `project`; defaults from the caller's cwd, resolved by the broker):
+## 4. Orchestrator per workspace
 
-- **Read:** `tasks.list`, `tasks.show`, `tasks.graph`, `tasks.next`, `questions.list`, `inbox.list`, `runs.list`,
-  `events.tail`, `workspaces.list`, `projects.list`, `orchestrator.status`, `whoami`.
-- **Deterministic writes** (preview → apply with the hash in one round trip: the tool returns the plan and a
-  `confirm_token`; a second call with the token applies it): `tasks.new`, `tasks.transition`, `tasks.set_*`
-  (priority, size, deps, kind, labels, short), `tasks.child_add`, `questions.ask|answer|apply`, `inbox.add_note`,
-  `inbox.attach`. The broker enforces the task format; skills no longer explain file formats.
-- **Delegation to the orchestrator:** `orchestrator.ask(workspace, text, kind)` with `kind` in `formalize` (turn a
-  request into tasks/spec), `update` (bring task state in line with what happened), `plan`, `review`, `free`. It
-  enqueues a turn and returns a `ticket`; `orchestrator.ticket(ticket)` returns state and the reply when done. This is
-  how sessions "delegate task updates and formalisation" instead of doing them with skills. The orchestrator is the
-  only writer of task content that needs judgment; deterministic fields can still be set by anyone through the tools.
-- **Mail:** `mail.send(to, kind, subject, body, refs?, thread?, in_reply_to?)`, `mail.inbox`, `mail.read`,
-  `mail.reply`, `mail.decline`. Addresses:
-  - `workspace` (slug or uuid) → that workspace's orchestrator role (the normal case);
-  - `workspace/session-name` → a live interactive console of that workspace (§6);
-  - `workspace:project` is not a mail address (projects have no inbox; the orchestrator routes).
-- **Lifecycle:** `orchestrator.ensure(workspace, dry_run)`, `orchestrator.pause|resume`, `console.register` (§6).
-- Resources: the project index and the specs as MCP resources, so clients can read them without file access.
+- `events-and-triggers.md` §0/§0a, with the worker loop inside the broker: serialised per workspace, parallel across
+  workspaces; trigger evaluation in the broker (holds the old daemon lock; `triggers daemon` superseded).
+- Required fixes, tracked separately: T026 (trigger enqueue race, separate cursors, read-only status), T027 (no
+  recovery of a claim within its lease/startup grace), T028 (reduced capability enforced on every tool including Kilo;
+  per-turn nonce delimiters).
+- Liveness in `orchestrator/worker.json` from a heartbeat thread; staleness checks the process table.
 
-## 5. Orchestrator per workspace
+## 5. Consoles
 
-- Unchanged from `events-and-triggers.md` §0/§0a except: the worker loop runs inside the broker, one logical worker
-  per workspace, serialised per workspace, parallel across workspaces. `triggers daemon` is superseded: the broker owns
-  trigger evaluation and holds the existing daemon lock, so an old daemon cannot run beside it (G6).
-- Worker liveness is a separate volatile record (`orchestrator/worker.json`: broker pid, current turn, child pid,
-  heartbeat from a thread that keeps ticking during long turns); staleness checks the process table, not only the
-  heartbeat age (G7). The queue lock stays short-lived; the worker's own exclusivity uses a separate lock (G2).
-- The orchestrator works on **all projects of its workspace**; a turn names the project(s) it touched. Its tool calls
-  to task data go through the same MCP surface (it is a client of the broker too), so its writes are validated like
-  everyone else's.
-- Fixes required by the Codex review, kept here because they are about the orchestrator: triggers enqueue through the
-  canonical queue under the lock and the delivery cursor advances only after a turn completes (`server-and-bindings`
-  T026); `status` is read-only (no auto-registration); explicit stop/pause is respected by `ensure` unless the owner
-  asks to resume; an interrupted mutating turn is marked `outcome_unknown` for the owner instead of being retried
-  (C8, C9); a claimed turn is not recovered while its lease is valid or within a startup grace period even if the child
-  pid is not written yet (G2, T027); unattended turns are restricted on every tool, Kilo included, and untrusted data is
-  wrapped with a per-turn nonce delimiter (G3, G4, T028).
+- A console is an interactive session (any tool) known to the broker. **Registration is lazy (G2-7):** the first MCP
+  call of a client creates a console bound to the workspace/project the client names (or the one in its MCP server
+  config), with a broker-issued `console_uuid` and secret and a lease renewed by every call (C2-7). `console.register`
+  only sets a human name (for Claude, its SendMessage name) and must be unique in the workspace.
+- Mail to `workspace/console-name` lands in the console's mailbox, which survives reconnects for a retention period.
+  Consoles learn about it pull-style: `mail.poll`, `whoami` and `orchestrator.status` report `unread_mail`; when it is
+  > 0 the broker appends a one-line human-readable notice to the text content of tool results (G2-6), never a
+  non-standard field. Watchers, toasts and SendMessage nudges are optional adapters.
+- Mail to a console that is gone is returned with `console_gone`; the sender may re-send it to the workspace.
 
-## 6. Consoles: interactive sessions
+## 6. Mail safety (v1)
 
-- Any interactive session (Claude, Kilo, Codex) connected to the broker calls `console.register(name, tool)` at start
-  (the skills say so; for Claude the name is its SendMessage name). It is a console of the workspace of its cwd.
-- Mail to `workspace/session-name` is stored for that console. The console learns about it pull-style: every broker
-  tool result carries `unread_mail: N` in a small envelope field, and the skills tell the session to look when N > 0.
-  Optional nudges: a watcher (`ai-orch mail watch`) for Claude, the VS Code toast, the UI badge.
-- A console that disconnects keeps its mailbox for a retention period; mail to a console that no longer exists is
-  returned to the sender with `console_gone` (and can be re-sent to the workspace orchestrator).
+- **No automatic classifier in v1 (C2-8, G2-9).** An unattended orchestrator receives only **safe metadata** of new mail
+  (from, kind, subject, size, policy decision), never the raw body. The body is read by the orchestrator only after the
+  owner accepts the message (Decisions/Inbox, or `mail.accept` by the owner), and then wrapped with a per-turn nonce.
+  A console reads its own mail directly (it is a human-attended session).
+- **Effects are structured (C5):** the orchestrator acts on mail only through broker tools (reply, decline, question,
+  proposal); mail never causes shell commands.
+- **Policy:** `[mail] isolation = open | restricted | blind`, `accept_from`, `send_to`, `deny`, `max_body_kib` (32),
+  `max_received_per_hour` (20). Checked for both sides in one broker transaction, at send and again at acceptance;
+  unregistered or unconfigured targets are denied; blind workspaces neither send nor receive.
+- **Outcomes reach the sender:** decline and expiry send an automatic reply; events `mail.received|read|answered|
+  declined|expired`.
+- **References:** ids or root-relative paths in the sender's workspace, validated; read only through `mail.fetch_ref`
+  after acceptance and policy/size checks.
+- **Secrets:** best-effort scan with named patterns (AWS, GitHub, provider keys, private-key blocks), tested; it blocks
+  or warns and never claims more.
 
-## 7. Mail safety
+## 7. What the skills become
 
-- **Quarantine (C1):** mail addressed to an orchestrator never enters the persistent orchestrator session as raw
-  text. A fresh, stateless, no-tools classifier turn (cheap model) reads it and produces a structured result
-  (`summary`, `intent`, `requested_actions[]`, `questions[]`, `suspicious: bool`). Only that structured result reaches
-  the orchestrator, marked `untrusted_peer_data` with provenance. Reading referenced files or sending a substantive
-  reply that quotes workspace content needs the owner's approval (a proposal, §0c E3).
-- **Structured effects (C5):** the orchestrator acts on mail through broker tools (reply, decline, create a
-  question, create a proposal), never through shell commands; the broker applies them. `peer_message` and
-  `mail_classify` are first-class turn types with their own prompt builders (G4).
-- **Rate limits (G8):** per workspace `[mail] max_received_per_hour` (default 20) and `max_mail_turns_per_hour`
-  (default 6, shared token bucket with event turns); excess mail is stored and batched, never dropped.
-- **Outcomes reach the sender (G9):** `decline` and `expire` produce an automatic reply (`kind = reply`,
-  `receipt_status`), so the sender's outbox always ends in a terminal state. Events: `mail.received`, `mail.read`,
-  `mail.answered`, `mail.declined`, `mail.expired` (G12).
-- **References (G5):** `refs` are ids or paths relative to the sender's workspace root (no `..`, no absolute paths,
-  checked by the broker). The receiver reads one only through `mail.fetch_ref`, which the broker serves from the
-  sender's workspace after policy and size checks (and only after owner approval for orchestrator recipients).
-- **Policy** per workspace config: `[mail] isolation = open | restricted | blind`, `accept_from`, `send_to`, `deny`,
-  `max_body_kib`. The broker checks both sides inside one transaction, at send time and again before the
-  classifier turn, and quarantines (does not process) mail whose policy changed meanwhile (C11). An unregistered
-  or unconfigured target is `deny` by default.
-- **Content:** bodies are Markdown ≤ 32 KiB, references are ids or paths in the sender's workspace, no attachments in v1.
-  Secret scanning is best-effort and documented as such (C12, G8): a small set of explicit patterns (AWS, GitHub,
-  Anthropic/OpenAI style keys, private key blocks), tested; it warns or blocks, and never claims to catch hosts or
-  finding details.
+`task-pipeline`, `orchestration-workflow` and the bindings shrink to: reach the broker (MCP), cite `ID (short title)`
+(qualified across projects), delegate formalisation and state updates with `orchestrator.ask`, use deterministic tools
+for simple fields, and check `unread_mail`. Format rules and transitions live in the broker. CLI instructions stay as
+the fallback.
 
-## 8. What the skills become
+## 8. Migration (v1), each step independently shippable (C2-9)
 
-- `task-pipeline`, `orchestration-workflow` and the bindings shrink to: how to reach the broker (MCP tools), the
-  citation rule, when to `orchestrator.ask` (formalize, update) versus calling a deterministic tool, and how to read
-  `unread_mail`. Format rules, transitions and index sync move into the broker and stop depending on the agent having
-  read the skill.
-- The CLI-based instructions stay as a fallback for environments without the broker.
+1. **Invariants first:** T026, T027, T028; `status` read-only; config CAS under `config_lock` (C7).
+2. **MCP client spike (gate):** a minimal broker + stdio shim with two read tools, exercised from Claude Code, Kilo and
+   Codex: simultaneous shim starts, broker down/up, reconnect, long tickets, text-content notices. The plan continues
+   only if all three work; otherwise the spec is amended.
+3. Shared on-disk locking and idempotency keys in the engine; broker singleton and readiness.
+4. Registry: workspace uuid/slug, explicit projects, `projects discover` (proposals only), `QualifiedTaskRef` parser.
+5. Read-only broker tools; then deterministic writes (CAS, idempotency, confirm tokens for destructive actions).
+6. Skills switched incrementally to the broker, CLI fallback kept.
+7. Orchestrator workers inside the broker, recovery/re-attachment, `orchestrator.ask` tickets.
+8. Mail to workspace orchestrators (metadata-only quarantine, policy, limits); then consoles; UI mail view and
+   workspace/project switcher.
 
-## 9. Migration
+**v2 (not now):** cross-project `depends-on` and graphs, automatic classifier turns, reactive notifications,
+attachments, other machines.
 
-1. Fix the queue/cursor race (T026) and make `status` read-only: independent of the broker.
-2. Registry + identity (uuid, projects discovery, qualified ids in the engine).
-3. Broker process from the UI backend: MCP read tools, then deterministic writes with confirm tokens.
-4. Orchestrator workers in the broker + `orchestrator.ask` tickets.
-5. Mail (workspace orchestrator first, then consoles), quarantine classifier, policy.
-6. Skills rewritten to use the broker; the CLI path stays as fallback.
-7. UI: workspace/project switcher, mail view, consoles.
+## 9. Open questions for the owner
 
-## 10. Open questions for the owner
-
-- Q-a: Start the broker at login (launchd unit) or only on demand (first `ai-orch`/MCP use)?
-- Q-b: Projects inside a workspace: confirmed explicitly in the workspace config, or discovered automatically with the
-  exclusions above?
-- Q-c: Should a project be allowed to be its own workspace as well (for example `ai-orchestration` opened alone), with
-  the nesting rule deciding ownership, or must a folder be either a workspace or a project?
-- Q-d: The orchestrator's model for the mail classifier: the cheapest model of the workspace's orchestrator tool, or a
-  fixed one?
-
-## 11. Out of scope (v1)
-
-Other machines and network transport; signatures and encryption; attachments in mail; group messages; editing task
-trees of another workspace (read-only cross-workspace).
+- Q-a: start the broker at login (launchd unit) or only on demand (first shim/CLI/UI use)?
+- Q-c: may a folder be both a project of an outer workspace and a workspace of its own (for example `ai-orchestration`
+  opened alone), with the nesting rule deciding, or must it be one or the other?
