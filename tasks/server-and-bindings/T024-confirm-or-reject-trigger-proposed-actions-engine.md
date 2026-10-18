@@ -6,13 +6,15 @@
 - priority: P2
 - priority-reason: E3 turns unattended mutating actions into proposals; today they can only be listed
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: -
 - paths: scripts/orchestration_triggers.py, ../ai-orchestration-ui/backend/server.py
 - handoff: Read tasks/server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md, do the open steps, run the Verification, update the task and the registry.
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
