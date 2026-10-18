@@ -70,7 +70,7 @@
 
 ### 11.6 - 11.1 review follow-ups: S10 enforcement, full `reopen`, children of `T###`, CLI tests
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/11.6-tree-followups) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-18; claude; merged) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 · **Repo:** `ai-orchestration/`
 - **Origin:** review of 11.1 (2026-10-17), items the merged engine does not cover yet.
 - **Goal:**
   - S10: `--expect-plan-hash` required on apply for `child add`, `expand`, `collapse`, `reopen` (today optional);

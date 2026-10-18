@@ -31,7 +31,7 @@
 
 ### 12.14 - Emit events from `orchestration_config.py`; config writes under a lock
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.14-config-events) · **Size:** S · **Depends on:** 12.11
+- **Status:** `done` (2026-10-18; claude; merged) · **Size:** S · **Depends on:** 12.11
 - **Goal:** E1 and E10 `config.changed`.
 
 ### 12.3 - Session registry and identifiers
