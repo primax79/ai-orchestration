@@ -9,6 +9,7 @@ Dispatches:
   - `ai-orch run <subcommand> [args...]`    -> `orchestration_runs.py`
   - `ai-orch events <subcommand> [args...]` -> `orchestration_events.py`
   - `ai-orch sessions <subcommand> [args...]` -> `orchestration_sessions.py`
+  - `ai-orch triggers <subcommand> [args...]` -> `orchestration_triggers.py`
   - `ai-orch render-agents-md [args...]`    -> `orchestration_config.py render-agents-md`
   - `ai-orch describe [--json]`             -> machine-readable command & schema catalog
 """
@@ -43,6 +44,7 @@ ORCH_ENV_SCRIPT = REPO_ROOT / "scripts" / "orchestration_env.py"
 ORCH_RUNS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_runs.py"
 ORCH_EVENTS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_events.py"
 ORCH_SESSIONS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_sessions.py"
+ORCH_TRIGGERS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_triggers.py"
 
 CLI_DESCRIPTION: dict[str, Any] = {
     "name": "ai-orch",
@@ -416,6 +418,33 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
             },
         },
+        "triggers": {
+            "script": str(ORCH_TRIGGERS_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch triggers <subcommand> [options] [--json]",
+            "description": "Trigger engine, event matching, batching, and reduced-capability policy.",
+            "subcommands": {
+                "run-once": {
+                    "usage": "ai-orch triggers run-once [--config <file>] [--role <role>] [--dry-run] [--workspace <dir>] [--json]",
+                    "description": "Process new events since role cursor in one pass.",
+                },
+                "daemon": {
+                    "usage": "ai-orch triggers daemon [--config <file>] [--role <role>] [--poll-interval <sec>] [--workspace <dir>] [--json]",
+                    "description": "Run background daemon polling for new events with lease and graceful stop.",
+                },
+                "list": {
+                    "usage": "ai-orch triggers list [--config <file>] [--workspace <dir>] [--json]",
+                    "description": "List configured trigger rules and kill switch status.",
+                },
+                "status": {
+                    "usage": "ai-orch triggers status [--role <role>] [--workspace <dir>] [--json]",
+                    "description": "Show trigger engine status, cursor, firings count, and daemon health.",
+                },
+                "history": {
+                    "usage": "ai-orch triggers history [--rule <rule>] [--limit <n>] [--workspace <dir>] [--json]",
+                    "description": "Show history of trigger firings.",
+                },
+            },
+        },
     },
 }
 
@@ -485,6 +514,10 @@ def main() -> int:
 
     if group in ("sessions", "session"):
         proc = subprocess.run([sys.executable, str(ORCH_SESSIONS_SCRIPT), *rest], check=False)
+        return proc.returncode
+
+    if group in ("triggers", "trigger"):
+        proc = subprocess.run([sys.executable, str(ORCH_TRIGGERS_SCRIPT), *rest], check=False)
         return proc.returncode
 
     if group == "render-agents-md":
