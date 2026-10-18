@@ -70,7 +70,7 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T024 (Proposal confirm engine) | P2 | [Confirm or reject trigger-proposed actions (engine + UI wiring)](server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md) | delivered | kilo | - |
 | T026 (Trigger enqueue race) | P1 | [Trigger enqueue races the orchestrator queue and advances the role cursor too early](server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md) | delivered | kilo | - |
 | T027 (Duplicate turn resumption) | P1 | [Stale-claim recovery relaunches a turn whose child process has not written its pid yet](server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md) | delivered | kilo | - |
-| T028 (Unattended turn hardening) | P1 | [Unattended turns: enforce reduced capability on every tool and harden the untrusted-data delimiters](server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md) | in progress | kilo | - |
+| T028 (Unattended turn hardening) | P1 | [Unattended turns: enforce reduced capability on every tool and harden the untrusted-data delimiters](server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md) | delivered | kilo | - |
 
 ### micro
 

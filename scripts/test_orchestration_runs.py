@@ -65,6 +65,9 @@ from orchestration_runs import (
     resolve_claude_allowed_tools,
     check_claude_allowed_tools,
     DEFAULT_CLAUDE_ALLOWED_TOOLS,
+    resolve_kilo_agent,
+    check_kilo_agent,
+    DEFAULT_KILO_AGENTS,
     resolve_task_by_id,
 )
 
@@ -4691,6 +4694,133 @@ def test_adapter_argv_live_flag_corrections():
         assert "Bash(python3 -m pytest:*)" in DEFAULT_CLAUDE_ALLOWED_TOOLS[mode]
 
 
+def test_kilo_unattended_turn_enforces_restricted_agent():
+    """T028: Unattended Kilo turns (mode=triage) use the verified restricted agent; orchestrate turns remain unchanged."""
+    # Start: triage mode adds --agent ask
+    start_triage = build_adapter_argv("kilo", {}, "triage", "/w", "google/gemini-3.8-flash", prompt_file="/p.md")
+    assert "--agent" in start_triage
+    idx = start_triage.index("--agent")
+    assert start_triage[idx + 1] == "aio-unattended"
+
+    # Resume: triage mode adds --agent ask
+    resume_triage = build_adapter_argv(
+        "kilo", {}, "triage", "/w", "google/gemini-3.8-flash", session_id="ses_x", prompt_file="/p.md", is_resume=True
+    )
+    assert "--agent" in resume_triage
+    idx = resume_triage.index("--agent")
+    assert resume_triage[idx + 1] == "aio-unattended"
+    assert resume_triage[-3:] == ["/p.md", "--", "Continue."]
+
+    # Owner orchestrate turn: unchanged (no --agent)
+    start_orch = build_adapter_argv("kilo", {}, "orchestrate", "/w", "google/gemini-3.8-flash", prompt_file="/p.md")
+    assert "--agent" not in start_orch
+    assert start_orch[-2:] == ["--", "Follow the attached task prompt."]
+
+    resume_orch = build_adapter_argv(
+        "kilo", {}, "orchestrate", "/w", "google/gemini-3.8-flash", session_id="ses_x", prompt_file="/p.md", is_resume=True
+    )
+    assert "--agent" not in resume_orch
+    assert resume_orch[-3:] == ["/p.md", "--", "Continue."]
+
+    # Custom configured restricted agent in headless
+    custom_cfg = {"headless": {"agent": {"triage": "custom-ask"}}}
+    custom_argv = build_adapter_argv("kilo", custom_cfg, "triage", "/w", "google/gemini-3.8-flash", prompt_file="/p.md")
+    assert "--agent" in custom_argv
+    assert custom_argv[custom_argv.index("--agent") + 1] == "custom-ask"
+
+    # If no restricted agent can be enforced for triage: run is refused (fail closed)
+    disabled_cfg = {"headless": {"agent": {"triage": ""}}}
+    with pytest.raises(ValueError, match="Kilo requires a restricted agent"):
+        build_adapter_argv("kilo", disabled_cfg, "triage", "/w", "google/gemini-3.8-flash", prompt_file="/p.md")
+
+    ok_agent, err_msg = check_kilo_agent(disabled_cfg["headless"], "triage")
+    assert not ok_agent
+    assert "Kilo requires a restricted agent" in err_msg
+
+    # The default agent is accepted only when Kilo's resolved permissions really deny everything but reading
+    import orchestration_runs as _runs
+    _runs._kilo_agent_cache.clear()
+    _runs._kilo_agent_cache["aio-unattended"] = (True, None)
+    ok_default, _ = check_kilo_agent({}, "triage")
+    assert ok_default
+    _runs._kilo_agent_cache["aio-unattended"] = (False, "Kilo agent 'aio-unattended' is not installed")
+    ok_missing, err_missing = check_kilo_agent({}, "triage")
+    assert not ok_missing and "not installed" in err_missing
+    _runs._kilo_agent_cache.clear()
+    ok_orch, _ = check_kilo_agent({}, "orchestrate")
+    assert ok_orch
+
+
+def test_kilo_triage_refused_when_no_restricted_agent_configured(sample_workspace: pathlib.Path):
+    """T028: Kilo run start for triage mode is refused when no restricted agent is configured."""
+    tasks_dir = sample_workspace / "tasks"
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Test note for kilo triage",
+            "--body",
+            "Analyze something",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    # Explicitly disable agent for triage
+    proj_cfg.write_text(
+        orig_cfg + '\n[tools.kilo.headless.agent]\ntriage = ""\n',
+        encoding="utf-8",
+    )
+
+    # Preview should include warning
+    cmd_prev = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--note",
+        note_id,
+        "--tool",
+        "kilo",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_prev = subprocess.run(cmd_prev, capture_output=True, text=True, check=True)
+    data_prev = json.loads(res_prev.stdout)
+    assert any("restricted agent" in w for w in data_prev.get("warnings", []))
+
+    # Start must be refused
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--note",
+        note_id,
+        "--tool",
+        "kilo",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=False)
+    assert res_start.returncode != 0
+    data_start = json.loads(res_start.stdout)
+    assert data_start["ok"] is False
+    assert data_start["reason"] == "missing-restricted-agent"
+
+
 def test_git_common_dir_of_worktree(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -6124,3 +6254,66 @@ def test_run_events_session_filter(sample_workspace: pathlib.Path):
     assert out_agent["count"] >= 1
     assert any(e["type"] == "run.finished" for e in out_agent["events"])
 
+
+
+
+SYNTHETIC_KILO_AGENT_LIST = """ask (primary)
+[
+  {"permission": "*", "action": "allow", "pattern": "*"},
+  {"permission": "edit", "pattern": "*", "action": "allow"},
+  {"permission": "bash", "pattern": "*", "action": "allow"},
+  {"permission": "edit", "pattern": "*", "action": "deny"},
+  {"permission": "bash", "pattern": "*", "action": "deny"},
+  {"permission": "bash", "pattern": "cp *", "action": "allow"},
+  {"permission": "webfetch", "pattern": "*", "action": "allow"},
+  {"permission": "codex-mcp_*", "pattern": "*", "action": "ask"}
+]
+aio-unattended (primary)
+[
+  {"permission": "*", "action": "allow", "pattern": "*"},
+  {"permission": "edit", "pattern": "*", "action": "allow"},
+  {"permission": "bash", "pattern": "*", "action": "allow"},
+  {"permission": "task", "pattern": "*", "action": "allow"},
+  {"permission": "*", "pattern": "*", "action": "deny"},
+  {"permission": "read", "pattern": "*", "action": "allow"},
+  {"permission": "glob", "pattern": "*", "action": "allow"},
+  {"permission": "grep", "pattern": "*", "action": "allow"},
+  {"permission": "list", "pattern": "*", "action": "allow"}
+]
+leaky (primary)
+[
+  {"permission": "*", "pattern": "*", "action": "deny"},
+  {"permission": "read", "pattern": "*", "action": "allow"},
+  {"permission": "bash", "pattern": "*", "action": "allow"}
+]
+"""
+
+
+def test_kilo_agent_restriction_uses_last_matching_rule():
+    """T028: Kilo merges global permissions into every agent and evaluates with "last matching rule wins";
+    only an agent whose effective permissions deny every probe is accepted for unattended turns."""
+    import orchestration_runs as _runs
+
+    ok, reason = _runs.kilo_agent_is_restricted("aio-unattended", SYNTHETIC_KILO_AGENT_LIST)
+    assert ok, reason
+    ok_ask, reason_ask = _runs.kilo_agent_is_restricted("ask", SYNTHETIC_KILO_AGENT_LIST)
+    assert not ok_ask and "bash cp a b" in reason_ask
+    ok_leaky, reason_leaky = _runs.kilo_agent_is_restricted("leaky", SYNTHETIC_KILO_AGENT_LIST)
+    assert not ok_leaky and "bash rm -rf build" in reason_leaky
+    ok_missing, reason_missing = _runs.kilo_agent_is_restricted("nope", SYNTHETIC_KILO_AGENT_LIST)
+    assert not ok_missing and "not installed" in reason_missing
+
+
+def test_kilo_agent_command_preview_and_apply(tmp_path: pathlib.Path):
+    """T028: `ai-orch run kilo-agent` previews by default and writes only with --apply (never replacing silently)."""
+    env = dict(os.environ, AI_ORCH_KILO_AGENT_DIR=str(tmp_path))
+    prev = subprocess.run([str(BIN_AI_ORCH), "run", "kilo-agent", "--json"], capture_output=True, text=True, env=env, check=True)
+    assert json.loads(prev.stdout)["plan"]["action"] == "create"
+    assert not (tmp_path / "aio-unattended.md").exists()
+    subprocess.run([str(BIN_AI_ORCH), "run", "kilo-agent", "--apply", "--json"], capture_output=True, text=True, env=env, check=True)
+    content = (tmp_path / "aio-unattended.md").read_text(encoding="utf-8")
+    assert '"*": deny' in content and "read: allow" in content
+    (tmp_path / "aio-unattended.md").write_text("changed", encoding="utf-8")
+    refused = subprocess.run([str(BIN_AI_ORCH), "run", "kilo-agent", "--apply", "--json"], capture_output=True, text=True, env=env)
+    assert refused.returncode == 1
+    assert (tmp_path / "aio-unattended.md").read_text(encoding="utf-8") == "changed"
