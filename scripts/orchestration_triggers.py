@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import signal
 import subprocess
 import sys
@@ -74,6 +75,7 @@ MAX_LOOP_DEPTH = 3
 TERMINAL_STATES = {"fired", "skipped", "dead"}
 NON_TERMINAL_STATES = {"pending", "retry"}
 ALLOWED_ACTIONS = {"notify", "resume-origin", "start-run", "command", "enqueue-turn"}
+NOTE_ID_RE = re.compile(r"^N\d{3,}$")
 
 # Thread-safety & in-process re-entrancy tracking for trigger lock
 _TRIGGER_LOCK_COUNTS: dict[str, int] = {}
@@ -754,8 +756,10 @@ def execute_action(
                 "type": "resume-run",
                 "origin_run": origin_run,
                 "rule": rule_name,
+                "subject": event.get("subject"),
                 "trigger_event": event["id"],
                 "trigger_seq": event["seq"],
+                "trigger_subject": event.get("subject"),
                 "created_at": _now_iso(),
                 "status": "pending_confirmation",
             }
@@ -788,18 +792,59 @@ def execute_action(
         prop_dir = workspace / ".ai-orchestration" / "proposed_actions"
         prop_dir.mkdir(parents=True, exist_ok=True)
 
+        task_id = run_params.get("task") or event.get("subject") or (event.get("data") or {}).get("task")
+        proposed_plan_hash = None
+        if task_id:
+            try:
+                own_bin = pathlib.Path(__file__).resolve().parent.parent / "bin" / "ai-orch"
+                target_flag = "--note" if NOTE_ID_RE.match(str(task_id)) else "--task"
+                p_cmd = [
+                    sys.executable,
+                    str(own_bin),
+                    "run",
+                    "preview",
+                    target_flag,
+                    str(task_id),
+                    "--workspace",
+                    str(workspace),
+                    "--json",
+                ]
+                if run_params.get("mode"):
+                    p_cmd.extend(["--mode", str(run_params["mode"])])
+                tool = run_params.get("tool")
+                if tool and tool != "cross_agent_order":
+                    p_cmd.extend(["--tool", str(tool)])
+                for opt in ("profile", "model", "variant", "effort", "isolation", "target_run", "instructions"):
+                    if run_params.get(opt):
+                        p_cmd.extend([f"--{opt.replace('_', '-')}", str(run_params[opt])])
+                for flag in ("allow_same_tool", "allow_dirty_base", "force", "keep_worktree"):
+                    if run_params.get(flag):
+                        p_cmd.append(f"--{flag.replace('_', '-')}")
+
+                res = subprocess.run(p_cmd, cwd=str(workspace), capture_output=True, text=True, check=False)
+                if res.returncode == 0:
+                    p_data = json.loads(res.stdout)
+                    proposed_plan_hash = p_data.get("plan_hash")
+            except Exception:
+                pass
+
         prop_data = {
             "action_id": action_id,
             "action_hash": action_hash,
             "type": "start-run",
             "rule": rule_name,
+            "subject": event.get("subject"),
             "trigger_event": event["id"],
             "trigger_seq": event["seq"],
+            "trigger_subject": event.get("subject"),
             "run_params": run_params,
             "created_at": _now_iso(),
             "status": "pending_confirmation",
             "policy": "reduced_capability",
         }
+        if proposed_plan_hash:
+            prop_data["plan_hash"] = proposed_plan_hash
+
         _write_json_atomic(prop_dir / f"{action_id}.json", prop_data)
 
         return {
@@ -869,8 +914,10 @@ def execute_action(
                 "type": "command",
                 "command": cmd_list,
                 "rule": rule_name,
+                "subject": event.get("subject"),
                 "trigger_event": event["id"],
                 "trigger_seq": event["seq"],
+                "trigger_subject": event.get("subject"),
                 "created_at": _now_iso(),
                 "status": "pending_confirmation",
                 "reason": "mutating_command_requires_confirmation_under_e3",
@@ -938,6 +985,558 @@ def _enqueue_orchestrator_turn(
         "turn_seq": next_qseq,
         "turn_id": turn_id,
     }
+
+
+# ---------------------------------------------------------------------------
+# Proposed Actions Management (Spec §0c E3, T024)
+# ---------------------------------------------------------------------------
+
+def list_proposals(
+    workspace: pathlib.Path | str,
+    status: str = "all",
+) -> dict[str, Any]:
+    """List proposed actions in <workspace>/.ai-orchestration/proposed_actions/ (Spec §0c E3, T024).
+
+    Filter by status: pending (matches pending and pending_confirmation), confirmed, rejected, or all.
+    """
+    ws = pathlib.Path(workspace).resolve()
+    prop_dir = ws / ".ai-orchestration" / "proposed_actions"
+    if not prop_dir.is_dir():
+        return {
+            "ok": True,
+            "count": 0,
+            "proposals": [],
+            "proposed_actions": [],
+        }
+
+    records: list[dict[str, Any]] = []
+    norm_status = (status or "all").lower().strip()
+    if norm_status == "pending_confirmation":
+        norm_status = "pending"
+
+    for p in sorted(prop_dir.glob("*.json")):
+        if p.name.startswith("."):
+            continue
+        try:
+            rec = _read_json_safe(p)
+            rec_status = rec.get("status", "")
+            if norm_status == "all":
+                records.append(rec)
+            elif norm_status == "pending" and rec_status in ("pending", "pending_confirmation"):
+                records.append(rec)
+            elif norm_status == rec_status:
+                records.append(rec)
+        except Exception:
+            continue
+
+    records.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return {
+        "ok": True,
+        "count": len(records),
+        "proposals": records,
+        "proposed_actions": records,
+    }
+
+
+def confirm_action(
+    workspace: pathlib.Path | str,
+    action_id: str,
+    expect_hash: str,
+    *,
+    actor: str | None = None,
+) -> dict[str, Any]:
+    """Confirm and execute a proposed action under the trigger lock (Spec §0c E3, T024).
+
+    Refuses unless the proposal is pending and expect_hash matches proposal action_hash.
+    Executes through the same paths an owner action would use:
+      - start-run: runs preview to compute current plan_hash, validates it against any proposed
+                   plan_hash or parameters, then runs start with --expect-plan-hash and --requested-by.
+      - command: runs with repo's ai-orch only if argv[0] is ai-orch, otherwise refuses.
+      - resume-run: resumes run with ai-orch run start --continue <origin_run>.
+    Records outcome (status: confirmed, result, run_id) atomically and emits trigger.action_confirmed.
+    """
+    ws = pathlib.Path(workspace).resolve()
+    ensure_git_exclude(ws)
+
+    clean_id = action_id[:-5] if action_id.endswith(".json") else action_id
+    prop_path = ws / ".ai-orchestration" / "proposed_actions" / f"{clean_id}.json"
+
+    with trigger_lock(ws):
+        if not prop_path.is_file():
+            return {
+                "ok": False,
+                "error": "proposal_not_found",
+                "action_id": clean_id,
+                "message": f"Proposed action '{clean_id}' not found at {prop_path}",
+            }
+
+        try:
+            proposal = _read_json_safe(prop_path)
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": "proposal_read_error",
+                "action_id": clean_id,
+                "message": f"Failed reading proposed action '{clean_id}': {e}",
+            }
+
+        current_status = proposal.get("status", "")
+        if current_status not in ("pending", "pending_confirmation"):
+            return {
+                "ok": False,
+                "error": "not_pending",
+                "action_id": clean_id,
+                "status": current_status,
+                "message": f"Proposed action '{clean_id}' is not pending (current status: {current_status})",
+            }
+
+        actual_hash = (proposal.get("action_hash") or "").strip().lower()
+        if expect_hash.strip().lower() != actual_hash:
+            return {
+                "ok": False,
+                "error": "hash_mismatch",
+                "action_id": clean_id,
+                "expected": expect_hash,
+                "actual": proposal.get("action_hash"),
+                "message": f"Action hash mismatch for '{clean_id}': expected '{expect_hash}', got '{proposal.get('action_hash')}'",
+            }
+
+        act_type = proposal.get("type")
+        own_bin = pathlib.Path(__file__).resolve().parent.parent / "bin" / "ai-orch"
+
+        # Path 1: start-run
+        if act_type == "start-run":
+            run_params = proposal.get("run_params", {})
+            task_id = (
+                run_params.get("task")
+                or proposal.get("subject")
+                or proposal.get("trigger_subject")
+                or proposal.get("task_id")
+            )
+            if not task_id and proposal.get("trigger_seq"):
+                try:
+                    evs = read_events(ws, since=proposal["trigger_seq"] - 1, limit=5)
+                    for ev in evs:
+                        if ev.get("seq") == proposal["trigger_seq"] or ev.get("id") == proposal.get("trigger_event"):
+                            task_id = ev.get("subject") or (ev.get("data") or {}).get("task")
+                            break
+                except Exception:
+                    pass
+
+            if not task_id:
+                return {
+                    "ok": False,
+                    "error": "missing_target_task",
+                    "action_id": clean_id,
+                    "message": f"Cannot determine target task for proposed start-run action '{clean_id}'",
+                }
+
+            target_flag = "--note" if NOTE_ID_RE.match(str(task_id)) else "--task"
+            if run_params.get("batch"):
+                target_flag = "--batch"
+                task_id = run_params["batch"]
+            elif run_params.get("note"):
+                target_flag = "--note"
+                task_id = run_params["note"]
+
+            # Step 1a: run preview
+            preview_cmd = [
+                sys.executable,
+                str(own_bin),
+                "run",
+                "preview",
+                target_flag,
+                str(task_id),
+                "--workspace",
+                str(ws),
+                "--json",
+            ]
+            if run_params.get("mode"):
+                preview_cmd.extend(["--mode", str(run_params["mode"])])
+            tool = run_params.get("tool")
+            if tool and tool != "cross_agent_order":
+                preview_cmd.extend(["--tool", str(tool)])
+            for opt in ("profile", "model", "variant", "effort", "isolation", "target_run", "instructions"):
+                if run_params.get(opt):
+                    preview_cmd.extend([f"--{opt.replace('_', '-')}", str(run_params[opt])])
+            for flag in ("allow_same_tool", "allow_dirty_base", "force", "keep_worktree"):
+                if run_params.get(flag):
+                    preview_cmd.append(f"--{flag.replace('_', '-')}")
+
+            preview_proc = subprocess.run(preview_cmd, cwd=str(ws), capture_output=True, text=True, check=False)
+            try:
+                preview_data = json.loads(preview_proc.stdout)
+            except Exception:
+                preview_data = {"error": preview_proc.stderr or preview_proc.stdout}
+
+            if preview_proc.returncode != 0:
+                err_detail = preview_data.get("message") or preview_data.get("error") or preview_proc.stderr or "preview failed"
+                return {
+                    "ok": False,
+                    "error": "preview_failed",
+                    "action_id": clean_id,
+                    "details": preview_data,
+                    "message": f"Run preview failed: {err_detail}",
+                }
+
+            current_plan_hash = preview_data.get("plan_hash")
+            if not current_plan_hash:
+                return {
+                    "ok": False,
+                    "error": "preview_missing_plan_hash",
+                    "action_id": clean_id,
+                    "details": preview_data,
+                    "message": "Run preview did not return a plan_hash",
+                }
+
+            # Step 1b: check if preview hash differs from what was proposed in a way that matters
+            proposed_plan_hash = proposal.get("plan_hash") or run_params.get("plan_hash") or run_params.get("expect_plan_hash")
+            if proposed_plan_hash and proposed_plan_hash.lower() != current_plan_hash.lower():
+                return {
+                    "ok": False,
+                    "error": "plan_hash_mismatch",
+                    "action_id": clean_id,
+                    "message": (
+                        f"Preview plan hash '{current_plan_hash}' differs from proposed plan hash '{proposed_plan_hash}' "
+                        "(task or repository state changed since proposal was generated)"
+                    ),
+                    "proposed_plan_hash": proposed_plan_hash,
+                    "current_plan_hash": current_plan_hash,
+                }
+
+            for check_field in ("mode", "tool", "profile", "model"):
+                if run_params.get(check_field) and run_params[check_field] != "cross_agent_order":
+                    if preview_data.get(check_field) and preview_data[check_field] != run_params[check_field]:
+                        return {
+                            "ok": False,
+                            "error": f"{check_field}_mismatch",
+                            "action_id": clean_id,
+                            "message": f"Preview {check_field} '{preview_data[check_field]}' differs from proposed {check_field} '{run_params[check_field]}'",
+                        }
+
+            # Step 1c: run start
+            start_cmd = [
+                sys.executable,
+                str(own_bin),
+                "run",
+                "start",
+                target_flag,
+                str(task_id),
+                "--workspace",
+                str(ws),
+                "--expect-plan-hash",
+                current_plan_hash,
+                "--json",
+            ]
+            if run_params.get("mode"):
+                start_cmd.extend(["--mode", str(run_params["mode"])])
+            if tool and tool != "cross_agent_order":
+                start_cmd.extend(["--tool", str(tool)])
+            for opt in ("profile", "model", "variant", "effort", "isolation", "target_run", "instructions"):
+                if run_params.get(opt):
+                    start_cmd.extend([f"--{opt.replace('_', '-')}", str(run_params[opt])])
+            for flag in ("allow_same_tool", "allow_dirty_base", "force", "keep_worktree"):
+                if run_params.get(flag):
+                    start_cmd.append(f"--{flag.replace('_', '-')}")
+
+            req_by = "cli"
+            if actor in ("ui", "vscode"):
+                req_by = actor
+            start_cmd.extend(["--requested-by", req_by])
+
+            start_proc = subprocess.run(start_cmd, cwd=str(ws), capture_output=True, text=True, check=False)
+            try:
+                start_data = json.loads(start_proc.stdout)
+            except Exception:
+                start_data = {"error": start_proc.stderr or start_proc.stdout}
+
+            if start_proc.returncode != 0:
+                err_detail = start_data.get("message") or start_data.get("error") or start_proc.stderr or "run start failed"
+                return {
+                    "ok": False,
+                    "error": "start_failed",
+                    "action_id": clean_id,
+                    "details": start_data,
+                    "message": f"Run start failed: {err_detail}",
+                }
+
+            run_id = start_data.get("run_id")
+            proposal["status"] = "confirmed"
+            proposal["confirmed_at"] = _now_iso()
+            if actor:
+                proposal["confirmed_by"] = actor
+            proposal["result"] = start_data
+            if run_id:
+                proposal["run_id"] = run_id
+            _write_json_atomic(prop_path, proposal)
+
+            try:
+                emit(
+                    ws,
+                    "trigger.action_confirmed",
+                    payload={
+                        "action_id": clean_id,
+                        "action_hash": proposal.get("action_hash"),
+                        "type": "start-run",
+                        "rule": proposal.get("rule"),
+                        "run_id": run_id,
+                        "result": start_data,
+                        "actor": actor,
+                    },
+                    subject=clean_id,
+                    origin_session=proposal.get("rule"),
+                    actor=actor or "owner",
+                )
+            except Exception as e:
+                logger.warning("Could not emit trigger.action_confirmed: %s", e)
+
+            return {
+                "ok": True,
+                "action_id": clean_id,
+                "status": "confirmed",
+                "run_id": run_id,
+                "result": start_data,
+            }
+
+        # Path 2: command
+        elif act_type == "command":
+            cmd_raw = proposal.get("command", [])
+            cmd_list = cmd_raw if isinstance(cmd_raw, list) else cmd_raw.strip().split()
+
+            is_ai_orch = bool(cmd_list) and os.path.basename(str(cmd_list[0])) == "ai-orch"
+            if not is_ai_orch:
+                return {
+                    "ok": False,
+                    "error": "disallowed_command",
+                    "action_id": clean_id,
+                    "message": f"Command '{cmd_list[0] if cmd_list else ''}' is disallowed. Only ai-orch commands may be confirmed and executed.",
+                }
+
+            res = subprocess.run(
+                [sys.executable, str(own_bin), *[str(a) for a in cmd_list[1:]]],
+                cwd=str(ws),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            cmd_result = {
+                "command": cmd_list,
+                "exit_code": res.returncode,
+                "stdout": res.stdout,
+                "stderr": res.stderr,
+            }
+            proposal["status"] = "confirmed"
+            proposal["confirmed_at"] = _now_iso()
+            if actor:
+                proposal["confirmed_by"] = actor
+            proposal["result"] = cmd_result
+            _write_json_atomic(prop_path, proposal)
+
+            try:
+                emit(
+                    ws,
+                    "trigger.action_confirmed",
+                    payload={
+                        "action_id": clean_id,
+                        "action_hash": proposal.get("action_hash"),
+                        "type": "command",
+                        "rule": proposal.get("rule"),
+                        "result": cmd_result,
+                        "actor": actor,
+                    },
+                    subject=clean_id,
+                    origin_session=proposal.get("rule"),
+                    actor=actor or "owner",
+                )
+            except Exception as e:
+                logger.warning("Could not emit trigger.action_confirmed: %s", e)
+
+            return {
+                "ok": res.returncode == 0,
+                "action_id": clean_id,
+                "status": "confirmed",
+                "result": cmd_result,
+            }
+
+        # Path 3: resume-run
+        elif act_type == "resume-run":
+            origin_run = proposal.get("origin_run")
+            if not origin_run:
+                return {
+                    "ok": False,
+                    "error": "missing_origin_run",
+                    "action_id": clean_id,
+                    "message": "Proposal missing origin_run",
+                }
+
+            start_cmd = [
+                sys.executable,
+                str(own_bin),
+                "run",
+                "start",
+                "--continue",
+                origin_run,
+                "--workspace",
+                str(ws),
+                "--json",
+            ]
+            req_by = "cli"
+            if actor in ("ui", "vscode"):
+                req_by = actor
+            start_cmd.extend(["--requested-by", req_by])
+
+            start_proc = subprocess.run(start_cmd, cwd=str(ws), capture_output=True, text=True, check=False)
+            try:
+                start_data = json.loads(start_proc.stdout)
+            except Exception:
+                start_data = {"error": start_proc.stderr or start_proc.stdout}
+
+            if start_proc.returncode != 0:
+                err_detail = start_data.get("message") or start_data.get("error") or start_proc.stderr or "run start failed"
+                return {
+                    "ok": False,
+                    "error": "start_failed",
+                    "action_id": clean_id,
+                    "details": start_data,
+                    "message": f"Run start --continue failed: {err_detail}",
+                }
+
+            run_id = start_data.get("run_id")
+            proposal["status"] = "confirmed"
+            proposal["confirmed_at"] = _now_iso()
+            if actor:
+                proposal["confirmed_by"] = actor
+            proposal["result"] = start_data
+            if run_id:
+                proposal["run_id"] = run_id
+            _write_json_atomic(prop_path, proposal)
+
+            try:
+                emit(
+                    ws,
+                    "trigger.action_confirmed",
+                    payload={
+                        "action_id": clean_id,
+                        "action_hash": proposal.get("action_hash"),
+                        "type": "resume-run",
+                        "rule": proposal.get("rule"),
+                        "run_id": run_id,
+                        "result": start_data,
+                        "actor": actor,
+                    },
+                    subject=clean_id,
+                    origin_session=proposal.get("rule"),
+                    actor=actor or "owner",
+                )
+            except Exception as e:
+                logger.warning("Could not emit trigger.action_confirmed: %s", e)
+
+            return {
+                "ok": True,
+                "action_id": clean_id,
+                "status": "confirmed",
+                "run_id": run_id,
+                "result": start_data,
+            }
+
+        else:
+            return {
+                "ok": False,
+                "error": "unsupported_action_type",
+                "action_id": clean_id,
+                "type": act_type,
+                "message": f"Unsupported proposed action type '{act_type}'",
+            }
+
+
+def reject_action(
+    workspace: pathlib.Path | str,
+    action_id: str,
+    reason: str,
+    *,
+    actor: str | None = None,
+) -> dict[str, Any]:
+    """Reject a proposed action with a reason under the trigger lock (Spec §0c E3, T024).
+
+    Refuses unless the proposal is pending.
+    Records rejected status and reason atomically, and emits trigger.action_rejected.
+    """
+    ws = pathlib.Path(workspace).resolve()
+    ensure_git_exclude(ws)
+
+    clean_id = action_id[:-5] if action_id.endswith(".json") else action_id
+    prop_path = ws / ".ai-orchestration" / "proposed_actions" / f"{clean_id}.json"
+
+    if not reason or not reason.strip():
+        return {
+            "ok": False,
+            "error": "missing_reason",
+            "action_id": clean_id,
+            "message": "A non-empty reason is required to reject a proposed action",
+        }
+
+    with trigger_lock(ws):
+        if not prop_path.is_file():
+            return {
+                "ok": False,
+                "error": "proposal_not_found",
+                "action_id": clean_id,
+                "message": f"Proposed action '{clean_id}' not found at {prop_path}",
+            }
+
+        try:
+            proposal = _read_json_safe(prop_path)
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": "proposal_read_error",
+                "action_id": clean_id,
+                "message": f"Failed reading proposed action '{clean_id}': {e}",
+            }
+
+        current_status = proposal.get("status", "")
+        if current_status not in ("pending", "pending_confirmation"):
+            return {
+                "ok": False,
+                "error": "not_pending",
+                "action_id": clean_id,
+                "status": current_status,
+                "message": f"Proposed action '{clean_id}' is not pending (current status: {current_status})",
+            }
+
+        clean_reason = reason.strip()
+        proposal["status"] = "rejected"
+        proposal["rejected_at"] = _now_iso()
+        proposal["rejected_reason"] = clean_reason
+        if actor:
+            proposal["rejected_by"] = actor
+        _write_json_atomic(prop_path, proposal)
+
+        try:
+            emit(
+                ws,
+                "trigger.action_rejected",
+                payload={
+                    "action_id": clean_id,
+                    "action_hash": proposal.get("action_hash"),
+                    "type": proposal.get("type"),
+                    "rule": proposal.get("rule"),
+                    "reason": clean_reason,
+                    "actor": actor,
+                },
+                subject=clean_id,
+                origin_session=proposal.get("rule"),
+                actor=actor or "owner",
+            )
+        except Exception as e:
+            logger.warning("Could not emit trigger.action_rejected: %s", e)
+
+        return {
+            "ok": True,
+            "action_id": clean_id,
+            "status": "rejected",
+            "reason": clean_reason,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1492,6 +2091,76 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_proposals(args: argparse.Namespace) -> int:
+    ws = pathlib.Path(args.workspace or ".").resolve()
+    status = getattr(args, "status", "all") or "all"
+    res = list_proposals(ws, status=status)
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
+    if not res.get("ok"):
+        print(f"Error: {res.get('error')}", file=sys.stderr)
+        return 1
+
+    props = res.get("proposals", [])
+    if not props:
+        print(f"No proposed actions found (status: {status}).")
+        return 0
+
+    print(f"Proposed Actions ({len(props)}, status: {status}):\n")
+    for p in props:
+        act_id = p.get("action_id", "?")
+        st = p.get("status", "?")
+        ptype = p.get("type", "?")
+        rule = p.get("rule", "?")
+        h = (p.get("action_hash") or "")[:12]
+        created = p.get("created_at", "")
+        print(f"  [{st.upper()}] {act_id} (type: {ptype}, rule: {rule}, hash: {h}..., created: {created})")
+    return 0
+
+
+def cmd_confirm(args: argparse.Namespace) -> int:
+    ws = pathlib.Path(args.workspace or ".").resolve()
+    res = confirm_action(
+        ws,
+        args.action_id,
+        args.expect_hash,
+        actor=getattr(args, "actor", None),
+    )
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
+    if not res.get("ok"):
+        print(f"Error: {res.get('message') or res.get('error')}", file=sys.stderr)
+        return 1
+
+    run_id_str = f" (run_id: {res['run_id']})" if res.get("run_id") else ""
+    print(f"Action '{args.action_id}' confirmed and executed{run_id_str}.")
+    return 0
+
+
+def cmd_reject(args: argparse.Namespace) -> int:
+    ws = pathlib.Path(args.workspace or ".").resolve()
+    res = reject_action(
+        ws,
+        args.action_id,
+        args.reason,
+        actor=getattr(args, "actor", None),
+    )
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
+    if not res.get("ok"):
+        print(f"Error: {res.get('message') or res.get('error')}", file=sys.stderr)
+        return 1
+
+    print(f"Action '{args.action_id}' rejected (reason: {args.reason}).")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="orchestration_triggers.py",
@@ -1542,6 +2211,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_hist.add_argument("--workspace", "-w", default=None, help="Path to workspace root")
     p_hist.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_hist.set_defaults(func=cmd_history)
+
+    # proposals
+    p_props = sub.add_parser("proposals", help="List proposed trigger actions")
+    p_props.add_argument("--status", choices=["pending", "confirmed", "rejected", "all", "pending_confirmation"], default="all", help="Filter by status (default: all)")
+    p_props.add_argument("--workspace", "-w", default=None, help="Path to workspace root")
+    p_props.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_props.set_defaults(func=cmd_proposals)
+
+    # confirm
+    p_conf = sub.add_parser("confirm", help="Confirm and execute a proposed trigger action")
+    p_conf.add_argument("action_id", help="Proposed action ID to confirm")
+    p_conf.add_argument("--expect-hash", "--expect-action-hash", dest="expect_hash", required=True, help="Expected action hash for concurrency safety")
+    p_conf.add_argument("--actor", default=None, help="Actor confirming the action (e.g. owner, ui)")
+    p_conf.add_argument("--workspace", "-w", default=None, help="Path to workspace root")
+    p_conf.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_conf.set_defaults(func=cmd_confirm)
+
+    # reject
+    p_rej = sub.add_parser("reject", help="Reject a proposed trigger action with a reason")
+    p_rej.add_argument("action_id", help="Proposed action ID to reject")
+    p_rej.add_argument("--reason", required=True, help="Reason for rejecting the action")
+    p_rej.add_argument("--actor", default=None, help="Actor rejecting the action (e.g. owner, ui)")
+    p_rej.add_argument("--workspace", "-w", default=None, help="Path to workspace root")
+    p_rej.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_rej.set_defaults(func=cmd_reject)
 
     return parser
 

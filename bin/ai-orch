@@ -466,6 +466,18 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch triggers history [--rule <rule>] [--limit <n>] [--workspace <dir>] [--json]",
                     "description": "Show history of trigger firings.",
                 },
+                "proposals": {
+                    "usage": "ai-orch triggers proposals [--status pending|confirmed|rejected|all] [--workspace <dir>] [--json]",
+                    "description": "List proposed trigger actions with optional status filter.",
+                },
+                "confirm": {
+                    "usage": "ai-orch triggers confirm <action_id> --expect-hash <hash> [--actor <actor>] [--workspace <dir>] [--json]",
+                    "description": "Confirm and execute a proposed trigger action under trigger lock.",
+                },
+                "reject": {
+                    "usage": "ai-orch triggers reject <action_id> --reason <text> [--actor <actor>] [--workspace <dir>] [--json]",
+                    "description": "Reject a proposed trigger action with a reason under trigger lock.",
+                },
             },
         },
         "orchestrator": {
