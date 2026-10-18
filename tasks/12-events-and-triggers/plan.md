@@ -66,7 +66,7 @@
 
 ### 12.10 - UI: Orchestrator card in Config (current holder, Reassign…, pause/rotate) and first-run setup wizard
 
-- **Status:** `in progress` (2026-10-18) · **Size:** M · **Depends on:** 12.9, 12.8
+- **Status:** `delivered` (2026-10-18) · **Size:** M · **Depends on:** 12.9, 12.8
 - **Goal:** §0b, UI part.
 
 ### 12.7 - VS Code: event watcher and notifications
