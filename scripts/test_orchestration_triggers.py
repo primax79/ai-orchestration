@@ -17,6 +17,7 @@ Verifies:
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import pathlib
@@ -43,21 +44,25 @@ from orchestration_triggers import (
     TriggerDaemon,
     check_and_consume_rate_limit,
     check_loop_guard,
+    confirm_action,
     create_batch,
     daemon_lock,
     execute_action,
     find_active_batch,
     get_firing_record,
+    list_proposals,
     load_triggers_config,
     make_firing_id,
     matches_filter,
     matches_trigger,
+    reject_action,
     run_once,
     trigger_lock,
     validate_trigger_rule,
 )
 
 BIN_AI_ORCH = REPO_ROOT / "bin" / "ai-orch"
+STUB_AGENT = REPO_ROOT / "scripts" / "fixtures" / "runs" / "stub_agent.py"
 
 
 @pytest.fixture
@@ -746,3 +751,501 @@ def test_command_action_runs_only_ai_orch_read_commands(tmp_path):
     # A read-only ai-orch command runs.
     res = ot.execute_action(ws, {"name": "r", "action": "command", "command": ["ai-orch", "events", "stats", "--workspace", str(ws), "--json"]}, event, "f2")
     assert res["status"] == "executed"
+
+
+# ---------------------------------------------------------------------------
+# 10. Proposed Actions Tests (T024)
+# ---------------------------------------------------------------------------
+
+def _create_sample_workspace_for_run(tmp_path: pathlib.Path) -> pathlib.Path:
+    """Helper to set up a git repo workspace with tasks and stub kilo config."""
+    ws = tmp_path / "run_ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=str(ws), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(ws), check=True)
+    subprocess.run(["git", "config", "user.name", "Test Runner"], cwd=str(ws), check=True)
+
+    tasks_dir = ws / "tasks" / "server"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    task_file = tasks_dir / "T007-verification-gate.md"
+    task_file.write_text(
+        "# T007 Verification Gate\n\n"
+        "- id: T007\n"
+        "- title: Verification Gate\n"
+        "- category: server\n"
+        "- priority: P2\n"
+        "- priority-reason: testing\n"
+        "- next-up: yes\n"
+        "- state: delivered\n"
+        "- executor: claude\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: none\n\n"
+        "## Goal\nTest goal.\n\n"
+        "## Steps\n1. Step one.\n\n"
+        "## Verification\npytest\n",
+        encoding="utf-8",
+    )
+
+    stub_path = str(STUB_AGENT)
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    proj_cfg.write_text(
+        '[project]\nname = "sample"\nprimary_orchestrator = "kilo"\n\n'
+        '[routing]\ndefault_executor = "kilo"\ndefault_orchestrator = "kilo"\ndefault_profile = "bulk-execution"\n\n'
+        '[verification]\ndefault_mode = "cross-agent"\ncross_agent_order = ["kilo:bulk-execution", "claude:deep-reasoning"]\n\n'
+        f'[tools.kilo.headless]\nargv = ["{sys.executable}", "{stub_path}", "--lines", "1", "--exit-code", "0"]\n',
+        encoding="utf-8",
+    )
+
+    subprocess.run(["git", "add", "."], cwd=str(ws), check=True)
+    subprocess.run(["git", "commit", "-m", "init workspace with T007 delivered"], cwd=str(ws), check=True)
+    return ws
+
+
+def test_proposals_list(ws: pathlib.Path):
+    """Test listing proposals with status filtering via Python API and CLI."""
+    prop_dir = ws / ".ai-orchestration" / "proposed_actions"
+    prop_dir.mkdir(parents=True, exist_ok=True)
+
+    p1 = {
+        "action_id": "act-1",
+        "action_hash": "hash1",
+        "type": "command",
+        "status": "pending_confirmation",
+        "created_at": "2026-10-18T00:00:01Z",
+    }
+    p2 = {
+        "action_id": "act-2",
+        "action_hash": "hash2",
+        "type": "start-run",
+        "status": "confirmed",
+        "created_at": "2026-10-18T00:00:02Z",
+    }
+    p3 = {
+        "action_id": "act-3",
+        "action_hash": "hash3",
+        "type": "command",
+        "status": "rejected",
+        "created_at": "2026-10-18T00:00:03Z",
+    }
+
+    (prop_dir / "act-1.json").write_text(json.dumps(p1), encoding="utf-8")
+    (prop_dir / "act-2.json").write_text(json.dumps(p2), encoding="utf-8")
+    (prop_dir / "act-3.json").write_text(json.dumps(p3), encoding="utf-8")
+
+    # Python API tests
+    res_all = list_proposals(ws, status="all")
+    assert res_all["ok"] is True
+    assert res_all["count"] == 3
+    assert len(res_all["proposals"]) == 3
+
+    res_pending = list_proposals(ws, status="pending")
+    assert res_pending["ok"] is True
+    assert res_pending["count"] == 1
+    assert res_pending["proposals"][0]["action_id"] == "act-1"
+
+    res_confirmed = list_proposals(ws, status="confirmed")
+    assert res_confirmed["ok"] is True
+    assert res_confirmed["count"] == 1
+    assert res_confirmed["proposals"][0]["action_id"] == "act-2"
+
+    res_rejected = list_proposals(ws, status="rejected")
+    assert res_rejected["ok"] is True
+    assert res_rejected["count"] == 1
+    assert res_rejected["proposals"][0]["action_id"] == "act-3"
+
+    # CLI tests
+    res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "triggers", "proposals", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    assert data["count"] == 3
+
+    res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "triggers", "proposals", "--status", "pending", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["count"] == 1
+    assert data["proposals"][0]["action_id"] == "act-1"
+
+    res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "triggers", "proposals", "--status", "confirmed", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["count"] == 1
+    assert data["proposals"][0]["action_id"] == "act-2"
+
+    res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "triggers", "proposals", "--status", "rejected", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["count"] == 1
+    assert data["proposals"][0]["action_id"] == "act-3"
+
+
+def test_confirm_with_stale_hash_refused(ws: pathlib.Path):
+    """Test confirming a proposal with stale/mismatched hash is refused."""
+    prop_dir = ws / ".ai-orchestration" / "proposed_actions"
+    prop_dir.mkdir(parents=True, exist_ok=True)
+
+    action_id = "act-stale"
+    action_hash = "real_hash_12345"
+    prop_data = {
+        "action_id": action_id,
+        "action_hash": action_hash,
+        "type": "command",
+        "command": ["ai-orch", "events", "stats"],
+        "status": "pending_confirmation",
+        "created_at": "2026-10-18T00:00:00Z",
+    }
+    (prop_dir / f"{action_id}.json").write_text(json.dumps(prop_data), encoding="utf-8")
+
+    # Call with stale hash via Python API
+    res_api = confirm_action(ws, action_id, "stale_hash_99999")
+    assert res_api["ok"] is False
+    assert res_api["error"] == "hash_mismatch"
+    assert "Action hash mismatch" in res_api["message"]
+
+    # Call with stale hash via CLI
+    res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "triggers", "confirm", action_id, "--expect-hash", "stale_hash_99999", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode != 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is False
+    assert data["error"] == "hash_mismatch"
+
+    # Verify proposal remains pending
+    prop_after = json.loads((prop_dir / f"{action_id}.json").read_text(encoding="utf-8"))
+    assert prop_after["status"] == "pending_confirmation"
+
+    # Verify no action_confirmed event was emitted
+    events = read_events(ws)
+    assert not any(e.get("type") == "trigger.action_confirmed" for e in events)
+
+
+def test_confirm_start_run_starts_stub_run(tmp_path: pathlib.Path):
+    """Test confirming a proposed start-run action previews, starts a stub run, and emits event."""
+    ws = _create_sample_workspace_for_run(tmp_path)
+
+    prop_dir = ws / ".ai-orchestration" / "proposed_actions"
+    prop_dir.mkdir(parents=True, exist_ok=True)
+
+    action_id = "prop-start-run-001"
+    run_params = {"mode": "verify", "tool": "kilo", "isolation": "none"}
+    action_hash = hashlib.sha256(json.dumps(run_params, sort_keys=True).encode("utf-8")).hexdigest()
+
+    prop_data = {
+        "action_id": action_id,
+        "action_hash": action_hash,
+        "type": "start-run",
+        "rule": "test-verify-rule",
+        "subject": "T007",
+        "run_params": run_params,
+        "status": "pending_confirmation",
+        "created_at": "2026-10-18T00:00:00Z",
+    }
+    (prop_dir / f"{action_id}.json").write_text(json.dumps(prop_data), encoding="utf-8")
+
+    # Confirm via CLI
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "triggers",
+            "confirm",
+            action_id,
+            "--expect-hash",
+            action_hash,
+            "--actor",
+            "owner",
+            "--workspace",
+            str(ws),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"Confirm failed: {res.stdout}\n{res.stderr}"
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    assert data["status"] == "confirmed"
+    run_id = data["run_id"]
+    assert run_id
+    assert "T007-kilo" in run_id
+
+    # Verify proposal was updated atomically on disk
+    prop_file = prop_dir / f"{action_id}.json"
+    updated_prop = json.loads(prop_file.read_text(encoding="utf-8"))
+    assert updated_prop["status"] == "confirmed"
+    assert updated_prop["confirmed_by"] == "owner"
+    assert updated_prop["run_id"] == run_id
+    assert "confirmed_at" in updated_prop
+    assert updated_prop["result"]["ok"] is True
+
+    # Verify event trigger.action_confirmed was emitted
+    events = read_events(ws)
+    conf_events = [e for e in events if e.get("type") == "trigger.action_confirmed"]
+    assert len(conf_events) == 1
+    ev = conf_events[0]
+    assert ev["subject"] == action_id
+    assert ev["actor"] == "owner"
+    assert ev["data"]["action_id"] == action_id
+    assert ev["data"]["run_id"] == run_id
+    assert ev["data"]["type"] == "start-run"
+
+
+def test_confirm_command_runs_only_ai_orch(ws: pathlib.Path):
+    """Test confirming command action runs only ai-orch, and refuses arbitrary programs."""
+    prop_dir = ws / ".ai-orchestration" / "proposed_actions"
+    prop_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Non-ai-orch command must be refused on confirm
+    bad_cmd = ["rm", "-rf", "/tmp/does-not-exist"]
+    bad_hash = hashlib.sha256(" ".join(bad_cmd).encode("utf-8")).hexdigest()
+    bad_id = "act-bad-cmd"
+    bad_data = {
+        "action_id": bad_id,
+        "action_hash": bad_hash,
+        "type": "command",
+        "command": bad_cmd,
+        "status": "pending_confirmation",
+        "created_at": "2026-10-18T00:00:00Z",
+    }
+    (prop_dir / f"{bad_id}.json").write_text(json.dumps(bad_data), encoding="utf-8")
+
+    res_bad = confirm_action(ws, bad_id, bad_hash)
+    assert res_bad["ok"] is False
+    assert res_bad["error"] == "disallowed_command"
+    assert "Only ai-orch commands" in res_bad["message"]
+
+    # Verify bad command proposal is still pending
+    bad_prop_after = json.loads((prop_dir / f"{bad_id}.json").read_text(encoding="utf-8"))
+    assert bad_prop_after["status"] == "pending_confirmation"
+
+    # 2. Valid ai-orch command succeeds
+    good_cmd = ["ai-orch", "events", "stats", "--workspace", str(ws), "--json"]
+    good_hash = hashlib.sha256(" ".join(good_cmd).encode("utf-8")).hexdigest()
+    good_id = "act-good-cmd"
+    good_data = {
+        "action_id": good_id,
+        "action_hash": good_hash,
+        "type": "command",
+        "command": good_cmd,
+        "status": "pending_confirmation",
+        "created_at": "2026-10-18T00:00:00Z",
+    }
+    (prop_dir / f"{good_id}.json").write_text(json.dumps(good_data), encoding="utf-8")
+
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "triggers",
+            "confirm",
+            good_id,
+            "--expect-hash",
+            good_hash,
+            "--actor",
+            "owner",
+            "--workspace",
+            str(ws),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    assert data["status"] == "confirmed"
+    assert data["result"]["exit_code"] == 0
+
+    good_prop_after = json.loads((prop_dir / f"{good_id}.json").read_text(encoding="utf-8"))
+    assert good_prop_after["status"] == "confirmed"
+    assert good_prop_after["confirmed_by"] == "owner"
+    assert good_prop_after["result"]["exit_code"] == 0
+
+    # Event emitted
+    events = read_events(ws)
+    conf_events = [e for e in events if e.get("type") == "trigger.action_confirmed" and e.get("subject") == good_id]
+    assert len(conf_events) == 1
+
+
+def test_reject_action(ws: pathlib.Path):
+    """Test rejecting a proposed action with reason records state and emits event."""
+    prop_dir = ws / ".ai-orchestration" / "proposed_actions"
+    prop_dir.mkdir(parents=True, exist_ok=True)
+
+    action_id = "act-to-reject"
+    prop_data = {
+        "action_id": action_id,
+        "action_hash": "somehash",
+        "type": "start-run",
+        "rule": "test-rule",
+        "status": "pending_confirmation",
+        "created_at": "2026-10-18T00:00:00Z",
+    }
+    (prop_dir / f"{action_id}.json").write_text(json.dumps(prop_data), encoding="utf-8")
+
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "triggers",
+            "reject",
+            action_id,
+            "--reason",
+            "Not needed at this time",
+            "--actor",
+            "reviewer",
+            "--workspace",
+            str(ws),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    assert data["status"] == "rejected"
+    assert data["reason"] == "Not needed at this time"
+
+    # Verify on disk
+    updated = json.loads((prop_dir / f"{action_id}.json").read_text(encoding="utf-8"))
+    assert updated["status"] == "rejected"
+    assert updated["rejected_reason"] == "Not needed at this time"
+    assert updated["rejected_by"] == "reviewer"
+    assert "rejected_at" in updated
+
+    # Verify event emitted
+    events = read_events(ws)
+    rej_events = [e for e in events if e.get("type") == "trigger.action_rejected" and e.get("subject") == action_id]
+    assert len(rej_events) == 1
+    ev = rej_events[0]
+    assert ev["actor"] == "reviewer"
+    assert ev["data"]["reason"] == "Not needed at this time"
+
+
+def test_double_confirm_and_transitions_refused(ws: pathlib.Path):
+    """Test that double confirm, confirm after reject, and reject after confirm are refused."""
+    prop_dir = ws / ".ai-orchestration" / "proposed_actions"
+    prop_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = ["ai-orch", "events", "stats", "--workspace", str(ws), "--json"]
+    h = hashlib.sha256(" ".join(cmd).encode("utf-8")).hexdigest()
+    act_id = "act-double"
+    (prop_dir / f"{act_id}.json").write_text(
+        json.dumps({
+            "action_id": act_id,
+            "action_hash": h,
+            "type": "command",
+            "command": cmd,
+            "status": "pending_confirmation",
+            "created_at": "2026-10-18T00:00:00Z",
+        }),
+        encoding="utf-8",
+    )
+
+    # 1. First confirm succeeds
+    res1 = confirm_action(ws, act_id, h)
+    assert res1["ok"] is True
+    assert res1["status"] == "confirmed"
+
+    # 2. Double confirm refused
+    res2 = confirm_action(ws, act_id, h)
+    assert res2["ok"] is False
+    assert res2["error"] == "not_pending"
+    assert res2["status"] == "confirmed"
+
+    # 3. Reject on confirmed action refused
+    res_rej = reject_action(ws, act_id, "attempt reject confirmed")
+    assert res_rej["ok"] is False
+    assert res_rej["error"] == "not_pending"
+
+    # 4. Create another proposal and reject it
+    act_rej_id = "act-rejected-first"
+    (prop_dir / f"{act_rej_id}.json").write_text(
+        json.dumps({
+            "action_id": act_rej_id,
+            "action_hash": "hash_rej",
+            "type": "command",
+            "command": cmd,
+            "status": "pending_confirmation",
+            "created_at": "2026-10-18T00:00:00Z",
+        }),
+        encoding="utf-8",
+    )
+    r1 = reject_action(ws, act_rej_id, "first reject")
+    assert r1["ok"] is True
+
+    # Confirm on rejected action refused
+    c_rej = confirm_action(ws, act_rej_id, "hash_rej")
+    assert c_rej["ok"] is False
+    assert c_rej["error"] == "not_pending"
+    assert c_rej["status"] == "rejected"
+
+    # Double reject refused
+    r2 = reject_action(ws, act_rej_id, "second reject")
+    assert r2["ok"] is False
+    assert r2["error"] == "not_pending"
+
+
+def test_confirm_start_run_hash_mismatch_if_plan_changed(tmp_path: pathlib.Path):
+    """Test that start-run confirm refuses if proposed plan_hash differs from current preview."""
+    ws = _create_sample_workspace_for_run(tmp_path)
+
+    prop_dir = ws / ".ai-orchestration" / "proposed_actions"
+    prop_dir.mkdir(parents=True, exist_ok=True)
+
+    action_id = "prop-stale-plan-hash"
+    run_params = {"mode": "verify", "tool": "kilo", "isolation": "none"}
+    action_hash = hashlib.sha256(json.dumps(run_params, sort_keys=True).encode("utf-8")).hexdigest()
+
+    prop_data = {
+        "action_id": action_id,
+        "action_hash": action_hash,
+        "type": "start-run",
+        "rule": "test-verify-rule",
+        "subject": "T007",
+        "run_params": run_params,
+        "plan_hash": "stale_plan_hash_0000000000000000000000000000000000000000000000000000000000000000",
+        "status": "pending_confirmation",
+        "created_at": "2026-10-18T00:00:00Z",
+    }
+    (prop_dir / f"{action_id}.json").write_text(json.dumps(prop_data), encoding="utf-8")
+
+    res = confirm_action(ws, action_id, action_hash)
+    assert res["ok"] is False
+    assert res["error"] == "plan_hash_mismatch"
+    assert "differs from proposed plan hash" in res["message"]
+
+    # Proposal remains pending
+    updated = json.loads((prop_dir / f"{action_id}.json").read_text(encoding="utf-8"))
+    assert updated["status"] == "pending_confirmation"
