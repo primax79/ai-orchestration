@@ -46,6 +46,7 @@ ORCH_EVENTS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_events.py"
 ORCH_SESSIONS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_sessions.py"
 ORCH_TRIGGERS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_triggers.py"
 ORCH_ORCHESTRATOR_SCRIPT = REPO_ROOT / "scripts" / "orchestration_orchestrator.py"
+ORCH_BROKER_LOCK_SCRIPT = REPO_ROOT / "scripts" / "orchestration_broker_lock.py"
 
 CLI_DESCRIPTION: dict[str, Any] = {
     "name": "ai-orch",
@@ -550,6 +551,17 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
             },
         },
+        "broker": {
+            "script": str(ORCH_BROKER_LOCK_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch broker status [--config-dir <dir>] [--json]",
+            "description": "Inspect orchestration broker singleton lock status and readiness manifest.",
+            "subcommands": {
+                "status": {
+                    "usage": "ai-orch broker status [--config-dir <dir>] [--json]",
+                    "description": "Probe broker singleton lock and display broker status.",
+                },
+            },
+        },
     },
 }
 
@@ -631,6 +643,10 @@ def main() -> int:
 
     if group in ("orchestrator", "orch"):
         proc = subprocess.run([sys.executable, str(ORCH_ORCHESTRATOR_SCRIPT), *rest], check=False)
+        return proc.returncode
+
+    if group == "broker":
+        proc = subprocess.run([sys.executable, str(ORCH_BROKER_LOCK_SCRIPT), *rest], check=False)
         return proc.returncode
 
     if group == "render-agents-md":

@@ -16,6 +16,7 @@ import contextlib
 import datetime
 import difflib
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -399,6 +400,25 @@ def _get_orchestration_events() -> Any | None:
         return orchestration_events
     except Exception as e:
         print(f"[warning] could not import orchestration_events: {e}", file=sys.stderr)
+        return None
+
+
+def _get_broker_status() -> Any:
+    try:
+        import orchestration_broker_lock
+        return orchestration_broker_lock.broker_status()
+    except ImportError:
+        pass
+
+    try:
+        repo_root = _find_repo_root()
+        if repo_root is not None:
+            scripts_dir = repo_root / "scripts"
+            if scripts_dir.is_dir() and str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+        import orchestration_broker_lock
+        return orchestration_broker_lock.broker_status()
+    except Exception:
         return None
 
 
@@ -1420,13 +1440,16 @@ def move_block_to_closed(
     task_id: str,
     new_status: str | None = None,
     status_note: str | None = None,
+    expect_task_hash: str | None = None,
 ) -> tuple[str, str]:
     """Move a block ### task_id to the ## Closed section of file_path.
     If new_status is given, the status line is updated first.
     Appends the block to ## Closed (creating ## Closed at end of file if not present).
     """
     if new_status is not None:
-        rewrite_block_in_file(file_path, task_id, new_status=new_status, status_note=status_note)
+        rewrite_block_in_file(
+            file_path, task_id, new_status=new_status, status_note=status_note, expect_task_hash=expect_task_hash
+        )
 
     text = file_path.read_text(encoding="utf-8")
     heading_re = re.compile(
@@ -1454,6 +1477,10 @@ def move_block_to_closed(
                 break
 
     block_text = text[start_pos:end_pos]
+    if expect_task_hash and new_status is None:
+        curr_h = hashlib.sha256(block_text.encode("utf-8")).hexdigest()
+        if curr_h.lower() != expect_task_hash.strip().lower():
+            raise ValueError(f"Task hash mismatch: expected {expect_task_hash}, actual {curr_h}")
     m_closed = re.search(r"^##\s+Closed\b.*$", text, re.MULTILINE)
     if m_closed and start_pos > m_closed.start():
         # Already under ## Closed
@@ -1492,13 +1519,14 @@ def move_block_to_open(
     task_id: str,
     new_status: str = "open",
     status_note: str | None = None,
+    expect_task_hash: str | None = None,
 ) -> tuple[str, str]:
     """Move a block ### task_id out of ## Closed back into the open section of file_path.
     Inserts in sorted ID order among open sibling blocks.
     Removes ## Closed if no blocks remain in it.
     """
     new_block_text, new_h = rewrite_block_in_file(
-        file_path, task_id, new_status=new_status, status_note=status_note
+        file_path, task_id, new_status=new_status, status_note=status_note, expect_task_hash=expect_task_hash
     )
     text = file_path.read_text(encoding="utf-8")
     heading_re = re.compile(
@@ -4987,25 +5015,27 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
     uc_id = data.get("id")
     if not uc_id or not USE_CASE_ID_RE.match(uc_id):
         return False, {"error": f"Invalid use case id {uc_id!r}, must match UC###"}
-    title = data.get("title", "Untitled Use Case")
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-    fname = f"{uc_id}-{slug}.md"
-    uc_dir = tasks_dir / "use-cases"
-    uc_dir.mkdir(parents=True, exist_ok=True)
-    fpath = uc_dir / fname
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    with task_write_lock(tasks_dir):
+        title = data.get("title", "Untitled Use Case")
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        fname = f"{uc_id}-{slug}.md"
+        uc_dir = tasks_dir / "use-cases"
+        uc_dir.mkdir(parents=True, exist_ok=True)
+        fpath = uc_dir / fname
 
-    existing = list(uc_dir.glob(f"{uc_id}-*.md"))
-    if existing:
-        fpath = existing[0]
+        existing = list(uc_dir.glob(f"{uc_id}-*.md"))
+        if existing:
+            fpath = existing[0]
 
-    linked_tasks_str = ", ".join(data.get("linked_tasks", [])) or "-"
-    short_val = data.get("short")
-    if short_val and str(short_val).strip() and str(short_val).strip() != "-":
-        short_val = str(short_val).strip()
-    else:
-        short_val = derive_short_title(title)
+        linked_tasks_str = ", ".join(data.get("linked_tasks", [])) or "-"
+        short_val = data.get("short")
+        if short_val and str(short_val).strip() and str(short_val).strip() != "-":
+            short_val = str(short_val).strip()
+        else:
+            short_val = derive_short_title(title)
 
-    content = f"""# {uc_id} - {title}
+        content = f"""# {uc_id} - {title}
 
 - id: {uc_id}
 - title: {title}
@@ -5038,8 +5068,8 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
 ## AI Validation Log
 {data.get("validation_log", "")}
 """
-    _atomic_write_text(fpath, content)
-    return True, {"ok": True, "id": uc_id, "file_path": str(fpath), "rel_path": str(fpath.relative_to(tasks_dir))}
+        _atomic_write_text(fpath, content)
+        return True, {"ok": True, "id": uc_id, "file_path": str(fpath), "rel_path": str(fpath.relative_to(tasks_dir))}
 
 
 def record_use_case_validation(
@@ -5051,42 +5081,45 @@ def record_use_case_validation(
     actor: str = "ai-validator",
     gaps: list[str] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    use_cases = discover_use_cases(tasks_dir)
-    target = next((u for u in use_cases if u["id"] == uc_id), None)
-    if not target:
-        return False, {"error": f"Use case {uc_id} not found"}
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    with task_write_lock(tasks_dir):
+        use_cases = discover_use_cases(tasks_dir)
+        target = next((u for u in use_cases if u["id"] == uc_id), None)
+        if not target:
+            return False, {"error": f"Use case {uc_id} not found"}
 
-    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    now_date = datetime.date.today().isoformat()
-    verdict_clean = verdict.strip().lower()
-    new_status = "verified" if verdict_clean == "pass" else ("failing" if verdict_clean == "fail" else "partial")
+        now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        now_date = datetime.date.today().isoformat()
+        verdict_clean = verdict.strip().lower()
+        new_status = "verified" if verdict_clean == "pass" else ("failing" if verdict_clean == "fail" else "partial")
 
-    log_entry = f"\n### [{now_iso}] AI Validation by {actor}\n- **Verdict:** `{verdict.upper()}`\n- **Summary:** {summary}\n"
-    if evidence:
-        log_entry += f"- **Evidence:**\n{evidence}\n"
-    if gaps:
-        log_entry += "- **Gaps Found:**\n" + "\n".join(f"  - {g}" for g in gaps) + "\n"
+        log_entry = f"\n### [{now_iso}] AI Validation by {actor}\n- **Verdict:** `{verdict.upper()}`\n- **Summary:** {summary}\n"
+        if evidence:
+            log_entry += f"- **Evidence:**\n{evidence}\n"
+        if gaps:
+            log_entry += "- **Gaps Found:**\n" + "\n".join(f"  - {g}" for g in gaps) + "\n"
 
-    existing_content = target["content"]
-    updated_content = re.sub(r"-\s+last-tested:\s*.*$", f"- last-tested: {now_date}", existing_content, flags=re.MULTILINE)
-    updated_content = re.sub(r"-\s+last-verdict:\s*.*$", f"- last-verdict: {verdict_clean}", updated_content, flags=re.MULTILINE)
-    updated_content = re.sub(r"-\s+status:\s*.*$", f"- status: {new_status}", updated_content, flags=re.MULTILINE)
+        existing_content = target["content"]
+        updated_content = re.sub(r"-\s+last-tested:\s*.*$", f"- last-tested: {now_date}", existing_content, flags=re.MULTILINE)
+        updated_content = re.sub(r"-\s+last-verdict:\s*.*$", f"- last-verdict: {verdict_clean}", updated_content, flags=re.MULTILINE)
+        updated_content = re.sub(r"-\s+status:\s*.*$", f"- status: {new_status}", updated_content, flags=re.MULTILINE)
 
-    if "## AI Validation Log" in updated_content:
-        updated_content = updated_content.rstrip() + "\n" + log_entry
-    else:
-        updated_content = updated_content.rstrip() + "\n\n## AI Validation Log\n" + log_entry
+        if "## AI Validation Log" in updated_content:
+            updated_content = updated_content.rstrip() + "\n" + log_entry
+        else:
+            updated_content = updated_content.rstrip() + "\n\n## AI Validation Log\n" + log_entry
 
-    fpath = pathlib.Path(target["file_path"])
-    _atomic_write_text(fpath, updated_content)
-    return True, {
-        "ok": True,
-        "id": uc_id,
-        "verdict": verdict,
-        "status": new_status,
-        "last_tested": now_date,
-        "file_path": str(fpath),
-    }
+        fpath = pathlib.Path(target["file_path"])
+        _atomic_write_text(fpath, updated_content)
+        return True, {
+            "ok": True,
+            "id": uc_id,
+            "verdict": verdict,
+            "status": new_status,
+            "summary": summary,
+            "file_path": str(fpath),
+            "rel_path": str(fpath.relative_to(tasks_dir)),
+        }
 
 
 def validate_use_case_probe(
@@ -6494,7 +6527,7 @@ def transition_task(
                 file_path = pathlib.Path(node.file_path)
                 if new_canon in TERMINAL_STATES:
                     _, new_h = move_block_to_closed(
-                        file_path, task_id, new_status=effective_state, status_note="; ".join(note_parts)
+                        file_path, task_id, new_status=effective_state, status_note="; ".join(note_parts), expect_task_hash=expect_task_hash
                     )
                     if node.parent and node.parent in tree:
                         parent_node = tree[node.parent]
@@ -6519,7 +6552,7 @@ def transition_task(
                                     )
                 else:
                     _, new_h = rewrite_block_in_file(
-                        file_path, task_id, new_status=effective_state, status_note="; ".join(note_parts)
+                        file_path, task_id, new_status=effective_state, status_note="; ".join(note_parts), expect_task_hash=expect_task_hash
                     )
                 _emit_event(
                     tasks_dir,
@@ -8025,6 +8058,7 @@ def cmd_transition(args: argparse.Namespace) -> int:
         expect_task_hash=expect_task_hash,
         force_unblock=force_unblock,
     )
+    args._last_result = payload
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
     else:
@@ -8054,6 +8088,7 @@ def cmd_child_add(args: argparse.Namespace) -> int:
         expect_plan_hash=expect_plan_hash,
         short=getattr(args, "short", None),
     )
+    args._last_result = res
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
@@ -8354,6 +8389,7 @@ def cmd_set_short(args: argparse.Namespace) -> int:
     )
     if res.get("task_hash") and "plan_hash" not in res:
         res["plan_hash"] = res["task_hash"]  # same name the UI/VS Code bridges use for the other set-* commands
+    args._last_result = res
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
@@ -12522,11 +12558,32 @@ def cmd_labels(args: argparse.Namespace) -> int:
     return 0
 
 
+def _instrument_subparsers(sub_action: Any) -> Any:
+    orig = sub_action.add_parser
+
+    def add_parser(*args: Any, **kwargs: Any) -> argparse.ArgumentParser:
+        p = orig(*args, **kwargs)
+        p.add_argument(
+            "--idempotency-key",
+            default=None,
+            help="Idempotency key (8-128 chars from [A-Za-z0-9_.:-]) for deduplicating mutations",
+        )
+        return p
+
+    sub_action.add_parser = add_parser
+    return sub_action
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", action="store_true", help="Output structured JSON on stdout")
+    ap.add_argument(
+        "--idempotency-key",
+        default=None,
+        help="Idempotency key (8-128 chars from [A-Za-z0-9_.:-]) for deduplicating mutations",
+    )
 
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = _instrument_subparsers(ap.add_subparsers(dest="cmd", required=True))
 
     p_list = sub.add_parser("list", help="List all emergent tasks and initiatives in tasks/")
     p_list.add_argument("--kind", action="append", default=None, help="Filter by kind (repeatable, OR within field)")
@@ -12555,7 +12612,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_q = sub.add_parser("questions", help="Manage blocking question files (Q###) and task decision linkage")
     p_q.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_q.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
-    q_sub = p_q.add_subparsers(dest="q_cmd", required=True)
+    q_sub = _instrument_subparsers(p_q.add_subparsers(dest="q_cmd", required=True))
 
     # questions list
     p_ql = q_sub.add_parser("list", help="List blocking questions")
@@ -12638,7 +12695,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_inbox = sub.add_parser("inbox", help="Manage inbox draft notes, image attachments, and triage")
     p_inbox.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_inbox.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
-    inbox_sub = p_inbox.add_subparsers(dest="inbox_cmd", required=True)
+    inbox_sub = _instrument_subparsers(p_inbox.add_subparsers(dest="inbox_cmd", required=True))
 
     # inbox list
     p_il = inbox_sub.add_parser("list", help="List inbox notes")
@@ -12769,7 +12826,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_child = sub.add_parser("child", help="Structure commands: child tasks")
     p_child.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_child.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
-    child_sub = p_child.add_subparsers(dest="child_cmd", required=True)
+    child_sub = _instrument_subparsers(p_child.add_subparsers(dest="child_cmd", required=True))
 
     p_cadd = child_sub.add_parser("add", help="Add a child task under a parent")
     p_cadd.add_argument("parent", help="Parent ID (e.g. '07' or '07.4')")
@@ -12945,7 +13002,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_uc = sub.add_parser("use-cases", help="Manage use cases and recorded AI validations (Spec 15)")
     p_uc.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_uc.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
-    uc_sub = p_uc.add_subparsers(dest="uc_cmd", required=True)
+    uc_sub = _instrument_subparsers(p_uc.add_subparsers(dest="uc_cmd", required=True))
 
     uc_list = uc_sub.add_parser("list", help="List use cases")
     uc_list.add_argument("--tasks-dir", default="tasks")
@@ -13006,10 +13063,193 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{8,128}$")
+
+
+def is_mutating_command(args: argparse.Namespace) -> bool:
+    cmd = getattr(args, "cmd", None)
+    if not cmd:
+        return False
+    if cmd == "sync-index":
+        return bool(getattr(args, "apply", False))
+    if cmd in ("list", "validate", "graph", "next", "labels"):
+        return False
+    if cmd == "questions":
+        q_cmd = getattr(args, "q_cmd", None)
+        return q_cmd in ("ask", "answer", "withdraw", "apply")
+    if cmd == "inbox":
+        inbox_cmd = getattr(args, "inbox_cmd", None)
+        return inbox_cmd in ("add", "edit", "attach", "detach", "resolve", "discard", "reopen")
+    if cmd == "use-cases":
+        uc_cmd = getattr(args, "uc_cmd", None)
+        return uc_cmd in ("create", "record-validation")
+    if cmd == "child":
+        child_cmd = getattr(args, "child_cmd", None)
+        return child_cmd == "add"
+    if cmd in (
+        "transition",
+        "new",
+        "attach",
+        "detach",
+        "expand",
+        "collapse",
+        "reopen",
+        "ship",
+        "archive",
+        "set-priority",
+        "set-size",
+        "set-deps",
+        "set-kind",
+        "set-labels",
+        "set-short",
+        "micro",
+        "promote",
+        "upgrade",
+    ):
+        return True
+    return False
+
+
+def get_canonical_args(args: argparse.Namespace) -> dict[str, Any]:
+    ignored = {"idempotency_key", "json", "func", "_last_result"}
+    out: dict[str, Any] = {}
+    for k, v in sorted(vars(args).items()):
+        if k in ignored or k.startswith("_"):
+            continue
+        if isinstance(v, pathlib.Path):
+            out[k] = str(v.resolve())
+        elif isinstance(v, (set, list, tuple)):
+            out[k] = [str(x.resolve()) if isinstance(x, pathlib.Path) else x for x in v]
+        else:
+            out[k] = v
+    return out
+
+
+def dispatch_command(args: argparse.Namespace) -> int:
+    is_json = bool(getattr(args, "json", False) or "--json" in sys.argv)
+    if is_mutating_command(args):
+        # 1. Broker singleton guard (exit 75 if broker holds lock unless AI_ORCH_BROKER_CHILD is set)
+        b_status = _get_broker_status()
+        if b_status is not None and getattr(b_status, "held", False) and not os.environ.get("AI_ORCH_BROKER_CHILD"):
+            pid = getattr(b_status, "pid", None)
+            pid_str = str(pid) if pid is not None else "unknown"
+            err_msg = f"route through the broker (MCP) \u2014 it is running as pid {pid_str}"
+            payload = {
+                "ok": False,
+                "error": "broker-owns-writes",
+                "message": err_msg,
+            }
+            if is_json:
+                print(json.dumps(payload, indent=2))
+            else:
+                print(f"[FAIL] broker-owns-writes: {err_msg}", file=sys.stderr)
+            return 75
+
+        # 2. Idempotency key handling
+        idemp_key = getattr(args, "idempotency_key", None)
+        if idemp_key is not None and str(idemp_key).strip():
+            key = str(idemp_key).strip()
+            if not IDEMPOTENCY_KEY_RE.match(key):
+                err_payload = {
+                    "ok": False,
+                    "error": "invalid-idempotency-key",
+                    "message": f"Idempotency key {key!r} is invalid; must match '^[A-Za-z0-9_.:-]{{8,128}}$'.",
+                }
+                if is_json:
+                    print(json.dumps(err_payload, indent=2))
+                else:
+                    print(f"[FAIL] invalid-idempotency-key: {err_payload['message']}", file=sys.stderr)
+                return 2
+
+            tasks_dir = pathlib.Path(getattr(args, "tasks_dir", "tasks")).resolve()
+            project_root = _resolve_workspace_from_tasks_dir(tasks_dir)
+            idemp_dir = project_root / ".ai-orchestration" / "idempotency"
+            idemp_dir.mkdir(parents=True, exist_ok=True)
+            key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            idemp_file = idemp_dir / f"{key_hash}.json"
+            canonical_args = get_canonical_args(args)
+
+            with task_write_lock(tasks_dir):
+                if idemp_file.is_file():
+                    try:
+                        stored_data = json.loads(idemp_file.read_text(encoding="utf-8"))
+                    except Exception:
+                        stored_data = {}
+
+                    if stored_data.get("canonical_args") != canonical_args:
+                        err_payload = {
+                            "ok": False,
+                            "error": "idempotency-key-reused",
+                            "message": f"Idempotency key {key!r} already used with different arguments.",
+                        }
+                        if is_json:
+                            print(json.dumps(err_payload, indent=2))
+                        else:
+                            print(f"[FAIL] idempotency-key-reused: {err_payload['message']}", file=sys.stderr)
+                        return 2
+
+                    stored_result = stored_data.get("result", {})
+                    stored_exit_code = stored_data.get("exit_code", 0)
+                    stored_stdout = stored_data.get("stdout", "")
+                    if is_json:
+                        print(json.dumps(stored_result, indent=2))
+                    else:
+                        if stored_stdout:
+                            sys.stdout.write(stored_stdout)
+                        else:
+                            print(json.dumps(stored_result, indent=2))
+                    return stored_exit_code
+
+                # First call: execute under the same lock
+                stdout_buf = io.StringIO()
+                with contextlib.redirect_stdout(stdout_buf):
+                    exit_code = args.func(args)
+                captured_stdout = stdout_buf.getvalue()
+                sys.stdout.write(captured_stdout)
+
+                result_json = None
+                last_res = getattr(args, "_last_result", None)
+                if isinstance(last_res, dict):
+                    result_json = last_res
+                else:
+                    try:
+                        result_json = json.loads(captured_stdout)
+                    except Exception:
+                        result_json = {"stdout": captured_stdout, "exit_code": exit_code}
+
+                record = {
+                    "key": key,
+                    "canonical_args": canonical_args,
+                    "created_at": time.time(),
+                    "exit_code": exit_code,
+                    "result": result_json,
+                    "stdout": captured_stdout,
+                }
+                idemp_file.write_text(json.dumps(record, indent=2), encoding="utf-8")
+
+                # Prune records older than 7 days on write
+                now = time.time()
+                seven_days = 7 * 86400
+                try:
+                    for p in idemp_dir.glob("*.json"):
+                        if p.name != idemp_file.name:
+                            try:
+                                if now - p.stat().st_mtime > seven_days:
+                                    p.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                except Exception:
+                    pass
+
+                return exit_code
+
+    return args.func(args)
+
+
 def main() -> None:
     ap = build_parser()
     args = ap.parse_args()
-    sys.exit(args.func(args))
+    sys.exit(dispatch_command(args))
 
 
 if __name__ == "__main__":

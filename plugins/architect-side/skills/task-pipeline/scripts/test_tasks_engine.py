@@ -7360,3 +7360,306 @@ def test_set_short_on_initiative_is_read_back(tmp_path: pathlib.Path) -> None:
     listing = json.loads(run_cli("list", "--tasks-dir", str(tasks_dir), "--json").stdout)
     blob = json.dumps(listing)
     assert '"short_title": "Agent runs"' in blob and '"short_title_source": "field"' in blob
+
+
+def test_concurrent_writers_transition_no_lost_update(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    t_path = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(t_path, task_id="T001", state="open")
+
+    tree = te.discover_task_tree(tasks_dir)
+    initial_hash = tree["T001"].task_hash
+
+    import concurrent.futures
+
+    def _tr_writer(state: str) -> subprocess.CompletedProcess[str]:
+        return run_cli(
+            "transition",
+            "T001",
+            state,
+            "--actor",
+            "kilo",
+            "--expect-task-hash",
+            initial_hash,
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        )
+
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    with te.task_write_lock(tasks_dir):
+        f1 = ex.submit(_tr_writer, "in progress")
+        f2 = ex.submit(_tr_writer, "in progress")
+        time.sleep(0.3)
+
+    r1 = f1.result(timeout=10)
+    r2 = f2.result(timeout=10)
+    ex.shutdown(wait=True)
+
+    results = [r1, r2]
+    successes = [r for r in results if r.returncode == 0]
+    failures = [r for r in results if r.returncode != 0]
+
+    assert len(successes) == 1, f"Expected 1 success, got {len(successes)}: {[r.stdout for r in results]}"
+    assert len(failures) == 1, f"Expected 1 failure, got {len(failures)}: {[r.stdout for r in results]}"
+    fail_payload = json.loads(failures[0].stdout)
+    assert fail_payload.get("error") == "stale-task"
+
+
+def test_concurrent_writers_set_short_no_lost_update(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    t_path = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(t_path, task_id="T001", state="open")
+
+    tree = te.discover_task_tree(tasks_dir)
+    initial_hash = tree["T001"].task_hash
+
+    import concurrent.futures
+
+    def _short_writer(title: str) -> subprocess.CompletedProcess[str]:
+        return run_cli(
+            "set-short",
+            "T001",
+            title,
+            "--expect-task-hash",
+            initial_hash,
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        )
+
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    with te.task_write_lock(tasks_dir):
+        f1 = ex.submit(_short_writer, "title alpha")
+        f2 = ex.submit(_short_writer, "title beta")
+        time.sleep(0.3)
+
+    r1 = f1.result(timeout=10)
+    r2 = f2.result(timeout=10)
+    ex.shutdown(wait=True)
+
+    results = [r1, r2]
+    successes = [r for r in results if r.returncode == 0]
+    failures = [r for r in results if r.returncode != 0]
+
+    assert len(successes) == 1, f"Expected 1 success, got {len(successes)}: {[r.stdout for r in results]}"
+    assert len(failures) == 1, f"Expected 1 failure, got {len(failures)}: {[r.stdout for r in results]}"
+    fail_payload = json.loads(failures[0].stdout)
+    assert "Task hash mismatch" in fail_payload.get("error", "")
+
+
+def test_concurrent_writers_apply_on_top_without_expect_hash(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    t_path = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(t_path, task_id="T001", state="open")
+
+    import concurrent.futures
+
+    def _set_short(title: str) -> subprocess.CompletedProcess[str]:
+        return run_cli(
+            "set-short",
+            "T001",
+            title,
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        )
+
+    # Both write without --expect-task-hash; one applies on top of the other under lock
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    with te.task_write_lock(tasks_dir):
+        f1 = ex.submit(_set_short, "title one")
+        f2 = ex.submit(_set_short, "title two")
+        time.sleep(0.3)
+
+    r1 = f1.result(timeout=10)
+    r2 = f2.result(timeout=10)
+    ex.shutdown(wait=True)
+
+    assert r1.returncode == 0
+    assert r2.returncode == 0
+    final_tree = te.discover_task_tree(tasks_dir)
+    assert final_tree["T001"].short_title in ("title one", "title two")
+    assert te.validate_tasks_tree(tasks_dir)[0] == []
+
+
+def test_idempotency_key_lifecycle_and_pruning(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    t_path = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(t_path, task_id="T001", state="open")
+
+    # 1. Invalid key format rejected
+    r_bad = run_cli("transition", "T001", "in progress", "--actor", "kilo", "--idempotency-key", "short", "--tasks-dir", str(tasks_dir), "--json")
+    assert r_bad.returncode == 2
+    assert "invalid-idempotency-key" in r_bad.stdout
+
+    r_bad_chars = run_cli("transition", "T001", "in progress", "--actor", "kilo", "--idempotency-key", "invalid key with spaces!!", "--tasks-dir", str(tasks_dir), "--json")
+    assert r_bad_chars.returncode == 2
+    assert "invalid-idempotency-key" in r_bad_chars.stdout
+
+    # 2. First call with valid key succeeds and writes to idempotency store
+    idemp_key = "key_sample_12345"
+    r1 = run_cli("transition", "T001", "in progress", "--actor", "kilo", "--idempotency-key", idemp_key, "--tasks-dir", str(tasks_dir), "--json")
+    assert r1.returncode == 0
+    p1 = json.loads(r1.stdout)
+    assert p1["ok"] is True
+    assert p1["new_state"] == "in progress"
+
+    # Check that disk record exists
+    proj_root = te._resolve_workspace_from_tasks_dir(tasks_dir)
+    key_h = hashlib.sha256(idemp_key.encode("utf-8")).hexdigest()
+    rec_file = proj_root / ".ai-orchestration" / "idempotency" / f"{key_h}.json"
+    assert rec_file.is_file()
+    rec_data = json.loads(rec_file.read_text(encoding="utf-8"))
+    assert rec_data["key"] == idemp_key
+    assert rec_data["exit_code"] == 0
+    assert rec_data["result"]["new_state"] == "in progress"
+
+    # 3. Repeated call with same key and same arguments returns stored result without writing
+    old_mtime = t_path.stat().st_mtime
+    time.sleep(0.1)
+    r2 = run_cli("transition", "T001", "in progress", "--actor", "kilo", "--idempotency-key", idemp_key, "--tasks-dir", str(tasks_dir), "--json")
+    assert r2.returncode == 0
+    p2 = json.loads(r2.stdout)
+    assert p2 == p1
+    assert t_path.stat().st_mtime == old_mtime
+
+    # 4. Same key with different arguments -> idempotency-key-reused
+    r_diff = run_cli("transition", "T001", "delivered", "--actor", "kilo", "--idempotency-key", idemp_key, "--tasks-dir", str(tasks_dir), "--json")
+    assert r_diff.returncode == 2
+    p_diff = json.loads(r_diff.stdout)
+    assert p_diff.get("error") == "idempotency-key-reused"
+
+    # 5. Pruning of records older than 7 days on write
+    old_key = "old_stale_key_9999"
+    old_h = hashlib.sha256(old_key.encode("utf-8")).hexdigest()
+    old_file = proj_root / ".ai-orchestration" / "idempotency" / f"{old_h}.json"
+    old_file.write_text(json.dumps({"key": old_key, "exit_code": 0}), encoding="utf-8")
+    eight_days_ago = time.time() - (8 * 86400)
+    os.utime(str(old_file), (eight_days_ago, eight_days_ago))
+
+    fresh_key = "fresh_key_77777777"
+    r_fresh = run_cli("set-short", "T001", "short title", "--idempotency-key", fresh_key, "--tasks-dir", str(tasks_dir), "--json")
+    assert r_fresh.returncode == 0
+    assert not old_file.exists()
+    assert (proj_root / ".ai-orchestration" / "idempotency" / f"{hashlib.sha256(fresh_key.encode('utf-8')).hexdigest()}.json").exists()
+
+
+def _broker_holding_worker(cfg_dir: str, ready_evt: Any, stop_evt: Any) -> None:
+    repo_root = te._find_repo_root()
+    if repo_root:
+        sys.path.insert(0, str(repo_root / "scripts"))
+    import orchestration_broker_lock as obl
+
+    os.environ["AI_ORCHESTRATION_CONFIG"] = cfg_dir
+    handle = obl.acquire_broker_lock(cfg_dir)
+    assert handle is not None
+    obl.write_broker_manifest(cfg_dir, pid=os.getpid(), port=9999, started_at="2026-10-18T12:00:00Z")
+    ready_evt.set()
+    stop_evt.wait(timeout=10)
+    handle.release()
+
+
+def test_broker_singleton_guard_blocks_mutating_commands(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_dir = tmp_path / "broker_cfg"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_dir))
+    monkeypatch.delenv("AI_ORCH_BROKER_CHILD", raising=False)
+
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    t_path = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(t_path, task_id="T001", state="open")
+
+    import multiprocessing
+    ready_evt = multiprocessing.Event()
+    stop_evt = multiprocessing.Event()
+    proc = multiprocessing.Process(
+        target=_broker_holding_worker,
+        args=(str(cfg_dir), ready_evt, stop_evt),
+    )
+    proc.start()
+
+    try:
+        assert ready_evt.wait(timeout=5)
+
+        # 1. Mutating command fails with exit 75 and broker-owns-writes
+        env = os.environ.copy()
+        env["AI_ORCHESTRATION_CONFIG"] = str(cfg_dir)
+        env.pop("AI_ORCH_BROKER_CHILD", None)
+
+        res_mut = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "transition", "T001", "in progress", "--tasks-dir", str(tasks_dir), "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert res_mut.returncode == 75
+        p_mut = json.loads(res_mut.stdout)
+        assert p_mut["ok"] is False
+        assert p_mut["error"] == "broker-owns-writes"
+        assert f"running as pid {proc.pid}" in p_mut["message"]
+
+        # Also test via set-short
+        res_mut2 = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "set-short", "T001", "my short", "--tasks-dir", str(tasks_dir), "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert res_mut2.returncode == 75
+        p_mut2 = json.loads(res_mut2.stdout)
+        assert p_mut2["error"] == "broker-owns-writes"
+
+        # 2. Read command is UNAFFECTED and succeeds
+        res_read = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "list", "--tasks-dir", str(tasks_dir), "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert res_read.returncode == 0
+        p_read = json.loads(res_read.stdout)
+        assert p_read["ok"] is True
+
+        res_val = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "validate", "--tasks-dir", str(tasks_dir), "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert res_val.returncode == 0
+
+        # 3. Mutating command with AI_ORCH_BROKER_CHILD=1 succeeds
+        env_child = env.copy()
+        env_child["AI_ORCH_BROKER_CHILD"] = "1"
+        res_child = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "set-short", "T001", "my short", "--tasks-dir", str(tasks_dir), "--json"],
+            capture_output=True,
+            text=True,
+            env=env_child,
+        )
+        assert res_child.returncode == 0
+        p_child = json.loads(res_child.stdout)
+        assert p_child["ok"] is True
+
+    finally:
+        stop_evt.set()
+        proc.join(timeout=5)
+        if proc.is_alive():
+            proc.terminate()
+
+    # 4. Once broker stops, mutating command succeeds normally
+    res_after = subprocess.run(
+        [sys.executable, str(SCRIPT_PATH), "transition", "T001", "in progress", "--tasks-dir", str(tasks_dir), "--json"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert res_after.returncode == 0
+    p_after = json.loads(res_after.stdout)
+    assert p_after["ok"] is True
