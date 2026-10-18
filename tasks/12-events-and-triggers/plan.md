@@ -61,12 +61,12 @@
 
 ### 12.8 - UI: orchestrator chat panel
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, ai-orchestration-ui worktree task/12.8-orchestrator-chat) · **Size:** L · **Depends on:** 12.5, 12.6
+- **Status:** `delivered` (2026-10-18) · **Size:** L · **Depends on:** 12.5, 12.6
 - **Goal:** §0 "Owner chat in the UI" and E12; proposed-action confirmations (E3).
 
 ### 12.10 - UI: Orchestrator card in Config (current holder, Reassign…, pause/rotate) and first-run setup wizard
 
-- **Status:** `open` · **Size:** M · **Depends on:** 12.9, 12.8
+- **Status:** `in progress` (2026-10-18) · **Size:** M · **Depends on:** 12.9, 12.8
 - **Goal:** §0b, UI part.
 
 ### 12.7 - VS Code: event watcher and notifications
@@ -82,3 +82,10 @@
 - **Origin:** 12.7 review (2026-10-18): `scripts/test-bridge-parity.mjs` lists 18 message types the 12.6 frontend sends that the extension bridge does not handle yet (`pending126Types`).
 - **Goal:** the dashboard webview inside VS Code supports every 12.6 view (sessions, Triggers page, proposed actions, notifications, questions awaiting application, orchestrator queue) by mapping each message to the same `ai-orch` command the web backend runs; `pending126Types` becomes empty.
 - **Verification:** `npm test` green with the parity check reporting no pending 12.6 types; handler tests for argv building and mutating actions requiring `--expect-*-hash` where the engine does.
+
+### 12.16 - UI: confirm/reject trigger-proposed actions (T024 wiring) and chat turn ordering
+
+- **Status:** `in progress` (2026-10-18) · **Kind:** feature · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 12.8 · **Repo:** `ai-orchestration-ui/`
+- **Origin:** 12.8 review (2026-10-18): the backend confirm/reject endpoints still return `not-implemented` (written before T024 merged) and the chat panel shows the rotate hand-off turn above earlier turns.
+- **Goal:** `POST /api/triggers/proposed-actions/{id}/confirm|reject` call `ai-orch triggers confirm --expect-hash --actor ui` / `triggers reject --reason`; the Triggers page and the chat panel get working Confirm/Reject buttons; the conversation is strictly chronological.
+- **Verification:** backend tests with a stubbed CLI; live: a pending `command` proposal confirmed from the UI turns `confirmed`, a rejected one `rejected` with the reason; after a rotate the hand-off turn appears last.
