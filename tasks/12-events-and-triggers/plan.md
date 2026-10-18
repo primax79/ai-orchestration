@@ -20,12 +20,12 @@
 
 ### 12.12 - Emit events from `tasks_engine.py`
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.12-engine-events) · **Size:** M · **Depends on:** 12.11
+- **Status:** `done` (2026-10-18; claude; merged) · **Size:** M · **Depends on:** 12.11
 - **Goal:** Events for tasks, questions and the inbox, through the outbox; the E11 application ledger with `questions apply`.
 
 ### 12.13 - Emit events from `orchestration_runs.py` and extract the supervised-invocation primitive
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.13-run-events) · **Size:** L · **Depends on:** 12.11, 07.11 (runs lane end)
+- **Status:** `done` (2026-10-18; claude; merged) · **Size:** L · **Depends on:** 12.11, 07.11 (runs lane end)
 - **Goal:** E1 and E4.
 - **Also (from the 12.11 review):** `events tail --session S` (spec §1 line 128) was not implemented in 12.11; add it here, where events start carrying the session.
 
@@ -36,7 +36,7 @@
 
 ### 12.3 - Session registry and identifiers
 
-- **Status:** `open` · **Size:** M · **Depends on:** 12.12, 12.13
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.3-sessions) · **Size:** M · **Depends on:** 12.12, 12.13
 - **Goal:** §2 and E10, including the header amendments in specs 08 and 09.
 
 ### 12.4 - Trigger engine

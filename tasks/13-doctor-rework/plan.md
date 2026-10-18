@@ -26,7 +26,7 @@
 
 ### 13.3 - P1-c: smarter duplicate resolution
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/13.3-duplicates) · **Size:** M
+- **Status:** `delivered` (2026-10-18; claude; merged; 58 env tests; Q006-Q008 skills held as advice) · **Size:** M
 - **Goal:** Before advising, compare against cached plugin versions, normalized frontmatter and git history of the source repos. Duplicates that are only older or re-serialized become auto-resolvable (5 of the 11 on this machine).
 
 ### 13.4 - P1-d: detect stale plugin copies
@@ -41,7 +41,7 @@
 
 ### 13.6 - P2-b + P2-c: Kilo effective view; install respects plugins and policy
 
-- **Status:** `open` · **Size:** M
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/13.6-kilo-view) · **Size:** M
 - **Goal:**
   - a Kilo view covering every folder Kilo reads (including `~/.claude/skills` and `~/.config/kilo/skills`);
   - `install-skills` skips skills that a plugin provides or that the conflict policy would remove, so install and resolve no longer undo each other.
