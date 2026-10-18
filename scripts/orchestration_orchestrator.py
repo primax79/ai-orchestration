@@ -299,6 +299,11 @@ def _get_timeout_seconds(workspace: pathlib.Path) -> float:
     return DEFAULT_WALL_CLOCK_TIMEOUT_SECONDS
 
 
+# Last-resort defaults when the config has no `orchestration` profile for the tool.
+# Aliases, not dated ids: the CLIs resolve them to the current model.
+FALLBACK_MODELS = {"claude": "sonnet", "kilo": "google/gemini-3.8-flash", "codex": "gpt-5.6-luna"}
+
+
 def load_orchestrator_tool_config(workspace: pathlib.Path, tool: str) -> tuple[dict[str, Any], str]:
     """Load tool configuration and default model for the orchestrator role."""
     merged_cfg = _load_merged_config(workspace)
@@ -307,7 +312,7 @@ def load_orchestrator_tool_config(workspace: pathlib.Path, tool: str) -> tuple[d
     if not isinstance(tool_cfg, dict):
         tool_cfg = {}
 
-    model = "claude-3-5-sonnet-20241022"
+    model = FALLBACK_MODELS.get(tool, "sonnet")
     if resolve_model_and_variants is not None:
         try:
             m, _, _ = resolve_model_and_variants(tool, "orchestration", None, None, None, merged_cfg)
@@ -1127,7 +1132,7 @@ def execute_claimed_turn(
     cur = orch_doc.get("current", {})
     generation = orch_doc.get("generation", 1)
     tool = cur.get("tool", "claude")
-    model = cur.get("model", "claude-3-5-sonnet-20241022")
+    model = cur.get("model") or load_orchestrator_tool_config(ws, tool)[1]
     sess_id = cur.get("session_id")
     prov_sess_id = cur.get("provider_session_id")
 
@@ -1440,7 +1445,11 @@ def rotate_orchestrator(
         old_gen = orch_doc.get("generation", 1)
         target_gen = old_gen + 1
         target_tool = new_tool or cur.get("tool", "claude")
-        target_model = new_model or cur.get("model", "claude-3-5-sonnet-20241022")
+        target_model = (
+            new_model
+            or (cur.get("model") if target_tool == cur.get("tool", "claude") else None)
+            or load_orchestrator_tool_config(ws, target_tool)[1]
+        )
         fencing_token = f"gen-{target_gen}-{uuid.uuid4().hex[:8]}"
 
         # Transition role state: active -> rotating

@@ -2095,7 +2095,8 @@ def detect_tool(name: str) -> dict[str, Any]:
             auth_status = "authenticated"
         else:
             auth_status = "configured"
-        models = ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"]
+        # The CLI accepts these aliases and resolves them to the current models.
+        models = ["opus", "sonnet", "haiku"]
     elif name == "codex":
         codex_cfg = pathlib.Path.home() / ".codex"
         if codex_cfg.exists() or os.environ.get("CODEX_API_KEY") or os.environ.get("OPENAI_API_KEY"):
