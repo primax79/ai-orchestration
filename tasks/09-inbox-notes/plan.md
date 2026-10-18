@@ -92,6 +92,7 @@
 - **Origin:** 09.4/09.5 dispatch (2026-10-17): `run accept-triage` takes `--only` but no edits, while spec §4 says each proposed task can be edited before acceptance.
 - **Goal:** `run accept-triage ... --edits-file F` (JSON: per proposed task index, overridden title/category/priority/priority_reason/goal/steps/verification, validated like the proposal); the review panel's cards become editable and send the edits.
 - **Verification:** engine tests (edited fields land in the created task, invalid edits refused); live: edit one proposed task, accept, the task has the edited title.
+- **Progress (2026-10-18):** engine part merged (`run accept-triage --edits-file`, 117 run tests); UI part (editable proposal cards sending the edits) waits for the frontend lane after 12.6.
 
 ### 09.11 - VS Code: handlers for task attachments and triage (parity with 09.5, 09.8, 09.9)
 
