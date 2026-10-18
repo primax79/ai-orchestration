@@ -48,5 +48,5 @@
 
 ### 13.7 - P3-a..d: stray-file and redundant-MCP actions, `register-mcp` idempotency, agents in the Doctor, trigger-conflict generalization
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/13.7-stray-mcp) · **Size:** M
+- **Status:** `delivered` (2026-10-18) · **Size:** M
 - **Goal:** Report §P3.
