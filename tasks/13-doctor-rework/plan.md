@@ -17,7 +17,7 @@
 
 ### 13.2 - P1-b: severity model, cross-assistant grouping, persistent acknowledge
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/13.2-severity) · **Size:** M
+- **Status:** `delivered` (2026-10-18; claude; merged; 52 env tests; live: 22 groups (3 error fixable duplicates, 15 warning, 4 info, 1 acknowledged = the orchestration pair via Precedence)) · **Size:** M
 - **Goal:**
   - four severity levels;
   - findings grouped across assistants and scopes;
@@ -26,7 +26,7 @@
 
 ### 13.3 - P1-c: smarter duplicate resolution
 
-- **Status:** `open` · **Size:** M
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/13.3-duplicates) · **Size:** M
 - **Goal:** Before advising, compare against cached plugin versions, normalized frontmatter and git history of the source repos. Duplicates that are only older or re-serialized become auto-resolvable (5 of the 11 on this machine).
 
 ### 13.4 - P1-d: detect stale plugin copies

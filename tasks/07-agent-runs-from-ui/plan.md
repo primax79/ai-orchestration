@@ -167,7 +167,7 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
 
 ### 07.11 - Batch runs for microtasks
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/07.11-batch-runs) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 10.4 · **Repo:** `ai-orchestration/`
+- **Status:** `delivered` (2026-10-18; claude; merged; 103 run tests twice; batch verify is one run for the whole batch against the final commit) · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 10.4 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:** `../specs/timeline-gantt.md` §5 "Batch runs":
   - `run start --batch IDS` takes microtasks of one target repo only (refused otherwise);

@@ -25,7 +25,7 @@
 
 ### 12.13 - Emit events from `orchestration_runs.py` and extract the supervised-invocation primitive
 
-- **Status:** `open` · **Size:** L · **Depends on:** 12.11, 07.11 (runs lane end)
+- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.13-run-events) · **Size:** L · **Depends on:** 12.11, 07.11 (runs lane end)
 - **Goal:** E1 and E4.
 - **Also (from the 12.11 review):** `events tail --session S` (spec §1 line 128) was not implemented in 12.11; add it here, where events start carrying the session.
 
