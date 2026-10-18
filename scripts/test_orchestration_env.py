@@ -5,8 +5,10 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
+import pytest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent / "orchestration_env.py"
 
@@ -62,17 +64,18 @@ def test_conflict_detection_when_generic_and_bound_both_installed(tmp_path: path
 
     st = run_env(["status"], fake_home)
     conflicts = st["environments"]["claude"]["global"]["conflicts"]
-    assert len(conflicts) == 1
-    assert "orchestration-workflow" in conflicts[0]
-    assert "kilo-mcp-orchestrator" in conflicts[0]
+    assert len(conflicts) == 4
+    assert any("orchestration-workflow" in c and "kilo-mcp-orchestrator" in c for c in conflicts)
 
     # Test auto-resolve conflicts
     rc = run_env(["resolve-conflicts"], fake_home)
     assert rc["ok"] is True
-    assert rc["resolved_count"] == 1
-    assert rc["resolved"][0]["assistant"] == "claude"
-    assert rc["resolved"][0]["removed"] == "orchestration-workflow"
-    assert rc["resolved"][0]["kept"] == "kilo-mcp-orchestrator"
+    assert rc["resolved_count"] == 4
+    resolved_map = {r["removed"]: r["kept"] for r in rc["resolved"] if r["assistant"] == "claude"}
+    assert resolved_map["orchestration-workflow"] == "kilo-mcp-orchestrator"
+    assert resolved_map["executor-contract"] == "kilo-mcp-executor-contract"
+    assert resolved_map["conflict-resolver"] == "kilo-mcp-conflict-resolver"
+    assert resolved_map["orchestration-metrics"] == "kilo-mcp-metrics-analyst"
 
     # Verify conflict is now gone
     st_after = run_env(["status"], fake_home)
@@ -89,7 +92,7 @@ def test_register_mcp_across_kilo_claude_codex(tmp_path: pathlib.Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    reg = run_env(["register-mcp", "kilo-mcp", "--assistants", "all", "--scope", "global"], fake_home)
+    reg = run_env(["register-mcp", "kilo-mcp", "--assistants", "claude", "codex", "kilo", "--scope", "global"], fake_home)
     assert reg["ok"] is True
     assert len(reg["updated_configs"]) == 3
 
@@ -472,13 +475,13 @@ claude = "generic"
 
     rc = run_env(["resolve-conflicts"], fake_home)
     assert rc["ok"] is True
-    assert rc["resolved_count"] == 2
+    assert rc["resolved_count"] == 8
 
-    kilo_res = next(r for r in rc["resolved"] if r["assistant"] == "kilo")
+    kilo_res = next(r for r in rc["resolved"] if r["assistant"] == "kilo" and r["removed"] == "orchestration-workflow")
     assert kilo_res["kept"] == "kilo-mcp-orchestrator"
     assert kilo_res["removed"] == "orchestration-workflow"
 
-    claude_res = next(r for r in rc["resolved"] if r["assistant"] == "claude")
+    claude_res = next(r for r in rc["resolved"] if r["assistant"] == "claude" and r["kept"] == "orchestration-workflow")
     assert claude_res["kept"] == "orchestration-workflow"
     assert claude_res["removed"] == "kilo-mcp-orchestrator"
 
@@ -1177,7 +1180,7 @@ def test_no_duplicate_conflict_entries_and_plan_paths(tmp_path: pathlib.Path) ->
                 seen_keys.add(key)
 
             tcs = [sc for sc in scs if sc["kind"] == "trigger-conflict"]
-            expected_tcs = 1 if scope == "global" else 0
+            expected_tcs = 4 if scope == "global" else 0
             assert len(tcs) == expected_tcs
 
     # 2. Verify plan has no duplicate paths
@@ -1495,8 +1498,8 @@ def test_doctor_fixable_finding_carries_flag_and_actions(tmp_path: pathlib.Path)
     # 1. Status inspection: conflict carries fixable=True, actions non-empty, scope='global'
     st = run_env(["status"], fake_home)
     scs = st["environments"]["claude"]["global"]["structured_conflicts"]
-    assert len(scs) == 1
-    sc = scs[0]
+    assert len(scs) == 4
+    sc = next(s for s in scs if set(s["names"]) == {"orchestration-workflow", "kilo-mcp-orchestrator"})
     assert sc["kind"] == "trigger-conflict"
     assert sc["scope"] == "global"
     assert sc["fixable"] is True
@@ -1506,26 +1509,25 @@ def test_doctor_fixable_finding_carries_flag_and_actions(tmp_path: pathlib.Path)
     assert sc["actions"][0]["path"].endswith("orchestration-workflow")
     assert sc["advice"] == []
 
-    # 2. Dry-run resolution: plan contains executable actions, applied=0, resolved_count=1
+    # 2. Dry-run resolution: plan contains executable actions, applied=0, resolved_count=4
     rc_dry = run_env(["resolve-conflicts", "--dry-run"], fake_home)
     assert rc_dry["ok"] is True
     assert rc_dry["dry_run"] is True
-    assert len(rc_dry["actions"]) == 1
-    assert rc_dry["actions"][0]["action"] == "trash"
-    assert rc_dry["advice"] == []
+    assert len(rc_dry["actions"]) == 4
     assert rc_dry["applied"] == 0
-    assert rc_dry["resolved_count"] == 1
+    assert rc_dry["resolved_count"] == 4
     assert rc_dry["resolved"] == []
 
-    # 3. Apply resolution: executing plan performs action, returns applied=1, resolved_count=1
+    # 3. Apply resolution: executing plan performs action, returns applied=4, resolved_count=4
     rc_apply = run_env(["resolve-conflicts", "--apply"], fake_home)
     assert rc_apply["ok"] is True
-    assert rc_apply["applied"] == 1
-    assert rc_apply["resolved_count"] == 1
-    assert len(rc_apply["resolved"]) == 1
-    assert rc_apply["resolved"][0]["assistant"] == "claude"
-    assert rc_apply["resolved"][0]["removed"] == "orchestration-workflow"
-    assert rc_apply["resolved"][0]["kept"] == "kilo-mcp-orchestrator"
+    assert rc_apply["applied"] == 4
+    assert rc_apply["resolved_count"] == 4
+    res_map = {r["removed"]: r["kept"] for r in rc_apply["resolved"] if r["assistant"] == "claude"}
+    assert res_map["orchestration-workflow"] == "kilo-mcp-orchestrator"
+    assert res_map["executor-contract"] == "kilo-mcp-executor-contract"
+    assert res_map["conflict-resolver"] == "kilo-mcp-conflict-resolver"
+    assert res_map["orchestration-metrics"] == "kilo-mcp-metrics-analyst"
 
     # Confirmed resolved in status
     st_after = run_env(["status"], fake_home)
@@ -1621,9 +1623,9 @@ def test_doctor_project_scope_does_not_repeat_global_findings(tmp_path: pathlib.
     # Finding appears in global section (scope="global"), but is NOT repeated in project section
     st = run_env(["status", "--workspace", str(fake_ws)], fake_home)
     global_scs = st["environments"]["claude"]["global"]["structured_conflicts"]
-    assert len(global_scs) == 1
-    assert global_scs[0]["kind"] == "trigger-conflict"
-    assert global_scs[0]["scope"] == "global"
+    assert len(global_scs) == 4
+    assert all(s["kind"] == "trigger-conflict" for s in global_scs)
+    assert all(s["scope"] == "global" for s in global_scs)
 
     project_scs = st["environments"]["claude"]["project"]["structured_conflicts"]
     assert project_scs == []
@@ -1642,8 +1644,8 @@ def test_doctor_project_scope_does_not_repeat_global_findings(tmp_path: pathlib.
 
     # Global scope does not scan project workspace, so it does not see the duplicate
     g_scs2 = st2["environments"]["claude"]["global"]["structured_conflicts"]
-    assert len(g_scs2) == 1
-    assert g_scs2[0]["kind"] == "trigger-conflict"
+    assert len(g_scs2) == 4
+    assert all(sc["kind"] == "trigger-conflict" for sc in g_scs2)
 
     # Project scope sees the duplicate because it involves a project-scope entry!
     p_scs2 = st2["environments"]["claude"]["project"]["structured_conflicts"]
@@ -3037,13 +3039,12 @@ def test_resolve_then_install_leaves_no_new_finding(tmp_path: pathlib.Path) -> N
 
     # Verify conflict exists
     st_before = run_env(["status"], fake_home)
-    assert len(st_before["environments"]["claude"]["global"]["structured_conflicts"]) == 1
+    assert len(st_before["environments"]["claude"]["global"]["structured_conflicts"]) == 4
 
-    # Resolve conflicts -> removes generic 'orchestration-workflow' per bound policy
+    # Resolve conflicts -> removes all 4 generic skills per bound policy
     rc = run_env(["resolve-conflicts", "--apply"], fake_home)
     assert rc["ok"] is True
-    assert rc["resolved_count"] == 1
-    assert rc["resolved"][0]["removed"] == "orchestration-workflow"
+    assert rc["resolved_count"] == 4
     assert not (fake_home / ".claude" / "skills" / "orchestration-workflow").exists()
 
     # Re-run install-skills: skips 'orchestration-workflow' due to bound policy
@@ -3059,6 +3060,337 @@ def test_resolve_then_install_leaves_no_new_finding(tmp_path: pathlib.Path) -> N
     st_after = run_env(["status"], fake_home)
     assert st_after["environments"]["claude"]["global"]["conflicts"] == []
     assert st_after["environments"]["claude"]["global"]["structured_conflicts"] == []
+
+
+# ---------------------------------------------------------------------------
+# Task 13.7: Doctor P3 Tests
+# ---------------------------------------------------------------------------
+
+
+def test_p3a_clean_stray_and_redundant_mcp_dry_run_and_apply(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # 1. Setup stray ~/.codex/config.json with MCP servers
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    stray_json = codex_dir / "config.json"
+    stray_json.write_text(json.dumps({
+        "mcpServers": {
+            "server-a": {"command": "cmd-a"},
+            "server-b": {"command": "cmd-b"},
+        }
+    }))
+
+    # Setup ~/.codex/config.toml defining server-a but not server-b
+    (codex_dir / "config.toml").write_text("""[mcp_servers.server-a]
+command = "cmd-a"
+args = []
+""")
+
+    # 2. Setup redundant MCP override in Kilo:
+    # kilo.json and kilo.jsonc both define playwright with identical command
+    kilo_dir = fake_home / ".config" / "kilo"
+    kilo_dir.mkdir(parents=True)
+    kilo_json = kilo_dir / "kilo.json"
+    kilo_jsonc = kilo_dir / "kilo.jsonc"
+    kilo_json.write_text(json.dumps({
+        "mcp": {
+            "playwright": {"command": "npx", "args": ["@modelcontextprotocol/server-playwright"]},
+            "other": {"command": "other-cmd"},
+        }
+    }, indent=2))
+    kilo_jsonc.write_text("""{
+        "mcp": {
+            "playwright": {"command": "npx", "args": ["@modelcontextprotocol/server-playwright"]}
+        }
+    }""")
+
+    # Check status before clean: 1 stray file, 1 redundant MCP override
+    st_before = run_env(["status"], fake_home)
+    assert len(st_before["stray"]) == 1
+    assert "playwright" in st_before["environments"]["kilo"]["global"]["mcp_servers"]
+    assert len(st_before["environments"]["kilo"]["global"]["mcp_servers"]["playwright"]["overrides"]) == 1
+
+    # Check finding_groups:
+    # stray finding is fixable=True, actionable=True
+    # redundant-mcp finding is fixable=True, actionable=True, severity="info"
+    groups = st_before.get("finding_groups", [])
+    stray_g = next(g for g in groups if g["kind"] == "stray")
+    assert stray_g["fixable"] is True
+    assert stray_g["actionable"] is True
+    assert len(stray_g["actions"]) == 1
+    assert stray_g["actions"][0]["action"] == "trash"
+    assert "server-a (in config.toml: True)" in stray_g["advice"][0]
+    assert "server-b (in config.toml: False)" in stray_g["advice"][0]
+
+    mcp_g = next(g for g in groups if g["kind"] == "redundant-mcp")
+    assert mcp_g["fixable"] is True
+    assert mcp_g["severity"] == "info"
+    assert mcp_g["actions"][0]["action"] == "edit"
+
+    # 3. Dry-run clean-stray: plan lists 1 trash and 1 edit
+    dry = run_env(["clean-stray", "--dry-run"], fake_home)
+    assert dry["ok"] is True
+    assert dry["dry_run"] is True
+    assert len(dry["plan"]) == 2
+    actions = [item["action"] for item in dry["plan"]]
+    assert "trash" in actions
+    assert "edit" in actions
+    assert dry["applied"] == 0
+    plan_hash = dry["plan_hash"]
+
+    # 4. Expect plan hash mismatch refused
+    bad = run_env_raw(["clean-stray", "--expect-plan-hash", "wronghash123"], fake_home)
+    assert bad.returncode != 0
+    assert "Plan hash mismatch" in json.loads(bad.stdout)["error"]
+
+    # 5. Apply clean-stray with matching plan hash
+    res = run_env(["clean-stray", "--expect-plan-hash", plan_hash], fake_home)
+    assert res["ok"] is True
+    assert res["applied"] == 2
+
+    # Check disk state: stray file moved to trash, kilo.json edited, other keys preserved
+    assert not stray_json.exists()
+    trash_items = list((fake_home / ".config" / "ai-orchestration" / "trash").rglob("config.json"))
+    assert len(trash_items) == 1
+
+    updated_kilo = json.loads(kilo_json.read_text(encoding="utf-8"))
+    assert "playwright" not in updated_kilo.get("mcp", {})
+    assert updated_kilo.get("mcp", {}).get("other") == {"command": "other-cmd"}
+
+    # 6. Verify status now reports no stray and no override
+    st_after = run_env(["status"], fake_home)
+    assert st_after["stray"] == []
+    assert st_after["environments"]["kilo"]["global"]["mcp_servers"]["playwright"]["overrides"] == []
+
+
+def test_p3a_clean_stray_refuses_unparseable_config(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    bad_json = codex_dir / "config.json"
+    bad_json.write_text("{ unparseable json content }")
+
+    st = run_env(["status"], fake_home)
+    stray_g = next(g for g in st["finding_groups"] if g["kind"] == "stray")
+    assert stray_g["fixable"] is False
+    assert stray_g["actionable"] is False
+    assert "cannot be parsed" in stray_g["advice"][0]
+
+    # clean-stray dry run plans advise action, does not trash
+    dry = run_env(["clean-stray", "--dry-run"], fake_home)
+    assert len(dry["plan"]) == 1
+    assert dry["plan"][0]["action"] == "advise"
+
+    # clean-stray apply leaves unparseable file intact
+    run_env(["clean-stray"], fake_home)
+    assert bad_json.exists()
+
+
+def test_p3b_register_mcp_idempotency_and_replace_diff(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # 1. First registration into claude & codex
+    reg1 = run_env(["register-mcp", "kilo-mcp", "--assistants", "claude", "codex", "--scope", "global"], fake_home)
+    assert reg1["ok"] is True
+    assert len(reg1["updated_configs"]) == 2
+
+    # 2. Re-register identical entry: plan shows noop for both, applied is 0
+    dry_noop = run_env(["register-mcp", "kilo-mcp", "--assistants", "claude", "codex", "--scope", "global", "--dry-run"], fake_home)
+    assert dry_noop["ok"] is True
+    assert len(dry_noop["plan"]) == 2
+    assert all(item["action"] == "noop" for item in dry_noop["plan"])
+    assert all("already registered" in item["reason"] for item in dry_noop["plan"])
+
+    # Apply identical registration: updated_configs is empty (idempotent, no changes written)
+    apply_noop = run_env(["register-mcp", "kilo-mcp", "--assistants", "claude", "codex", "--scope", "global"], fake_home)
+    assert apply_noop["ok"] is True
+    assert apply_noop["updated_configs"] == []
+
+    # 3. Differing command: modify claude config to have old command, then re-register
+    cfg_p = pathlib.Path(reg1["updated_configs"][0])
+    cdata = json.loads(cfg_p.read_text(encoding="utf-8"))
+    cdata["mcpServers"]["kilo-mcp"]["command"] = "old-python"
+    cfg_p.write_text(json.dumps(cdata, indent=2) + "\n")
+
+    dry_replace = run_env(["register-mcp", "kilo-mcp", "--assistants", "claude", "--scope", "global", "--dry-run"], fake_home)
+    assert dry_replace["ok"] is True
+    replace_items = [item for item in dry_replace["plan"] if item["action"] == "replace"]
+    assert len(replace_items) == 1
+    assert "old_command" in replace_items[0]
+    assert "old-python" in replace_items[0]["old_command"]
+    assert "new_command" in replace_items[0]
+    assert "diff" in replace_items[0]
+    assert "->" in replace_items[0]["diff"]
+
+
+def test_p3b_register_mcp_assistants_all_skips_kilo_for_kilo_mcp(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Running with --assistants all on kilo-mcp omits kilo by default
+    reg = run_env(["register-mcp", "kilo-mcp", "--assistants", "all", "--scope", "global"], fake_home)
+    assert reg["ok"] is True
+    # Only claude and codex configs were updated
+    assert len(reg["updated_configs"]) == 2
+    st = run_env(["status"], fake_home)
+    assert "kilo-mcp" in st["environments"]["claude"]["global"]["registered_mcps"]
+    assert "kilo-mcp" in st["environments"]["codex"]["global"]["registered_mcps"]
+    assert "kilo-mcp" not in st["environments"]["kilo"]["global"]["registered_mcps"]
+
+
+def test_p3c_agent_transform_drops_kilo_frontmatter_and_hashes_receipt(tmp_path: pathlib.Path) -> None:
+    from orchestration_env import transform_agent_for_assistant, read_agent_receipts
+
+    # Verify transform logic directly
+    kilo_agent_text = """---
+name: test-agent
+description: Test agent description
+mode: subagent
+permission:
+  edit: allow
+---
+# Test Agent Instructions
+Here is the agent prompt.
+"""
+    claude_transformed = transform_agent_for_assistant(kilo_agent_text, "claude")
+    assert "mode:" not in claude_transformed
+    assert "permission:" not in claude_transformed
+    assert "edit: allow" not in claude_transformed
+    assert "name: test-agent" in claude_transformed
+    assert "description: Test agent description" in claude_transformed
+    assert "# Test Agent Instructions" in claude_transformed
+
+    # For kilo, content is unchanged
+    assert transform_agent_for_assistant(kilo_agent_text, "kilo") == kilo_agent_text
+
+    # Verify install-skills for claude transforms agent and writes receipt with transformed hash
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    res = run_env(["install-skills", "--assistants", "claude", "--repo", "kilo-mcp"], fake_home)
+    assert res["ok"] is True
+
+    claude_agents_dir = fake_home / ".claude" / "agents"
+    agent_file = claude_agents_dir / "kilo-mcp-orchestrator-agent.md"
+    assert agent_file.is_file()
+    agent_text = agent_file.read_text(encoding="utf-8")
+    assert "mode:" not in agent_text
+    assert "permission:" not in agent_text
+
+    receipts = read_agent_receipts(claude_agents_dir)
+    assert "kilo-mcp-orchestrator-agent.md" in receipts
+    rdata = receipts["kilo-mcp-orchestrator-agent.md"]
+    assert rdata["source_hash"] == hashlib.sha256(agent_text.encode("utf-8")).hexdigest()
+
+    # Status classifies as up-to-date
+    st = run_env(["status"], fake_home)
+    agent_info = st["environments"]["claude"]["global"]["agents"]["kilo-mcp-orchestrator-agent.md"]
+    assert agent_info["state"] == "up-to-date"
+
+
+def test_p3c_legacy_agent_without_receipt_classifies_up_to_date_instead_of_foreign(tmp_path: pathlib.Path) -> None:
+    from orchestration_env import resolve_source_repo, transform_agent_for_assistant
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    rpath = resolve_source_repo("kilo-mcp", None)
+    if not rpath:
+        pytest.skip("kilo-mcp source repo not found")
+    cat_agent = rpath / "plugins" / "architect-side" / "agents" / "kilo-mcp-orchestrator-agent.md"
+    if not cat_agent.is_file():
+        pytest.skip("kilo-mcp catalog agent not found")
+
+    raw = cat_agent.read_text(encoding="utf-8")
+    claude_copy = transform_agent_for_assistant(raw, "claude")
+
+    claude_agents_dir = fake_home / ".claude" / "agents"
+    claude_agents_dir.mkdir(parents=True)
+    # Write adapted agent directly without receipt (legacy copy)
+    (claude_agents_dir / "kilo-mcp-orchestrator-agent.md").write_text(claude_copy, encoding="utf-8")
+
+    st = run_env(["status"], fake_home)
+    agent_info = st["environments"]["claude"]["global"]["agents"]["kilo-mcp-orchestrator-agent.md"]
+    # Should classify as up-to-date-legacy (or up-to-date), NOT foreign!
+    assert agent_info["state"] in ("up-to-date-legacy", "up-to-date")
+    assert agent_info["state"] != "foreign"
+
+
+def test_p3d_generalized_trigger_conflicts_and_plugin_advice(tmp_path: pathlib.Path) -> None:
+    from orchestration_env import resolve_source_repo
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    rpath_orch = resolve_source_repo("ai-orchestration", None)
+    rpath_kilo = resolve_source_repo("kilo-mcp", None)
+    if not rpath_orch or not rpath_kilo:
+        pytest.skip("Source repos not found")
+
+    src_generic = rpath_orch / "plugins" / "executor-side" / "skills" / "executor-contract"
+    src_bound = rpath_kilo / "plugins" / "executor-side" / "skills" / "kilo-mcp-executor-contract"
+    if not (src_generic / "SKILL.md").is_file() or not (src_bound / "SKILL.md").is_file():
+        pytest.skip("Skills for pair testing not found")
+
+    claude_skills = fake_home / ".claude" / "skills"
+    claude_skills.mkdir(parents=True)
+    shutil.copytree(src_generic, claude_skills / "executor-contract")
+    shutil.copytree(src_bound, claude_skills / "kilo-mcp-executor-contract")
+
+    st = run_env(["status"], fake_home)
+    scs = st["environments"]["claude"]["global"]["structured_conflicts"]
+    tcs = [s for s in scs if s["kind"] == "trigger-conflict"]
+    assert len(tcs) == 1
+    assert set(tcs[0]["names"]) == {"executor-contract", "kilo-mcp-executor-contract"}
+    assert tcs[0]["kind"] == "trigger-conflict"
+
+    # Now simulate a plugin-only generic skill that competes with bound
+    # Advice should list all other skills provided by that plugin
+    fake_home2 = tmp_path / "home2"
+    fake_home2.mkdir()
+    plugins_cache = fake_home2 / ".claude" / "plugins" / "cache"
+    p_install = plugins_cache / "custom-pack" / "skills"
+    p_skills_root = p_install / "skills"
+    (p_skills_root / "executor-contract").mkdir(parents=True)
+    (p_skills_root / "executor-contract" / "SKILL.md").write_text("# Generic\n")
+    (p_skills_root / "other-helper-a").mkdir(parents=True)
+    (p_skills_root / "other-helper-a" / "SKILL.md").write_text("# Helper A\n")
+    (p_skills_root / "other-helper-b").mkdir(parents=True)
+    (p_skills_root / "other-helper-b" / "SKILL.md").write_text("# Helper B\n")
+
+    reg = fake_home2 / ".claude" / "plugins" / "installed_plugins.json"
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    reg.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "pack@custom": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_install),
+                }
+            ]
+        }
+    }))
+
+    # Also install standalone bound skill in fake_home2
+    c_skills2 = fake_home2 / ".claude" / "skills"
+    c_skills2.mkdir(parents=True)
+    shutil.copytree(src_bound, c_skills2 / "kilo-mcp-executor-contract")
+
+    # Status in fake_home2
+    st2 = run_env(["status"], fake_home2)
+    scs2 = st2["environments"]["claude"]["global"]["structured_conflicts"]
+    tcs2 = [s for s in scs2 if s["kind"] == "trigger-conflict"]
+    assert len(tcs2) == 1
+    # Check that resolve-conflicts dry-run advice lists the other skills in pack@custom
+    rc_dry = run_env(["resolve-conflicts", "--dry-run"], fake_home2)
+    assert len(rc_dry["advice"]) == 1
+    advice = rc_dry["advice"][0]
+    assert "pack@custom" in advice
+    assert "other-helper-a" in advice
+    assert "other-helper-b" in advice
 
 
 

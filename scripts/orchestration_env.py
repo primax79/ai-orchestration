@@ -121,15 +121,19 @@ def compute_target_hash(target_path: pathlib.Path) -> str | None:
     return None
 
 
-# In-memory caches for git history lookups across skill directories per run
+# In-memory caches for git history lookups across skill directories and agent files per run
 _SKILL_HISTORY_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 _SKILL_COMMITS_CACHE: dict[tuple[str, str], list[str]] = {}
+_AGENT_HISTORY_CACHE: dict[tuple[str, str, str], dict[str, str]] = {}
+_AGENT_COMMITS_CACHE: dict[tuple[str, str], list[str]] = {}
 
 
 def clear_skill_history_cache() -> None:
     """Clear in-memory git history hash caches (useful between test runs)."""
     _SKILL_HISTORY_CACHE.clear()
     _SKILL_COMMITS_CACHE.clear()
+    _AGENT_HISTORY_CACHE.clear()
+    _AGENT_COMMITS_CACHE.clear()
 
 
 def get_git_repo_root(path: pathlib.Path) -> pathlib.Path | None:
@@ -269,6 +273,114 @@ def find_historical_skill_match(
                 if ch == inst_hash:
                     return (entry["repo"], entry["hash"])
 
+    return None
+
+
+def transform_agent_for_assistant(content: str, assistant: str) -> str:
+    """Transform agent markdown for target assistant.
+    For Claude: drop Kilo-only frontmatter keys (mode, permission).
+    """
+    if assistant != "claude":
+        return content
+    content = content.lstrip("\ufeff")
+    m = re.match(r"^(\s*---\r?\n)(.*?)(---\r?\n)(.*)$", content, re.DOTALL)
+    if not m:
+        return content
+    header_start, fm_text, header_end, body = m.groups()
+    new_fm_lines: list[str] = []
+    skip_indent = False
+    for line in fm_text.splitlines(keepends=True):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            skip_indent = False
+            new_fm_lines.append(line)
+            continue
+        if not line.startswith(" ") and not line.startswith("\t") and ":" in line:
+            key = line.split(":", 1)[0].strip()
+            if key in ("mode", "permission"):
+                skip_indent = True
+                continue
+            else:
+                skip_indent = False
+                new_fm_lines.append(line)
+        elif skip_indent and (line.startswith(" ") or line.startswith("\t")):
+            continue
+        else:
+            skip_indent = False
+            new_fm_lines.append(line)
+    return header_start + "".join(new_fm_lines) + header_end + body
+
+
+def compute_git_agent_hash(
+    repo_root: pathlib.Path,
+    commit_sha: str,
+    rel_agent_file: str,
+    assistant: str = "kilo",
+) -> str | None:
+    res = subprocess.run(
+        ["git", "-C", str(repo_root), "show", f"{commit_sha}:{rel_agent_file}"],
+        capture_output=True,
+        check=False,
+    )
+    if res.returncode != 0 or not res.stdout:
+        return None
+    try:
+        content = res.stdout.decode("utf-8")
+    except Exception:
+        content = res.stdout.decode("utf-8", errors="replace")
+    transformed = transform_agent_for_assistant(content, assistant)
+    return hashlib.sha256(transformed.encode("utf-8")).hexdigest()
+
+
+def find_historical_agent_match(
+    inst_hash: str,
+    matching_entries: list[dict[str, Any]],
+    assistant: str = "kilo",
+    home: pathlib.Path | None = None,
+    max_commits: int = 200,
+) -> tuple[str, str] | None:
+    if not inst_hash:
+        return None
+    for entry in matching_entries:
+        agent_file = pathlib.Path(entry["path"]).resolve()
+        repo_root = get_git_repo_root(agent_file)
+        if not repo_root:
+            continue
+        try:
+            rel_agent_file = agent_file.relative_to(repo_root).as_posix()
+        except ValueError:
+            continue
+        cache_key = (str(repo_root), rel_agent_file, assistant)
+        commits_key = (str(repo_root), rel_agent_file)
+        if commits_key not in _AGENT_COMMITS_CACHE:
+            try:
+                res = subprocess.run(
+                    ["git", "-C", str(repo_root), "log", "-n", str(max_commits), "--format=%H", "--", rel_agent_file],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    _AGENT_COMMITS_CACHE[commits_key] = [c for c in res.stdout.strip().split() if c]
+                else:
+                    _AGENT_COMMITS_CACHE[commits_key] = []
+            except Exception:
+                _AGENT_COMMITS_CACHE[commits_key] = []
+
+        if cache_key in _AGENT_HISTORY_CACHE and inst_hash in _AGENT_HISTORY_CACHE[cache_key].values():
+            return (entry["repo"], entry["hash"])
+
+        commits = _AGENT_COMMITS_CACHE.get(commits_key, [])
+        if cache_key not in _AGENT_HISTORY_CACHE:
+            _AGENT_HISTORY_CACHE[cache_key] = {}
+        for commit_sha in commits:
+            if commit_sha in _AGENT_HISTORY_CACHE[cache_key]:
+                continue
+            ch = compute_git_agent_hash(repo_root, commit_sha, rel_agent_file, assistant)
+            if ch:
+                _AGENT_HISTORY_CACHE[cache_key][commit_sha] = ch
+                if ch == inst_hash:
+                    return (entry["repo"], entry["hash"])
     return None
 
 
@@ -634,6 +746,20 @@ def skill_equivalent(path_a: pathlib.Path, path_b: pathlib.Path) -> bool:
     return compare_skill_dirs(path_a, path_b)["equivalent"]
 
 
+def agent_equivalent(agent_path: pathlib.Path, catalog_agent_path: pathlib.Path, assistant: str = "kilo") -> bool:
+    """Check if an installed agent file is equivalent to a catalog agent (with per-assistant transform)."""
+    try:
+        inst_text = agent_path.read_text(encoding="utf-8")
+        cat_text = catalog_agent_path.read_text(encoding="utf-8")
+        trans_cat = transform_agent_for_assistant(cat_text, assistant)
+        if inst_text == trans_cat:
+            return True
+        is_eq, _, _ = compare_skill_md(inst_text, trans_cat)
+        return is_eq
+    except Exception:
+        return False
+
+
 def format_diff_summary(diff_info: dict[str, Any]) -> str:
     """Generate a short diff summary string describing differences between two skills."""
     parts = []
@@ -776,7 +902,7 @@ def resolve_source_repo(repo_name: str, home: pathlib.Path | None = None) -> pat
         sibling = root.parent / repo_name
         if sibling.is_dir() and ((sibling / "plugins").is_dir() or (sibling / "server.py").is_file()):
             return sibling
-        for parent in list(root.parents)[:4]:
+        for parent in list(root.parents)[:8]:
             cand = parent / repo_name
             if cand.is_dir() and ((cand / "plugins").is_dir() or (cand / "server.py").is_file()):
                 return cand
@@ -1077,11 +1203,24 @@ def detect_agent_state(
     catalog_agents: dict[tuple[str, str, str], dict[str, Any]],
     receipts: dict[str, dict[str, Any]],
     home: pathlib.Path | None = None,
+    assistant: str | None = None,
 ) -> tuple[str, str | None, str | None]:
     """Determine state, source_repo, and source_hash for an installed agent file/symlink."""
     aname = child.name
     if aname in OBSOLETE_AGENT_RENAMES:
         return (f"obsolete-renamed->{OBSOLETE_AGENT_RENAMES[aname]}", None, None)
+
+    asst = assistant
+    if not asst:
+        parts = child.resolve().parts if child.is_symlink() else child.parts
+        if ".claude" in child.parts or ".claude" in parts:
+            asst = "claude"
+        elif ".kilo" in child.parts or ".config/kilo" in child.parts or ".kilo" in parts:
+            asst = "kilo"
+        elif ".codex" in child.parts or ".codex" in parts:
+            asst = "codex"
+        else:
+            asst = "kilo"
 
     matching_entries = [entry for entry in catalog_agents.values() if entry["name"] == aname]
     if not matching_entries:
@@ -1115,16 +1254,34 @@ def detect_agent_state(
         if not cat_entry and matching_entries:
             cat_entry = matching_entries[0]
         cat_hash = cat_entry["hash"] if cat_entry else None
+        cat_trans_hash = cat_hash
+        if cat_entry:
+            try:
+                raw_c = pathlib.Path(cat_entry["path"]).read_text(encoding="utf-8")
+                cat_trans_hash = hashlib.sha256(transform_agent_for_assistant(raw_c, asst).encode("utf-8")).hexdigest()
+            except Exception:
+                pass
 
-        if inst_hash and inst_hash == r_hash and (not cat_hash or inst_hash == cat_hash):
+        if inst_hash and inst_hash == r_hash and (not cat_trans_hash or inst_hash == cat_trans_hash):
             return ("up-to-date", r_repo, cat_hash or r_hash)
         else:
             return ("modified-or-outdated", r_repo, cat_hash or r_hash)
 
     # No receipt: check if hash matches any catalog entry (legacy copies)
     for entry in matching_entries:
-        if inst_hash and inst_hash == entry["hash"]:
-            return ("up-to-date", entry["repo"], entry["hash"])
+        try:
+            raw_c = pathlib.Path(entry["path"]).read_text(encoding="utf-8")
+            trans_h = hashlib.sha256(transform_agent_for_assistant(raw_c, asst).encode("utf-8")).hexdigest()
+        except Exception:
+            trans_h = entry["hash"]
+        if (inst_hash and inst_hash == trans_h) or agent_equivalent(child, pathlib.Path(entry["path"]), asst):
+            return ("up-to-date-legacy", entry["repo"], entry["hash"])
+
+    # No receipt: check if hash matches any earlier commit in source git history
+    hist_match = find_historical_agent_match(inst_hash, matching_entries, assistant=asst, home=home)
+    if hist_match:
+        hist_repo, hist_cat_hash = hist_match
+        return ("outdated-legacy", hist_repo, hist_cat_hash)
 
     if child.is_symlink():
         try:
@@ -1138,6 +1295,37 @@ def detect_agent_state(
             pass
 
     return ("foreign", None, None)
+
+
+DEFAULT_GENERIC_BOUND_PAIRS: list[tuple[str, str]] = [
+    ("orchestration-workflow", "kilo-mcp-orchestrator"),
+    ("executor-contract", "kilo-mcp-executor-contract"),
+    ("conflict-resolver", "kilo-mcp-conflict-resolver"),
+    ("orchestration-metrics", "kilo-mcp-metrics-analyst"),
+]
+
+
+def get_generic_bound_pairs(home: pathlib.Path | None = None) -> list[tuple[str, str]]:
+    """Return generic/bound skill pairs from kilo-mcp bindings or defaults."""
+    h = home or get_home_dir()
+    pairs = list(DEFAULT_GENERIC_BOUND_PAIRS)
+    seen_generic = {p[0] for p in pairs}
+    rpath = resolve_source_repo("kilo-mcp", h)
+    if rpath and (rpath / "bindings").is_dir():
+        for bfile in sorted((rpath / "bindings").glob("*.json")):
+            generic_name = bfile.stem
+            try:
+                bdata = json.loads(bfile.read_text(encoding="utf-8"))
+                bound_name = bdata.get("name")
+                if bound_name:
+                    if generic_name in seen_generic:
+                        pairs = [(g, bound_name) if g == generic_name else (g, b) for g, b in pairs]
+                    else:
+                        pairs.append((generic_name, bound_name))
+                        seen_generic.add(generic_name)
+            except Exception:
+                pass
+    return pairs
 
 
 def load_conflict_policy(
@@ -1339,6 +1527,37 @@ def format_toml_server_entry(name: str, command: str, args: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def normalize_mcp_config(cfg: Any) -> tuple[str | None, list[str], dict[str, str]]:
+    """Normalize MCP server configuration into (command, args, env)."""
+    if not isinstance(cfg, dict):
+        return None, [], {}
+    cmd = cfg.get("command")
+    args = cfg.get("args") or []
+    if isinstance(cmd, list):
+        if cmd:
+            cmd_str = str(cmd[0])
+            args_list = [str(x) for x in cmd[1:]] + [str(x) for x in args]
+        else:
+            cmd_str = ""
+            args_list = [str(x) for x in args]
+    elif cmd is not None:
+        cmd_str = str(cmd)
+        args_list = [str(x) for x in args]
+    else:
+        cmd_str = None
+        args_list = [str(x) for x in args]
+    env = cfg.get("env") or {}
+    env_dict = {str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {}
+    return cmd_str, args_list, env_dict
+
+
+def are_mcp_configs_equivalent(cfg_a: Any, cfg_b: Any) -> bool:
+    """Check if two MCP configurations are functionally equivalent."""
+    if cfg_a == cfg_b:
+        return True
+    return normalize_mcp_config(cfg_a) == normalize_mcp_config(cfg_b)
+
+
 def read_registered_mcps(config_path: pathlib.Path, assistant: str) -> dict[str, Any]:
     if not config_path.exists():
         return {}
@@ -1411,20 +1630,31 @@ def read_kilo_merged_mcps(
                 continue
             for sname, scfg in file_mcps.items():
                 if sname in servers:
+                    is_identical = are_mcp_configs_equivalent(servers[sname]["config"], scfg)
                     servers[sname]["overrides"].append(servers[sname]["provenance"])
+                    if "override_details" not in servers[sname]:
+                        servers[sname]["override_details"] = []
+                    servers[sname]["override_details"].append({
+                        "provenance": servers[sname]["provenance"],
+                        "config": servers[sname]["config"],
+                        "identical": is_identical,
+                    })
                     servers[sname]["provenance"] = str(cand)
                     servers[sname]["config"] = scfg
                     servers[sname]["command"] = scfg.get("command") if isinstance(scfg, dict) else None
                     servers[sname]["args"] = scfg.get("args") if isinstance(scfg, dict) else None
+                    servers[sname]["identical"] = all(d.get("identical", False) for d in servers[sname]["override_details"])
                 else:
                     servers[sname] = {
                         "name": sname,
                         "scope": scope,
                         "provenance": str(cand),
                         "overrides": [],
+                        "override_details": [],
                         "config": scfg,
                         "command": scfg.get("command") if isinstance(scfg, dict) else None,
                         "args": scfg.get("args") if isinstance(scfg, dict) else None,
+                        "identical": True,
                     }
         except Exception:
             continue
@@ -1566,6 +1796,63 @@ def kilo_skill_roots(
         filtered = raw_roots
 
     # Deduplicate while preserving order (last occurrence wins in precedence)
+    seen_paths: set[pathlib.Path] = set()
+    deduped_reversed: list[tuple[pathlib.Path, str, str]] = []
+    for item in reversed(filtered):
+        p_resolved = item[0].resolve()
+        if p_resolved not in seen_paths:
+            seen_paths.add(p_resolved)
+            deduped_reversed.append(item)
+    return list(reversed(deduped_reversed))
+
+
+def kilo_agent_roots(
+    home: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+    scope: str | None = None,
+) -> list[tuple[pathlib.Path, str, str]]:
+    """Return all roots Kilo reads for agents in ascending precedence order (lowest first, highest last)."""
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+
+    disable_claude = (
+        os.environ.get("KILO_DISABLE_CLAUDE_CODE") in ("1", "true", "yes")
+    )
+    disable_external = os.environ.get("KILO_DISABLE_EXTERNAL_AGENTS") in ("1", "true", "yes")
+    disable_project = os.environ.get("KILO_DISABLE_PROJECT_CONFIG") in ("1", "true", "yes")
+
+    raw_roots: list[tuple[pathlib.Path, str, str]] = []
+
+    # 1. Global external roots
+    if not disable_external and not disable_claude:
+        raw_roots.append((h / ".claude" / "agents", "global", "~/.claude/agents"))
+
+    # 2. Global config roots
+    raw_roots.append((h / ".config" / "kilo" / "agents", "global", "~/.config/kilo/agents"))
+    raw_roots.append((h / ".config" / "kilo" / "agent", "global", "~/.config/kilo/agent"))
+    raw_roots.append((h / ".kilocode" / "agents", "global", "~/.kilocode/agents"))
+    raw_roots.append((h / ".kilocode" / "agent", "global", "~/.kilocode/agent"))
+    raw_roots.append((h / ".kilo" / "agents", "global", "~/.kilo/agents"))
+    raw_roots.append((h / ".kilo" / "agent", "global", "~/.kilo/agent"))
+
+    # 3. Project external roots
+    if ws is not None and not disable_external and not disable_claude:
+        raw_roots.append((ws / ".claude" / "agents", "project", ".claude/agents"))
+
+    # 4. Project config roots
+    if ws is not None and not disable_project:
+        raw_roots.append((ws / ".kilocode" / "agents", "project", ".kilocode/agents"))
+        raw_roots.append((ws / ".kilocode" / "agent", "project", ".kilocode/agent"))
+        raw_roots.append((ws / ".kilo" / "agents", "project", ".kilo/agents"))
+        raw_roots.append((ws / ".kilo" / "agent", "project", ".kilo/agent"))
+
+    if scope == "global":
+        filtered = [r for r in raw_roots if r[1] == "global"]
+    elif scope == "project":
+        filtered = [r for r in raw_roots if r[1] == "project"]
+    else:
+        filtered = raw_roots
+
     seen_paths: set[pathlib.Path] = set()
     deduped_reversed: list[tuple[pathlib.Path, str, str]] = []
     for item in reversed(filtered):
@@ -1861,15 +2148,80 @@ def discover_claude_plugin_skills(
                                         break
                 except Exception:
                     pass
-                results.append({
-                    "plugin_id": plugin_id,
-                    "scope": iscope,
-                    "project_path": project_path,
-                    "skill_name": skill_name,
-                    "path": str(ip),
-                    "origin": f"plugin:{plugin_id}",
-                })
+                    results.append({
+                        "plugin_id": plugin_id,
+                        "scope": iscope,
+                        "project_path": project_path,
+                        "skill_name": skill_name,
+                        "path": str(ip),
+                        "origin": f"plugin:{plugin_id}",
+                    })
 
+    return results
+
+
+def discover_claude_plugin_agents(
+    home: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+) -> list[dict[str, Any]]:
+    """Inspect ~/.claude/plugins/installed_plugins.json and discover installed plugin agents.
+    Returns list of dicts with keys:
+        plugin_id: str
+        scope: str
+        project_path: str | None
+        agent_name: str
+        path: str (path to agent markdown file)
+        origin: str ('plugin:<plugin_id>')
+    """
+    h = home or get_home_dir()
+    reg_path = h / ".claude" / "plugins" / "installed_plugins.json"
+    if not reg_path.is_file():
+        return []
+
+    try:
+        data = json.loads(reg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    plugins_map = data.get("plugins", {})
+    if not isinstance(plugins_map, dict):
+        return []
+
+    results: list[dict[str, Any]] = []
+
+    for plugin_id, installs in sorted(plugins_map.items()):
+        if isinstance(installs, dict):
+            installs_list = [installs]
+        elif isinstance(installs, list):
+            installs_list = installs
+        else:
+            continue
+
+        for install in installs_list:
+            if not isinstance(install, dict):
+                continue
+            iscope = install.get("scope", "user")
+            project_path = install.get("projectPath")
+            ip_str = install.get("installPath")
+            if not ip_str:
+                continue
+            ip = pathlib.Path(ip_str).expanduser()
+            if not ip.is_dir():
+                continue
+
+            agents_dir = ip / "agents"
+            if agents_dir.is_dir():
+                for child in sorted(agents_dir.glob("*.md")):
+                    if child.name.startswith(".") or not child.is_file():
+                        continue
+                    results.append({
+                        "plugin_id": plugin_id,
+                        "scope": iscope,
+                        "project_path": project_path,
+                        "agent_name": child.name,
+                        "path": str(child),
+                        "origin": f"plugin:{plugin_id}",
+                    })
     return results
 
 
@@ -2207,13 +2559,22 @@ def plan_for_conflict(
     entries = sc.get("entries", [])
 
     if kind == "trigger-conflict":
+        names = sc.get("names", [])
+        gb_pairs = get_generic_bound_pairs(h)
+        matched_pair = next(((g, b) for g, b in gb_pairs if set(names) == {g, b}), None)
+        if matched_pair:
+            generic_name, bound_name = matched_pair
+        else:
+            generic_name = names[0] if names else "orchestration-workflow"
+            bound_name = names[1] if len(names) > 1 else "kilo-mcp-orchestrator"
+
         keep_target = policy.get(assistant, "generic" if assistant == "kilo" else "bound")
         if keep_target == "generic":
-            to_remove_name = "kilo-mcp-orchestrator"
-            to_keep_name = "orchestration-workflow"
+            to_remove_name = bound_name
+            to_keep_name = generic_name
         else:
-            to_remove_name = "orchestration-workflow"
-            to_keep_name = "kilo-mcp-orchestrator"
+            to_remove_name = generic_name
+            to_keep_name = bound_name
 
         to_remove_entries = [e for e in entries if e.get("name") == to_remove_name]
         standalone_to_remove = [e for e in to_remove_entries if not e.get("origin", "").startswith("plugin:")]
@@ -2257,11 +2618,22 @@ def plan_for_conflict(
                 origin = e.get("origin", "")
                 plugin_id = origin.split("plugin:", 1)[1] if origin.startswith("plugin:") else ""
                 target_path = pathlib.Path(e_path)
+
+                claude_plugins = discover_claude_plugin_skills(h)
+                plugin_skills = sorted(set(ps["skill_name"] for ps in claude_plugins if ps["plugin_id"] == plugin_id))
+                other_skills = [s for s in plugin_skills if s != to_remove_name]
+
                 if plugin_id == "architect-side@ai-orchestration":
                     reason = (
                         "architect-side@ai-orchestration provides 5 essential orchestration skills "
                         "(task-pipeline, task-spec-authoring, task-worktree-ops, conflict-resolver, "
                         "orchestration-metrics); keep both plugins with reciprocal Precedence or acknowledge finding"
+                    )
+                elif other_skills:
+                    skills_str = ", ".join(other_skills)
+                    reason = (
+                        f"{plugin_id} provides {len(other_skills)} other skills ({skills_str}); "
+                        f"keep both plugins with reciprocal Precedence or acknowledge finding"
                     )
                 else:
                     reason = f"disable plugin {plugin_id} in ~/.claude/settings.json (enabledPlugins) or uninstall it"
@@ -2881,29 +3253,93 @@ def inspect_environment(
             # Inspect agents
             adir = assistant_agents_dir(assistant, scope, ws, h)
             installed_agents: dict[str, Any] = {}
-            if adir.is_dir():
-                agent_receipts = read_agent_receipts(adir)
-                for child in sorted(adir.iterdir()):
-                    if child.name.startswith(".") or not child.name.endswith(".md"):
+            agent_entries: list[dict[str, Any]] = []
+
+            if assistant == "kilo":
+                k_agent_roots = kilo_agent_roots(h, ws, scope)
+                for rdir, rscope, rtag in k_agent_roots:
+                    if not rdir.is_dir():
                         continue
-                    if not (child.is_file() or child.is_symlink()):
-                        continue
-                    aname = child.name
-                    state, src_repo, src_hash = detect_agent_state(child, catalog_agents, agent_receipts, h)
-                    inst_hash = ""
-                    try:
-                        resolved = child.resolve()
-                        if resolved.is_file():
-                            inst_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
-                    except Exception:
-                        pass
-                    installed_agents[aname] = {
-                        "state": state,
-                        "is_symlink": child.is_symlink(),
-                        "installed_hash": inst_hash,
-                        "source_repo": src_repo,
-                        "source_hash": src_hash,
-                    }
+                    r_receipts = read_agent_receipts(rdir)
+                    for child in sorted(rdir.glob("*.md")):
+                        if child.name.startswith(".") or not (child.is_file() or child.is_symlink()):
+                            continue
+                        aname = child.name
+                        state, src_repo, src_hash = detect_agent_state(child, catalog_agents, r_receipts, h, assistant="kilo")
+                        inst_hash = ""
+                        try:
+                            resolved = child.resolve()
+                            if resolved.is_file():
+                                inst_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+                        except Exception:
+                            pass
+                        installed_agents[aname] = {
+                            "state": state,
+                            "is_symlink": child.is_symlink(),
+                            "installed_hash": inst_hash,
+                            "source_repo": src_repo,
+                            "source_hash": src_hash,
+                        }
+                        agent_entries.append({
+                            "name": aname,
+                            "origin": f"standalone:{rtag}" if rtag != "~/.kilo/agents" else "standalone",
+                            "scope": rscope,
+                            "path": str(child),
+                            "enabled": True,
+                            "state": state,
+                            "source_repo": src_repo,
+                            "source_hash": src_hash,
+                        })
+            else:
+                if adir.is_dir():
+                    agent_receipts = read_agent_receipts(adir)
+                    for child in sorted(adir.glob("*.md")):
+                        if child.name.startswith(".") or not (child.is_file() or child.is_symlink()):
+                            continue
+                        aname = child.name
+                        state, src_repo, src_hash = detect_agent_state(child, catalog_agents, agent_receipts, h, assistant=assistant)
+                        inst_hash = ""
+                        try:
+                            resolved = child.resolve()
+                            if resolved.is_file():
+                                inst_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+                        except Exception:
+                            pass
+                        installed_agents[aname] = {
+                            "state": state,
+                            "is_symlink": child.is_symlink(),
+                            "installed_hash": inst_hash,
+                            "source_repo": src_repo,
+                            "source_hash": src_hash,
+                        }
+                        agent_entries.append({
+                            "name": aname,
+                            "origin": "standalone",
+                            "scope": scope,
+                            "path": str(child),
+                            "enabled": True,
+                            "state": state,
+                            "source_repo": src_repo,
+                            "source_hash": src_hash,
+                        })
+
+                if assistant == "claude":
+                    claude_plugin_agents = discover_claude_plugin_agents(h, ws)
+                    for pa in claude_plugin_agents:
+                        pa_scope = "project" if pa["scope"] in ("project", "local") else "global"
+                        if pa_scope == scope or (scope == "project" and pa_scope == "global"):
+                            en = global_plugin_enabled.get(pa["plugin_id"], True)
+                            if pa_scope == "project" and pa["plugin_id"] in project_plugin_enabled:
+                                en = project_plugin_enabled[pa["plugin_id"]]
+                            agent_entries.append({
+                                "name": pa["agent_name"],
+                                "origin": pa["origin"],
+                                "scope": pa["scope"],
+                                "path": pa["path"],
+                                "enabled": en,
+                                "state": "plugin",
+                                "source_repo": pa["plugin_id"].split("@", 1)[1] if "@" in pa["plugin_id"] else None,
+                            })
 
             # Conflicts computed over the UNION of enabled entries:
             # per assistant+scope view; project view = standalone global + standalone project + enabled plugins
@@ -2928,68 +3364,73 @@ def inspect_environment(
             conflicts: list[str] = []
             structured_conflicts_map: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
 
-            # 1. Trigger conflict: orchestration-workflow + kilo-mcp-orchestrator
-            generic_entries = [e for e in enabled_for_conflicts if e["name"] == "orchestration-workflow"]
-            bound_entries = [e for e in enabled_for_conflicts if e["name"] == "kilo-mcp-orchestrator"]
-            if generic_entries and bound_entries:
-                names = ["orchestration-workflow", "kilo-mcp-orchestrator"]
-                key = ("trigger-conflict", tuple(sorted(names)))
-                combined_entries: list[dict[str, Any]] = []
-                seen_entry_paths: set[str] = set()
-                for e in generic_entries + bound_entries:
-                    ep = e.get("path")
-                    if ep and ep in seen_entry_paths:
-                        continue
-                    if ep:
-                        seen_entry_paths.add(ep)
-                    combined_entries.append(e)
+            # 1. Trigger conflicts across generic/bound pairs
+            gb_pairs = get_generic_bound_pairs(h)
+            for generic_name, bound_name in gb_pairs:
+                generic_entries = [e for e in enabled_for_conflicts if e["name"] == generic_name]
+                bound_entries = [e for e in enabled_for_conflicts if e["name"] == bound_name]
+                if generic_entries and bound_entries:
+                    names = [generic_name, bound_name]
+                    key = ("trigger-conflict", tuple(sorted(names)))
+                    combined_entries: list[dict[str, Any]] = []
+                    seen_entry_paths: set[str] = set()
+                    for e in generic_entries + bound_entries:
+                        ep = e.get("path")
+                        if ep and ep in seen_entry_paths:
+                            continue
+                        if ep:
+                            seen_entry_paths.add(ep)
+                        combined_entries.append(e)
 
-                is_global_location = not any(is_project_entry(e, ws) for e in combined_entries)
-                already_in_global = key in global_conflict_keys.get(assistant, set())
+                    is_global_location = not any(is_project_entry(e, ws) for e in combined_entries)
+                    already_in_global = key in global_conflict_keys.get(assistant, set())
 
-                if not (scope == "project" and is_global_location and already_in_global):
-                    p_items, _ = plan_for_conflict(
-                        sc={
+                    if not (scope == "project" and is_global_location and already_in_global):
+                        p_items, _ = plan_for_conflict(
+                            sc={
+                                "kind": "trigger-conflict",
+                                "names": names,
+                                "entries": combined_entries,
+                                "scope": scope,
+                            },
+                            assistant=assistant,
+                            scope=scope,
+                            policy=policy,
+                            catalog=catalog,
+                            home=h,
+                        )
+                        actions = [item for item in p_items if item["action"] != "advise"]
+                        advice: list[str] = []
+                        for item in p_items:
+                            if item["action"] == "advise":
+                                r = item.get("reason", "")
+                                if r and r not in advice:
+                                    advice.append(r)
+                        is_fixable = len(actions) > 0
+
+                        has_prec_generic = any(skill_has_precedence_section(e.get("path", "")) for e in generic_entries)
+                        has_prec_bound = any(skill_has_precedence_section(e.get("path", "")) for e in bound_entries)
+                        if has_prec_generic and has_prec_bound and not actions:
+                            if set(names) == {"orchestration-workflow", "kilo-mcp-orchestrator"}:
+                                advice = ["Generic and bound orchestration skills declare reciprocal Precedence; kilo-mcp-orchestrator specializes kilo-mcp tool calls while orchestration-workflow governs architecture."]
+                            else:
+                                advice = [f"Generic and bound skills declare reciprocal Precedence; {bound_name} specializes tools while {generic_name} governs architecture."]
+
+                        structured_conflicts_map[key] = {
                             "kind": "trigger-conflict",
                             "names": names,
                             "entries": combined_entries,
                             "scope": scope,
-                        },
-                        assistant=assistant,
-                        scope=scope,
-                        policy=policy,
-                        catalog=catalog,
-                        home=h,
-                    )
-                    actions = [item for item in p_items if item["action"] != "advise"]
-                    advice: list[str] = []
-                    for item in p_items:
-                        if item["action"] == "advise":
-                            r = item.get("reason", "")
-                            if r and r not in advice:
-                                advice.append(r)
-                    is_fixable = len(actions) > 0
-
-                    has_prec_generic = any(skill_has_precedence_section(e.get("path", "")) for e in generic_entries)
-                    has_prec_bound = any(skill_has_precedence_section(e.get("path", "")) for e in bound_entries)
-                    if has_prec_generic and has_prec_bound and not actions:
-                        advice = ["Generic and bound orchestration skills declare reciprocal Precedence; kilo-mcp-orchestrator specializes kilo-mcp tool calls while orchestration-workflow governs architecture."]
-
-                    structured_conflicts_map[key] = {
-                        "kind": "trigger-conflict",
-                        "names": names,
-                        "entries": combined_entries,
-                        "scope": scope,
-                        "fixable": is_fixable,
-                        "actionable": is_fixable,
-                        "actions": actions,
-                        "advice": advice,
-                    }
-                    if scope == "global":
-                        global_conflict_keys.setdefault(assistant, set()).add(key)
-                    conflicts.append(
-                        "Both generic 'orchestration-workflow' and bound 'kilo-mcp-orchestrator' are installed in the same scope; they compete for the same trigger."
-                    )
+                            "fixable": is_fixable,
+                            "actionable": is_fixable,
+                            "actions": actions,
+                            "advice": advice,
+                        }
+                        if scope == "global":
+                            global_conflict_keys.setdefault(assistant, set()).add(key)
+                        conflicts.append(
+                            f"Both generic '{generic_name}' and bound '{bound_name}' are installed in the same scope; they compete for the same trigger."
+                        )
 
             # 2. Duplicate name conflict across origins
             by_name: dict[str, list[dict[str, Any]]] = {}
@@ -3179,6 +3620,7 @@ def inspect_environment(
                 "skill_entries": skill_entries,
                 "agents_dir": str(adir),
                 "agents": installed_agents,
+                "agent_entries": agent_entries,
                 "conflicts": conflicts,
                 "structured_conflicts": structured_conflicts,
                 "stale_plugins": stale_plugins,
@@ -3235,9 +3677,10 @@ def inspect_environment(
 
         # Check acknowledgment (persistent or precedence)
         is_acked, _ = is_finding_acknowledged(kind, names, group_entries, acks, group_key=gkey)
-        if not is_acked and kind == "trigger-conflict" and set(names) == {"orchestration-workflow", "kilo-mcp-orchestrator"}:
-            gen_entries = [e for e in group_entries if e.get("name") == "orchestration-workflow"]
-            bnd_entries = [e for e in group_entries if e.get("name") == "kilo-mcp-orchestrator"]
+        if not is_acked and kind == "trigger-conflict":
+            gb_pairs = get_generic_bound_pairs(h)
+            gen_entries = [e for e in group_entries if any(e.get("name") == g for g, _ in gb_pairs)]
+            bnd_entries = [e for e in group_entries if any(e.get("name") == b for _, b in gb_pairs)]
             if gen_entries and bnd_entries:
                 has_prec_gen = any(skill_has_precedence_section(e.get("path", "")) for e in gen_entries)
                 has_prec_bnd = any(skill_has_precedence_section(e.get("path", "")) for e in bnd_entries)
@@ -3312,6 +3755,35 @@ def inspect_environment(
             "state": "stray",
         }]
         s_acked, _ = is_finding_acknowledged("stray", [sp.name], s_entries, acks, group_key=s_gkey)
+        can_parse = False
+        server_preview = ""
+        try:
+            raw = sp.read_text(encoding="utf-8")
+            data = json.loads(raw) if sp.suffix == ".json" else parse_jsonc(raw)
+            if isinstance(data, dict):
+                can_parse = True
+                raw_mcps = data.get("mcpServers") or data.get("mcp_servers") or {}
+                if isinstance(raw_mcps, dict):
+                    c_toml = read_codex_mcps("global", h)
+                    server_preview = ", ".join(f"{sn} (in config.toml: {sn in c_toml})" for sn in raw_mcps.keys())
+        except Exception:
+            can_parse = False
+
+        if can_parse:
+            adv_text = f"Stray configuration file '{s}' is ignored by Codex (reads config.toml)."
+            if server_preview:
+                adv_text += f" Servers in file: {server_preview}"
+            s_actions = [{
+                "action": "trash",
+                "path": str(sp),
+                "reason": f"Move stray configuration file '{sp.name}' to trash",
+            }]
+            s_fixable = True
+        else:
+            adv_text = f"Stray configuration file '{s}' cannot be parsed; refusing to touch."
+            s_actions = []
+            s_fixable = False
+
         finding_groups.append({
             "group_key": s_gkey,
             "kind": "stray",
@@ -3320,12 +3792,118 @@ def inspect_environment(
             "acknowledged": s_acked,
             "locations": [{"assistant": "codex", "scope": "global"}],
             "entries": s_entries,
-            "fixable": False,
-            "actionable": False,
-            "actions": [],
-            "advice": [f"Stray configuration file '{s}' is ignored by Codex (reads config.toml)"],
+            "fixable": s_fixable,
+            "actionable": s_fixable,
+            "actions": s_actions,
+            "advice": [adv_text],
             "count": 1,
         })
+
+    # Add redundant/conflicting MCP findings to finding_groups
+    for asst in ASSISTANTS:
+        for scp in scopes_to_check:
+            sinfo = environments.get(asst, {}).get(scp, {})
+            mcp_srvs = sinfo.get("mcp_servers", {})
+            for sname, sdata in mcp_srvs.items():
+                override_details = sdata.get("override_details", [])
+                for det in override_details:
+                    prov_str = det.get("provenance", "")
+                    is_id = det.get("identical", False)
+                    m_gkey = f"redundant-mcp:{sname}"
+                    m_entries = [{
+                        "name": sname,
+                        "path": prov_str,
+                        "origin": "mcp",
+                        "scope": scp,
+                        "enabled": True,
+                        "state": "redundant" if is_id else "conflicting",
+                    }]
+                    m_acked, _ = is_finding_acknowledged("redundant-mcp", [sname], m_entries, acks, group_key=m_gkey)
+                    if is_id:
+                        m_sev = "info"
+                        m_fixable = True
+                        m_actions = [{
+                            "action": "edit",
+                            "path": prov_str,
+                            "server": sname,
+                            "reason": f"Remove redundant MCP server '{sname}' from {pathlib.Path(prov_str).name}",
+                        }]
+                        m_advice = [f"MCP server '{sname}' is redundantly defined in {pathlib.Path(prov_str).name} (identical to higher-precedence configuration in {pathlib.Path(sdata['provenance']).name})"]
+                    else:
+                        m_sev = "info" if m_acked else "warning"
+                        m_fixable = False
+                        m_actions = []
+                        m_advice = [f"MCP server '{sname}' defined in multiple files with conflicting configurations: {prov_str} vs {sdata['provenance']}"]
+
+                    finding_groups.append({
+                        "group_key": m_gkey,
+                        "kind": "redundant-mcp",
+                        "names": [sname],
+                        "severity": m_sev,
+                        "acknowledged": m_acked,
+                        "locations": [{"assistant": asst, "scope": scp}],
+                        "entries": m_entries,
+                        "fixable": m_fixable,
+                        "actionable": m_fixable,
+                        "actions": m_actions,
+                        "advice": m_advice,
+                        "count": 1,
+                    })
+
+    if ws is not None:
+        for asst in ASSISTANTS:
+            p_mcps = environments.get(asst, {}).get("project", {}).get("mcp_servers", {})
+            g_mcps = environments.get(asst, {}).get("global", {}).get("mcp_servers", {})
+            for sname, p_data in p_mcps.items():
+                if sname in g_mcps:
+                    g_data = g_mcps[sname]
+                    is_equiv = are_mcp_configs_equivalent(p_data.get("config"), g_data.get("config"))
+                    p_prov = p_data.get("provenance", "")
+                    m_gkey = f"redundant-mcp:{sname}:project"
+                    m_entries = [{
+                        "name": sname,
+                        "path": p_prov,
+                        "origin": "mcp",
+                        "scope": "project",
+                        "enabled": True,
+                        "state": "redundant" if is_equiv else "conflicting",
+                    }]
+                    m_acked, _ = is_finding_acknowledged("redundant-mcp", [sname], m_entries, acks, group_key=m_gkey)
+                    if is_equiv:
+                        finding_groups.append({
+                            "group_key": m_gkey,
+                            "kind": "redundant-mcp",
+                            "names": [sname],
+                            "severity": "info",
+                            "acknowledged": m_acked,
+                            "locations": [{"assistant": asst, "scope": "project"}],
+                            "entries": m_entries,
+                            "fixable": True,
+                            "actionable": True,
+                            "actions": [{
+                                "action": "edit",
+                                "path": p_prov,
+                                "server": sname,
+                                "reason": f"Remove redundant project MCP server '{sname}' from {pathlib.Path(p_prov).name}",
+                            }],
+                            "advice": [f"MCP server '{sname}' registered in project scope is identical to global registration"],
+                            "count": 1,
+                        })
+                    else:
+                        finding_groups.append({
+                            "group_key": m_gkey,
+                            "kind": "redundant-mcp",
+                            "names": [sname],
+                            "severity": "info" if m_acked else "warning",
+                            "acknowledged": m_acked,
+                            "locations": [{"assistant": asst, "scope": "project"}],
+                            "entries": m_entries,
+                            "fixable": False,
+                            "actionable": False,
+                            "actions": [],
+                            "advice": [f"MCP server '{sname}' registered in project scope differs from global registration"],
+                            "count": 1,
+                        })
 
     sev_rank = {"error": 0, "warning": 1, "info": 2, "neutral": 3}
     finding_groups.sort(key=lambda g: (sev_rank.get(g["severity"], 9), g["group_key"]))
@@ -3577,7 +4155,9 @@ def install_skills(
                     for agent_md in sorted(src_agents_root.glob("*.md")):
                         aname = agent_md.name
                         target_agent = dest_agents_dir / aname
-                        src_hash = hashlib.sha256(agent_md.read_bytes()).hexdigest()
+                        src_text = agent_md.read_text(encoding="utf-8")
+                        transformed_text = transform_agent_for_assistant(src_text, assistant)
+                        src_hash = hashlib.sha256(transformed_text.encode("utf-8")).hexdigest()
                         is_existing = target_agent.exists() or target_agent.is_symlink()
                         if not is_existing:
                             action = "create"
@@ -3586,7 +4166,7 @@ def install_skills(
                             before_sha256 = None
                             after_sha256 = src_hash
                         else:
-                            cur_state, s_repo, s_hash = detect_agent_state(target_agent, catalog_agents, agent_receipts, h)
+                            cur_state, s_repo, s_hash = detect_agent_state(target_agent, catalog_agents, agent_receipts, h, assistant=assistant)
                             before_sha256 = compute_target_hash(target_agent)
                             if cur_state in ("unmanaged", "modified-or-outdated", "foreign"):
                                 if overwrite_all or aname in overwrite_set:
@@ -3597,7 +4177,7 @@ def install_skills(
                                     action = "skip"
                                     reason = f"Skip {cur_state} agent '{aname}': not in --overwrite list"
                                     after_sha256 = None
-                            elif before_sha256 == compute_target_hash(agent_md):
+                            elif before_sha256 == src_hash:
                                 # Identical content: nothing to do (avoids trashing/copying on every install)
                                 action = "noop"
                                 reason = f"Agent '{aname}' already up to date"
@@ -3629,6 +4209,8 @@ def install_skills(
                             "dest_dir": dest_agents_dir,
                             "link": link,
                             "plan_item": p_item,
+                            "content": transformed_text,
+                            "source_hash": src_hash,
                         })
 
             # 4. Skills to install
@@ -3678,12 +4260,27 @@ def install_skills(
 
                         # Check 2: Skip names that conflict policy would remove
                         asst_policy = policy.get(assistant, "generic" if assistant == "kilo" else "bound")
-                        if asst_policy == "bound" and sname == "orchestration-workflow":
-                            skip_due_to_policy = True
-                            policy_skip_reason = f"removed by conflict policy ('{asst_policy}')"
-                        elif asst_policy == "generic" and sname == "kilo-mcp-orchestrator":
-                            skip_due_to_policy = True
-                            policy_skip_reason = f"removed by conflict policy ('{asst_policy}')"
+                        gb_pairs = get_generic_bound_pairs(h)
+                        bound_for_generic = {g: b for g, b in gb_pairs}
+                        generic_for_bound = {b: g for g, b in gb_pairs}
+                        if asst_policy == "bound":
+                            if sname == "orchestration-workflow":
+                                skip_due_to_policy = True
+                                policy_skip_reason = f"removed by conflict policy ('{asst_policy}')"
+                            elif sname in bound_for_generic:
+                                bound_name = bound_for_generic[sname]
+                                if (dest_skills_dir / bound_name).is_dir() or (dest_skills_dir / bound_name).is_symlink():
+                                    skip_due_to_policy = True
+                                    policy_skip_reason = f"removed by conflict policy ('{asst_policy}')"
+                        elif asst_policy == "generic":
+                            if sname == "kilo-mcp-orchestrator":
+                                skip_due_to_policy = True
+                                policy_skip_reason = f"removed by conflict policy ('{asst_policy}')"
+                            elif sname in generic_for_bound:
+                                generic_name = generic_for_bound[sname]
+                                if (dest_skills_dir / generic_name).is_dir() or (dest_skills_dir / generic_name).is_symlink():
+                                    skip_due_to_policy = True
+                                    policy_skip_reason = f"removed by conflict policy ('{asst_policy}')"
 
                     if skip_due_to_plugin:
                         action = "skip"
@@ -3812,12 +4409,12 @@ def install_skills(
                 if op["link"]:
                     op["target"].symlink_to(op["src"])
                 else:
-                    shutil.copy2(op["src"], op["target"])
+                    op["target"].write_text(op["content"], encoding="utf-8")
                 receipt_data = {
                     "repo": op["repo"],
                     "plugin": op["plugin"],
                     "name": op["agent"],
-                    "source_hash": hashlib.sha256(op["src"].read_bytes()).hexdigest(),
+                    "source_hash": op["source_hash"],
                     "installed_at": datetime.now(timezone.utc).isoformat(),
                     "mode": "symlink" if op["link"] else "copy",
                 }
@@ -4163,6 +4760,259 @@ def _atomic_write_with_backup(path: pathlib.Path, content: str) -> None:
         raise
 
 
+def remove_mcp_from_config(config_path: pathlib.Path, server_name: str) -> tuple[bool, str, str]:
+    """Safely remove an MCP server from a JSON/JSONC/TOML config file.
+    Never modifies an unparseable config file.
+    Returns (ok, new_content, error_message).
+    """
+    if not config_path.is_file():
+        return False, "", "File not found"
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return False, "", f"Cannot read file: {exc}"
+
+    if config_path.suffix == ".toml":
+        try:
+            parsed = tomllib.loads(raw)
+            if not isinstance(parsed, dict):
+                return False, "", "Top-level TOML is not a table"
+        except Exception as exc:
+            return False, "", f"Unparseable TOML ({exc})"
+        pattern = rf'\[mcp_servers\.("?{re.escape(server_name)}"?)\].*?(?=\n\[|\Z)'
+        new_raw = re.sub(pattern, "", raw, flags=re.DOTALL)
+        return True, new_raw.strip() + "\n", ""
+
+    # JSON or JSONC
+    try:
+        data = json.loads(raw)
+    except Exception:
+        try:
+            data = parse_jsonc(raw)
+        except Exception as exc:
+            return False, "", f"Unparseable JSON/JSONC ({exc})"
+
+    if not isinstance(data, dict):
+        return False, "", "Top-level JSON is not an object"
+
+    modified = False
+    if "mcp" in data and isinstance(data["mcp"], dict):
+        if server_name in data["mcp"]:
+            del data["mcp"][server_name]
+            modified = True
+    if "mcpServers" in data and isinstance(data["mcpServers"], dict):
+        if server_name in data["mcpServers"]:
+            del data["mcpServers"][server_name]
+            modified = True
+
+    if not modified:
+        return False, "", f"Server '{server_name}' not found in {config_path.name}"
+
+    new_raw = json.dumps(data, indent=2) + "\n"
+    return True, new_raw, ""
+
+
+def clean_stray(
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    dry_run: bool = False,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    """Clean stray configuration files and redundant MCP overrides.
+    Returns:
+        {ok, dry_run, applied, plan, plan_hash}
+    """
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+
+    def _build_plan() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        p: list[dict[str, Any]] = []
+        ops: list[dict[str, Any]] = []
+
+        # 1. Stray config files
+        codex_json = h / ".codex" / "config.json"
+        if codex_json.is_file():
+            raw = codex_json.read_text(encoding="utf-8")
+            can_parse = False
+            servers_in_json: list[str] = []
+            try:
+                data = json.loads(raw)
+                can_parse = isinstance(data, dict)
+            except Exception:
+                try:
+                    data = parse_jsonc(raw)
+                    can_parse = isinstance(data, dict)
+                except Exception:
+                    can_parse = False
+            if can_parse:
+                mcps = data.get("mcpServers") or data.get("mcp_servers") or {}
+                if isinstance(mcps, dict):
+                    servers_in_json = list(mcps.keys())
+                codex_toml_mcps = read_codex_mcps("global", h)
+                server_preview_parts = [
+                    f"{s} (in config.toml: {s in codex_toml_mcps})"
+                    for s in servers_in_json
+                ]
+                preview_str = f"Servers in file: {', '.join(server_preview_parts)}" if server_preview_parts else "No servers in file"
+                reason = f"Move stray config file '{codex_json.name}' to trash ({preview_str})"
+                p_item = {
+                    "action": "trash",
+                    "path": str(codex_json),
+                    "reason": reason,
+                    "current_state": "stray",
+                    "before_sha256": compute_target_hash(codex_json),
+                    "after_sha256": None,
+                }
+                p.append(p_item)
+                ops.append({
+                    "type": "trash",
+                    "path": codex_json,
+                    "assistant": "codex",
+                    "scope": "global",
+                    "kind": "stray",
+                    "plan_item": p_item,
+                })
+            else:
+                p.append({
+                    "action": "advise",
+                    "path": str(codex_json),
+                    "reason": f"Stray config file '{codex_json}' cannot be parsed; refusing to touch",
+                    "current_state": "stray",
+                    "before_sha256": compute_target_hash(codex_json),
+                    "after_sha256": None,
+                })
+
+        # 2. Redundant MCP overrides in Kilo (global and project)
+        for scp in (["global", "project"] if ws else ["global"]):
+            kilo_mcps = read_kilo_merged_mcps(scp, ws, h)
+            for sname, sdata in kilo_mcps.items():
+                override_details = sdata.get("override_details", [])
+                for det in override_details:
+                    prov_path = pathlib.Path(det["provenance"])
+                    is_id = det.get("identical", False)
+                    if is_id:
+                        ok, new_content, err = remove_mcp_from_config(prov_path, sname)
+                        if ok:
+                            p_item = {
+                                "action": "edit",
+                                "path": str(prov_path),
+                                "server": sname,
+                                "reason": f"Remove redundant MCP server '{sname}' from {prov_path.name} (identical to {pathlib.Path(sdata['provenance']).name})",
+                                "current_state": "redundant",
+                                "before_sha256": compute_target_hash(prov_path),
+                                "after_sha256": hashlib.sha256(new_content.encode("utf-8")).hexdigest(),
+                            }
+                            p.append(p_item)
+                            ops.append({
+                                "type": "edit",
+                                "path": prov_path,
+                                "content": new_content,
+                                "plan_item": p_item,
+                            })
+                        else:
+                            p.append({
+                                "action": "advise",
+                                "path": str(prov_path),
+                                "server": sname,
+                                "reason": f"Cannot remove redundant MCP server '{sname}' from {prov_path.name}: {err}",
+                                "current_state": "redundant",
+                                "before_sha256": compute_target_hash(prov_path),
+                                "after_sha256": None,
+                            })
+
+        # 3. Two-scope redundancy (project identical to global)
+        if ws is not None:
+            for asst in ASSISTANTS:
+                if asst == "kilo":
+                    p_mcps = read_kilo_merged_mcps("project", ws, h)
+                    g_mcps = read_kilo_merged_mcps("global", ws, h)
+                elif asst == "claude":
+                    p_mcps = read_claude_mcps("project", ws, h)
+                    g_mcps = read_claude_mcps("global", ws, h)
+                else:
+                    p_mcps = {}
+                    g_mcps = read_codex_mcps("global", h)
+                for sname, p_data in p_mcps.items():
+                    if sname in g_mcps:
+                        g_data = g_mcps[sname]
+                        if are_mcp_configs_equivalent(p_data.get("config"), g_data.get("config")):
+                            p_prov = pathlib.Path(p_data["provenance"])
+                            ok, new_content, err = remove_mcp_from_config(p_prov, sname)
+                            if ok:
+                                p_item = {
+                                    "action": "edit",
+                                    "path": str(p_prov),
+                                    "server": sname,
+                                    "reason": f"Remove redundant project MCP server '{sname}' from {p_prov.name} (identical to global registration)",
+                                    "current_state": "redundant",
+                                    "before_sha256": compute_target_hash(p_prov),
+                                    "after_sha256": hashlib.sha256(new_content.encode("utf-8")).hexdigest(),
+                                }
+                                p.append(p_item)
+                                ops.append({
+                                    "type": "edit",
+                                    "path": p_prov,
+                                    "content": new_content,
+                                    "plan_item": p_item,
+                                })
+
+        return p, ops
+
+    plan, ops = _build_plan()
+    plan_hash = compute_plan_hash(plan)
+
+    if expect_plan_hash is not None and expect_plan_hash != plan_hash:
+        return {
+            "ok": False,
+            "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed plan hash is {plan_hash}",
+            "plan": plan,
+            "plan_hash": plan_hash,
+        }
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "applied": 0,
+            "plan": plan,
+            "plan_hash": plan_hash,
+        }
+
+    with env_lock(h):
+        plan, ops = _build_plan()
+        plan_hash = compute_plan_hash(plan)
+        if expect_plan_hash is not None and expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed plan hash is {plan_hash}",
+                "plan": plan,
+                "plan_hash": plan_hash,
+            }
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        for op in ops:
+            if op["type"] == "trash":
+                trash_path(
+                    op["path"],
+                    assistant=op["assistant"],
+                    scope=op["scope"],
+                    kind=op["kind"],
+                    reason=op["plan_item"]["reason"],
+                    workspace=ws,
+                    home=h,
+                    timestamp=ts,
+                )
+            elif op["type"] == "edit":
+                _atomic_write_with_backup(op["path"], op["content"])
+
+        return {
+            "ok": True,
+            "applied": len(ops),
+            "plan": plan,
+            "plan_hash": plan_hash,
+        }
+
+
 def register_mcp_server(
     server_repo: str,
     assistants: list[str],
@@ -4176,6 +5026,9 @@ def register_mcp_server(
 ) -> dict[str, Any]:
     h = home or get_home_dir()
     ws = workspace.resolve() if workspace else pathlib.Path.cwd()
+
+    if "all" in assistants:
+        assistants = [a for a in ASSISTANTS if not (a == "kilo" and server_repo == "kilo-mcp")]
 
     if "codex" in assistants and scope != "global":
         raise ValueError("Codex does not support project-scoped MCP registration. Only global scope is supported.")
@@ -4240,22 +5093,48 @@ def register_mcp_server(
                     except json.JSONDecodeError as exc:
                         raise ValueError(f"Refusing to modify {cfg_path}: it is not valid JSON ({exc}). Fix or register the server manually.") from exc
 
-                if claude_bin is not None:
-                    argv = ["claude", "mcp", "add", "--transport", "stdio", "--scope", scope_flag, server_repo, "--", effective_cmd, *cmd_args]
-                    mcps = read_claude_mcps(scope, ws, h)
-                    cur_state = "registered" if server_repo in mcps else "unregistered"
+                target_cfg = {"command": effective_cmd, "args": cmd_args}
+                mcps = read_claude_mcps(scope, ws, h)
+                existing = mcps.get(server_repo)
+                cur_state = "registered" if existing else "unregistered"
+                is_equiv = existing and are_mcp_configs_equivalent(existing.get("config"), target_cfg)
+
+                if is_equiv:
                     p.append({
-                        "action": "cli",
+                        "action": "noop",
+                        "assistant": "claude",
+                        "scope": scope,
+                        "path": "claude" if claude_bin else str(cfg_path),
+                        "command": f"{effective_cmd} {' '.join(shlex.quote(a) for a in cmd_args)}",
+                        "reason": f"MCP server '{server_repo}' already registered in claude ({scope}) with equivalent command",
+                        "current_state": "registered",
+                        "before_sha256": compute_target_hash(cfg_path) if cfg_path.exists() else None,
+                        "after_sha256": None,
+                    })
+                elif claude_bin is not None:
+                    argv = ["claude", "mcp", "add", "--transport", "stdio", "--scope", scope_flag, server_repo, "--", effective_cmd, *cmd_args]
+                    act = "replace" if existing else "cli"
+                    old_c, old_a, _ = normalize_mcp_config(existing.get("config")) if existing else (None, [], {})
+                    old_str = f"{old_c} {' '.join(shlex.quote(a) for a in old_a)}" if old_c else ""
+                    new_str = f"{effective_cmd} {' '.join(shlex.quote(a) for a in cmd_args)}"
+                    reason = f"Register MCP server '{server_repo}' in claude ({scope}) via CLI" if not existing else f"Update registration of '{server_repo}' in claude ({scope}): {old_str} -> {new_str}"
+                    p_item = {
+                        "action": act,
                         "assistant": "claude",
                         "scope": scope,
                         "path": "claude",
                         "command": " ".join(shlex.quote(a) for a in argv),
                         "argv": argv,
-                        "reason": f"Register MCP server '{server_repo}' in claude ({scope}) via CLI",
+                        "reason": reason,
                         "current_state": cur_state,
                         "before_sha256": None,
                         "after_sha256": None,
-                    })
+                    }
+                    if existing:
+                        p_item["old_command"] = old_str
+                        p_item["new_command"] = new_str
+                        p_item["diff"] = f"{old_str} -> {new_str}"
+                    p.append(p_item)
                     cli_ops.append({
                         "assistant": "claude",
                         "argv": argv,
@@ -4281,14 +5160,25 @@ def register_mcp_server(
                         "args": cmd_args,
                     }
                     new_json_str = json.dumps(new_data, indent=2) + "\n"
-                    p.append({
-                        "action": "edit",
+                    act = "replace" if existing else "edit"
+                    p_item = {
+                        "action": act,
+                        "assistant": "claude",
+                        "scope": scope,
                         "path": str(cfg_path),
-                        "reason": f"Register MCP server '{server_repo}' in claude ({scope})",
+                        "reason": f"Register MCP server '{server_repo}' in claude ({scope})" if not existing else f"Update registration of '{server_repo}' in claude ({scope})",
                         "current_state": cur_state,
                         "before_sha256": compute_target_hash(cfg_path),
                         "after_sha256": hashlib.sha256(new_json_str.encode("utf-8")).hexdigest(),
-                    })
+                    }
+                    if existing:
+                        old_c, old_a, _ = normalize_mcp_config(existing.get("config"))
+                        old_str = f"{old_c} {' '.join(shlex.quote(a) for a in old_a)}" if old_c else ""
+                        new_str = f"{effective_cmd} {' '.join(shlex.quote(a) for a in cmd_args)}"
+                        p_item["old_command"] = old_str
+                        p_item["new_command"] = new_str
+                        p_item["diff"] = f"{old_str} -> {new_str}"
+                    p.append(p_item)
                     file_updates.append({
                         "assistant": "claude",
                         "cfg_path": cfg_path,
@@ -4298,23 +5188,48 @@ def register_mcp_server(
             elif assistant == "codex":
                 codex_bin = shutil.which("codex")
                 cfg_path = assistant_mcp_config_path("codex", "global", ws, h)
+                mcps = read_codex_mcps("global", h)
+                existing = mcps.get(server_repo)
+                cur_state = "registered" if existing else "unregistered"
+                target_cfg = {"command": effective_cmd, "args": cmd_args}
+                is_equiv = existing and are_mcp_configs_equivalent(existing.get("config"), target_cfg)
 
-                if codex_bin is not None:
-                    argv = ["codex", "mcp", "add", server_repo, "--", effective_cmd, *cmd_args]
-                    mcps = read_codex_mcps("global", h)
-                    cur_state = "registered" if server_repo in mcps else "unregistered"
+                if is_equiv:
                     p.append({
-                        "action": "cli",
+                        "action": "noop",
+                        "assistant": "codex",
+                        "scope": "global",
+                        "path": "codex" if codex_bin else str(cfg_path),
+                        "command": f"{effective_cmd} {' '.join(shlex.quote(a) for a in cmd_args)}",
+                        "reason": f"MCP server '{server_repo}' already registered in codex (global) with equivalent command",
+                        "current_state": "registered",
+                        "before_sha256": compute_target_hash(cfg_path) if cfg_path.exists() else None,
+                        "after_sha256": None,
+                    })
+                elif codex_bin is not None:
+                    argv = ["codex", "mcp", "add", server_repo, "--", effective_cmd, *cmd_args]
+                    act = "replace" if existing else "cli"
+                    old_c, old_a, _ = normalize_mcp_config(existing.get("config")) if existing else (None, [], {})
+                    old_str = f"{old_c} {' '.join(shlex.quote(a) for a in old_a)}" if old_c else ""
+                    new_str = f"{effective_cmd} {' '.join(shlex.quote(a) for a in cmd_args)}"
+                    reason = f"Register MCP server '{server_repo}' in codex (global) via CLI" if not existing else f"Update registration of '{server_repo}' in codex (global): {old_str} -> {new_str}"
+                    p_item = {
+                        "action": act,
                         "assistant": "codex",
                         "scope": "global",
                         "path": "codex",
                         "command": " ".join(shlex.quote(a) for a in argv),
                         "argv": argv,
-                        "reason": f"Register MCP server '{server_repo}' in codex (global) via CLI",
+                        "reason": reason,
                         "current_state": cur_state,
                         "before_sha256": None,
                         "after_sha256": None,
-                    })
+                    }
+                    if existing:
+                        p_item["old_command"] = old_str
+                        p_item["new_command"] = new_str
+                        p_item["diff"] = f"{old_str} -> {new_str}"
+                    p.append(p_item)
                     cli_ops.append({
                         "assistant": "codex",
                         "argv": argv,
@@ -4370,26 +5285,52 @@ def register_mcp_server(
                     data = {"$schema": "https://app.kilo.ai/config.json"}
                     cur_state = "missing"
 
-                new_data = json.loads(json.dumps(data))
-                new_data.setdefault("mcp", {})[server_repo] = {
+                target_cfg = {
                     "type": "local",
                     "command": [effective_cmd, *cmd_args],
                     "enabled": True,
                 }
-                new_json_str = json.dumps(new_data, indent=2) + "\n"
-                p.append({
-                    "action": "edit",
-                    "path": str(cfg_path),
-                    "reason": f"Register MCP server '{server_repo}' in kilo ({scope})",
-                    "current_state": cur_state,
-                    "before_sha256": compute_target_hash(cfg_path),
-                    "after_sha256": hashlib.sha256(new_json_str.encode("utf-8")).hexdigest(),
-                })
-                file_updates.append({
-                    "assistant": "kilo",
-                    "cfg_path": cfg_path,
-                    "content": new_json_str,
-                })
+                existing_kilo_cfg = data.get("mcp", {}).get(server_repo)
+                is_equiv = existing_kilo_cfg and are_mcp_configs_equivalent(existing_kilo_cfg, target_cfg)
+
+                if is_equiv:
+                    p.append({
+                        "action": "noop",
+                        "assistant": "kilo",
+                        "scope": scope,
+                        "path": str(cfg_path),
+                        "reason": f"MCP server '{server_repo}' already registered in kilo ({scope}) with equivalent command",
+                        "current_state": "registered",
+                        "before_sha256": compute_target_hash(cfg_path),
+                        "after_sha256": None,
+                    })
+                else:
+                    new_data = json.loads(json.dumps(data))
+                    new_data.setdefault("mcp", {})[server_repo] = target_cfg
+                    new_json_str = json.dumps(new_data, indent=2) + "\n"
+                    act = "replace" if existing_kilo_cfg else "edit"
+                    p_item = {
+                        "action": act,
+                        "path": str(cfg_path),
+                        "reason": f"Register MCP server '{server_repo}' in kilo ({scope})" if not existing_kilo_cfg else f"Update registration of '{server_repo}' in kilo ({scope})",
+                        "current_state": cur_state,
+                        "before_sha256": compute_target_hash(cfg_path),
+                        "after_sha256": hashlib.sha256(new_json_str.encode("utf-8")).hexdigest(),
+                    }
+                    if existing_kilo_cfg:
+                        old_c, old_a, _ = normalize_mcp_config(existing_kilo_cfg)
+                        old_str = f"{old_c} {' '.join(shlex.quote(a) for a in old_a)}" if old_c else ""
+                        new_str = f"{effective_cmd} {' '.join(shlex.quote(a) for a in cmd_args)}"
+                        p_item["assistant"] = "kilo"
+                        p_item["old_command"] = old_str
+                        p_item["new_command"] = new_str
+                        p_item["diff"] = f"{old_str} -> {new_str}"
+                    p.append(p_item)
+                    file_updates.append({
+                        "assistant": "kilo",
+                        "cfg_path": cfg_path,
+                        "content": new_json_str,
+                    })
 
         return p, cli_ops, file_updates, needs_venv
 
@@ -4493,6 +5434,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     print("\n=== Environments (Skills & Registered MCPs) ===")
     for assistant, scopes in report["environments"].items():
         for scope, sinfo in scopes.items():
+            if scope not in SCOPES or not isinstance(sinfo, dict):
+                continue
             print(f"\n[{assistant} — {scope}] ({sinfo['installed_count']} skill(s), MCPs: {', '.join(sinfo['registered_mcps']) or 'none'})")
             for sname, sdata in sinfo["skills"].items():
                 print(f"  - {sname:<30} [{sdata['state']}] (source: {sdata['source_repo'] or 'local'})")
@@ -4500,6 +5443,13 @@ def cmd_status(args: argparse.Namespace) -> int:
                 if entry.get("origin") not in ("standalone", "standalone:~/.kilo/skills", "standalone:.kilo/skills"):
                     en_str = "enabled" if entry.get("enabled") else "disabled"
                     print(f"  - {entry['name']:<30} [{entry['state']}] ({entry['origin']}, {en_str})")
+            if sinfo.get("agents"):
+                for aname, adata in sinfo["agents"].items():
+                    print(f"  @ [agent] {aname:<25} [{adata['state']}] (source: {adata.get('source_repo') or 'local'})")
+            for entry in sinfo.get("agent_entries", []):
+                if entry.get("origin") not in ("standalone", "standalone:~/.kilo/agents", "standalone:.kilo/agents"):
+                    en_str = "enabled" if entry.get("enabled") else "disabled"
+                    print(f"  @ [agent] {entry['name']:<25} [{entry['state']}] ({entry['origin']}, {en_str})")
             if sinfo.get("mcp_servers"):
                 for mname, mdata in sinfo["mcp_servers"].items():
                     prov = mdata.get("provenance", "")
@@ -4582,7 +5532,10 @@ def cmd_install_skills(args: argparse.Namespace) -> int:
 
 
 def cmd_register_mcp(args: argparse.Namespace) -> int:
-    assistants = list(ASSISTANTS) if "all" in args.assistants else args.assistants
+    if "all" in args.assistants:
+        assistants = [a for a in ASSISTANTS if not (a == "kilo" and args.server == "kilo-mcp")]
+    else:
+        assistants = args.assistants
     ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
     try:
         res = register_mcp_server(
@@ -4676,6 +5629,28 @@ def cmd_resolve_conflicts(args: argparse.Namespace) -> int:
                     print(f"  ADVISE: {adv}")
             else:
                 print("[ok] No trigger conflicts found.")
+    return 0 if res.get("ok") else 1
+
+
+def cmd_clean_stray(args: argparse.Namespace) -> int:
+    ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
+    res = clean_stray(
+        workspace=ws,
+        home=args.home,
+        dry_run=args.dry_run,
+        expect_plan_hash=args.expect_plan_hash,
+    )
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        if not res.get("ok"):
+            print(f"[error] {res.get('error', 'Execution refused')}", file=sys.stderr)
+        elif res.get("dry_run"):
+            print(f"[dry-run] Plan ({len(res['plan'])} action(s), hash: {res['plan_hash']}):")
+            for item in res["plan"]:
+                print(f"  {item['action'].upper():<8} {item['path']} ({item['reason']})")
+        else:
+            print(f"[ok] Cleaned {res.get('applied', 0)} item(s). Plan hash: {res['plan_hash']}.")
     return 0 if res.get("ok") else 1
 
 
@@ -4966,6 +5941,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_rc.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
     p_rc.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
     p_rc.set_defaults(func=cmd_resolve_conflicts)
+
+    p_cs = sub.add_parser("clean-stray", help="Clean stray configuration files and redundant MCP overrides")
+    p_cs.add_argument("--workspace", default=None)
+    p_cs.add_argument("--dry-run", action="store_true", default=False, help="Compute and display clean plan without executing")
+    p_cs.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
+    p_cs.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
+    p_cs.set_defaults(func=cmd_clean_stray)
 
     p_ack = sub.add_parser("ack", help="Acknowledge a doctor finding until its content changes")
     p_ack.add_argument("finding_key", help="Finding key or group key to acknowledge")
