@@ -406,6 +406,11 @@ def ensure_orchestrator(
         orch_doc["status"] = "active"
         orch_doc["consecutive_owner_turns"] = 0
         orch_doc["consecutive_turn_failures"] = 0
+        cur_c = int(orch_doc.get("cursor", 0))
+        if "delivery_cursor" not in orch_doc:
+            orch_doc["delivery_cursor"] = cur_c
+        if "trigger_scan_cursor" not in orch_doc:
+            orch_doc["trigger_scan_cursor"] = cur_c
         if "current" in orch_doc and isinstance(orch_doc["current"], dict):
             orch_doc["current"]["model"] = chosen_model
             orch_doc["current"]["status"] = "active"
@@ -538,26 +543,269 @@ def resume_orchestrator(workspace: pathlib.Path | str) -> dict[str, Any]:
         return {"status": "active"}
 
 
+def _migrate_orchestrator_cursors(
+    orch_doc: dict[str, Any],
+    orch_file: pathlib.Path | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Ensure both delivery_cursor and trigger_scan_cursor exist; migrate old single cursor (Spec §0c E2, T026)."""
+    migrated = False
+    legacy_cursor = int(orch_doc.get("cursor", 0))
+
+    if "delivery_cursor" not in orch_doc and "delivery" not in orch_doc:
+        orch_doc["delivery_cursor"] = legacy_cursor
+        migrated = True
+    elif "delivery_cursor" not in orch_doc:
+        orch_doc["delivery_cursor"] = int(orch_doc["delivery"])
+        migrated = True
+
+    if "trigger_scan_cursor" not in orch_doc and "trigger_scan" not in orch_doc:
+        orch_doc["trigger_scan_cursor"] = legacy_cursor
+        migrated = True
+    elif "trigger_scan_cursor" not in orch_doc:
+        orch_doc["trigger_scan_cursor"] = int(orch_doc["trigger_scan"])
+        migrated = True
+
+    # Keep cursor in sync with delivery_cursor
+    delivery_val = int(orch_doc.get("delivery_cursor", legacy_cursor))
+    if orch_doc.get("cursor") != delivery_val:
+        orch_doc["cursor"] = delivery_val
+        migrated = True
+
+    if migrated and orch_file and orch_file.is_file():
+        try:
+            _write_json_atomic(orch_file, orch_doc)
+        except Exception:
+            pass
+
+    return orch_doc, migrated
+
+
+def _migrate_trigger_cursor_file(workspace: pathlib.Path | str, role: str = "orchestrator") -> bool:
+    """Ensure triggers/cursor.json has both trigger_scan_cursor and delivery_cursor (Spec §0c E2, T026)."""
+    ws = pathlib.Path(workspace).resolve()
+    cur_path = ws / ".ai-orchestration" / "triggers" / "cursor.json"
+    if not cur_path.is_file():
+        return False
+    try:
+        data = _read_json_safe(cur_path)
+        migrated = False
+        for r, rdata in data.items():
+            if isinstance(rdata, dict):
+                c = int(rdata.get("cursor", 0))
+                if "trigger_scan_cursor" not in rdata:
+                    rdata["trigger_scan_cursor"] = c
+                    migrated = True
+                if "delivery_cursor" not in rdata:
+                    rdata["delivery_cursor"] = c
+                    migrated = True
+        if migrated:
+            _write_json_atomic(cur_path, data)
+        return migrated
+    except Exception:
+        return False
+
+
+def get_delivery_cursor(workspace: pathlib.Path | str, role: str = "orchestrator") -> int:
+    """Get the role delivery cursor (Spec §0c E2, T026)."""
+    ws = pathlib.Path(workspace).resolve()
+    if role == "orchestrator":
+        orch_file = get_orchestrator_file(ws)
+        if not orch_file.is_file():
+            return 0
+        try:
+            orch_doc = _read_json_safe(orch_file)
+            orch_doc, _ = _migrate_orchestrator_cursors(orch_doc, orch_file)
+            return int(orch_doc.get("delivery_cursor", orch_doc.get("cursor", 0)))
+        except Exception:
+            return 0
+    else:
+        role_file = ws / ".ai-orchestration" / "roles" / f"{role}.json"
+        if role_file.is_file():
+            try:
+                rdoc = _read_json_safe(role_file)
+                return int(rdoc.get("delivery_cursor", rdoc.get("cursor", 0)))
+            except Exception:
+                pass
+    return 0
+
+
+def get_trigger_scan_cursor(workspace: pathlib.Path | str, role: str = "orchestrator") -> int:
+    """Get the trigger_scan cursor (Spec §0c E2, E7, T026)."""
+    ws = pathlib.Path(workspace).resolve()
+    _migrate_trigger_cursor_file(ws, role=role)
+
+    if role == "orchestrator":
+        orch_file = get_orchestrator_file(ws)
+        if orch_file.is_file():
+            try:
+                orch_doc = _read_json_safe(orch_file)
+                orch_doc, _ = _migrate_orchestrator_cursors(orch_doc, orch_file)
+                if "trigger_scan_cursor" in orch_doc:
+                    return int(orch_doc["trigger_scan_cursor"])
+            except Exception:
+                pass
+    # Check triggers/cursor.json
+    cur_path = ws / ".ai-orchestration" / "triggers" / "cursor.json"
+    if cur_path.is_file():
+        try:
+            data = _read_json_safe(cur_path)
+            role_data = data.get(role, {})
+            if "trigger_scan_cursor" in role_data:
+                return int(role_data["trigger_scan_cursor"])
+            if "cursor" in role_data:
+                val = int(role_data["cursor"])
+                role_data["trigger_scan_cursor"] = val
+                if "delivery_cursor" not in role_data:
+                    role_data["delivery_cursor"] = val
+                _write_json_atomic(cur_path, data)
+                return val
+        except Exception:
+            pass
+
+    # If role == orchestrator, fallback to delivery cursor / cursor
+    if role == "orchestrator":
+        orch_file = get_orchestrator_file(ws)
+        if orch_file.is_file():
+            try:
+                orch_doc = _read_json_safe(orch_file)
+                return int(orch_doc.get("trigger_scan_cursor", orch_doc.get("cursor", 0)))
+            except Exception:
+                pass
+
+    return 0
+
+
+def advance_delivery_cursor(workspace: pathlib.Path | str, seq: int, role: str = "orchestrator") -> int:
+    """Advance the role delivery cursor monotonically under orchestrator_lock (Spec §0c E2, T026)."""
+    ws = pathlib.Path(workspace).resolve()
+    if role == "orchestrator":
+        with orchestrator_lock(ws):
+            orch_file = get_orchestrator_file(ws)
+            if not orch_file.is_file():
+                raise FileNotFoundError("Orchestrator role file not found")
+            orch_doc = _read_json_safe(orch_file)
+            orch_doc, _ = _migrate_orchestrator_cursors(orch_doc)
+            cur_val = int(orch_doc.get("delivery_cursor", orch_doc.get("cursor", 0)))
+            if seq < cur_val:
+                raise ValueError(f"Delivery cursor can only advance monotonically: attempted {seq} < current {cur_val}")
+            orch_doc["delivery_cursor"] = seq
+            orch_doc["cursor"] = seq
+            if "trigger_scan_cursor" not in orch_doc:
+                orch_doc["trigger_scan_cursor"] = seq
+            _write_json_atomic(orch_file, orch_doc)
+            try:
+                advance_cursor(ws, role="orchestrator", seq=seq)
+            except Exception:
+                pass
+            return seq
+    else:
+        return advance_cursor(ws, seq=seq, role=role)
+
+
+def advance_trigger_scan_cursor(workspace: pathlib.Path | str, seq: int, role: str = "orchestrator") -> int:
+    """Advance the trigger_scan cursor monotonically under orchestrator_lock (Spec §0c E2, E7, T026)."""
+    ws = pathlib.Path(workspace).resolve()
+    cur_val = get_trigger_scan_cursor(ws, role=role)
+    if seq < cur_val:
+        raise ValueError(f"Trigger scan cursor can only advance monotonically: attempted {seq} < current {cur_val}")
+
+    if role == "orchestrator":
+        orch_file = get_orchestrator_file(ws)
+        if orch_file.is_file():
+            with orchestrator_lock(ws):
+                orch_doc = _read_json_safe(orch_file)
+                orch_doc, _ = _migrate_orchestrator_cursors(orch_doc)
+                orch_doc["trigger_scan_cursor"] = seq
+                _write_json_atomic(orch_file, orch_doc)
+
+    cur_path = ws / ".ai-orchestration" / "triggers" / "cursor.json"
+    data = {}
+    if cur_path.is_file():
+        try:
+            data = _read_json_safe(cur_path)
+        except Exception:
+            data = {}
+    rdata = data.get(role, {})
+    deliv = rdata.get("delivery_cursor", get_delivery_cursor(ws, role=role))
+    data[role] = {
+        "cursor": seq,
+        "trigger_scan_cursor": seq,
+        "delivery_cursor": deliv,
+        "updated_at": _now_iso(),
+    }
+    cur_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(cur_path, data)
+    return seq
+
+
 def get_orchestrator_status(workspace: pathlib.Path | str) -> dict[str, Any]:
-    """Return status of the orchestrator role, current session, and queue."""
+    """Return status of the orchestrator role, current session, and queue (read-only, Spec §0, T026)."""
     ws = pathlib.Path(workspace).resolve()
     orch_file = get_orchestrator_file(ws)
 
+    # Read-only check: if orchestrator.json is missing, report missing without writing or locking
+    if not orch_file.is_file():
+        return {
+            "role": "orchestrator",
+            "generation": None,
+            "status": "missing",
+            "session_id": None,
+            "provider_session_id": None,
+            "tool": None,
+            "model": None,
+            "cursor": 0,
+            "delivery_cursor": 0,
+            "trigger_scan_cursor": 0,
+            "turns": 0,
+            "last_usage": None,
+            "consecutive_owner_turns": 0,
+            "consecutive_turn_failures": 0,
+            "fencing_token": None,
+            "queue": {
+                "total": 0,
+                "queued": 0,
+                "running": 0,
+            },
+        }
+
     with orchestrator_lock(ws):
         if not orch_file.is_file():
-            # Auto-register if not yet started
-            orch_doc = ensure_orchestrator(ws)
-        else:
-            try:
-                orch_doc = _read_json_safe(orch_file)
-            except Exception:
-                orch_doc = ensure_orchestrator(ws)
+            return {
+                "role": "orchestrator",
+                "generation": None,
+                "status": "missing",
+                "session_id": None,
+                "provider_session_id": None,
+                "tool": None,
+                "model": None,
+                "cursor": 0,
+                "delivery_cursor": 0,
+                "trigger_scan_cursor": 0,
+                "turns": 0,
+                "last_usage": None,
+                "consecutive_owner_turns": 0,
+                "consecutive_turn_failures": 0,
+                "fencing_token": None,
+                "queue": {
+                    "total": 0,
+                    "queued": 0,
+                    "running": 0,
+                },
+            }
+        try:
+            orch_doc = _read_json_safe(orch_file)
+            orch_doc, _ = _migrate_orchestrator_cursors(orch_doc, orch_file)
+        except Exception:
+            orch_doc = {}
 
         queue_items = list_queue(ws)
         queued_count = sum(1 for q in queue_items if q.get("state") == "queued")
         running_count = sum(1 for q in queue_items if q.get("state") == "running")
 
         cur = orch_doc.get("current", {})
+        deliv_cur = int(orch_doc.get("delivery_cursor", orch_doc.get("cursor", 0)))
+        scan_cur = int(orch_doc.get("trigger_scan_cursor", orch_doc.get("cursor", 0)))
+
         return {
             "role": "orchestrator",
             "generation": orch_doc.get("generation", 1),
@@ -566,7 +814,9 @@ def get_orchestrator_status(workspace: pathlib.Path | str) -> dict[str, Any]:
             "provider_session_id": cur.get("provider_session_id"),
             "tool": cur.get("tool"),
             "model": cur.get("model"),
-            "cursor": orch_doc.get("cursor", 0),
+            "cursor": deliv_cur,
+            "delivery_cursor": deliv_cur,
+            "trigger_scan_cursor": scan_cur,
             "turns": cur.get("turns", 0),
             "last_usage": cur.get("last_usage"),
             "consecutive_owner_turns": orch_doc.get("consecutive_owner_turns", 0),
@@ -1369,13 +1619,17 @@ def execute_claimed_turn(
             fresh_orch["consecutive_owner_turns"] = 0
         fresh_orch["consecutive_turn_failures"] = 0
 
-        # Advance cursor for event deliveries (Spec §0c E2)
+        # Advance cursor for event deliveries (Spec §0c E2, T026)
         if turn_record.get("events"):
             seqs = [e.get("seq") for e in turn_record["events"] if isinstance(e.get("seq"), int)]
             if seqs:
                 max_s = max(seqs)
-                if max_s > fresh_orch.get("cursor", 0):
+                cur_deliv = int(fresh_orch.get("delivery_cursor", fresh_orch.get("cursor", 0)))
+                if max_s > cur_deliv:
                     fresh_orch["cursor"] = max_s
+                    fresh_orch["delivery_cursor"] = max_s
+                    if "trigger_scan_cursor" not in fresh_orch:
+                        fresh_orch["trigger_scan_cursor"] = max_s
                     try:
                         advance_cursor(ws, role="orchestrator", seq=max_s)
                     except Exception:
@@ -1866,10 +2120,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.json:
                 print(json.dumps(res, indent=2))
             else:
-                print(f"Role         : {res.get('role')} (generation {res.get('generation')})")
+                gen_str = f" (generation {res.get('generation')})" if res.get('generation') is not None else ""
+                print(f"Role         : {res.get('role')}{gen_str}")
                 print(f"Status       : {res.get('status')}")
-                print(f"Tool / Model : {res.get('tool')} ({res.get('model')})")
-                print(f"Session ID   : {res.get('session_id')}")
+                tool_str = res.get('tool') or '-'
+                model_str = f" ({res.get('model')})" if res.get('model') else ""
+                print(f"Tool / Model : {tool_str}{model_str}")
+                print(f"Session ID   : {res.get('session_id') or '-'}")
                 print(f"Provider ID  : {res.get('provider_session_id') or '-'}")
                 print(f"Turns Run    : {res.get('turns')}")
                 print(f"Cursor       : {res.get('cursor')}")

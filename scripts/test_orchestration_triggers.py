@@ -50,6 +50,7 @@ from orchestration_triggers import (
     execute_action,
     find_active_batch,
     get_firing_record,
+    get_trigger_scan_cursor,
     list_proposals,
     load_triggers_config,
     make_firing_id,
@@ -322,9 +323,11 @@ enabled = true
     assert res["events_processed"] == 3
     assert len(res["firings"]) == 2  # e1, e2 matched, e3 did not
 
-    # Cursor should advance to highest seq (4)
-    new_cursor = get_cursor(ws, role="orchestrator")
+    # Trigger scan cursor should advance to highest seq (4)
+    new_cursor = get_trigger_scan_cursor(ws, role="orchestrator")
     assert new_cursor == e3["seq"]
+    # Role delivery cursor must not have advanced because no turn was executed
+    assert get_cursor(ws, role="orchestrator") == 1
 
     # Batch should be marked acknowledged in batches dir
     batch = find_active_batch(ws, role="orchestrator")
@@ -410,7 +413,7 @@ enabled = true
     res1 = run_once(ws)
     assert res1["status"] == "partial_settled"
     # e1 settled, so watermark advanced to e1 (seq 2)
-    assert get_cursor(ws, role="orchestrator") == e1["seq"]
+    assert get_trigger_scan_cursor(ws, role="orchestrator") == e1["seq"]
 
     # Event 1 was executed, event 2 was attempted
     assert execution_calls == [e1["seq"], e2["seq"]]
@@ -424,7 +427,7 @@ enabled = true
     # Now second run: crash condition does not trigger (len(execution_calls) == 2 is false)
     res2 = run_once(ws)
     assert res2["status"] == "acknowledged"
-    assert get_cursor(ws, role="orchestrator") == e2["seq"]
+    assert get_trigger_scan_cursor(ws, role="orchestrator") == e2["seq"]
 
     # Event 1 was NOT re-executed! Event 2 was re-executed.
     assert execution_calls == [e1["seq"], e2["seq"], e2["seq"]]
@@ -655,7 +658,7 @@ enabled = true
 
     # Wait for daemon loop to process
     time.sleep(0.4)
-    assert get_cursor(ws, role="orchestrator") >= ev["seq"]
+    assert get_trigger_scan_cursor(ws, role="orchestrator") >= ev["seq"]
 
     # Stop daemon
     daemon.stop()

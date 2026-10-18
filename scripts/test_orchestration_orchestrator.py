@@ -16,6 +16,7 @@ Verifies:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import pathlib
@@ -36,6 +37,7 @@ for p in (SCRIPTS_DIR, REPO_ROOT / "plugins" / "shared" / "skills" / "orchestrat
 import orchestration_orchestrator as orch
 import orchestration_events as events
 import orchestration_sessions as sessions
+import orchestration_triggers as triggers
 
 
 @pytest.fixture(autouse=True)
@@ -93,17 +95,27 @@ resume_argv = ["{sys.executable}", "{STUB_AGENT}", "--session-id", "{{session_id
 # ---------------------------------------------------------------------------
 
 def test_self_registration_on_empty_workspace(ws: pathlib.Path):
-    """When no orchestrator session exists, status/start self-registers generation 1."""
+    """When no orchestrator session exists, status reports missing (read-only); start registers generation 1."""
     orch_file = ws / ".ai-orchestration" / "orchestrator.json"
     assert not orch_file.exists()
 
     status = orch.get_orchestrator_status(ws)
     assert status["role"] == "orchestrator"
-    assert status["generation"] == 1
-    assert status["status"] == "active"
-    assert status["tool"] == "claude"
-    assert status["session_id"] is not None
-    assert status["turns"] == 0
+    assert status["status"] == "missing"
+    assert status["generation"] is None
+    assert not orch_file.exists()
+
+    # start_orchestrator is the registering path
+    start_res = orch.start_orchestrator(ws)
+    assert start_res["generation"] == 1
+
+    status2 = orch.get_orchestrator_status(ws)
+    assert status2["role"] == "orchestrator"
+    assert status2["generation"] == 1
+    assert status2["status"] == "active"
+    assert status2["tool"] == "claude"
+    assert status2["session_id"] is not None
+    assert status2["turns"] == 0
 
     assert orch_file.is_file()
     evs = events.read_events(ws)
@@ -544,7 +556,29 @@ def test_cancel_queued_turn(ws: pathlib.Path):
 
 def test_cli_subcommands(ws: pathlib.Path):
     """Test ai-orch orchestrator subcommands via subprocess."""
-    # 1. status
+    # 1. status on fresh workspace is missing
+    res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "orchestrator", "status", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    st = json.loads(res.stdout)
+    assert st["role"] == "orchestrator"
+    assert st["status"] == "missing"
+
+    # Start orchestrator
+    res_start = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "orchestrator", "start", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert res_start.returncode == 0
+    st_start = json.loads(res_start.stdout)
+    assert st_start["generation"] == 1
+
+    # Status now shows generation 1 active
     res = subprocess.run(
         [sys.executable, str(BIN_AI_ORCH), "orchestrator", "status", "--workspace", str(ws), "--json"],
         capture_output=True,
@@ -554,6 +588,7 @@ def test_cli_subcommands(ws: pathlib.Path):
     st = json.loads(res.stdout)
     assert st["role"] == "orchestrator"
     assert st["generation"] == 1
+    assert st["status"] == "active"
 
     # 2. enqueue
     res = subprocess.run(
@@ -800,3 +835,236 @@ def test_ensure_orchestrator_refuses_uninstalled_tool(ws: pathlib.Path):
     msg = str(exc_info.value)
     assert "nonexistent_ghost_tool" in msg
     assert "ai-orch setup" in msg
+
+
+# ---------------------------------------------------------------------------
+# 13. T026 Trigger Enqueue Race & Cursor Separation Tests
+# ---------------------------------------------------------------------------
+
+def test_status_on_fresh_workspace_writes_nothing(tmp_path: pathlib.Path):
+    """Spec §0, T026: status on a fresh workspace reports missing and writes nothing."""
+    fresh_ws = tmp_path / "fresh_workspace"
+    fresh_ws.mkdir()
+
+    before_entries = sorted([str(p.relative_to(fresh_ws)) for p in fresh_ws.rglob("*")])
+
+    # 1. API call
+    st = orch.get_orchestrator_status(fresh_ws)
+    assert st["role"] == "orchestrator"
+    assert st["status"] == "missing"
+    assert st["generation"] is None
+    assert st["session_id"] is None
+    assert st["cursor"] == 0
+    assert st["delivery_cursor"] == 0
+    assert st["trigger_scan_cursor"] == 0
+
+    mid_entries = sorted([str(p.relative_to(fresh_ws)) for p in fresh_ws.rglob("*")])
+    assert before_entries == mid_entries
+    assert not (fresh_ws / ".ai-orchestration").exists()
+
+    # 2. CLI call
+    res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "orchestrator", "status", "--workspace", str(fresh_ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    cli_data = json.loads(res.stdout)
+    assert cli_data["role"] == "orchestrator"
+    assert cli_data["status"] == "missing"
+
+    after_entries = sorted([str(p.relative_to(fresh_ws)) for p in fresh_ws.rglob("*")])
+    assert before_entries == after_entries
+    assert not (fresh_ws / ".ai-orchestration").exists()
+
+
+def test_concurrent_owner_and_trigger_enqueue(ws: pathlib.Path):
+    """Spec §0c E6, T026: concurrent owner and trigger enqueues never lose or overwrite a turn."""
+    orch.start_orchestrator(ws)
+
+    num_owner = 15
+    num_trigger = 15
+    total_turns = num_owner + num_trigger
+
+    def do_owner_enqueue(idx: int):
+        return orch.enqueue_turn(ws, turn_type="owner_chat", message=f"owner turn {idx}")
+
+    def do_trigger_enqueue(idx: int):
+        ev = {"id": f"ev-trig-{idx}", "seq": 500 + idx, "type": "task.created"}
+        return triggers._enqueue_orchestrator_turn(ws, f"rule-{idx}", ev)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = []
+        for i in range(num_owner):
+            futures.append(executor.submit(do_owner_enqueue, i))
+        for i in range(num_trigger):
+            futures.append(executor.submit(do_trigger_enqueue, i))
+
+        results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+    assert len(results) == total_turns
+
+    # Check queue on disk
+    queue_items = orch.list_queue(ws)
+    assert len(queue_items) == total_turns
+
+    turn_seqs = [q["turn_seq"] for q in queue_items]
+    assert len(set(turn_seqs)) == total_turns
+    assert sorted(turn_seqs) == list(range(1, total_turns + 1))
+
+    # All files exist and match sequence format
+    q_dir = orch.get_queue_dir(ws)
+    q_files = sorted(list(q_dir.glob("*.json")))
+    assert len(q_files) == total_turns
+
+
+def test_trigger_enqueued_turn_crash_does_not_advance_delivery_cursor(ws: pathlib.Path):
+    """Spec §0c E2, T026: crashed turn does not advance delivery cursor; events are redelivered."""
+    orch.start_orchestrator(ws)
+
+    st0 = orch.get_orchestrator_status(ws)
+    assert st0["cursor"] == 0
+    assert st0["delivery_cursor"] == 0
+    assert st0["trigger_scan_cursor"] == 0
+
+    # Emit an event
+    ev = events.emit(ws, "task.transitioned", payload={"task_id": "T001", "to": "delivered"}, subject="T001")
+    ev_seq = ev["seq"]
+
+    # Configure trigger rule
+    cfg = ws / ".ai-orchestration.local.toml"
+    current_cfg = cfg.read_text(encoding="utf-8")
+    cfg.write_text(
+        current_cfg
+        + """
+[[triggers]]
+name = "enqueue-on-delivered"
+on = "task.transitioned"
+action = "enqueue-turn"
+enabled = true
+""",
+        encoding="utf-8",
+    )
+
+    # Run trigger engine once to process event and enqueue turn
+    trig_res = triggers.run_once(ws)
+    assert trig_res["ok"] is True
+    assert trig_res["events_processed"] >= 1
+
+    # Trigger scan cursor advanced, but delivery cursor MUST STILL BE 0!
+    st1 = orch.get_orchestrator_status(ws)
+    assert st1["trigger_scan_cursor"] == ev_seq
+    assert st1["delivery_cursor"] == 0
+    assert st1["cursor"] == 0
+
+    # Configure tool to fail exit 1
+    cfg.write_text(
+        f"""[routing]
+default_orchestrator = "claude"
+
+[orchestrator]
+rotate_after_tokens = 50000
+timeout_seconds = 30.0
+
+[tools.claude]
+enabled = true
+
+[tools.claude.headless]
+argv = ["{sys.executable}", "{STUB_AGENT}", "--exit-code", "1", "--session-id", "{{session_id}}"]
+resume_argv = ["{sys.executable}", "{STUB_AGENT}", "--exit-code", "1", "--session-id", "{{session_id}}"]
+""",
+        encoding="utf-8",
+    )
+
+    # Run turn: crashes on first attempt
+    run_res1 = orch.run_next_turn(ws)
+    assert run_res1["status"] in ("retrying", "failed")
+
+    # Delivery cursor MUST NOT advance on crash
+    st2 = orch.get_orchestrator_status(ws)
+    assert st2["delivery_cursor"] == 0
+    assert st2["cursor"] == 0
+    assert st2["trigger_scan_cursor"] == ev_seq
+
+    # Fix tool configuration to succeed
+    cfg.write_text(
+        f"""[routing]
+default_orchestrator = "claude"
+
+[orchestrator]
+rotate_after_tokens = 50000
+timeout_seconds = 30.0
+
+[tools.claude]
+enabled = true
+
+[tools.claude.headless]
+argv = ["{sys.executable}", "{STUB_AGENT}", "--session-id", "{{session_id}}"]
+resume_argv = ["{sys.executable}", "{STUB_AGENT}", "--session-id", "{{session_id}}"]
+""",
+        encoding="utf-8",
+    )
+
+    # Retry turn: executes successfully
+    run_res2 = orch.run_next_turn(ws)
+    assert run_res2["status"] == "done"
+
+    # Now delivery cursor advances after durable completion!
+    st3 = orch.get_orchestrator_status(ws)
+    assert st3["delivery_cursor"] == ev_seq
+    assert st3["cursor"] == ev_seq
+    assert st3["trigger_scan_cursor"] == ev_seq
+
+
+def test_cursor_state_file_migration(ws: pathlib.Path):
+    """Spec §0c E2, T026: compatibly migrate existing state files with old single cursor -> both."""
+    orch_dir = ws / ".ai-orchestration"
+    orch_dir.mkdir(parents=True, exist_ok=True)
+    orch_file = orch_dir / "orchestrator.json"
+
+    # Write old state file without delivery_cursor / trigger_scan_cursor
+    old_doc = {
+        "role_id": "orchestrator",
+        "generation": 1,
+        "cursor": 25,
+        "status": "active",
+        "current": {
+            "role_id": "orchestrator",
+            "generation": 1,
+            "session_id": "sess-legacy-001",
+            "tool": "claude",
+            "status": "active",
+            "turns": 3,
+        },
+    }
+    orch._write_json_atomic(orch_file, old_doc)
+
+    # Also old triggers/cursor.json
+    trig_dir = orch_dir / "triggers"
+    trig_dir.mkdir(parents=True, exist_ok=True)
+    old_trig_cursor = {
+        "orchestrator": {
+            "cursor": 25,
+            "updated_at": "2026-10-18T10:00:00Z",
+        }
+    }
+    orch._write_json_atomic(trig_dir / "cursor.json", old_trig_cursor)
+
+    # Reading status should migrate in place
+    st = orch.get_orchestrator_status(ws)
+    assert st["cursor"] == 25
+    assert st["delivery_cursor"] == 25
+    assert st["trigger_scan_cursor"] == 25
+
+    # Check migrated orchestrator.json
+    migrated_orch = json.loads(orch_file.read_text(encoding="utf-8"))
+    assert migrated_orch["cursor"] == 25
+    assert migrated_orch["delivery_cursor"] == 25
+    assert migrated_orch["trigger_scan_cursor"] == 25
+
+    # Check trigger scan cursor getter migrates triggers/cursor.json
+    tsc = triggers.get_trigger_scan_cursor(ws, role="orchestrator")
+    assert tsc == 25
+    migrated_trig = json.loads((trig_dir / "cursor.json").read_text(encoding="utf-8"))
+    assert migrated_trig["orchestrator"]["trigger_scan_cursor"] == 25
+    assert migrated_trig["orchestrator"]["delivery_cursor"] == 25
