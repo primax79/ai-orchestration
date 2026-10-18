@@ -766,3 +766,93 @@ def test_cli_tail_jsonl(ws: pathlib.Path):
     assert e1["seq"] == 1
     assert e2["seq"] == 2
 
+
+# ---------------------------------------------------------------------------
+# Session Field & Filter Tests (Task 12.13)
+# ---------------------------------------------------------------------------
+
+def test_emit_session_field_and_fallback(ws: pathlib.Path):
+    # 1. Explicit session parameter
+    ev1 = emit(ws, "run.started", {"status": "starting"}, session="sess-agent-1", subject="R1")
+    assert ev1["session"] == "sess-agent-1"
+    assert ev1["origin_session"] == "sess-agent-1"
+
+    # 2. Distinct session and origin_session
+    ev2 = emit(
+        ws,
+        "run.started",
+        {"status": "starting"},
+        session="sess-agent-2",
+        origin_session="sess-orch-main",
+        subject="R2",
+    )
+    assert ev2["session"] == "sess-agent-2"
+    assert ev2["origin_session"] == "sess-orch-main"
+
+    # 3. Session extracted from payload
+    ev3 = emit(ws, "run.started", {"session_id": "sess-from-payload"}, subject="R3")
+    assert ev3["session"] == "sess-from-payload"
+    assert ev3["origin_session"] == "sess-from-payload"
+
+
+def test_tail_session_filter_api_and_cli(ws: pathlib.Path):
+    emit(ws, "task.transitioned", {"step": 1}, session="sess-alpha")
+    emit(ws, "run.started", {"step": 2}, session="sess-beta")
+    emit(ws, "run.finished", {"step": 3}, session="sess-alpha")
+    emit(ws, "config.changed", {"step": 4})  # No session
+
+    # API read_events filtering
+    alpha_events = read_events(ws, session="sess-alpha")
+    assert len(alpha_events) == 2
+    assert [e["seq"] for e in alpha_events] == [1, 3]
+
+    beta_events = read_events(ws, session="sess-beta")
+    assert len(beta_events) == 1
+    assert beta_events[0]["seq"] == 2
+
+    # CLI tail filtering
+    cmd = [
+        str(BIN_AI_ORCH),
+        "events",
+        "tail",
+        "--workspace",
+        str(ws),
+        "--session",
+        "sess-alpha",
+        "--json",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    out = json.loads(res.stdout)
+    assert out["ok"] is True
+    assert out["count"] == 2
+    assert [e["seq"] for e in out["events"]] == [1, 3]
+
+
+def test_tail_session_filter_follow_mode(ws: pathlib.Path):
+    stop_event = threading.Event()
+    collected: list[dict[str, Any]] = []
+
+    def collector():
+        for ev in tail_events(ws, session="sess-target", follow=True, poll_interval=0.05, stop_event=stop_event):
+            collected.append(ev)
+
+    t = threading.Thread(target=collector, daemon=True)
+    t.start()
+
+    time.sleep(0.1)
+    emit(ws, "test.ignore", {"data": 1}, session="sess-other")
+    emit(ws, "test.match1", {"data": 2}, session="sess-target")
+    emit(ws, "test.ignore2", {"data": 3})
+    emit(ws, "test.match2", {"data": 4}, origin_session="sess-target")
+
+    deadline = time.time() + 3.0
+    while len(collected) < 2 and time.time() < deadline:
+        time.sleep(0.05)
+
+    stop_event.set()
+    t.join(timeout=2.0)
+
+    assert len(collected) == 2
+    assert [e["type"] for e in collected] == ["test.match1", "test.match2"]
+
+

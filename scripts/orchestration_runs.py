@@ -19,6 +19,7 @@ import copy
 import datetime
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import re
@@ -32,6 +33,8 @@ import threading
 import time
 from typing import Any
 import uuid
+
+logger = logging.getLogger("orchestration_runs")
 
 try:
     import fcntl
@@ -59,11 +62,24 @@ ORCH_CONFIG_DIR = (
     / "orchestration-setup"
     / "scripts"
 )
+SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent
 
 if str(TASKS_ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(TASKS_ENGINE_DIR))
 if str(ORCH_CONFIG_DIR) not in sys.path:
     sys.path.insert(0, str(ORCH_CONFIG_DIR))
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from orchestration_invoke import (
+    get_process_start_time,
+    is_process_alive,
+    get_process_descendants,
+    kill_process_group,
+    SupervisedInvocation,
+    invoke_supervised,
+    InvocationResult,
+)
 
 try:
     from tasks_engine import (
@@ -175,188 +191,135 @@ DEFAULT_LOG_CHUNK_SIZE = int(os.environ.get("AI_ORCH_LOG_CHUNK_SIZE", 10 * 1024 
 
 
 # ---------------------------------------------------------------------------
-# Process Identity and Group Kill Helpers (R2, R9, R13)
+# Event Emission Helpers (Spec §0c E1, Spec §1, Task 12.13)
 # ---------------------------------------------------------------------------
 
-def get_process_start_time(pid: int) -> str | None:
-    """Retrieve process start time via `ps -o lstart= -p <pid>` in ISO format."""
-    if pid <= 0:
-        return None
+def _find_repo_root() -> pathlib.Path | None:
+    cur = pathlib.Path(__file__).resolve().parent
+    for parent in [cur, *cur.parents]:
+        if (parent / "scripts" / "orchestration_events.py").is_file():
+            return parent
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+def _get_orchestration_events() -> Any | None:
     try:
-        res = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            check=False,
+        import orchestration_events
+        return orchestration_events
+    except ImportError:
+        pass
+
+    try:
+        repo_root = _find_repo_root()
+        if repo_root is not None:
+            scripts_dir = repo_root / "scripts"
+            if scripts_dir.is_dir() and str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+        import orchestration_events
+        return orchestration_events
+    except Exception as e:
+        logger.warning("Could not import orchestration_events: %s", e)
+        return None
+
+
+def _emit_run_event(
+    workspace: pathlib.Path | str,
+    event_type: str,
+    record: dict[str, Any],
+    *,
+    data: dict[str, Any] | None = None,
+    subject: str | None = None,
+) -> dict[str, Any] | None:
+    """Emit a run event through orchestration_events into workspace event store."""
+    ws = pathlib.Path(workspace).resolve()
+    orch_events = _get_orchestration_events()
+    if orch_events is None:
+        print(
+            f"[warning] could not import orchestration_events; {event_type} event omitted",
+            file=sys.stderr,
         )
-        if res.returncode != 0:
-            return None
-        out = (res.stdout or "").strip()
-        if not out:
-            return None
-        parts = out.split()
-        if len(parts) >= 5:
-            cleaned = " ".join(parts[:5])
-            try:
-                dt = datetime.datetime.strptime(cleaned, "%a %b %d %H:%M:%S %Y")
-                return dt.isoformat()
-            except ValueError:
-                pass
-        return out
-    except Exception:
+        return None
+
+    run_id = record.get("run_id", "-")
+    resolved_subject = subject or run_id
+    session_id = record.get("session_id")
+    origin_session = record.get("origin_session")
+
+    payload = dict(data) if data is not None else {}
+    if "run_id" not in payload and run_id != "-":
+        payload["run_id"] = run_id
+    if session_id:
+        if "session" not in payload:
+            payload["session"] = session_id
+        if "session_id" not in payload:
+            payload["session_id"] = session_id
+    if record.get("task_id") and "task_id" not in payload:
+        payload["task_id"] = record["task_id"]
+
+    try:
+        ev = orch_events.emit(
+            ws,
+            event_type,
+            payload,
+            source="orchestration_runs",
+            subject=resolved_subject,
+            origin_session=origin_session,
+            session=session_id,
+        )
+        return ev
+    except Exception as e:
+        print(
+            f"[warning] failed to emit {event_type} event for run {run_id}: {e}",
+            file=sys.stderr,
+        )
         return None
 
 
-def is_process_alive(pid: int, expected_start_time: str | None = None) -> bool:
-    """Check if process is alive and optionally verify start time (PID reuse check)."""
-    if pid <= 0:
-        return False
+def _ensure_question_asked_event(
+    workspace: pathlib.Path,
+    record: dict[str, Any],
+    q_id: str,
+    q_text: str,
+    ctx_text: str,
+    parsed_options: list[Any],
+    blocks: str,
+    asked_by: str,
+) -> None:
+    """Emit question.asked if not already emitted by tasks_engine (Spec §1, Task 12.13)."""
+    orch_events = _get_orchestration_events()
+    if orch_events is None:
+        return
     try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    if expected_start_time is not None:
-        cur_start = get_process_start_time(pid)
-        return cur_start is not None and cur_start == expected_start_time
-    return True
-
-
-def get_process_descendants(root_pid: int) -> list[int]:
-    """Find all descendant process IDs of root_pid by recursively walking the process tree."""
-    if root_pid <= 0:
-        return []
-
-    # First attempt: ps -A -o pid=,ppid= (or ps -ax -o pid=,ppid= or ps -o pid=,ppid=)
-    for ps_cmd in (
-        ["ps", "-A", "-o", "pid=,ppid="],
-        ["ps", "-ax", "-o", "pid=,ppid="],
-        ["ps", "-o", "pid=,ppid="],
-    ):
-        try:
-            res = subprocess.run(ps_cmd, capture_output=True, text=True, check=False)
-            if res.returncode == 0 and res.stdout.strip():
-                parent_to_children: dict[int, list[int]] = collections.defaultdict(list)
-                for line in res.stdout.splitlines():
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
-                        try:
-                            pid, ppid = int(parts[0]), int(parts[1])
-                            parent_to_children[ppid].append(pid)
-                        except ValueError:
-                            continue
-                descendants: list[int] = []
-                queue = collections.deque(parent_to_children.get(root_pid, []))
-                visited = {root_pid}
-                while queue:
-                    curr = queue.popleft()
-                    if curr in visited:
-                        continue
-                    visited.add(curr)
-                    descendants.append(curr)
-                    queue.extend(parent_to_children.get(curr, []))
-                return descendants
-        except Exception:
-            pass
-
-    # Fallback: pgrep -P recursively
-    try:
-        descendants = []
-        queue = collections.deque([root_pid])
-        visited = {root_pid}
-        while queue:
-            curr = queue.popleft()
-            res = subprocess.run(["pgrep", "-P", str(curr)], capture_output=True, text=True, check=False)
-            if res.returncode == 0:
-                for line in res.stdout.splitlines():
-                    line = line.strip()
-                    if line:
-                        try:
-                            child_pid = int(line)
-                            if child_pid not in visited:
-                                visited.add(child_pid)
-                                descendants.append(child_pid)
-                                queue.append(child_pid)
-                        except ValueError:
-                            continue
-        return descendants
+        recent = orch_events.read_events(workspace, types=["question.asked"], limit=10)
+        if any(e.get("subject") == q_id for e in recent):
+            return
     except Exception:
-        return []
-
-
-def kill_process_group(
-    pgid: int,
-    leader_pid: int | None = None,
-    expected_leader_start_time: str | None = None,
-    timeout: float = 10.0,
-) -> bool:
-    """Send SIGTERM to process group and agent descendants, then SIGKILL if needed."""
-    if pgid <= 0:
-        return False
-
-    if leader_pid is not None and expected_leader_start_time is not None:
-        cur_start = get_process_start_time(leader_pid)
-        if cur_start is None or cur_start != expected_leader_start_time:
-            # PID reused or leader died with wrong start time: do NOT kill!
-            return False
-
-    # Collect descendants of leader BEFORE sending signals
-    descendants: list[int] = []
-    if leader_pid is not None:
-        descendants = get_process_descendants(leader_pid)
-
-    # 1. Send SIGTERM to descendants
-    for dpid in descendants:
-        try:
-            os.kill(dpid, signal.SIGTERM)
-        except OSError:
-            pass
-
-    # 2. Send SIGTERM to process group
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except OSError:
         pass
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        group_alive = False
-        try:
-            os.killpg(pgid, 0)
-            group_alive = True
-        except OSError:
-            pass
-
-        desc_alive = False
-        for dpid in descendants:
-            try:
-                os.kill(dpid, 0)
-                desc_alive = True
-                break
-            except OSError:
-                pass
-
-        if not group_alive and not desc_alive:
-            return True
-        time.sleep(0.05)
-
-    # Refresh descendants in case any were spawned before leader died
-    all_descendants = set(descendants)
-    if leader_pid is not None:
-        all_descendants.update(get_process_descendants(leader_pid))
-
-    # SIGKILL descendants
-    for dpid in all_descendants:
-        try:
-            os.kill(dpid, signal.SIGKILL)
-        except OSError:
-            pass
-
-    # SIGKILL process group
     try:
-        os.killpg(pgid, signal.SIGKILL)
-    except OSError:
-        pass
-    return True
+        orch_events.emit(
+            workspace,
+            "question.asked",
+            {
+                "question_id": q_id,
+                "origin_run": record.get("run_id"),
+                "question": q_text,
+                "context": ctx_text,
+                "options": parsed_options,
+                "blocks": blocks,
+                "asked_by": asked_by,
+                "session": record.get("session_id"),
+                "session_id": record.get("session_id"),
+            },
+            source="orchestration_runs",
+            subject=q_id,
+            origin_session=record.get("origin_session"),
+            session=record.get("session_id"),
+        )
+    except Exception as e:
+        logger.warning("Failed to emit question.asked event for %s: %s", q_id, e)
 
 
 def expand_secret_env_vars(argv: list[str]) -> list[str]:
@@ -1190,6 +1153,16 @@ def process_run_questions(
                 q_id = res["id"]
                 if q_id not in recorded_questions:
                     recorded_questions.append(q_id)
+                _ensure_question_asked_event(
+                    workspace,
+                    record,
+                    q_id,
+                    q_text,
+                    ctx_text,
+                    parsed_options,
+                    blocks,
+                    asked_by,
+                )
             else:
                 err_msg = res.get("error") or res.get("message") or "Failed to ask question"
                 question_errors.append({"index": idx, "error": err_msg})
@@ -2780,6 +2753,15 @@ def reconcile(record: dict[str, Any], workspace: pathlib.Path | None = None) -> 
         if ws:
             try:
                 save_run_record(ws, record)
+                _emit_run_event(
+                    ws,
+                    "run.lost",
+                    record,
+                    data={
+                        "status": "lost",
+                        "reason": "Process exited or disappeared without recording terminal state",
+                    },
+                )
             except Exception:
                 pass
 
@@ -2818,6 +2800,7 @@ def create_run_record(
     is_batch: bool = False,
     batch_members: list[str] | None = None,
     members: dict[str, Any] | None = None,
+    origin_session: str | None = None,
 ) -> dict[str, Any]:
     """Initialize a run.json record structure (Spec §5.1, R2, R3, R8, Task 09.4)."""
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -2859,6 +2842,7 @@ def create_run_record(
         "started_at": now_iso,
         "ended_at": None,
         "session_id": None,
+        "origin_session": origin_session,
         "continued_from": continued_from,
         "final_report": None,
         "usage": None,
@@ -4276,7 +4260,17 @@ def cmd_start(args: argparse.Namespace) -> int:
                 keep_worktree=bool(getattr(args, "keep_worktree", False) or source_record.get("keep_worktree", False)),
             )
             record["session_id"] = session_id
+            record["origin_session"] = getattr(args, "origin_session", None) or source_record.get("origin_session")
             save_run_record(ws, record)
+            _emit_run_event(
+                ws,
+                "run.started",
+                record,
+                data={
+                    "status": "starting",
+                    "continued_from": args.continue_run_id,
+                },
+            )
 
             sup_cmd = [
                 sys.executable,
@@ -4462,7 +4456,17 @@ def cmd_start(args: argparse.Namespace) -> int:
                 )
                 if session_id:
                     rec["session_id"] = session_id
+                rec["origin_session"] = getattr(args, "origin_session", None)
                 save_run_record(ws, rec)
+                _emit_run_event(
+                    ws,
+                    "run.started",
+                    rec,
+                    data={
+                        "status": "starting",
+                        "panel_id": panel_id,
+                    },
+                )
 
                 sup_cmd = [
                     sys.executable,
@@ -4631,8 +4635,19 @@ def cmd_start(args: argparse.Namespace) -> int:
         )
         if session_id:
             record["session_id"] = session_id
+        record["origin_session"] = getattr(args, "origin_session", None)
 
         save_run_record(ws, record)
+        _emit_run_event(
+            ws,
+            "run.started",
+            record,
+            data={
+                "status": "starting",
+                "is_batch": data.get("is_batch", False),
+                "batch_members": data.get("batch_members"),
+            },
+        )
 
         sup_cmd = [
             sys.executable,
@@ -4743,18 +4758,85 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         with open(run_dir / "stderr.log", "a", encoding="utf-8") as f:
             f.write(f"Working directory '{cwd_path}' does not exist; refusing to run in non-existent directory\n")
         save_run_record(workspace, record)
+        _emit_run_event(
+            workspace,
+            "run.finished",
+            record,
+            data={
+                "status": "failed",
+                "exit_code": 1,
+                "invariant_error": record["invariant_error"],
+            },
+        )
         return 1
 
-    # 3. Spawn agent process in new process group (Instruction 2)
-    try:
-        proc = subprocess.Popen(
-            expanded_argv,
-            stdin=subprocess.PIPE if prompt_via == "stdin" else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(cwd_path),
-            start_new_session=True,
+    # 3. Supervised invocation in isolated process group (Spec §0c E4, E5)
+    inv = SupervisedInvocation(
+        argv=expanded_argv,
+        cwd=cwd_path,
+        prompt_text=prompt_text if prompt_via == "stdin" else None,
+        prompt_via=prompt_via,
+        log_dir=run_dir,
+        max_chunk_size=DEFAULT_LOG_CHUNK_SIZE,
+        stderr_path=run_dir / "stderr.log",
+        timeout=getattr(args, "timeout", None) or record.get("timeout"),
+    )
+
+    def on_started(inv_proc: SupervisedInvocation) -> None:
+        agent_pid = inv_proc.pid
+        agent_pgid = inv_proc.pgid
+        agent_start_time = inv_proc.start_time
+        record["agent"] = {"pid": agent_pid, "pgid": agent_pgid, "start_time": agent_start_time}
+        record["status"] = "running"
+        save_run_record(workspace, record)
+        _emit_run_event(
+            workspace,
+            "run.started",
+            record,
+            data={"status": "running", "agent": record["agent"]},
         )
+
+        # 6. Execute mode: transition task to "in progress" (Instruction 2)
+        if record.get("mode") == "execute":
+            try:
+                tasks_dir = workspace / "tasks"
+                if tasks_dir.is_dir() and transition_task:
+                    if record.get("is_batch"):
+                        for m_id in record.get("batch_members", []):
+                            t = resolve_task_by_id(tasks_dir, m_id)
+                            state = t.get("canonical_state") if t else None
+                            if state in ("open", "bounced"):
+                                ok, trans_res = transition_task(
+                                    tasks_dir=tasks_dir,
+                                    task_id=m_id,
+                                    new_state="in progress",
+                                    actor=record.get("tool"),
+                                )
+                                if ok:
+                                    if "members" in record and isinstance(record["members"], dict) and m_id in record["members"]:
+                                        record["members"][m_id]["state"] = "in progress"
+                                else:
+                                    record.setdefault("task_transition_errors", {})[m_id] = trans_res.get("error") or str(trans_res)
+                        save_run_record(workspace, record)
+                    else:
+                        t = resolve_task_by_id(tasks_dir, record["task_id"])
+                        state = t.get("canonical_state") if t else None
+                        if state in ("open", "bounced"):
+                            ok, trans_res = transition_task(
+                                tasks_dir=tasks_dir,
+                                task_id=record["task_id"],
+                                new_state="in progress",
+                                actor=record.get("tool"),
+                            )
+                            if not ok:
+                                record["task_transition_error"] = trans_res.get("error") or str(trans_res)
+                                save_run_record(workspace, record)
+            except Exception as e:
+                record["task_transition_error"] = str(e)
+                save_run_record(workspace, record)
+
+    try:
+        inv.start(on_started=on_started)
     except Exception as e:
         record["status"] = "failed"
         record["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -4762,159 +4844,19 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         with open(run_dir / "stderr.log", "a", encoding="utf-8") as f:
             f.write(f"Failed to spawn agent: {e}\n")
         save_run_record(workspace, record)
+        _emit_run_event(
+            workspace,
+            "run.finished",
+            record,
+            data={"status": "failed", "exit_code": 1, "agent_error": str(e)},
+        )
         return 1
 
-    # 4. Record agent identity and set status to running (Instruction 2)
-    agent_pid = proc.pid
-    try:
-        agent_pgid = os.getpgid(proc.pid)
-    except OSError:
-        agent_pgid = proc.pid
-    agent_start_time = get_process_start_time(agent_pid)
-    record["agent"] = {"pid": agent_pid, "pgid": agent_pgid, "start_time": agent_start_time}
-    record["status"] = "running"
-    save_run_record(workspace, record)
-
-    # 5. Write prompt to stdin if prompt_via == "stdin"
-    if prompt_via == "stdin" and proc.stdin:
-        try:
-            proc.stdin.write(prompt_text.encode("utf-8"))
-            proc.stdin.flush()
-            proc.stdin.close()
-        except Exception:
-            pass
-
-    # 6. Execute mode: transition task to "in progress" (Instruction 2)
-    if record.get("mode") == "execute":
-        try:
-            tasks_dir = workspace / "tasks"
-            if tasks_dir.is_dir() and transition_task:
-                if record.get("is_batch"):
-                    for m_id in record.get("batch_members", []):
-                        t = resolve_task_by_id(tasks_dir, m_id)
-                        state = t.get("canonical_state") if t else None
-                        if state in ("open", "bounced"):
-                            ok, trans_res = transition_task(
-                                tasks_dir=tasks_dir,
-                                task_id=m_id,
-                                new_state="in progress",
-                                actor=record.get("tool"),
-                            )
-                            if ok:
-                                if "members" in record and isinstance(record["members"], dict) and m_id in record["members"]:
-                                    record["members"][m_id]["state"] = "in progress"
-                            else:
-                                record.setdefault("task_transition_errors", {})[m_id] = trans_res.get("error") or str(trans_res)
-                    save_run_record(workspace, record)
-                else:
-                    t = resolve_task_by_id(tasks_dir, record["task_id"])
-                    state = t.get("canonical_state") if t else None
-                    if state in ("open", "bounced"):
-                        ok, trans_res = transition_task(
-                            tasks_dir=tasks_dir,
-                            task_id=record["task_id"],
-                            new_state="in progress",
-                            actor=record.get("tool"),
-                        )
-                        if not ok:
-                            record["task_transition_error"] = trans_res.get("error") or str(trans_res)
-                            save_run_record(workspace, record)
-        except Exception as e:
-            record["task_transition_error"] = str(e)
-            save_run_record(workspace, record)
-
-    # 7. Stream stdout and stderr
-    stderr_log = run_dir / "stderr.log"
-
-    def stream_stderr():
-        try:
-            with open(stderr_log, "ab", buffering=0) as f:
-                try:
-                    os.chmod(stderr_log, 0o600)
-                except OSError:
-                    pass
-                while True:
-                    chunk = proc.stderr.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-        except Exception:
-            pass
-
-    t_err = threading.Thread(target=stream_stderr, daemon=True)
-    t_err.start()
-
-    max_chunk_size = DEFAULT_LOG_CHUNK_SIZE
-    chunk_manifest_path = run_dir / "chunks.json"
-    manifest: list[dict[str, Any]] = []
-
-    def stream_stdout():
-        chunk_idx = 0
-        current_offset = 0
-        chunk_start_offset = 0
-        cur_fn = f"events.{chunk_idx:03d}.jsonl"
-        cur_path = run_dir / cur_fn
-        cur_file = open(cur_path, "ab", buffering=0)
-        try:
-            os.chmod(cur_path, 0o600)
-        except OSError:
-            pass
-        chunk_written = 0
-
-        def rotate():
-            nonlocal chunk_idx, current_offset, chunk_start_offset, cur_fn, cur_path, cur_file, chunk_written
-            cur_file.close()
-            manifest.append({
-                "chunk": chunk_idx,
-                "file": cur_fn,
-                "start_offset": chunk_start_offset,
-                "end_offset": current_offset,
-            })
-            chunk_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-            chunk_idx += 1
-            chunk_start_offset = current_offset
-            chunk_written = 0
-            cur_fn = f"events.{chunk_idx:03d}.jsonl"
-            cur_path = run_dir / cur_fn
-            cur_file = open(cur_path, "ab", buffering=0)
-            try:
-                os.chmod(cur_path, 0o600)
-            except OSError:
-                pass
-
-        try:
-            while True:
-                line = proc.stdout.readline()
-                if not line:
-                    break
-
-                if chunk_written > 0 and (chunk_written + len(line) > max_chunk_size):
-                    rotate()
-
-                cur_file.write(line)
-                chunk_written += len(line)
-                current_offset += len(line)
-
-            cur_file.close()
-            manifest.append({
-                "chunk": chunk_idx,
-                "file": cur_fn,
-                "start_offset": chunk_start_offset,
-                "end_offset": current_offset,
-            })
-            chunk_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        except Exception:
-            if cur_file:
-                cur_file.close()
-
-    t_out = threading.Thread(target=stream_stdout, daemon=True)
-    t_out.start()
-
-    # Wait for process exit
-    exit_code = proc.wait()
-    t_out.join(timeout=5.0)
-    t_err.join(timeout=5.0)
+    inv_res = inv.wait()
+    exit_code = inv_res.exit_code
+    if inv_res.timed_out:
+        record["status"] = "failed"
+        record["invariant_error"] = f"Execution timed out after {inv.timeout}s"
 
     # 8. Completion handling
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -5169,6 +5111,18 @@ def cmd_supervise(args: argparse.Namespace) -> int:
                         "reason": deliv_reason,
                         "transition_note": deliv_reason,
                     })
+                    _emit_run_event(
+                        workspace,
+                        "run.batch_member",
+                        record,
+                        data={
+                            "task_id": m_id,
+                            "delivered": True,
+                            "state": "delivered",
+                            "commit": c_sha,
+                            "reason": deliv_reason,
+                        },
+                    )
                 else:
                     no_commit_reason = f"No commit produced with prefix {m_id}: in run {record['run_id']}"
                     record["members"][m_id].update({
@@ -5178,6 +5132,18 @@ def cmd_supervise(args: argparse.Namespace) -> int:
                         "reason": no_commit_reason,
                         "transition_note": no_commit_reason,
                     })
+                    _emit_run_event(
+                        workspace,
+                        "run.batch_member",
+                        record,
+                        data={
+                            "task_id": m_id,
+                            "delivered": False,
+                            "state": "in progress",
+                            "commit": None,
+                            "reason": no_commit_reason,
+                        },
+                    )
                     t = resolve_task_by_id(tasks_dir, m_id)
                     if t and t.get("file_path"):
                         tf_path = pathlib.Path(t["file_path"])
@@ -5227,6 +5193,22 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             record["task_transition_error"] = str(e)
 
     save_run_record(workspace, record)
+    _emit_run_event(
+        workspace,
+        "run.finished",
+        record,
+        data={
+            "status": record["status"],
+            "exit_code": record.get("exit_code"),
+            "verdict": record.get("verdict"),
+            "questions": record.get("questions", []),
+            "final_commit": record.get("final_commit"),
+            "usage": record.get("usage"),
+            "agent_error": record.get("agent_error"),
+            "invariant_error": record.get("invariant_error"),
+            "proposal_status": record.get("proposal_status"),
+        },
+    )
     return 0
 
 
@@ -5335,6 +5317,16 @@ def cmd_cancel(args: argparse.Namespace) -> int:
         record["status"] = "cancelled"
         record["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         save_run_record(ws, record)
+        _emit_run_event(
+            ws,
+            "run.cancelled",
+            record,
+            data={
+                "status": "cancelled",
+                "reason": getattr(args, "reason", None) or "Cancelled by user",
+                "ended_at": record["ended_at"],
+            },
+        )
 
     # Outside the flock, kill process group
     agent = record.get("agent", {})
@@ -5539,6 +5531,16 @@ def cmd_mark_delivered(args: argparse.Namespace) -> int:
                     return 1
 
             save_run_record(ws, record)
+            _emit_run_event(
+                ws,
+                "run.delivered",
+                record,
+                data={
+                    "run_id": run_id,
+                    "members": transitioned,
+                    "state": "delivered",
+                },
+            )
             if args.json:
                 print(json.dumps({"ok": True, "run_id": run_id, "members": transitioned, "state": "delivered"}, indent=2))
             else:
@@ -5575,6 +5577,18 @@ def cmd_mark_delivered(args: argparse.Namespace) -> int:
             err_msg = trans_res.get("error") or str(trans_res)
             print_error(args.json, "transition-failed", f"Failed to transition task: {err_msg}")
             return 1
+
+        _emit_run_event(
+            ws,
+            "run.delivered",
+            record,
+            data={
+                "run_id": run_id,
+                "task_id": record["task_id"],
+                "state": "delivered",
+                "commit": record.get("final_commit"),
+            },
+        )
 
     if args.json:
         print(json.dumps({"ok": True, "task_id": record["task_id"], "run_id": run_id, "state": "delivered"}, indent=2))
@@ -5657,6 +5671,18 @@ def cmd_apply_verdict(args: argparse.Namespace) -> int:
                         if ok:
                             transitioned_members.append(tid)
 
+            _emit_run_event(
+                ws,
+                "verdict.applied",
+                record,
+                data={
+                    "run_id": run_id,
+                    "task_id": "batch",
+                    "members": transitioned_members,
+                    "verdict": verdict_val,
+                    "state": verdict_val,
+                },
+            )
             if args.json:
                 print(json.dumps({"ok": True, "task_id": "batch", "members": transitioned_members, "state": verdict_val, "run_id": run_id}, indent=2))
             else:
@@ -5724,6 +5750,22 @@ def cmd_apply_verdict(args: argparse.Namespace) -> int:
                 err_msg = trans_res.get("error") or str(trans_res)
                 print_error(args.json, "transition-failed", f"Failed to transition task: {err_msg}")
                 return 1
+
+        findings = verdict_obj.get("findings", []) if isinstance(verdict_obj, dict) else []
+        checks = verdict_obj.get("checks", []) if isinstance(verdict_obj, dict) else []
+        _emit_run_event(
+            ws,
+            "verdict.applied",
+            record,
+            data={
+                "run_id": run_id,
+                "task_id": record["task_id"],
+                "verdict": verdict_val,
+                "state": verdict_val,
+                "findings": findings,
+                "checks": checks,
+            },
+        )
 
         if args.json:
             print(json.dumps({"ok": True, "task_id": record["task_id"], "state": verdict_val, "run_id": run_id}, indent=2))
@@ -5819,6 +5861,19 @@ def cmd_apply_verdict(args: argparse.Namespace) -> int:
                 err_msg = trans_res.get("error") or str(trans_res)
                 print_error(args.json, "transition-failed", f"Failed to transition task: {err_msg}")
                 return 1
+
+        _emit_run_event(
+            ws,
+            "verdict.applied",
+            panel_runs[0],
+            data={
+                "panel_id": panel_id,
+                "task_id": task_id,
+                "verdict": target_state,
+                "state": target_state,
+                "panel_runs": [r["run_id"] for r in panel_runs],
+            },
+        )
 
         if args.json:
             print(json.dumps({"ok": True, "task_id": task_id, "state": target_state, "panel_id": panel_id}, indent=2))
@@ -6199,6 +6254,16 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
 
     record["cleaned_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     save_run_record(ws, record)
+    _emit_run_event(
+        ws,
+        "run.cleaned",
+        record,
+        data={
+            "run_id": run_id,
+            "cleaned": True,
+            "cleaned_at": record["cleaned_at"],
+        },
+    )
 
     if args.json:
         print(json.dumps({"ok": True, "run_id": run_id, "cleaned": True}, indent=2))
@@ -6273,6 +6338,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--force", action="store_true", help="Bypass same-task active run guard")
     p_start.add_argument("--keep-worktree", action="store_true", default=False, help="Keep detached throwaway worktree after verify run completion")
     p_start.add_argument("--expect-plan-hash", default=None, help="Required for ui/vscode, optional for cli")
+    p_start.add_argument("--origin-session", default=None, help="Origin session ID or role that started the run")
     p_start.add_argument("--requested-by", choices=("ui", "vscode", "cli"), default="cli", help="Caller origin")
     p_start.add_argument("--workspace", default=None, help="Project workspace root")
     p_start.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)

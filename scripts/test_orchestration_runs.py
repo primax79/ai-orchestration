@@ -57,6 +57,7 @@ from orchestration_runs import (
     get_allowed_modes_for_state,
     get_default_mode_for_state,
     ALLOWED_MODES_PER_STATE,
+    TERMINAL_STATES,
     reconcile,
     get_process_start_time,
     is_process_alive,
@@ -5006,4 +5007,529 @@ def test_batch_run_verify_per_member_and_whole_batch(sample_workspace: pathlib.P
     res_app_b = subprocess.run(cmd_app_batch, capture_output=True, text=True, check=True)
     assert json.loads(res_app_b.stdout)["ok"] is True
     assert resolve_task_by_id(tasks_dir, "T042")["canonical_state"] == "verified"
+
+
+# ---------------------------------------------------------------------------
+# Task 12.13: Run Event Emissions and Supervised Invocation Primitive Tests
+# ---------------------------------------------------------------------------
+
+def test_run_events_lifecycle_and_ordering(sample_workspace: pathlib.Path):
+    """Verify events emitted per state change: start -> supervisor start -> finished.
+    Checks seq ordering, source, subject=run_id, data fields, and timestamps."""
+    ws = sample_workspace
+    import orchestration_events
+
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--session-id", "sess-kilo-001", "--exit-code", "0"]\n',
+        encoding="utf-8",
+    )
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--workspace",
+        str(ws),
+        "--origin-session",
+        "sess-orch-main",
+        "--json",
+    ]
+    res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    out = json.loads(res.stdout)
+    assert out["ok"] is True
+    run_id = out["run_id"]
+
+    # Wait for run to finish
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        rec = load_run_record(ws, run_id)
+        if rec and rec.get("status") in TERMINAL_STATES:
+            break
+        time.sleep(0.1)
+
+    rec = load_run_record(ws, run_id)
+    assert rec["status"] == "succeeded"
+
+    events = orchestration_events.read_events(ws)
+    assert len(events) >= 3
+
+    # Check ordering
+    assert events[0]["type"] == "run.started"
+    assert events[0]["subject"] == run_id
+    assert events[0]["source"] == "orchestration_runs"
+    assert events[0]["origin_session"] == "sess-orch-main"
+    assert events[0]["data"]["status"] == "starting"
+    assert events[0]["data"]["task_id"] == "T007"
+    assert events[0]["data"]["run_id"] == run_id
+
+    assert events[1]["type"] == "run.started"
+    assert events[1]["subject"] == run_id
+    assert events[1]["source"] == "orchestration_runs"
+    assert events[1]["data"]["status"] == "running"
+    assert events[1]["data"]["agent"]["pid"] > 0
+
+    # Last event is run.finished
+    fin = next(e for e in events if e["type"] == "run.finished")
+    assert fin["subject"] == run_id
+    assert fin["source"] == "orchestration_runs"
+    assert fin["data"]["status"] == "succeeded"
+    assert fin["data"]["exit_code"] == 0
+    assert fin["data"]["session_id"] == "sess-kilo-001"
+    assert fin["session"] == "sess-kilo-001"
+
+    # Monotonic seq
+    seqs = [e["seq"] for e in events]
+    assert seqs == sorted(seqs)
+
+
+def test_run_events_no_events_on_preview_and_refusal(sample_workspace: pathlib.Path):
+    """Verify that preview commands and refused/failed launches emit zero events."""
+    ws = sample_workspace
+    import orchestration_events
+
+    # 1. Preview
+    cmd_prev = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--task",
+        "T007",
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res_prev = subprocess.run(cmd_prev, capture_output=True, text=True, check=True)
+    assert json.loads(res_prev.stdout)["ok"] is True
+    assert len(orchestration_events.read_events(ws)) == 0
+
+    # 2. Refusal on missing task
+    cmd_bad = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T999",
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res_bad = subprocess.run(cmd_bad, capture_output=True, text=True)
+    assert res_bad.returncode != 0
+    assert len(orchestration_events.read_events(ws)) == 0
+
+
+def test_run_events_cancel(sample_workspace: pathlib.Path):
+    """Verify run.cancelled event emitted on run cancel."""
+    ws = sample_workspace
+    import orchestration_events
+
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--sleep", "30"]\n',
+        encoding="utf-8",
+    )
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res.stdout)["run_id"]
+
+    # Wait for run to enter running state
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        rec = load_run_record(ws, run_id)
+        if rec and rec.get("status") == "running":
+            break
+        time.sleep(0.05)
+
+    cmd_cancel = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cancel",
+        run_id,
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res_cancel = subprocess.run(cmd_cancel, capture_output=True, text=True, check=True)
+    assert json.loads(res_cancel.stdout)["ok"] is True
+
+    canc_events = orchestration_events.read_events(ws, types=["run.cancelled"])
+    assert len(canc_events) == 1
+    assert canc_events[0]["subject"] == run_id
+    assert canc_events[0]["source"] == "orchestration_runs"
+    assert canc_events[0]["data"]["status"] == "cancelled"
+
+
+def test_run_events_lost_reconciliation(sample_workspace: pathlib.Path):
+    """Verify run.lost event emitted when reconciling a dead supervisor run."""
+    ws = sample_workspace
+    import orchestration_events
+
+    record = create_run_record(
+        run_id="20261018-020000-T007-kilo-0001",
+        task_id="T007",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="test",
+        variant=None,
+        effort=None,
+        requested_by="cli",
+        workspace=str(ws),
+        cwd=str(ws),
+        isolation="none",
+        task_bundle_sha256="",
+        argv_display=["kilo"],
+        plan_hash="",
+    )
+    record["status"] = "running"
+    record["supervisor"] = {"pid": 99999999, "start_time": "Sat Oct 17 00:00:00 2026"}
+    save_run_record(ws, record)
+
+    reconcile(record, workspace=ws)
+
+    lost_events = orchestration_events.read_events(ws, types=["run.lost"])
+    assert len(lost_events) == 1
+    assert lost_events[0]["subject"] == "20261018-020000-T007-kilo-0001"
+    assert lost_events[0]["source"] == "orchestration_runs"
+    assert lost_events[0]["data"]["status"] == "lost"
+
+
+def test_run_events_mark_delivered(sample_workspace: pathlib.Path):
+    """Verify run.delivered event emitted on mark-delivered."""
+    ws = sample_workspace
+    import orchestration_events
+
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--exit-code", "0"]\n',
+        encoding="utf-8",
+    )
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res.stdout)["run_id"]
+
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        rec = load_run_record(ws, run_id)
+        if rec and rec.get("status") == "succeeded":
+            break
+        time.sleep(0.1)
+
+    cmd_deliv = [
+        str(BIN_AI_ORCH),
+        "run",
+        "mark-delivered",
+        run_id,
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res_deliv = subprocess.run(cmd_deliv, capture_output=True, text=True, check=True)
+    assert json.loads(res_deliv.stdout)["ok"] is True
+
+    deliv_events = orchestration_events.read_events(ws, types=["run.delivered"])
+    assert len(deliv_events) == 1
+    assert deliv_events[0]["subject"] == run_id
+    assert deliv_events[0]["source"] == "orchestration_runs"
+    assert deliv_events[0]["data"]["task_id"] == "T007"
+    assert deliv_events[0]["data"]["state"] == "delivered"
+
+
+def test_run_events_apply_verdict(sample_workspace: pathlib.Path):
+    """Verify verdict.applied event emitted on apply-verdict."""
+    ws = sample_workspace
+    import orchestration_events
+
+    # First deliver task
+    task_file = ws / "tasks" / "server" / "T007-verification-gate.md"
+    content = task_file.read_text(encoding="utf-8")
+    task_file.write_text(content.replace("- state: open", "- state: delivered"), encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(ws), check=True)
+    subprocess.run(["git", "commit", "-m", "deliver T007"], cwd=str(ws), check=True)
+
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.claude.headless]\nallowed_tools = ["test"]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--verdict", "verified"]\n',
+        encoding="utf-8",
+    )
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "verify",
+        "--tool",
+        "claude",
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    ver_run_id = json.loads(res.stdout)["run_id"]
+
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        rec = load_run_record(ws, ver_run_id)
+        if rec and rec.get("status") == "succeeded":
+            break
+        time.sleep(0.1)
+
+    cmd_apply = [
+        str(BIN_AI_ORCH),
+        "run",
+        "apply-verdict",
+        ver_run_id,
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res_apply = subprocess.run(cmd_apply, capture_output=True, text=True, check=True)
+    assert json.loads(res_apply.stdout)["ok"] is True
+
+    verdict_events = orchestration_events.read_events(ws, types=["verdict.applied"])
+    assert len(verdict_events) == 1
+    assert verdict_events[0]["subject"] == ver_run_id
+    assert verdict_events[0]["source"] == "orchestration_runs"
+    assert verdict_events[0]["data"]["task_id"] == "T007"
+    assert verdict_events[0]["data"]["verdict"] == "verified"
+
+
+def test_run_events_cleanup(sample_workspace: pathlib.Path):
+    """Verify run.cleaned event emitted on cleanup."""
+    ws = sample_workspace
+    import orchestration_events
+
+    record = create_run_record(
+        run_id="20261018-020000-T007-kilo-0002",
+        task_id="T007",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="test",
+        variant=None,
+        effort=None,
+        requested_by="cli",
+        workspace=str(ws),
+        cwd=str(ws),
+        isolation="worktree",
+        task_bundle_sha256="",
+        argv_display=["kilo"],
+        plan_hash="",
+    )
+    record["status"] = "succeeded"
+    save_run_record(ws, record)
+
+    cmd_cleanup = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cleanup",
+        "20261018-020000-T007-kilo-0002",
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res = subprocess.run(cmd_cleanup, capture_output=True, text=True, check=True)
+    assert json.loads(res.stdout)["ok"] is True
+
+    clean_events = orchestration_events.read_events(ws, types=["run.cleaned"])
+    assert len(clean_events) == 1
+    assert clean_events[0]["subject"] == "20261018-020000-T007-kilo-0002"
+    assert clean_events[0]["source"] == "orchestration_runs"
+    assert clean_events[0]["data"]["cleaned"] is True
+
+
+def test_run_events_batch_member_outcomes(sample_workspace: pathlib.Path):
+    """Verify run.batch_member events emitted for batch member tasks."""
+    ws = sample_workspace
+    import orchestration_events
+
+    create_microtask(ws, "T011", "Task 11")
+    create_microtask(ws, "T012", "Task 12")
+    subprocess.run(["git", "add", "."], cwd=str(ws), check=True)
+    subprocess.run(["git", "commit", "-m", "add batch tasks"], cwd=str(ws), check=True)
+
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit-msg", "T011: commit for 11", "--final-report", "--exit-code", "0"]\n',
+        encoding="utf-8",
+    )
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--batch",
+        "T011,T012",
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    batch_run_id = json.loads(res.stdout)["run_id"]
+
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        rec = load_run_record(ws, batch_run_id)
+        if rec and rec.get("status") == "succeeded":
+            break
+        time.sleep(0.1)
+
+    member_events = orchestration_events.read_events(ws, types=["run.batch_member"])
+    assert len(member_events) == 2
+    t11_ev = next(e for e in member_events if e["data"]["task_id"] == "T011")
+    t12_ev = next(e for e in member_events if e["data"]["task_id"] == "T012")
+    assert t11_ev["data"]["delivered"] is True
+    assert t11_ev["data"]["state"] == "delivered"
+    assert t12_ev["data"]["delivered"] is False
+    assert t12_ev["data"]["state"] == "in progress"
+
+
+def test_run_events_question_filed_by_run(sample_workspace: pathlib.Path):
+    """Verify question.asked emitted when run files a question."""
+    ws = sample_workspace
+    import orchestration_events
+
+    q_json = {
+        "question": "Which database should we use?",
+        "context": "Need storage engine for events",
+        "options": ["sqlite", "postgres"],
+        "recommended": "sqlite",
+    }
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--question", {json.dumps(json.dumps(q_json))}, "--exit-code", "0"]\n',
+        encoding="utf-8",
+    )
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--workspace",
+        str(ws),
+        "--json",
+    ]
+    res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res.stdout)["run_id"]
+
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        rec = load_run_record(ws, run_id)
+        if rec and rec.get("status") == "succeeded":
+            break
+        time.sleep(0.1)
+
+    q_events = orchestration_events.read_events(ws, types=["question.asked"])
+    assert len(q_events) >= 1
+    assert q_events[0]["data"]["origin_run"] == run_id
+    assert q_events[0]["data"]["question"] == "Which database should we use?"
+
+
+def test_run_events_session_filter(sample_workspace: pathlib.Path):
+    """Verify events tail --session filter matches runs by session."""
+    ws = sample_workspace
+
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{STUB_AGENT}", "--commit", "--final-report", "--session-id", "sess-kilo-target", "--exit-code", "0"]\n',
+        encoding="utf-8",
+    )
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--workspace",
+        str(ws),
+        "--origin-session",
+        "sess-origin-xyz",
+        "--json",
+    ]
+    res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id = json.loads(res.stdout)["run_id"]
+
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        rec = load_run_record(ws, run_id)
+        if rec and rec.get("status") == "succeeded":
+            break
+        time.sleep(0.1)
+
+    # Filter by origin-session
+    cmd_tail_orig = [
+        str(BIN_AI_ORCH),
+        "events",
+        "tail",
+        "--workspace",
+        str(ws),
+        "--session",
+        "sess-origin-xyz",
+        "--json",
+    ]
+    res_orig = subprocess.run(cmd_tail_orig, capture_output=True, text=True, check=True)
+    out_orig = json.loads(res_orig.stdout)
+    assert out_orig["ok"] is True
+    assert out_orig["count"] >= 2
+    assert all(e["subject"] == run_id for e in out_orig["events"])
+
+    # Filter by agent session-id
+    cmd_tail_agent = [
+        str(BIN_AI_ORCH),
+        "events",
+        "tail",
+        "--workspace",
+        str(ws),
+        "--session",
+        "sess-kilo-target",
+        "--json",
+    ]
+    res_agent = subprocess.run(cmd_tail_agent, capture_output=True, text=True, check=True)
+    out_agent = json.loads(res_agent.stdout)
+    assert out_agent["ok"] is True
+    assert out_agent["count"] >= 1
+    assert any(e["type"] == "run.finished" for e in out_agent["events"])
 

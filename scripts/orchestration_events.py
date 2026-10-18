@@ -430,6 +430,7 @@ def emit(
     correlation_id: str | None = None,
     subject: str | None = None,
     origin_session: str | None = None,
+    session: str | None = None,
     actor: str | None = None,
     event_id: str | None = None,
     max_chunk_size: int | None = None,
@@ -474,9 +475,17 @@ def emit(
         if resolved_subject is None:
             resolved_subject = "-"
 
+        resolved_session = session
+        if resolved_session is None and isinstance(payload, dict):
+            resolved_session = payload.get("session") or payload.get("session_id")
+
         resolved_origin = origin_session
         if resolved_origin is None and isinstance(payload, dict):
             resolved_origin = payload.get("origin_session")
+        if resolved_origin is None:
+            resolved_origin = resolved_session
+
+        final_session = resolved_session or resolved_origin
 
         resolved_actor = actor or source
 
@@ -490,6 +499,7 @@ def emit(
             "data": payload,  # alias for Spec §1
             "subject": resolved_subject,  # Spec §1
             "origin_session": resolved_origin,  # Spec §1
+            "session": final_session,  # Spec §1 session field
             "actor": resolved_actor,  # Spec §1
             "correlation_id": correlation_id,
             "schema_version": SCHEMA_VERSION,
@@ -579,6 +589,7 @@ def outbox_prepare(
     correlation_id: str | None = None,
     subject: str | None = None,
     origin_session: str | None = None,
+    session: str | None = None,
     actor: str | None = None,
     pre_images: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -599,6 +610,7 @@ def outbox_prepare(
         "correlation_id": correlation_id,
         "subject": subject,
         "origin_session": origin_session,
+        "session": session or origin_session,
         "actor": actor,
         "intended_changes": intended_changes or [],
         "pre_images": pre_images or {},
@@ -635,6 +647,7 @@ def outbox_commit(
             correlation_id=record.get("correlation_id"),
             subject=record.get("subject"),
             origin_session=record.get("origin_session"),
+            session=record.get("session"),
             actor=record.get("actor"),
         )
         record["status"] = "committed"
@@ -689,6 +702,7 @@ def outbox_transaction(
     correlation_id: str | None = None,
     subject: str | None = None,
     origin_session: str | None = None,
+    session: str | None = None,
     actor: str | None = None,
     pre_images: dict[str, str] | None = None,
 ):
@@ -707,6 +721,7 @@ def outbox_transaction(
         correlation_id=correlation_id,
         subject=subject,
         origin_session=origin_session,
+        session=session,
         actor=actor,
         pre_images=pre_images,
     )
@@ -791,8 +806,13 @@ def read_events(
                 continue
             if types_set and ev.get("type") not in types_set:
                 continue
-            if session and ev.get("origin_session") != session:
-                continue
+            if session:
+                ev_s = ev.get("session")
+                ev_orig = ev.get("origin_session")
+                p = ev.get("data") if isinstance(ev.get("data"), dict) else (ev.get("payload") if isinstance(ev.get("payload"), dict) else {})
+                p_s = p.get("session") or p.get("session_id") or p.get("origin_session")
+                if session not in (ev_s, ev_orig, p_s):
+                    continue
 
             events.append(ev)
 
@@ -891,8 +911,13 @@ def tail_events(
                     continue
                 if types_set and ev.get("type") not in types_set:
                     continue
-                if session and ev.get("origin_session") != session:
-                    continue
+                if session:
+                    ev_s = ev.get("session")
+                    ev_orig = ev.get("origin_session")
+                    p = ev.get("data") if isinstance(ev.get("data"), dict) else (ev.get("payload") if isinstance(ev.get("payload"), dict) else {})
+                    p_s = p.get("session") or p.get("session_id") or p.get("origin_session")
+                    if session not in (ev_s, ev_orig, p_s):
+                        continue
 
                 last_emitted_seq = seq
                 yield ev
@@ -1018,6 +1043,7 @@ class EventStore:
         correlation_id: str | None = None,
         subject: str | None = None,
         origin_session: str | None = None,
+        session: str | None = None,
         actor: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
@@ -1029,6 +1055,7 @@ class EventStore:
             correlation_id=correlation_id,
             subject=subject,
             origin_session=origin_session,
+            session=session,
             actor=actor,
             **kwargs,
         )
@@ -1155,6 +1182,7 @@ def cmd_emit(args: argparse.Namespace) -> int:
             correlation_id=args.correlation_id,
             subject=args.subject,
             origin_session=getattr(args, "origin_session", None),
+            session=getattr(args, "session", None),
             actor=getattr(args, "actor", None),
         )
     except Exception as e:
@@ -1284,6 +1312,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_emit.add_argument("--subject", help="Optional subject identifier (e.g. task ID)", default=None)
     p_emit.add_argument("--actor", help="Optional actor identifier", default=None)
     p_emit.add_argument("--origin-session", help="Optional origin session ID", default=None)
+    p_emit.add_argument("--session", help="Optional session ID", default=None)
     p_emit.add_argument("--workspace", help="Workspace root directory", default=".")
     p_emit.add_argument("--json", action="store_true", help="Output JSON envelope")
     p_emit.set_defaults(func=cmd_emit)
@@ -1293,7 +1322,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_tail.add_argument("--since", type=int, help="Cursor: return events with seq > SEQ (exclusive; 0 = from the start)", default=None)
     p_tail.add_argument("--limit", type=int, help="Maximum events to return", default=None)
     p_tail.add_argument("--type", action="append", help="Filter by event type (can be repeated or comma-separated)", default=None)
-    p_tail.add_argument("--session", help="Filter by origin_session", default=None)
+    p_tail.add_argument("--session", help="Filter by session ID (agent session or origin session)", default=None)
     p_tail.add_argument("-f", "--follow", action="store_true", help="Poll manifest for new events")
     p_tail.add_argument("--poll-interval", type=float, default=0.25, help="Follow polling interval in seconds")
     p_tail.add_argument("--workspace", help="Workspace root directory", default=".")
