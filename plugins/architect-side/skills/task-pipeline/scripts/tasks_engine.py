@@ -8336,6 +8336,8 @@ def cmd_set_short(args: argparse.Namespace) -> int:
         dry_run=dry_run,
         expect_task_hash=expect_task_hash,
     )
+    if res.get("task_hash") and "plan_hash" not in res:
+        res["plan_hash"] = res["task_hash"]  # same name the UI/VS Code bridges use for the other set-* commands
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
