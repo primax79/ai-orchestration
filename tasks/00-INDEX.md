@@ -67,7 +67,7 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | --- | --- | --- | --- | --- | --- |
 | T022 (Run engine fixes) | P1 | [Run engine fixes found by the 07.5/12.1 live capture](server-and-bindings/T022-run-engine-fixes-found-by-the-07-5-12-1-live-captu.md) | delivered | kilo | - |
 | T024 (Proposal confirm engine) | P2 | [Confirm or reject trigger-proposed actions (engine + UI wiring)](server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md) | delivered | kilo | - |
-| T026 (Trigger enqueue race) | P1 | [Trigger enqueue races the orchestrator queue and advances the role cursor too early](server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md) | open | kilo | - |
+| T026 (Trigger enqueue race) | P1 | [Trigger enqueue races the orchestrator queue and advances the role cursor too early](server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md) | in progress | kilo | - |
 
 ### micro
 

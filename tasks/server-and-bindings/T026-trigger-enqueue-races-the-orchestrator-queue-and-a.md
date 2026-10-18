@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Found by the Codex review of 2026-10-18: a trigger can overwrite a queued turn and events can be lost
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
