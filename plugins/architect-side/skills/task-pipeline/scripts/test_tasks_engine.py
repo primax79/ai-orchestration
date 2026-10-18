@@ -7184,6 +7184,13 @@ def test_set_short_command(tmp_path: pathlib.Path) -> None:
     assert "+- short: custom short title" in payload_dry["diff"]
     # File not modified yet
     assert "- short:" not in t1_path.read_text(encoding="utf-8")
+    # The dry-run hash is the precondition for the apply (preview -> apply flow of the UI bridges)
+    res_flow = run_cli(
+        "set-short", "T001", "custom short title", "--expect-plan-hash", payload_dry["plan_hash"],
+        "--dry-run", "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert json.loads(res_flow.stdout)["ok"] is True
+    assert payload_dry["task_hash"] != payload_dry["new_task_hash"]
 
     # 2. Validation failure on malformed input
     res_bad = run_cli("set-short", "T001", "has trailing period.", "--tasks-dir", str(tasks_dir), "--json")

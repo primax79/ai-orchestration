@@ -4360,7 +4360,8 @@ def set_short(
                 "ok": True,
                 "task_id": node_id,
                 "short": short_title,
-                "task_hash": new_block_hash,
+                "task_hash": actual_hash if dry_run else new_block_hash,  # dry-run: the precondition to pass back
+                "new_task_hash": new_block_hash,
                 "dry_run": dry_run,
                 "diff": diff_str,
             }
@@ -4408,7 +4409,8 @@ def set_short(
                 "ok": True,
                 "task_id": node_id,
                 "short": short_title,
-                "task_hash": new_hash,
+                "task_hash": actual_hash if dry_run else new_hash,  # dry-run: the precondition to pass back
+                "new_task_hash": new_hash,
                 "dry_run": dry_run,
                 "diff": diff_str,
             }
