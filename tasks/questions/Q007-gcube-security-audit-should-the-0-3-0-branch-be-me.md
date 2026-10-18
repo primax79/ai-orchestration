@@ -2,7 +2,7 @@
 
 - id: Q007
 - question: gcube-security-audit: should the 0.3.0 branch be merged and released so the plugin becomes the canonical copy?
-- status: open
+- status: answered
 - blocks: T019 (waiting)
 - decider: owner
 - asked-by: claude:orchestration
@@ -23,6 +23,10 @@ The standalone copy (~/.kilo/skills/gcube-security-audit, symlinked in ~/.claude
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-18
+
+```text
+Owner 2026-10-18: recommended option A for all three (Q006-Q008).
+```

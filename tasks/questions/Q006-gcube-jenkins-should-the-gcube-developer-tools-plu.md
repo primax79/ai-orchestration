@@ -2,7 +2,7 @@
 
 - id: Q006
 - question: gcube-jenkins: should the gcube-developer-tools plugin become the canonical copy, with the env examples ported into it?
-- status: open
+- status: answered
 - blocks: T019 (in progress)
 - decider: owner
 - asked-by: claude:orchestration
@@ -23,6 +23,10 @@ Two copies exist. The standalone ~/.kilo/skills/gcube-jenkins has references/env
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-18
+
+```text
+Owner 2026-10-18: recommended option A for all three (Q006-Q008).
+```

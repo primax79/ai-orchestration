@@ -374,6 +374,20 @@ about one project** is kept in that project, not in the workspace tree:
 undisclosed vulnerabilities. Point to where they are kept instead. A claim
 that something does not exist cites the command that searched for it.
 
+## Citing tasks and questions: id plus a short title
+
+The owner cannot map bare ids to work. Whenever you mention a task, plan task,
+initiative, use case or question in chat, in a summary, in a Final Report or in
+a question's text, write the id followed by a 3-4 word short title in
+parentheses: "T007 (shared release manager)", "12.16 (UI proposal confirm)",
+"Q007 (security-audit release)". Never a bare id, tables included (add a
+short-title column or put the title next to the id).
+
+- Take the short title from the task's `Short:` / `short:` field when it exists;
+  otherwise derive 3-4 words from its full title (keep them stable within a session).
+- When you create a task or question, give it a short title as well, so every
+  agent cites it the same way.
+
 ## Blocking questions (`tasks/questions/Q###-<slug>.md`)
 
 When an agent hits a decision that belongs to the owner or decider (scope changes,

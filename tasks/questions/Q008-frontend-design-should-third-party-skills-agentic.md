@@ -2,7 +2,7 @@
 
 - id: Q008
 - question: frontend-design: should third-party-skills@agentic-coding-kit stay the canonical copy, with Kilo's copy kept in sync?
-- status: open
+- status: answered
 - blocks: T019 (waiting)
 - decider: owner
 - asked-by: claude:orchestration
@@ -23,6 +23,10 @@ The standalone ~/.kilo/skills/frontend-design is byte-identical to agentic-codin
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-18
+
+```text
+Owner 2026-10-18: recommended option A for all three (Q006-Q008).
+```
