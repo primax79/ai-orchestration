@@ -1113,7 +1113,8 @@ def test_trigger_conflict_standalone_dropped_vs_plugin_only_dropped(tmp_path: pa
     assert len(plan_b) == 1
     assert plan_b[0]["action"] == "advise"
     assert plan_b[0]["path"] == str(p_generic_b / "orchestration-workflow")
-    assert "disable plugin architect-side@ai-orchestration in ~/.claude/settings.json (enabledPlugins) or uninstall it" in plan_b[0]["reason"]
+    assert "architect-side@ai-orchestration provides 5 essential orchestration skills" in plan_b[0]["reason"]
+    assert "disable plugin" not in plan_b[0]["reason"]
     assert not any(item["action"] == "trash" for item in plan_b)
 
 
@@ -1571,7 +1572,10 @@ def test_doctor_advice_only_finding_carries_flag_and_apply_is_noop(tmp_path: pat
     assert sc["actionable"] is False
     assert sc["actions"] == []
     assert len(sc["advice"]) == 1
-    assert "disable plugin" in sc["advice"][0]
+    assert "architect-side@ai-orchestration" in sc["advice"][0]
+    assert "disable plugin" not in sc["advice"][0]
+    assert sc["severity"] == "warning"
+    assert sc["acknowledged"] is False
 
     # 2. Dry-run resolution: explicitly states actions=[] and advice=[...]
     rc_dry = run_env(["resolve-conflicts", "--dry-run"], fake_home)
@@ -1579,7 +1583,8 @@ def test_doctor_advice_only_finding_carries_flag_and_apply_is_noop(tmp_path: pat
     assert rc_dry["dry_run"] is True
     assert rc_dry["actions"] == []
     assert len(rc_dry["advice"]) == 1
-    assert "disable plugin" in rc_dry["advice"][0]
+    assert "architect-side@ai-orchestration" in rc_dry["advice"][0]
+    assert "disable plugin" not in rc_dry["advice"][0]
     assert rc_dry["applied"] == 0
     assert rc_dry["resolved_count"] == 0
 
@@ -2246,6 +2251,249 @@ def test_standalone_only_duplicates_p2d_resolution(tmp_path: pathlib.Path) -> No
     assert rc_apply4["applied"] >= 1
     assert not global_skill.exists()
     assert project_skill.exists()
+
+
+def test_doctor_severity_model_and_unmanaged_skills(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # 1. Create unmanaged third-party skill (e.g. impeccable) with no conflict
+    kilo_skills = fake_home / ".kilo" / "skills"
+    unmanaged_dir = kilo_skills / "impeccable"
+    unmanaged_dir.mkdir(parents=True)
+    (unmanaged_dir / "SKILL.md").write_text("# Impeccable Design\n")
+
+    st = run_env(["status"], fake_home)
+    entries = st["environments"]["kilo"]["global"]["skill_entries"]
+    imp_entry = next((e for e in entries if e["name"] == "impeccable"), None)
+    assert imp_entry is not None
+    assert imp_entry["state"] == "unmanaged"
+    assert imp_entry["severity"] == "info"
+
+    # Verify four severity levels are defined in the severity model
+    from orchestration_env import SEVERITY_LEVELS
+    assert SEVERITY_LEVELS == ("error", "warning", "info", "neutral")
+
+
+def test_doctor_cross_assistant_grouping_and_summary_counts(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Standalone + plugin in claude
+    c_skills = fake_home / ".claude" / "skills" / "shared-skill"
+    c_skills.mkdir(parents=True)
+    (c_skills / "SKILL.md").write_text("# Standalone v1\n")
+
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_skills = plugins_cache / "test-plugin" / "pkg" / "1.0.0" / "skills"
+    (p_skills / "shared-skill").mkdir(parents=True)
+    (p_skills / "shared-skill" / "SKILL.md").write_text("# Plugin v2 (differs)\n")
+
+    reg = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    reg.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "pkg@test-plugin": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_skills.parent),
+                }
+            ]
+        }
+    }))
+
+    # Also duplicate name across project scope
+    fake_ws = tmp_path / "workspace"
+    fake_ws.mkdir()
+    ws_claude_skill = fake_ws / ".claude" / "skills" / "shared-skill"
+    ws_claude_skill.mkdir(parents=True)
+    (ws_claude_skill / "SKILL.md").write_text("# Project copy\n")
+
+    st = run_env(["status", "--workspace", str(fake_ws)], fake_home)
+
+    scs_claude = st["environments"]["claude"]["global"]["structured_conflicts"]
+    assert len(scs_claude) >= 1
+    sc = scs_claude[0]
+    assert sc["group_key"] == "duplicate-name:shared-skill"
+    assert "severity" in sc
+    assert "acknowledged" in sc
+    assert "locations" in sc
+    assert {"assistant": "claude", "scope": "global"} in sc["locations"]
+
+    # Verify finding_groups at top level
+    fg = st["finding_groups"]
+    group = next((g for g in fg if g["group_key"] == "duplicate-name:shared-skill"), None)
+    assert group is not None
+    assert group["kind"] == "duplicate-name"
+    assert group["names"] == ["shared-skill"]
+
+    # Summary counts reflect groups
+    sm = st["summary"]
+    assert sm["total_groups"] == len(fg)
+    assert sm[group["severity"]] >= 1
+
+
+def test_doctor_trigger_conflict_automatic_precedence_and_no_disabling(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Plugins cache with Precedence in BOTH skills
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_generic = plugins_cache / "ai-orchestration" / "architect-side" / "0.3.0" / "skills"
+    (p_generic / "orchestration-workflow").mkdir(parents=True)
+    (p_generic / "orchestration-workflow" / "SKILL.md").write_text("# Generic\n\n### Precedence with Bound Skills\nWhen bound skill loaded, defer...\n")
+
+    p_bound = plugins_cache / "kilo-mcp" / "architect-side" / "0.2.2" / "skills"
+    (p_bound / "kilo-mcp-orchestrator").mkdir(parents=True)
+    (p_bound / "kilo-mcp-orchestrator" / "SKILL.md").write_text("# Bound\n\n### Precedence with Generic Skills\nSpecializes tool calls...\n")
+
+    reg = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    reg.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "architect-side@ai-orchestration": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_generic.parent),
+                }
+            ],
+            "architect-side@kilo-mcp": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_bound.parent),
+                }
+            ]
+        }
+    }))
+
+    st = run_env(["status"], fake_home)
+    scs = st["environments"]["claude"]["global"]["structured_conflicts"]
+    assert len(scs) == 1
+    sc = scs[0]
+    assert sc["kind"] == "trigger-conflict"
+    # Automatically acknowledged and info severity!
+    assert sc["acknowledged"] is True
+    assert sc["severity"] == "info"
+    assert "Precedence" in sc["advice"][0]
+    assert st["summary"]["acknowledged"] >= 1
+
+    # Now remove Precedence section from one of the copies
+    (p_bound / "kilo-mcp-orchestrator" / "SKILL.md").write_text("# Bound without precedence section\n")
+    st_noprec = run_env(["status"], fake_home)
+    sc_noprec = st_noprec["environments"]["claude"]["global"]["structured_conflicts"][0]
+    assert sc_noprec["acknowledged"] is False
+    assert sc_noprec["severity"] == "warning"
+    # Crucial: never advise disabling architect-side@ai-orchestration
+    assert "disable plugin" not in sc_noprec["advice"][0]
+    assert "architect-side@ai-orchestration" in sc_noprec["advice"][0]
+
+
+def test_doctor_persistent_ack_and_unack_cli(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Create a duplicate name conflict (advice only)
+    c_skills = fake_home / ".claude" / "skills" / "demo-ack-skill"
+    c_skills.mkdir(parents=True)
+    c_skill_md = c_skills / "SKILL.md"
+    c_skill_md.write_text("# Standalone Copy v1\n")
+
+    plugins_cache = fake_home / ".claude" / "plugins" / "cache"
+    p_skills = plugins_cache / "demo-pkg" / "demo" / "1.0.0" / "skills"
+    (p_skills / "demo-ack-skill").mkdir(parents=True)
+    (p_skills / "demo-ack-skill" / "SKILL.md").write_text("# Plugin Copy v2 (different)\n")
+
+    reg = fake_home / ".claude" / "plugins" / "installed_plugins.json"
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    reg.write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "demo@demo-pkg": [
+                {
+                    "scope": "user",
+                    "installPath": str(p_skills.parent),
+                }
+            ]
+        }
+    }))
+
+    # 1. Status before ack: unacknowledged
+    st1 = run_env(["status"], fake_home)
+    sc1 = st1["environments"]["claude"]["global"]["structured_conflicts"][0]
+    assert sc1["acknowledged"] is False
+    assert st1["summary"]["acknowledged"] == 0
+    gkey = sc1["group_key"]
+    assert gkey == "duplicate-name:demo-ack-skill"
+
+    # 2. Test dry-run ack
+    ack_dry = run_env(["ack", gkey, "--note", "Testing ack", "--dry-run"], fake_home)
+    assert ack_dry["ok"] is True
+    assert ack_dry["dry_run"] is True
+    assert len(ack_dry["plan"]) == 1
+    plan_hash = ack_dry["plan_hash"]
+
+    # Status unchanged after dry-run
+    st_dry = run_env(["status"], fake_home)
+    assert st_dry["environments"]["claude"]["global"]["structured_conflicts"][0]["acknowledged"] is False
+
+    # 3. Test apply ack with expect-plan-hash
+    ack_res = run_env(["ack", gkey, "--note", "Testing ack", "--expect-plan-hash", plan_hash], fake_home)
+    assert ack_res["ok"] is True
+    assert ack_res["acknowledged"] is True
+
+    # Check persistence in doctor-ack.json
+    ack_file = fake_home / ".config" / "ai-orchestration" / "doctor-ack.json"
+    assert ack_file.is_file()
+    ack_data = json.loads(ack_file.read_text(encoding="utf-8"))
+    assert "acknowledgments" in ack_data
+    assert len(ack_data["acknowledgments"]) == 1
+
+    # 4. Status after ack: acknowledged=True, severity=info, summary shows acknowledged
+    st2 = run_env(["status"], fake_home)
+    sc2 = st2["environments"]["claude"]["global"]["structured_conflicts"][0]
+    assert sc2["acknowledged"] is True
+    assert sc2["severity"] == "info"
+    assert st2["summary"]["acknowledged"] == 1
+
+    # 5. Content modification causes ack to lapse automatically!
+    c_skill_md.write_text("# Standalone Copy v1 (MODIFIED CONTENT)\n")
+    st3 = run_env(["status"], fake_home)
+    sc3 = st3["environments"]["claude"]["global"]["structured_conflicts"][0]
+    assert sc3["acknowledged"] is False
+    assert st3["summary"]["acknowledged"] == 0
+
+    # Re-ack modified content
+    run_env(["ack", gkey, "--note", "Re-ack after edit"], fake_home)
+    st4 = run_env(["status"], fake_home)
+    assert st4["environments"]["claude"]["global"]["structured_conflicts"][0]["acknowledged"] is True
+
+    # 6. Test unack
+    unack_res = run_env(["unack", gkey], fake_home)
+    assert unack_res["ok"] is True
+    assert unack_res["unacknowledged"] is True
+
+    st5 = run_env(["status"], fake_home)
+    assert st5["environments"]["claude"]["global"]["structured_conflicts"][0]["acknowledged"] is False
+    assert st5["summary"]["acknowledged"] == 0
+
+
+def test_doctor_json_backward_compatibility(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    st = run_env(["status"], fake_home)
+    expected_top_keys = {"clis", "source_repos", "available_catalog_count", "environments", "stray", "finding_groups", "groups", "summary", "severity_counts"}
+    assert expected_top_keys.issubset(set(st.keys()))
+
+    kilo_env = st["environments"]["kilo"]["global"]
+    expected_env_keys = {
+        "skills_dir", "installed_count", "skills", "skill_entries",
+        "agents_dir", "agents", "conflicts", "structured_conflicts",
+        "stale_plugins", "mcp_config_path", "registered_mcps", "mcp_servers",
+    }
+    assert expected_env_keys.issubset(set(kilo_env.keys()))
 
 
 

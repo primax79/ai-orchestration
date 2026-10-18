@@ -36,6 +36,8 @@ from typing import Any, Callable
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ASSISTANTS = ("kilo", "claude", "codex")
 SCOPES = ("global", "project")
+DOCTOR_ACK_FILENAME = "doctor-ack.json"
+SEVERITY_LEVELS = ("error", "warning", "info", "neutral")
 
 REMOTE_REPOS = {
     "ai-orchestration": "https://github.com/primax79/ai-orchestration.git",
@@ -267,9 +269,17 @@ def get_home_dir() -> pathlib.Path:
     return pathlib.Path.home()
 
 
-def get_env_lock_path(home: pathlib.Path | None = None) -> pathlib.Path:
+def get_config_dir(home: pathlib.Path | None = None) -> pathlib.Path:
     h = home or get_home_dir()
-    return h / ".config" / "ai-orchestration" / "env.lock"
+    return h / ".config" / "ai-orchestration"
+
+
+def get_doctor_ack_path(home: pathlib.Path | None = None) -> pathlib.Path:
+    return get_config_dir(home) / DOCTOR_ACK_FILENAME
+
+
+def get_env_lock_path(home: pathlib.Path | None = None) -> pathlib.Path:
+    return get_config_dir(home) / "env.lock"
 
 
 @contextlib.contextmanager
@@ -286,6 +296,126 @@ def env_lock(home: pathlib.Path | None = None):
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             except Exception:
                 pass
+
+
+def load_doctor_acks(home: pathlib.Path | None = None) -> dict[str, Any]:
+    """Load persistent doctor acknowledgments from <config dir>/doctor-ack.json."""
+    ack_path = get_doctor_ack_path(home)
+    if not ack_path.is_file():
+        return {}
+    try:
+        data = json.loads(ack_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data.get("acknowledgments", data)
+    except Exception:
+        pass
+    return {}
+
+
+def save_doctor_acks(acks: dict[str, Any], home: pathlib.Path | None = None) -> None:
+    """Save persistent doctor acknowledgments to <config dir>/doctor-ack.json atomically."""
+    ack_path = get_doctor_ack_path(home)
+    ack_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "acknowledgments": acks}
+    temp_path = ack_path.with_suffix(f".tmp.{os.getpid()}")
+    try:
+        temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temp_path.replace(ack_path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+
+
+def compute_entries_content_hashes(entries: list[dict[str, Any]]) -> list[str]:
+    """Compute sorted content hashes for all unique involved entries in a finding."""
+    hashes: list[str] = []
+    seen_paths: set[str] = set()
+    for e in entries:
+        ep = e.get("path")
+        if not ep or ep in seen_paths:
+            continue
+        seen_paths.add(ep)
+        h = compute_target_hash(pathlib.Path(ep))
+        if h:
+            hashes.append(h)
+    return sorted(hashes)
+
+
+def make_ack_storage_key(kind: str, names: list[str], content_hashes: list[str]) -> str:
+    """Generate canonical key for doctor-ack.json based on kind and content hashes."""
+    names_str = ",".join(sorted(names))
+    hashes_str = ",".join(content_hashes)
+    return f"{kind}:{names_str}:{hashes_str}"
+
+
+def is_finding_acknowledged(
+    kind: str,
+    names: list[str],
+    entries: list[dict[str, Any]],
+    acks: dict[str, Any],
+    group_key: str | None = None,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Check if a finding matches an active acknowledgment in doctor-ack.json.
+    Returns (is_acked, ack_record).
+    Lapses when any involved copy's content hash changes.
+    """
+    if not acks:
+        return False, None
+
+    current_hashes = compute_entries_content_hashes(entries)
+    sorted_names = sorted(names)
+
+    for ack_id, ack in acks.items():
+        if not isinstance(ack, dict):
+            continue
+        ack_kind = ack.get("kind")
+        ack_names = sorted(ack.get("names", []))
+        ack_hashes = ack.get("content_hashes", [])
+        ack_group_key = ack.get("group_key")
+
+        # Match kind and names (or group_key)
+        kind_matches = (ack_kind == kind)
+        names_match = (ack_names == sorted_names) or (bool(group_key) and ack_group_key == group_key)
+
+        if kind_matches and names_match:
+            # Check content hashes: ack is valid only if hashes match current hashes
+            if ack_hashes == current_hashes and len(current_hashes) > 0:
+                return True, ack
+            elif not current_hashes and not ack_hashes:
+                return True, ack
+
+    return False, None
+
+
+def skill_has_precedence_section(skill_path: pathlib.Path | str) -> bool:
+    """Check if a skill directory (or SKILL.md file) contains a Precedence section."""
+    if not skill_path:
+        return False
+    p = pathlib.Path(skill_path)
+    skill_md = p / "SKILL.md" if p.is_dir() else p
+    if not skill_md.is_file():
+        return False
+    try:
+        text = skill_md.read_text(encoding="utf-8", errors="replace")
+        return bool(re.search(r"^#{1,4}\s+.*Precedence", text, re.MULTILINE) or "Precedence" in text)
+    except Exception:
+        return False
+
+
+def compute_group_key(kind: str, names: list[str], entries: list[dict[str, Any]] | None = None) -> str:
+    sorted_names = sorted(names)
+    names_str = ",".join(sorted_names)
+    if kind == "trigger-conflict":
+        return f"trigger-conflict:{names_str}"
+    elif kind == "duplicate-name":
+        return f"duplicate-name:{names_str}"
+    elif kind == "stale-plugin-copy":
+        return f"stale-plugin-copy:{names_str}"
+    elif kind == "stray":
+        return f"stray:{names_str}"
+    else:
+        return f"{kind}:{names_str}"
 
 
 def get_repos_cache_dir(home: pathlib.Path | None = None) -> pathlib.Path:
@@ -1599,10 +1729,18 @@ def plan_for_conflict(
                 origin = e.get("origin", "")
                 plugin_id = origin.split("plugin:", 1)[1] if origin.startswith("plugin:") else ""
                 target_path = pathlib.Path(e_path)
+                if plugin_id == "architect-side@ai-orchestration":
+                    reason = (
+                        "architect-side@ai-orchestration provides 5 essential orchestration skills "
+                        "(task-pipeline, task-spec-authoring, task-worktree-ops, conflict-resolver, "
+                        "orchestration-metrics); keep both plugins with reciprocal Precedence or acknowledge finding"
+                    )
+                else:
+                    reason = f"disable plugin {plugin_id} in ~/.claude/settings.json (enabledPlugins) or uninstall it"
                 p_item = {
                     "action": "advise",
                     "path": str(target_path),
-                    "reason": f"disable plugin {plugin_id} in ~/.claude/settings.json (enabledPlugins) or uninstall it",
+                    "reason": reason,
                     "current_state": "conflict",
                     "before_sha256": compute_target_hash(target_path),
                     "after_sha256": None,
@@ -1977,13 +2115,23 @@ def inspect_environment(
             skill_entries: list[dict[str, Any]] = []
             for sname, sdata in installed_skills.items():
                 child_path = sdir / sname
+                s_state = sdata["state"]
+                if s_state == "unmanaged":
+                    s_sev = "info"
+                elif s_state in ("up-to-date", "plugin"):
+                    s_sev = "neutral"
+                elif s_state in ("outdated-legacy", "up-to-date-legacy", "modified-or-outdated", "foreign") or s_state.startswith("obsolete-"):
+                    s_sev = "warning"
+                else:
+                    s_sev = "info"
                 skill_entries.append({
                     "name": sname,
                     "origin": "standalone",
                     "scope": scope,
                     "path": str(child_path),
                     "enabled": True,
-                    "state": sdata["state"],
+                    "state": s_state,
+                    "severity": s_sev,
                 })
 
             if assistant == "claude":
@@ -1998,6 +2146,7 @@ def inspect_environment(
                                 "path": ps["path"],
                                 "enabled": en,
                                 "state": "plugin",
+                                "severity": "neutral",
                             })
                 elif scope == "project" and ws is not None:
                     for ps in claude_plugins:
@@ -2010,6 +2159,7 @@ def inspect_environment(
                                 "path": ps["path"],
                                 "enabled": en,
                                 "state": "plugin",
+                                "severity": "neutral",
                             })
                         elif ps["scope"] in ("project", "local"):
                             p_path = ps.get("project_path")
@@ -2022,6 +2172,7 @@ def inspect_environment(
                                     "path": ps["path"],
                                     "enabled": en,
                                     "state": "plugin",
+                                    "severity": "neutral",
                                 })
 
             # Inspect agents
@@ -2114,6 +2265,11 @@ def inspect_environment(
                             if r and r not in advice:
                                 advice.append(r)
                     is_fixable = len(actions) > 0
+
+                    has_prec_generic = any(skill_has_precedence_section(e.get("path", "")) for e in generic_entries)
+                    has_prec_bound = any(skill_has_precedence_section(e.get("path", "")) for e in bound_entries)
+                    if has_prec_generic and has_prec_bound and not actions:
+                        advice = ["Generic and bound orchestration skills declare reciprocal Precedence; kilo-mcp-orchestrator specializes kilo-mcp tool calls while orchestration-workflow governs architecture."]
 
                     structured_conflicts_map[key] = {
                         "kind": "trigger-conflict",
@@ -2321,12 +2477,159 @@ def inspect_environment(
     if codex_json.is_file():
         stray.append(str(codex_json))
 
+    acks = load_doctor_acks(h)
+
+    # Cross-assistant and cross-scope grouping of structured_conflicts
+    all_conflicts: list[tuple[str, str, dict[str, Any]]] = []
+    for asst in ASSISTANTS:
+        for scp in scopes_to_check:
+            if scp in environments.get(asst, {}):
+                for c in environments[asst][scp].get("structured_conflicts", []):
+                    all_conflicts.append((asst, scp, c))
+
+    groups_map: dict[str, list[tuple[str, str, dict[str, Any]]]] = {}
+    for asst, scp, c in all_conflicts:
+        gkey = compute_group_key(c["kind"], c["names"], c.get("entries"))
+        groups_map.setdefault(gkey, []).append((asst, scp, c))
+
+    finding_groups: list[dict[str, Any]] = []
+    for gkey, items_with_loc in groups_map.items():
+        first_c = items_with_loc[0][2]
+        kind = first_c["kind"]
+        names = first_c["names"]
+
+        # Deduplicate locations preserving deterministic order
+        loc_tuples: list[tuple[str, str]] = []
+        for a, s, _ in items_with_loc:
+            t = (a, s)
+            if t not in loc_tuples:
+                loc_tuples.append(t)
+        locations = [{"assistant": a, "scope": s} for a, s in sorted(loc_tuples, key=lambda x: (x[0], x[1]))]
+
+        # Aggregate unique entries
+        seen_paths: set[str] = set()
+        group_entries: list[dict[str, Any]] = []
+        for _, _, c in items_with_loc:
+            for e in c.get("entries", []):
+                ep = e.get("path")
+                if ep and ep not in seen_paths:
+                    seen_paths.add(ep)
+                    group_entries.append(e)
+                elif not ep and e not in group_entries:
+                    group_entries.append(e)
+
+        # Check acknowledgment (persistent or precedence)
+        is_acked, _ = is_finding_acknowledged(kind, names, group_entries, acks, group_key=gkey)
+        if not is_acked and kind == "trigger-conflict" and set(names) == {"orchestration-workflow", "kilo-mcp-orchestrator"}:
+            gen_entries = [e for e in group_entries if e.get("name") == "orchestration-workflow"]
+            bnd_entries = [e for e in group_entries if e.get("name") == "kilo-mcp-orchestrator"]
+            if gen_entries and bnd_entries:
+                has_prec_gen = any(skill_has_precedence_section(e.get("path", "")) for e in gen_entries)
+                has_prec_bnd = any(skill_has_precedence_section(e.get("path", "")) for e in bnd_entries)
+                if has_prec_gen and has_prec_bnd:
+                    is_acked = True
+
+        # Determine severity
+        if is_acked:
+            group_severity = "info"
+        elif kind == "trigger-conflict":
+            group_severity = "warning"
+        elif kind == "duplicate-name":
+            is_any_actionable = any(c.get("actionable") for _, _, c in items_with_loc)
+            group_severity = "error" if is_any_actionable else "info"
+        elif kind in ("outdated-legacy", "up-to-date-legacy", "foreign", "modified-or-outdated", "stale-plugin-copy"):
+            group_severity = "warning"
+        else:
+            group_severity = "info"
+
+        # Update each structured conflict item in-place
+        for _, _, c in items_with_loc:
+            c["severity"] = group_severity
+            c["group_key"] = gkey
+            c["locations"] = locations
+            c["acknowledged"] = is_acked
+
+        # Aggregate unique actions & advice
+        all_actions = []
+        seen_actions: set[tuple[str, str]] = set()
+        for _, _, c in items_with_loc:
+            for act in c.get("actions", []):
+                k_act = (act.get("action", ""), act.get("path", ""))
+                if k_act not in seen_actions:
+                    seen_actions.add(k_act)
+                    all_actions.append(act)
+
+        all_advice = []
+        for _, _, c in items_with_loc:
+            for adv in c.get("advice", []):
+                if adv and adv not in all_advice:
+                    all_advice.append(adv)
+
+        finding_groups.append({
+            "group_key": gkey,
+            "kind": kind,
+            "names": sorted(names),
+            "severity": group_severity,
+            "acknowledged": is_acked,
+            "locations": locations,
+            "entries": group_entries,
+            "fixable": any(c.get("fixable") for _, _, c in items_with_loc),
+            "actionable": any(c.get("actionable") for _, _, c in items_with_loc),
+            "actions": all_actions,
+            "advice": all_advice,
+            "count": len(locations),
+        })
+
+    # Add stray config files to finding_groups
+    for s in stray:
+        sp = pathlib.Path(s)
+        s_gkey = f"stray:{sp.name}"
+        s_entries = [{
+            "name": sp.name,
+            "path": str(sp),
+            "origin": "stray",
+            "scope": "global",
+            "enabled": False,
+            "state": "stray",
+        }]
+        s_acked, _ = is_finding_acknowledged("stray", [sp.name], s_entries, acks, group_key=s_gkey)
+        finding_groups.append({
+            "group_key": s_gkey,
+            "kind": "stray",
+            "names": [sp.name],
+            "severity": "info",
+            "acknowledged": s_acked,
+            "locations": [{"assistant": "codex", "scope": "global"}],
+            "entries": s_entries,
+            "fixable": False,
+            "actionable": False,
+            "actions": [],
+            "advice": [f"Stray configuration file '{s}' is ignored by Codex (reads config.toml)"],
+            "count": 1,
+        })
+
+    sev_rank = {"error": 0, "warning": 1, "info": 2, "neutral": 3}
+    finding_groups.sort(key=lambda g: (sev_rank.get(g["severity"], 9), g["group_key"]))
+
+    summary = {
+        "error": sum(1 for g in finding_groups if g["severity"] == "error"),
+        "warning": sum(1 for g in finding_groups if g["severity"] == "warning"),
+        "info": sum(1 for g in finding_groups if g["severity"] == "info"),
+        "neutral": sum(1 for g in finding_groups if g["severity"] == "neutral"),
+        "acknowledged": sum(1 for g in finding_groups if g["acknowledged"]),
+        "total_groups": len(finding_groups),
+    }
+
     return {
         "clis": clis,
         "source_repos": repos_status,
         "available_catalog_count": len(catalog),
         "environments": environments,
         "stray": stray,
+        "finding_groups": finding_groups,
+        "groups": finding_groups,
+        "summary": summary,
+        "severity_counts": summary,
     }
 
 
@@ -3399,6 +3702,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         status = f"OK ({info['version']}) at {info['path']}" if info["installed"] else "MISSING"
         print(f"  {tool:<10}: {status}")
 
+    if report.get("summary"):
+        sm = report["summary"]
+        print("\n=== Doctor Summary (Groups) ===")
+        print(f"  Errors: {sm.get('error', 0)}, Warnings: {sm.get('warning', 0)}, Info: {sm.get('info', 0)}, Neutral: {sm.get('neutral', 0)} (Acknowledged: {sm.get('acknowledged', 0)}, Total: {sm.get('total_groups', 0)})")
+
     print("\n=== Source Repositories ===")
     for rname, rinfo in report["source_repos"].items():
         status = f"OK ({rinfo['path']}, venv={rinfo['has_venv']})" if rinfo["available"] else "NOT CLONED"
@@ -3592,6 +3900,230 @@ def cmd_resolve_conflicts(args: argparse.Namespace) -> int:
     return 0 if res.get("ok") else 1
 
 
+def acknowledge_finding(
+    finding_key: str,
+    note: str = "",
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    dry_run: bool = False,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    """Acknowledge a doctor finding until any involved copy's content changes."""
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+    report = inspect_environment(ws, h)
+    groups = report.get("finding_groups", [])
+
+    matched_group = None
+    exact_matches = [g for g in groups if g["group_key"] == finding_key]
+    if exact_matches:
+        matched_group = exact_matches[0]
+    else:
+        partial_matches = [
+            g for g in groups
+            if finding_key in g.get("names", [])
+            or g.get("kind") == finding_key
+            or finding_key in g.get("group_key", "")
+        ]
+        if len(partial_matches) == 1:
+            matched_group = partial_matches[0]
+        elif len(partial_matches) > 1:
+            candidates = [g["group_key"] for g in partial_matches]
+            return {
+                "ok": False,
+                "error": f"Ambiguous finding key '{finding_key}': matches multiple groups: {candidates}",
+            }
+
+    if not matched_group:
+        return {
+            "ok": False,
+            "error": f"Finding '{finding_key}' not found among active findings in environment",
+        }
+
+    content_hashes = compute_entries_content_hashes(matched_group.get("entries", []))
+    storage_key = make_ack_storage_key(matched_group["kind"], matched_group["names"], content_hashes)
+
+    plan_item = {
+        "action": "ack",
+        "group_key": matched_group["group_key"],
+        "kind": matched_group["kind"],
+        "names": matched_group["names"],
+        "content_hashes": content_hashes,
+        "note": note,
+    }
+    plan_hash = hashlib.sha256(json.dumps([plan_item], sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+    if expect_plan_hash and expect_plan_hash != plan_hash:
+        return {
+            "ok": False,
+            "error": f"Plan hash mismatch: expected {expect_plan_hash}, computed {plan_hash}",
+        }
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "plan": [plan_item],
+            "plan_hash": plan_hash,
+            "group_key": matched_group["group_key"],
+            "storage_key": storage_key,
+        }
+
+    with env_lock(h):
+        acks = load_doctor_acks(h)
+        # Prune any previous acks for the exact same group_key
+        for old_k in list(acks.keys()):
+            old_v = acks[old_k]
+            if isinstance(old_v, dict) and old_v.get("group_key") == matched_group["group_key"]:
+                del acks[old_k]
+        acks[storage_key] = {
+            "group_key": matched_group["group_key"],
+            "kind": matched_group["kind"],
+            "names": matched_group["names"],
+            "content_hashes": content_hashes,
+            "note": note,
+            "acknowledged_at": datetime.now(timezone.utc).isoformat(),
+        }
+        save_doctor_acks(acks, h)
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "group_key": matched_group["group_key"],
+        "storage_key": storage_key,
+        "acknowledged": True,
+        "plan_hash": plan_hash,
+    }
+
+
+def unacknowledge_finding(
+    finding_key: str,
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    dry_run: bool = False,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    """Remove persistent acknowledgment for a doctor finding."""
+    h = home or get_home_dir()
+    with env_lock(h):
+        acks = load_doctor_acks(h)
+        matched_storage_keys = []
+        for k, v in acks.items():
+            if k == finding_key:
+                matched_storage_keys.append(k)
+            elif isinstance(v, dict):
+                if v.get("group_key") == finding_key:
+                    matched_storage_keys.append(k)
+                elif finding_key in v.get("names", []):
+                    matched_storage_keys.append(k)
+                elif v.get("kind") == finding_key:
+                    matched_storage_keys.append(k)
+                elif finding_key in k:
+                    matched_storage_keys.append(k)
+
+        if not matched_storage_keys:
+            return {
+                "ok": False,
+                "error": f"Finding '{finding_key}' is not acknowledged in doctor-ack.json",
+            }
+        # If multiple match, check if they all share the same group_key or if there is an exact group_key match
+        exact = [k for k in matched_storage_keys if k == finding_key or (isinstance(acks[k], dict) and acks[k].get("group_key") == finding_key)]
+        if exact:
+            matched_storage_keys = exact
+
+        matched_group_keys = set(acks[k].get("group_key", k) for k in matched_storage_keys if isinstance(acks[k], dict))
+        if len(matched_group_keys) > 1:
+            return {
+                "ok": False,
+                "error": f"Ambiguous finding key '{finding_key}': matches multiple acknowledgments across groups: {list(matched_group_keys)}",
+            }
+
+        target_key = matched_storage_keys[0]
+        group_key = acks[target_key].get("group_key", target_key) if isinstance(acks[target_key], dict) else target_key
+
+        plan_item = {
+            "action": "unack",
+            "group_key": group_key,
+            "storage_keys": matched_storage_keys,
+        }
+        plan_hash = hashlib.sha256(json.dumps([plan_item], sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+        if expect_plan_hash and expect_plan_hash != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, computed {plan_hash}",
+            }
+
+        if dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "plan": [plan_item],
+                "plan_hash": plan_hash,
+                "group_key": group_key,
+            }
+
+        for k in matched_storage_keys:
+            if k in acks:
+                del acks[k]
+        save_doctor_acks(acks, h)
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "group_key": group_key,
+        "unacknowledged": True,
+        "plan_hash": plan_hash,
+    }
+
+
+def cmd_ack(args: argparse.Namespace) -> int:
+    ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
+    res = acknowledge_finding(
+        finding_key=args.finding_key,
+        note=args.note,
+        workspace=ws,
+        home=args.home,
+        dry_run=args.dry_run,
+        expect_plan_hash=args.expect_plan_hash,
+    )
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        if not res.get("ok"):
+            print(f"[error] {res.get('error', 'Execution refused')}", file=sys.stderr)
+        elif res.get("dry_run"):
+            print(f"[dry-run] Plan ({len(res['plan'])} action(s), hash: {res['plan_hash']}):")
+            for item in res["plan"]:
+                print(f"  ACK {item['group_key']} (note: {item.get('note') or 'none'})")
+        else:
+            print(f"[ok] Acknowledged finding '{res['group_key']}'. Plan hash: {res['plan_hash']}.")
+    return 0 if res.get("ok") else 1
+
+
+def cmd_unack(args: argparse.Namespace) -> int:
+    ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
+    res = unacknowledge_finding(
+        finding_key=args.finding_key,
+        workspace=ws,
+        home=args.home,
+        dry_run=args.dry_run,
+        expect_plan_hash=args.expect_plan_hash,
+    )
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        if not res.get("ok"):
+            print(f"[error] {res.get('error', 'Execution refused')}", file=sys.stderr)
+        elif res.get("dry_run"):
+            print(f"[dry-run] Plan ({len(res['plan'])} action(s), hash: {res['plan_hash']}):")
+            for item in res["plan"]:
+                print(f"  UNACK {item['group_key']}")
+        else:
+            print(f"[ok] Removed acknowledgment for finding '{res['group_key']}'. Plan hash: {res['plan_hash']}.")
+    return 0 if res.get("ok") else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--home", type=pathlib.Path, default=None, help="Override home directory (for testing/sandboxing)")
@@ -3654,6 +4186,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_rc.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
     p_rc.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
     p_rc.set_defaults(func=cmd_resolve_conflicts)
+
+    p_ack = sub.add_parser("ack", help="Acknowledge a doctor finding until its content changes")
+    p_ack.add_argument("finding_key", help="Finding key or group key to acknowledge")
+    p_ack.add_argument("--note", default="", help="Optional note explaining why the finding is acknowledged")
+    p_ack.add_argument("--workspace", default=None)
+    p_ack.add_argument("--dry-run", action="store_true", default=False, help="Compute and display acknowledge plan without executing")
+    p_ack.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
+    p_ack.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
+    p_ack.set_defaults(func=cmd_ack)
+
+    p_unack = sub.add_parser("unack", help="Remove persistent acknowledgment for a doctor finding")
+    p_unack.add_argument("finding_key", help="Finding key or group key to un-acknowledge")
+    p_unack.add_argument("--workspace", default=None)
+    p_unack.add_argument("--dry-run", action="store_true", default=False, help="Compute and display unacknowledge plan without executing")
+    p_unack.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
+    p_unack.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
+    p_unack.set_defaults(func=cmd_unack)
 
     return ap
 
