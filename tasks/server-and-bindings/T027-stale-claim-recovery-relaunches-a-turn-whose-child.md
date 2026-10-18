@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Gemini review 2026-10-18: violates 'never two resumptions of the same session at the same time'
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: -
 - handoff: Read tasks/server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md, do the open steps, run the Verification, update the task and the registry.
 - short: Duplicate turn resumption
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
