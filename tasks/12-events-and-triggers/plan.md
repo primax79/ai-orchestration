@@ -78,7 +78,7 @@
 
 ### 12.15 - VS Code: parity handlers for the 12.6 message types (sessions, triggers, proposed actions, notifications, awaiting application)
 
-- **Status:** `in progress` (2026-10-18) · **Kind:** feature · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 12.6, 12.7 · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `delivered` (2026-10-18) · **Kind:** feature · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 12.6, 12.7 · **Repo:** `vscode-ai-orchestration/`
 - **Origin:** 12.7 review (2026-10-18): `scripts/test-bridge-parity.mjs` lists 18 message types the 12.6 frontend sends that the extension bridge does not handle yet (`pending126Types`).
 - **Goal:** the dashboard webview inside VS Code supports every 12.6 view (sessions, Triggers page, proposed actions, notifications, questions awaiting application, orchestrator queue) by mapping each message to the same `ai-orch` command the web backend runs; `pending126Types` becomes empty.
 - **Verification:** `npm test` green with the parity check reporting no pending 12.6 types; handler tests for argv building and mutating actions requiring `--expect-*-hash` where the engine does.
@@ -89,3 +89,10 @@
 - **Origin:** 12.8 review (2026-10-18): the backend confirm/reject endpoints still return `not-implemented` (written before T024 merged) and the chat panel shows the rotate hand-off turn above earlier turns.
 - **Goal:** `POST /api/triggers/proposed-actions/{id}/confirm|reject` call `ai-orch triggers confirm --expect-hash --actor ui` / `triggers reject --reason`; the Triggers page and the chat panel get working Confirm/Reject buttons; the conversation is strictly chronological.
 - **Verification:** backend tests with a stubbed CLI; live: a pending `command` proposal confirmed from the UI turns `confirmed`, a rejected one `rejected` with the reason; after a rotate the hand-off turn appears last.
+
+### 12.17 - VS Code: parity handlers for the 12.8, 12.10 and 12.16 message types (orchestrator chat, Config card and wizard, proposal confirm/reject)
+
+- **Status:** `open` · **Kind:** feature · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 12.8, 12.10, 12.16 · **Repo:** `vscode-ai-orchestration/`
+- **Origin:** 12.15 merge (2026-10-18): the parity check marks the nine 12.8 chat message types pending (`pending128Types`); 12.10 and 12.16 will add more, and the 12.15 confirm/reject handlers still mirror the old `not-implemented` backend stubs.
+- **Goal:** every message the web frontend sends after 12.8, 12.10 and 12.16 has a VS Code bridge handler building the same `ai-orch` argv as the backend; `pending128Types` is removed.
+- **Verification:** `npm test` green with no pending types; handler tests.
