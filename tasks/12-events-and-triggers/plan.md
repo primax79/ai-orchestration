@@ -51,7 +51,7 @@
 
 ### 12.9 - Orchestrator configuration: reassignment as succession, `ai-orch setup` engine shared with the `orchestration-setup` skill
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.9-orchestrator-config) · **Size:** M · **Depends on:** 12.5
+- **Status:** `delivered` (2026-10-18; claude; merged; review fix: no dated model ids (orchestrator default from the orchestration profile, alias fallback); setup plan probes CLIs read-only; real global config hash unchanged by tests) · **Size:** M · **Depends on:** 12.5
 - **Goal:** §0b, core part.
 
 ### 12.6 - UI: event and queue streams, notification area, Triggers page, session chips, "awaiting application" group
