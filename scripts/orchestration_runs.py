@@ -98,6 +98,7 @@ try:
         inbox_resolve,
         render_synced_index,
         validate_tasks_tree,
+        RESERVED_DIRS,
     )
 except ImportError:
     ALLOWED_TRANSITIONS = None  # type: ignore
@@ -115,6 +116,7 @@ except ImportError:
     inbox_resolve = None  # type: ignore
     render_synced_index = None  # type: ignore
     validate_tasks_tree = None  # type: ignore
+    RESERVED_DIRS = None  # type: ignore
 
 
 @contextlib.contextmanager
@@ -5899,10 +5901,36 @@ def _update_task_steps_and_verification(
     task_file: pathlib.Path,
     steps: list[str] | str | None,
     verification: list[str] | str | None,
+    kind: str | None = None,
+    labels: list[str] | str | None = None,
 ) -> None:
     if not task_file.is_file():
         return
     text = task_file.read_text(encoding="utf-8")
+
+    if kind is not None:
+        k_val = str(kind).strip().lower()
+        if re.search(r"^-\s+kind:\s*.*$", text, flags=re.MULTILINE):
+            text = re.sub(r"^-\s+kind:\s*.*$", f"- kind: {k_val}", text, flags=re.MULTILINE)
+        else:
+            pattern_handoff = re.compile(r"^(-\s+handoff:.*)$", re.MULTILINE)
+            if pattern_handoff.search(text):
+                text = pattern_handoff.sub(r"\1\n- kind: " + k_val, text, count=1)
+
+    if labels is not None:
+        if isinstance(labels, list):
+            lbl_val = ", ".join(str(x).strip() for x in labels if str(x).strip())
+        else:
+            lbl_val = str(labels).strip()
+        if re.search(r"^-\s+labels:\s*.*$", text, flags=re.MULTILINE):
+            text = re.sub(r"^-\s+labels:\s*.*$", f"- labels: {lbl_val}", text, flags=re.MULTILINE)
+        else:
+            pattern_anchor = re.compile(r"^(-\s+(?:kind|handoff):.*)$", re.MULTILINE)
+            matches = list(pattern_anchor.finditer(text))
+            if matches:
+                last_m = matches[-1]
+                ins = last_m.end()
+                text = text[:ins] + f"\n- labels: {lbl_val}" + text[ins:]
 
     if steps:
         steps_text = _format_checklist_items(steps)
@@ -5974,6 +6002,22 @@ def cmd_accept_triage(args: argparse.Namespace) -> int:
         print_error(args.json, "engine-missing", "tasks_engine functions are unavailable")
         return 1
 
+    edits_file_arg = getattr(args, "edits_file", None)
+    raw_edits: dict[str, Any] = {}
+    if edits_file_arg:
+        edits_path = pathlib.Path(edits_file_arg)
+        if not edits_path.is_file():
+            print_error(args.json, "edits-file-not-found", f"Edits file not found at {edits_path}")
+            return 1
+        try:
+            raw_edits = json.loads(edits_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            print_error(args.json, "invalid-edits-file", f"Failed to parse edits file JSON: {e}")
+            return 1
+        if not isinstance(raw_edits, dict):
+            print_error(args.json, "invalid-edits-file", "Edits file content must be a JSON object")
+            return 1
+
     note_id = record.get("note_id") or record.get("task_id")
     with safe_task_write_lock(tasks_dir):
         note = find_inbox_note(tasks_dir, note_id)
@@ -6008,7 +6052,7 @@ def cmd_accept_triage(args: argparse.Namespace) -> int:
 
         # Handle --only filter
         only_arg = getattr(args, "only", None)
-        selected_tasks: list[dict[str, Any]] = []
+        selected_indices: list[int] = []
         if only_arg:
             tokens = [t.strip() for t in only_arg.split(",") if t.strip()]
             indices_to_take: list[int] = []
@@ -6039,10 +6083,190 @@ def cmd_accept_triage(args: argparse.Namespace) -> int:
                         )
                         return 1
 
-            for idx in sorted(set(indices_to_take)):
-                selected_tasks.append(proposed_tasks[idx])
+            selected_indices = sorted(set(indices_to_take))
         else:
-            selected_tasks = list(proposed_tasks)
+            selected_indices = list(range(len(proposed_tasks)))
+
+        accepted_indices_set = set(selected_indices)
+
+        ALLOWED_EDIT_FIELDS = {
+            "title",
+            "category",
+            "priority",
+            "priority_reason",
+            "goal",
+            "steps",
+            "verification",
+            "kind",
+            "labels",
+        }
+        VALID_PRIORITIES = {"P0", "P1", "P2", "P3"}
+        VALID_KINDS = {"feature", "bug", "fix", "chore", "docs", "investigation"}
+        LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
+        RESERVED_CATEGORY_DIRS = RESERVED_DIRS if RESERVED_DIRS is not None else {
+            "_inbox", "_reviews", "specs", "done", "merged", "notes", "reviews", "questions", "use-cases"
+        }
+
+        warnings: list[str] = []
+        applied_edits: dict[str, dict[str, Any]] = {}
+
+        if edits_file_arg:
+            for raw_k, task_edits in raw_edits.items():
+                try:
+                    idx = int(raw_k)
+                except (ValueError, TypeError):
+                    print_error(
+                        args.json,
+                        "invalid-edit",
+                        f"Edit key {raw_k!r} must be an integer index",
+                    )
+                    return 1
+
+                if idx < 0:
+                    print_error(
+                        args.json,
+                        "invalid-edit",
+                        f"Edit index {idx} cannot be negative",
+                    )
+                    return 1
+
+                if idx not in accepted_indices_set:
+                    warnings.append(f"Edits for proposed task index {raw_k} ignored: task not accepted")
+                    continue
+
+                if not isinstance(task_edits, dict):
+                    print_error(
+                        args.json,
+                        "invalid-edit",
+                        f"Edits for task index {raw_k} must be an object",
+                    )
+                    return 1
+
+                for field in task_edits:
+                    if field not in ALLOWED_EDIT_FIELDS:
+                        print_error(
+                            args.json,
+                            "invalid-edit",
+                            f"Unknown field '{field}' in edits for task index {raw_k}",
+                        )
+                        return 1
+
+                merged_task = dict(proposed_tasks[idx])
+                merged_task.update(task_edits)
+
+                pri = str(merged_task.get("priority", "")).strip()
+                if pri not in VALID_PRIORITIES:
+                    print_error(
+                        args.json,
+                        "invalid-edit",
+                        f"Invalid priority '{pri}' in edits for task index {raw_k} (expected P0, P1, P2, or P3)",
+                    )
+                    return 1
+
+                p_reason = merged_task.get("priority_reason") or merged_task.get("priority-reason")
+                if not p_reason or not str(p_reason).strip():
+                    print_error(
+                        args.json,
+                        "invalid-edit",
+                        f"Missing or empty priority_reason in edits for task index {raw_k}",
+                    )
+                    return 1
+
+                t_title = str(merged_task.get("title", "")).strip()
+                if not t_title:
+                    print_error(
+                        args.json,
+                        "invalid-edit",
+                        f"Missing or empty title in edits for task index {raw_k}",
+                    )
+                    return 1
+
+                t_goal = str(merged_task.get("goal", "")).strip()
+                if not t_goal:
+                    print_error(
+                        args.json,
+                        "invalid-edit",
+                        f"Missing or empty goal in edits for task index {raw_k}",
+                    )
+                    return 1
+
+                t_cat = str(merged_task.get("category", "")).strip()
+                if not t_cat:
+                    print_error(
+                        args.json,
+                        "invalid-edit",
+                        f"Missing or empty category in edits for task index {raw_k}",
+                    )
+                    return 1
+                if (
+                    t_cat in RESERVED_CATEGORY_DIRS
+                    or t_cat.startswith(".")
+                    or t_cat.startswith("_")
+                    or t_cat == "micro"
+                    or "/" in t_cat
+                    or "\\" in t_cat
+                ):
+                    print_error(
+                        args.json,
+                        "invalid-edit",
+                        f"Invalid category '{t_cat}' in edits for task index {raw_k} (cannot be reserved directory)",
+                    )
+                    return 1
+
+                t_steps = merged_task.get("steps")
+                if t_steps is None or (isinstance(t_steps, list) and not t_steps) or (isinstance(t_steps, str) and not t_steps.strip()):
+                    print_error(
+                        args.json,
+                        "invalid-edit",
+                        f"Missing or empty steps in edits for task index {raw_k}",
+                    )
+                    return 1
+
+                t_ver = merged_task.get("verification")
+                if t_ver is None or (isinstance(t_ver, list) and not t_ver) or (isinstance(t_ver, str) and not t_ver.strip()):
+                    print_error(
+                        args.json,
+                        "invalid-edit",
+                        f"Missing or empty verification in edits for task index {raw_k}",
+                    )
+                    return 1
+
+                if "kind" in task_edits and task_edits["kind"] is not None:
+                    k_val = str(task_edits["kind"]).strip().lower()
+                    if k_val not in VALID_KINDS:
+                        print_error(
+                            args.json,
+                            "invalid-edit",
+                            f"Invalid kind '{task_edits['kind']}' in edits for task index {raw_k} (expected one of {sorted(VALID_KINDS)})",
+                        )
+                        return 1
+
+                if "labels" in task_edits and task_edits["labels"] is not None:
+                    raw_lbls = task_edits["labels"]
+                    if isinstance(raw_lbls, list):
+                        lbl_list = [str(x).strip() for x in raw_lbls if str(x).strip()]
+                    elif isinstance(raw_lbls, str):
+                        lbl_list = [x.strip() for x in raw_lbls.split(",") if x.strip()]
+                    else:
+                        print_error(
+                            args.json,
+                            "invalid-edit",
+                            f"Labels in edits for task index {raw_k} must be a list or comma-separated string",
+                        )
+                        return 1
+                    for lbl in lbl_list:
+                        if not LABEL_RE.match(lbl):
+                            print_error(
+                                args.json,
+                                "invalid-edit",
+                                f"Invalid label '{lbl}' in edits for task index {raw_k} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$')",
+                            )
+                            return 1
+
+                applied_edits[str(idx)] = task_edits
+                proposed_tasks[idx] = merged_task
+
+        selected_tasks = [proposed_tasks[i] for i in selected_indices]
 
         created_task_ids: list[str] = []
         for t_spec in selected_tasks:
@@ -6082,9 +6306,11 @@ def cmd_accept_triage(args: argparse.Namespace) -> int:
 
             steps = t_spec.get("steps")
             verification = t_spec.get("verification")
-            if steps or verification:
+            kind = t_spec.get("kind")
+            labels = t_spec.get("labels")
+            if steps or verification or kind or labels:
                 task_file = pathlib.Path(res_task["file_path"])
-                _update_task_steps_and_verification(task_file, steps, verification)
+                _update_task_steps_and_verification(task_file, steps, verification, kind=kind, labels=labels)
 
         produced_str = ", ".join(created_task_ids) if created_task_ids else "-"
         tool = record.get("tool") or "tool"
@@ -6117,7 +6343,16 @@ def cmd_accept_triage(args: argparse.Namespace) -> int:
         record["proposal_status"] = "accepted"
         record["accepted_tasks"] = created_task_ids
         record["accepted_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if applied_edits:
+            record["edits_applied"] = applied_edits
+            record["edits"] = applied_edits
         save_run_record(ws, record)
+
+        proposal["proposal_status"] = "accepted"
+        proposal["edits_applied"] = applied_edits
+        proposal["edits"] = applied_edits
+        proposal["tasks"] = proposed_tasks
+        proposal_file.write_text(json.dumps(proposal, indent=2), encoding="utf-8")
 
     if args.json:
         payload = {
@@ -6128,9 +6363,13 @@ def cmd_accept_triage(args: argparse.Namespace) -> int:
             "tasks_created": created_task_ids,
             "produced": produced_str,
             "processed_by": processed_by,
+            "edits_applied": applied_edits,
+            "warnings": warnings,
         }
         print(json.dumps(payload, indent=2))
     else:
+        for w in warnings:
+            print(f"Warning: {w}")
         print(f"Accepted triage proposal for note {note_id} (run {run_id}): created {len(created_task_ids)} task(s) ({produced_str}).")
     return 0
 
@@ -6370,6 +6609,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_acc_triage.add_argument("run_id", help="Triage run ID")
     p_acc_triage.add_argument("--only", default=None, help="Comma-separated indices or IDs of tasks in proposal to accept (e.g. 0,1)")
     p_acc_triage.add_argument("--expect-note-hash", default=None, help="Expected inbox note bundle hash")
+    p_acc_triage.add_argument("--edits-file", default=None, help="Path to JSON file containing edits to proposed tasks")
     p_acc_triage.add_argument("--workspace", default=None, help="Project workspace root")
     p_acc_triage.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_acc_triage.add_argument("--json", action="store_true", default=argparse.SUPPRESS)

@@ -3729,6 +3729,597 @@ def test_accept_triage_refuses_stale_note_hash(sample_workspace: pathlib.Path):
     assert data_stale["reason"] == "stale-note-hash"
 
 
+def test_accept_triage_with_edits_file(sample_workspace: pathlib.Path):
+    """Test accept-triage --edits-file overrides task fields and land in created task (Task 09.10)."""
+    tasks_dir = sample_workspace / "tasks"
+
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Edits test note",
+            "--body",
+            "Propose task to be edited",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    proposal = {
+        "tasks": [
+            {
+                "title": "Original Task Title",
+                "category": "server",
+                "priority": "P2",
+                "priority_reason": "Original reason",
+                "goal": "Original goal statement",
+                "steps": ["Original step 1", "Original step 2"],
+                "verification": ["Original ver 1"],
+            }
+        ],
+        "updates": [],
+        "spec": None,
+        "questions": [],
+    }
+
+    mock_agent = sample_workspace / "edits_agent.py"
+    msg = "Triage recommendations:\n```ai-orch-triage\n" + json.dumps(proposal) + "\n```\n"
+    evt = {"type": "message", "role": "assistant", "content": msg}
+    mock_agent.write_text(
+        f"import sys, json\n"
+        f"sys.stdout.write(json.dumps({json.dumps(evt)}) + '\\n')\n"
+        f"sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{mock_agent}"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "configure edits agent"], cwd=str(sample_workspace), check=True)
+
+    res_start = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--note",
+            note_id,
+            "--tool",
+            "kilo",
+            "--force",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id = json.loads(res_start.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+    assert rec["proposal_status"] == "pending"
+
+    # Write edits file
+    edits_file = sample_workspace / "task_edits.json"
+    edits_payload = {
+        "0": {
+            "title": "Edited Task Title",
+            "priority": "P0",
+            "priority_reason": "Urgent security audit requirement",
+            "goal": "Edited goal statement",
+            "steps": ["Step 1 edited", "Step 2 edited"],
+            "verification": ["Verify 1 edited"],
+            "kind": "feature",
+            "labels": ["security", "auth"],
+        }
+    }
+    edits_file.write_text(json.dumps(edits_payload, indent=2), encoding="utf-8")
+
+    # Accept triage with --edits-file
+    res_acc = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "accept-triage",
+            run_id,
+            "--edits-file",
+            str(edits_file),
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    acc_data = json.loads(res_acc.stdout)
+    assert acc_data["ok"] is True
+    assert acc_data["proposal_status"] == "accepted"
+    assert "0" in acc_data["edits_applied"]
+    assert acc_data["edits_applied"]["0"]["title"] == "Edited Task Title"
+    assert acc_data["edits_applied"]["0"]["priority"] == "P0"
+
+    new_task_ids = acc_data["tasks_created"]
+    assert len(new_task_ids) == 1
+    new_tid = new_task_ids[0]
+
+    # Verify task file on disk has edited fields
+    task_files = list((tasks_dir / "server").glob(f"{new_tid}-*.md"))
+    assert len(task_files) == 1
+    task_file = task_files[0]
+    assert "edited-task-title" in task_file.name
+    task_content = task_file.read_text(encoding="utf-8")
+    assert "- title: Edited Task Title" in task_content
+    assert "- priority: P0" in task_content
+    assert "- priority-reason: Urgent security audit requirement" in task_content
+    assert "- kind: feature" in task_content
+    assert "- labels: security, auth" in task_content
+    assert "## Goal\n\nEdited goal statement" in task_content
+    assert "- [ ] Step 1 edited" in task_content
+    assert "- [ ] Verify 1 edited" in task_content
+
+    # Validate tasks tree is clean
+    res_val = subprocess.run(
+        [str(BIN_AI_ORCH), "tasks", "validate", "--tasks-dir", str(tasks_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    val_data = json.loads(res_val.stdout)
+    assert val_data["errors"] == []
+
+    # Verify stored triage-proposal.json records proposal_status accepted and edits_applied
+    prop_path = sample_workspace / ".ai-orchestration" / "runs" / run_id / "triage-proposal.json"
+    prop_data = json.loads(prop_path.read_text(encoding="utf-8"))
+    assert prop_data["proposal_status"] == "accepted"
+    assert prop_data["edits_applied"]["0"]["title"] == "Edited Task Title"
+    assert prop_data["tasks"][0]["title"] == "Edited Task Title"
+
+
+def test_accept_triage_invalid_edits_refuses_and_creates_nothing(sample_workspace: pathlib.Path):
+    """Test that invalid edit (bad priority, unknown key, empty fields, bad category) refuses and creates nothing (Task 09.10)."""
+    tasks_dir = sample_workspace / "tasks"
+
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Invalid edit note",
+            "--body",
+            "Body",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    proposal = {
+        "tasks": [
+            {
+                "title": "Valid Initial Task",
+                "category": "server",
+                "priority": "P2",
+                "priority_reason": "Reason",
+                "goal": "Goal",
+                "steps": ["Step 1"],
+                "verification": ["Ver 1"],
+            }
+        ],
+        "updates": [],
+        "spec": None,
+        "questions": [],
+    }
+
+    mock_agent = sample_workspace / "inv_agent.py"
+    msg = "```ai-orch-triage\n" + json.dumps(proposal) + "\n```\n"
+    evt = {"type": "message", "role": "assistant", "content": msg}
+    mock_agent.write_text(
+        f"import sys, json\n"
+        f"sys.stdout.write(json.dumps({json.dumps(evt)}) + '\\n')\n"
+        f"sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{mock_agent}"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "configure invalid edit agent"], cwd=str(sample_workspace), check=True)
+
+    res_start = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--note",
+            note_id,
+            "--tool",
+            "kilo",
+            "--force",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id = json.loads(res_start.stdout)["run_id"]
+    wait_for_terminal(sample_workspace, run_id)
+
+    tasks_before = list(tasks_dir.glob("*/*.md"))
+
+    # 1. Bad priority (e.g. P99)
+    bad_pri_file = sample_workspace / "bad_pri.json"
+    bad_pri_file.write_text(json.dumps({"0": {"priority": "P99"}}), encoding="utf-8")
+    res_bad_pri = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "accept-triage", run_id, "--edits-file", str(bad_pri_file), "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+    )
+    assert res_bad_pri.returncode != 0
+    err_pri = json.loads(res_bad_pri.stdout)
+    assert err_pri["reason"] == "invalid-edit"
+    assert "Invalid priority" in err_pri["error"]
+    assert len(list(tasks_dir.glob("*/*.md"))) == len(tasks_before)
+
+    # 2. Unknown key in edits
+    unknown_key_file = sample_workspace / "unknown_key.json"
+    unknown_key_file.write_text(json.dumps({"0": {"unknown_field": "disallowed"}}), encoding="utf-8")
+    res_unk = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "accept-triage", run_id, "--edits-file", str(unknown_key_file), "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+    )
+    assert res_unk.returncode != 0
+    err_unk = json.loads(res_unk.stdout)
+    assert err_unk["reason"] == "invalid-edit"
+    assert "Unknown field 'unknown_field'" in err_unk["error"]
+    assert len(list(tasks_dir.glob("*/*.md"))) == len(tasks_before)
+
+    # 3. Empty title
+    empty_title_file = sample_workspace / "empty_title.json"
+    empty_title_file.write_text(json.dumps({"0": {"title": "   "}}), encoding="utf-8")
+    res_title = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "accept-triage", run_id, "--edits-file", str(empty_title_file), "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+    )
+    assert res_title.returncode != 0
+    err_title = json.loads(res_title.stdout)
+    assert err_title["reason"] == "invalid-edit"
+    assert "title" in err_title["error"].lower()
+    assert len(list(tasks_dir.glob("*/*.md"))) == len(tasks_before)
+
+    # 4. Invalid category (reserved directory)
+    bad_cat_file = sample_workspace / "bad_cat.json"
+    bad_cat_file.write_text(json.dumps({"0": {"category": "_inbox"}}), encoding="utf-8")
+    res_cat = subprocess.run(
+        [str(BIN_AI_ORCH), "run", "accept-triage", run_id, "--edits-file", str(bad_cat_file), "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+    )
+    assert res_cat.returncode != 0
+    err_cat = json.loads(res_cat.stdout)
+    assert err_cat["reason"] == "invalid-edit"
+    assert "category" in err_cat["error"].lower()
+    assert len(list(tasks_dir.glob("*/*.md"))) == len(tasks_before)
+
+    # Ensure run record still pending and note still in to-analyze/
+    rec_after = load_run_record(sample_workspace, run_id)
+    assert rec_after["proposal_status"] == "pending"
+    note_files = list((tasks_dir / "_inbox" / "to-analyze").glob("*/note.md"))
+    assert any(f"id: {note_id}" in p.read_text(encoding="utf-8") for p in note_files)
+
+
+def test_accept_triage_edits_combined_with_only(sample_workspace: pathlib.Path):
+    """Test edits combined with --only ignores edits for non-accepted indices with warning (Task 09.10)."""
+    tasks_dir = sample_workspace / "tasks"
+
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Edits plus only note",
+            "--body",
+            "Body",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    proposal = {
+        "tasks": [
+            {
+                "title": "Task Zero Original",
+                "category": "server",
+                "priority": "P2",
+                "priority_reason": "Zero reason",
+                "goal": "Goal 0",
+                "steps": ["Step 0"],
+                "verification": ["Ver 0"],
+            },
+            {
+                "title": "Task One Original",
+                "category": "server",
+                "priority": "P3",
+                "priority_reason": "One reason",
+                "goal": "Goal 1",
+                "steps": ["Step 1"],
+                "verification": ["Ver 1"],
+            },
+        ],
+        "updates": [],
+        "spec": None,
+        "questions": [],
+    }
+
+    mock_agent = sample_workspace / "only_edits_agent.py"
+    msg = "```ai-orch-triage\n" + json.dumps(proposal) + "\n```\n"
+    evt = {"type": "message", "role": "assistant", "content": msg}
+    mock_agent.write_text(
+        f"import sys, json\n"
+        f"sys.stdout.write(json.dumps({json.dumps(evt)}) + '\\n')\n"
+        f"sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{mock_agent}"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "configure only edits agent"], cwd=str(sample_workspace), check=True)
+
+    res_start = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--note",
+            note_id,
+            "--tool",
+            "kilo",
+            "--force",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id = json.loads(res_start.stdout)["run_id"]
+    wait_for_terminal(sample_workspace, run_id)
+
+    # Provide edits for both index 0 and index 1
+    edits_file = sample_workspace / "multi_edits.json"
+    edits_payload = {
+        "0": {"title": "Task Zero Edited", "priority": "P1"},
+        "1": {"title": "Task One Edited", "priority": "P0"},
+    }
+    edits_file.write_text(json.dumps(edits_payload), encoding="utf-8")
+
+    # Accept with --only 0
+    res_acc = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "accept-triage",
+            run_id,
+            "--only",
+            "0",
+            "--edits-file",
+            str(edits_file),
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    acc_data = json.loads(res_acc.stdout)
+    assert acc_data["ok"] is True
+    assert acc_data["proposal_status"] == "accepted"
+    created = acc_data["tasks_created"]
+    assert len(created) == 1
+
+    # Task 0 has edited title and priority
+    task_files = list((tasks_dir / "server").glob(f"{created[0]}-*.md"))
+    assert len(task_files) == 1
+    content = task_files[0].read_text(encoding="utf-8")
+    assert "- title: Task Zero Edited" in content
+    assert "- priority: P1" in content
+
+    # Task 1 was NOT created
+    all_server_files = [p.name for p in (tasks_dir / "server").glob("*.md")]
+    assert not any("task-one" in name.lower() for name in all_server_files)
+
+    # Result records warning for index 1
+    warnings = acc_data.get("warnings", [])
+    assert any("1" in w for w in warnings)
+    assert "0" in acc_data["edits_applied"]
+    assert "1" not in acc_data["edits_applied"]
+
+
+def test_accept_triage_edits_refuses_stale_note_hash(sample_workspace: pathlib.Path):
+    """Test that accept-triage with --edits-file still refuses stale note hash (Task 09.10)."""
+    tasks_dir = sample_workspace / "tasks"
+
+    res_add = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Stale with edits note",
+            "--body",
+            "Initial text",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_add.stdout)["id"]
+
+    proposal = {
+        "tasks": [
+            {
+                "title": "Stale Test Task",
+                "category": "server",
+                "priority": "P2",
+                "priority_reason": "Reason",
+                "goal": "Goal",
+                "steps": ["Step"],
+                "verification": ["Ver"],
+            }
+        ],
+        "updates": [],
+        "spec": None,
+        "questions": [],
+    }
+
+    mock_agent = sample_workspace / "stale_agent.py"
+    msg = "```ai-orch-triage\n" + json.dumps(proposal) + "\n```\n"
+    evt = {"type": "message", "role": "assistant", "content": msg}
+    mock_agent.write_text(
+        f"import sys, json\n"
+        f"sys.stdout.write(json.dumps({json.dumps(evt)}) + '\\n')\n"
+        f"sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    proj_cfg.write_text(
+        orig_cfg + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{mock_agent}"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "configure stale agent"], cwd=str(sample_workspace), check=True)
+
+    res_start = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--note",
+            note_id,
+            "--tool",
+            "kilo",
+            "--force",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id = json.loads(res_start.stdout)["run_id"]
+    wait_for_terminal(sample_workspace, run_id)
+
+    tasks_before = list(tasks_dir.glob("*/*.md"))
+
+    edits_file = sample_workspace / "valid_edits.json"
+    edits_file.write_text(json.dumps({"0": {"title": "Edited Title"}}), encoding="utf-8")
+
+    # 1. Expect note hash mismatch
+    res_mismatch = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "accept-triage",
+            run_id,
+            "--expect-note-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--edits-file",
+            str(edits_file),
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_mismatch.returncode != 0
+    data_mismatch = json.loads(res_mismatch.stdout)
+    assert data_mismatch["reason"] == "note-hash-mismatch"
+    assert len(list(tasks_dir.glob("*/*.md"))) == len(tasks_before)
+
+    # 2. Mutate note file to trigger stale-note-hash
+    note_files = list((tasks_dir / "_inbox" / "to-analyze").glob("*/note.md"))
+    note_md = next(p for p in note_files if f"id: {note_id}" in p.read_text(encoding="utf-8"))
+    note_md.write_text(note_md.read_text(encoding="utf-8") + "\nappended changed content\n", encoding="utf-8")
+
+    res_stale = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "accept-triage",
+            run_id,
+            "--edits-file",
+            str(edits_file),
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res_stale.returncode != 0
+    err_data = json.loads(res_stale.stdout)
+    assert err_data["reason"] == "stale-note-hash"
+    assert len(list(tasks_dir.glob("*/*.md"))) == len(tasks_before)
+    assert not any("edited-title" in p.name.lower() for p in tasks_dir.glob("*/*.md"))
+
+
 def test_triage_missing_or_invalid_block_records_invalid_status(sample_workspace: pathlib.Path):
     """Test that missing or invalid ai-orch-triage block results in proposal_status == 'invalid'."""
     tasks_dir = sample_workspace / "tasks"
