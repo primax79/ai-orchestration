@@ -41,7 +41,7 @@
 
 ### 12.4 - Trigger engine
 
-- **Status:** `in progress` (2026-10-18; claude; kilo, worktree task/12.4-triggers) · **Size:** L · **Depends on:** 12.3
+- **Status:** `done` (2026-10-18; claude; merged) · **Size:** L · **Depends on:** 12.3
 - **Goal:** §5, E7, and the reduced-capability policy for unattended turns (E3).
 
 ### 12.5 - Headless orchestrator role (sessions, queue, turns, succession, bounds)
