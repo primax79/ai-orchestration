@@ -141,6 +141,20 @@ cwd (C2-4). `whoami` reports the binding.
 for simple fields, and check `unread_mail`. Format rules and transitions live in the broker. CLI instructions stay as
 the fallback.
 
+## 7b. Interface: project view and workspace view (owner, 2026-10-18)
+
+The UI (web and VS Code) follows the placement rule:
+
+- **Project view:** one project's tree, exactly as today (backlog, Kanban, tree, timeline, decisions, inbox, runs),
+  with bare ids. A project selector switches between the projects of the workspace.
+- **Workspace view (common):** all projects of the workspace together, plus the coordination tasks of `_workspace`.
+  Every item shows its qualified id and project (`ai-orchestration/T025`), filters and grouping by project, and a
+  coordination task expands into the project tasks it `coordinates`, with their live states. Questions, inbox, runs
+  and mail are workspace-wide lists with a project column. Writes from this view always target the item's own project.
+- The selected view and project are remembered per window; deep links carry `workspace:project/ID`.
+- A third level, **all workspaces** (read-only overview: orchestrator status, unread mail, open questions per
+  workspace), comes with the broker's registry.
+
 ## 8. Migration (v1), each step independently shippable (C2-9)
 
 1. **Invariants first:** T026, T027, T028; `status` read-only; config CAS under `config_lock` (C7).
@@ -153,8 +167,8 @@ the fallback.
 5. Read-only broker tools; then deterministic writes (CAS, idempotency, confirm tokens for destructive actions).
 6. Skills switched incrementally to the broker, CLI fallback kept.
 7. Orchestrator workers inside the broker, recovery/re-attachment, `orchestrator.ask` tickets.
-8. Mail to workspace orchestrators (metadata-only quarantine, policy, limits); then consoles; UI mail view and
-   workspace/project switcher.
+8. Mail to workspace orchestrators (metadata-only quarantine, policy, limits); then consoles; UI mail view.
+9. Interface: project view and common workspace view (§7b), then the all-workspaces overview.
 
 **v2 (not now):** cross-project `depends-on` and graphs, automatic classifier turns, reactive notifications,
 attachments, other machines.
