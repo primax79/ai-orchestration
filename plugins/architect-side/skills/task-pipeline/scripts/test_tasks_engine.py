@@ -404,9 +404,9 @@ OLD
     synced = index_path.read_text(encoding="utf-8")
     assert "| 1 | 01 | [Core](01-core/plan.md) | open | - | M |" in synced
     assert "01 -> 02" in synced
-    assert "| T001 | P0 | [First feature](features/T001-first.md) |" in synced
+    assert "| T001 (First feature) | P0 | [First feature](features/T001-first.md) |" in synced
     assert "| T001 | Which DB engine? | owner | T002 |" in synced
-    assert "| T000 | [Initial setup](done/features/T000-init.md) | done |" in synced
+    assert "| T000 (Initial setup) | [Initial setup](done/features/T000-init.md) | done |" in synced
 
 
 def test_index_regression_fixture_lossless(tmp_path: pathlib.Path) -> None:
@@ -429,8 +429,9 @@ def test_index_regression_fixture_lossless(tmp_path: pathlib.Path) -> None:
             if not line_s.startswith("|"):
                 continue
             cells = [c.strip() for c in line_s.strip("|").split("|")]
-            if len(cells) == 4 and re.match(r"^T\d+$", cells[0]):
-                res[cells[0]] = (cells[2], cells[3])
+            m_id = re.match(r"^(T\d+)", cells[0])
+            if len(cells) == 4 and m_id:
+                res[m_id.group(1)] = (cells[2], cells[3])
         return res
 
     orig_done_rows = _extract_done_rows(orig_text)
@@ -533,7 +534,7 @@ def test_index_regression_fixture_lossless(tmp_path: pathlib.Path) -> None:
             cells = [c.strip() for c in line_s.strip("|").split("|")]
             if not cells or cells[0] in ("Id", "Task", "Task / Initiative", "---", "-") or cells[0].startswith("---"):
                 continue
-            ids.append(cells[0])
+            ids.append(cells[0].split()[0] if cells[0] else "")
         return ids
 
     # Check row ids in Next up
@@ -557,8 +558,9 @@ def test_index_regression_fixture_lossless(tmp_path: pathlib.Path) -> None:
             if not line_s.startswith("|"):
                 continue
             cells = [c.strip() for c in line_s.strip("|").split("|")]
-            if len(cells) == 4 and re.match(r"^T\d+$", cells[0]):
-                rows.append((cells[0], cells[2], cells[3]))
+            m_id = re.match(r"^(T\d+)", cells[0])
+            if len(cells) == 4 and m_id:
+                rows.append((m_id.group(1), cells[2], cells[3]))
         return rows
 
     assert _extract_done_ordered(result_text) == _extract_done_ordered(orig_text)
@@ -6863,6 +6865,453 @@ def test_11_4_cli_ship_and_archive(tmp_path: pathlib.Path) -> None:
     res_arch = run_cli("archive", "--dry-run", "--tasks-dir", str(tasks_dir))
     assert res_arch.returncode == 0
     assert "[ok] Nothing to archive." in res_arch.stdout
+
+
+# ==============================================================================
+# T025: Short Title Tests (derivation, parsing, validation, creation, set-short)
+# ==============================================================================
+
+
+def test_derive_short_title() -> None:
+    # 1. Dropping leading stop words ("the", "a", "an")
+    assert te.derive_short_title("The unified task and state model") == "unified task state model"
+    assert te.derive_short_title("A quick bug fix") == "quick bug fix"
+    assert te.derive_short_title("An operational review") == "operational review"
+
+    # 2. Stripping leading IDs
+    assert te.derive_short_title("T025 Short title field for tasks and questions") == "Short title field tasks"
+    assert te.derive_short_title("T007 - Shared release manager") == "Shared release manager"
+    assert te.derive_short_title("12.16 UI proposal confirm") == "UI proposal confirm"
+    assert te.derive_short_title("Q004 Permission policy for headless runs") == "Permission policy headless runs"
+    assert te.derive_short_title("UC001 User authentication flow") == "User authentication flow"
+    assert te.derive_short_title("N003 Brainstorming session notes") == "Brainstorming session notes"
+
+    # 3. Stripping backticks
+    assert te.derive_short_title("T007 - `shared release manager`") == "shared release manager"
+
+    # 4. Parentheticals
+    assert te.derive_short_title("12.16 (UI proposal confirm)") == "UI proposal confirm"
+    assert te.derive_short_title("Deploy service (production v1.2)") == "Deploy service"
+
+    # 5. Length <= 40 chars, no trailing punctuation
+    res = te.derive_short_title("Fix bug: part one.")
+    assert not res.endswith(".")
+    assert len(res) <= 40
+    assert 1 <= len(res.split()) <= 5
+
+    # 6. Fallback on empty or symbol-only
+    assert te.derive_short_title("") == "untitled"
+    assert te.derive_short_title("---") == "untitled"
+
+
+def test_validate_short_title() -> None:
+    # Valid
+    assert te.validate_short_title("short title") == []
+    assert te.validate_short_title("one two three four five") == []
+    assert te.validate_short_title("word") == []
+
+    # Empty / dash
+    assert len(te.validate_short_title("")) > 0
+    assert len(te.validate_short_title("-")) > 0
+    assert len(te.validate_short_title("   ")) > 0
+
+    # Word count > 5
+    issues = te.validate_short_title("one two three four five six")
+    assert any("expected 1-5 words" in i for i in issues)
+
+    # Length > 40 chars
+    long_val = "word " * 9  # 45 chars
+    issues = te.validate_short_title(long_val.strip())
+    assert any("exceeds 40 characters" in i for i in issues)
+
+    # Trailing punctuation
+    for punct in [".", ",", ";", ":", "!", "?", "-", "—", "–"]:
+        issues = te.validate_short_title(f"short title{punct}")
+        assert any("has trailing punctuation" in i for i in issues)
+
+
+def test_parse_short_title_all_kinds(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "micro").mkdir(parents=True)
+    (tasks_dir / "questions").mkdir(parents=True)
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "_inbox" / "to-analyze" / "20261018-note").mkdir(parents=True)
+
+    # 1. Full emergent task WITH short
+    t1_path = tasks_dir / "features" / "T001-with-short.md"
+    t1_path.write_text(
+        "# T001 Feature One\n\n"
+        "- id: T001\n- title: Feature One\n- category: features\n- priority: P1\n"
+        "- priority-reason: core\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: -\n"
+        "- short: feature one label\n\n## Goal\n\nGoal.\n\n## Steps\n\nSteps.\n\n## Verification\n\nVerify.\n",
+        encoding="utf-8",
+    )
+    parsed_t1 = te.parse_emergent_task_file(t1_path, tasks_dir)
+    assert parsed_t1["short"] == "feature one label"
+    assert parsed_t1["short_title"] == "feature one label"
+    assert parsed_t1["short_title_source"] == "field"
+
+    # 2. Full emergent task WITHOUT short (derived)
+    t2_path = tasks_dir / "features" / "T002-without-short.md"
+    t2_path.write_text(
+        "# T002 Feature Two\n\n"
+        "- id: T002\n- title: Feature Two\n- category: features\n- priority: P1\n"
+        "- priority-reason: core\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: -\n\n"
+        "## Goal\n\nGoal.\n\n## Steps\n\nSteps.\n\n## Verification\n\nVerify.\n",
+        encoding="utf-8",
+    )
+    parsed_t2 = te.parse_emergent_task_file(t2_path, tasks_dir)
+    assert parsed_t2["short"] is None
+    assert parsed_t2["short_title"] == "Feature Two"
+    assert parsed_t2["short_title_source"] == "derived"
+
+    # 3. Microtask WITH short
+    m1_path = tasks_dir / "micro" / "T003-micro-short.md"
+    m1_path.write_text(
+        "# T003 Quick chore\n\n"
+        "- id: T003\n- title: Quick chore\n- kind: chore\n- priority: P2\n"
+        "- state: open\n- executor: kilo\n- paths: -\n- depends-on: -\n"
+        "- short: quick chore\n\n## What\n\nDo chore.\n",
+        encoding="utf-8",
+    )
+    parsed_m1 = te.parse_emergent_task_file(m1_path, tasks_dir)
+    assert parsed_m1["short"] == "quick chore"
+    assert parsed_m1["short_title"] == "quick chore"
+    assert parsed_m1["short_title_source"] == "field"
+
+    # 4. Question WITH short
+    q1_path = tasks_dir / "questions" / "Q001-test-q.md"
+    q1_path.write_text(
+        "# Q001 Permission choice\n\n"
+        "- id: Q001\n- question: Which mode?\n- status: open\n- blocks: -\n"
+        "- decider: owner\n- asked-by: owner\n- asked: 2026-10-18\n- origin-run: -\n"
+        "- open-answer: no\n- recommended: A\n- short: permission choice\n\n"
+        "## Context\n\nCtx.\n\n## Options\n\n- **A** — Opt A\n",
+        encoding="utf-8",
+    )
+    parsed_q1 = te.parse_question_file(q1_path, tasks_dir)
+    assert parsed_q1["short"] == "permission choice"
+    assert parsed_q1["short_title"] == "permission choice"
+    assert parsed_q1["short_title_source"] == "field"
+
+    # 5. Question WITHOUT short (derived)
+    q2_path = tasks_dir / "questions" / "Q002-test-q2.md"
+    q2_path.write_text(
+        "# Q002 Database Selection Choice\n\n"
+        "- id: Q002\n- question: Which database engine should we adopt?\n- status: open\n- blocks: -\n"
+        "- decider: owner\n- asked-by: owner\n- asked: 2026-10-18\n- origin-run: -\n"
+        "- open-answer: no\n- recommended: A\n\n"
+        "## Context\n\nCtx.\n\n## Options\n\n- **A** — Opt A\n",
+        encoding="utf-8",
+    )
+    parsed_q2 = te.parse_question_file(q2_path, tasks_dir)
+    assert parsed_q2["short"] is None
+    assert parsed_q2["short_title_source"] == "derived"
+    assert parsed_q2["short_title"] == "Database Selection Choice"
+
+    # 6. Plan task with **Short:** bullet
+    init_dir = tasks_dir / "01-init"
+    init_dir.mkdir(parents=True)
+    plan_path = init_dir / "plan.md"
+    plan_path.write_text(
+        "# 01 - Init\n\n- **Goal:** G.\n\n## Tasks\n\n"
+        "### 01.1 - Task with short\n"
+        "- **Status:** `open` · **Short:** task with short · **Kind:** feature\n"
+        "- **Goal:** G1.\n\n"
+        "### 01.2 - Task without short\n"
+        "- **Status:** `open` · **Kind:** chore\n"
+        "- **Goal:** G2.\n",
+        encoding="utf-8",
+    )
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["01.1"].short == "task with short"
+    assert tree["01.1"].short_title == "task with short"
+    assert tree["01.1"].short_title_source == "field"
+
+    assert tree["01.2"].short is None
+    assert tree["01.2"].short_title == "Task without short"
+    assert tree["01.2"].short_title_source == "derived"
+
+
+def test_validate_malformed_short_values(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "questions").mkdir(parents=True)
+
+    # Emergent task with trailing punctuation in short
+    t1_path = tasks_dir / "features" / "T001-invalid.md"
+    t1_path.write_text(
+        "# T001 Feature One\n\n"
+        "- id: T001\n- title: Feature One\n- category: features\n- priority: P1\n"
+        "- priority-reason: core\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: -\n"
+        "- short: trailing period.\n\n## Goal\n\nGoal.\n\n## Steps\n\nSteps.\n\n## Verification\n\nVerify.\n",
+        encoding="utf-8",
+    )
+    # Question with 6 words in short
+    q1_path = tasks_dir / "questions" / "Q001-invalid.md"
+    q1_path.write_text(
+        "# Q001 Permission choice\n\n"
+        "- id: Q001\n- question: Which mode?\n- status: open\n- blocks: -\n"
+        "- decider: owner\n- asked-by: owner\n- asked: 2026-10-18\n- origin-run: -\n"
+        "- open-answer: yes\n- recommended: -\n- short: one two three four five six\n\n"
+        "## Context\n\nCtx.\n\n## Options\n\n- **A** — Opt A\n- **B** — Opt B\n\n## Answer\n\n-\n",
+        encoding="utf-8",
+    )
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert len(errors) == 0  # Constraints on short are non-fatal warnings
+    assert any("short title 'trailing period.' violates conventions" in w for w in warnings)
+    assert any("question short title 'one two three four five six' violates conventions" in w for w in warnings)
+
+
+def test_creation_commands_short_flag(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # 1. tasks new with --short
+    res_new1 = run_cli(
+        "new",
+        "--title", "First Task",
+        "--category", "features",
+        "--goal", "Goal 1",
+        "--priority-reason", "Reason 1",
+        "--short", "first custom title",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_new1.returncode == 0
+    t1_file = tasks_dir / json.loads(res_new1.stdout)["rel_path"]
+    t1_content = t1_file.read_text(encoding="utf-8")
+    assert "- short: first custom title" in t1_content
+
+    # 2. tasks new without --short (derived)
+    res_new2 = run_cli(
+        "new",
+        "--title", "The Second Feature Task",
+        "--category", "features",
+        "--goal", "Goal 2",
+        "--priority-reason", "Reason 2",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_new2.returncode == 0
+    t2_file = tasks_dir / json.loads(res_new2.stdout)["rel_path"]
+    t2_content = t2_file.read_text(encoding="utf-8")
+    # Derived from "The Second Feature Task" -> "Second Feature Task"
+    assert "- short: Second Feature Task" in t2_content
+
+    # 3. tasks micro with --short
+    res_m1 = run_cli(
+        "micro",
+        "--title", "Chore Task",
+        "--short", "chore custom title",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_m1.returncode == 0
+    m1_file = tasks_dir / json.loads(res_m1.stdout)["rel_path"]
+    m1_content = m1_file.read_text(encoding="utf-8")
+    assert "- short: chore custom title" in m1_content
+
+    # 4. tasks micro without --short (derived)
+    res_m2 = run_cli(
+        "micro",
+        "--title", "A Clean Chores Work",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_m2.returncode == 0
+    m2_file = tasks_dir / json.loads(res_m2.stdout)["rel_path"]
+    m2_content = m2_file.read_text(encoding="utf-8")
+    assert "- short: Clean Chores Work" in m2_content
+
+    # 5. questions ask with --short
+    res_q1 = run_cli(
+        "questions", "ask",
+        "--question", "Which option?",
+        "--context", "Context text",
+        "--blocks", "T001",
+        "--open-answer", "yes",
+        "--short", "which option question",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_q1.returncode == 0
+    q1_file = tasks_dir / json.loads(res_q1.stdout)["rel_path"]
+    q1_content = q1_file.read_text(encoding="utf-8")
+    assert "- short: which option question" in q1_content
+
+    # 6. questions ask without --short (derived)
+    res_q2 = run_cli(
+        "questions", "ask",
+        "--question", "What permission mode is needed?",
+        "--context", "Context text",
+        "--blocks", "T002",
+        "--open-answer", "yes",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_q2.returncode == 0
+    q2_file = tasks_dir / json.loads(res_q2.stdout)["rel_path"]
+    q2_content = q2_file.read_text(encoding="utf-8")
+    assert "- short: permission mode needed" in q2_content
+
+
+def test_set_short_command(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+
+    t1_path = tasks_dir / "features" / "T001-sample.md"
+    t1_path.write_text(
+        "# T001 Feature One\n\n"
+        "- id: T001\n- title: Feature One\n- category: features\n- priority: P1\n"
+        "- priority-reason: core\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: -\n\n"
+        "## Goal\n\nGoal.\n\n## Steps\n\nSteps.\n\n## Verification\n\nVerify.\n",
+        encoding="utf-8",
+    )
+
+    # 1. Dry run
+    res_dry = run_cli("set-short", "T001", "custom short title", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry.returncode == 0
+    payload_dry = json.loads(res_dry.stdout)
+    assert payload_dry["ok"] is True
+    assert payload_dry["dry_run"] is True
+    assert "+- short: custom short title" in payload_dry["diff"]
+    # File not modified yet
+    assert "- short:" not in t1_path.read_text(encoding="utf-8")
+
+    # 2. Validation failure on malformed input
+    res_bad = run_cli("set-short", "T001", "has trailing period.", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_bad.returncode == 1
+    assert "trailing punctuation" in json.loads(res_bad.stdout)["error"]
+
+    # 3. Apply change
+    res_apply = run_cli("set-short", "T001", "custom short title", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_apply.returncode == 0
+    payload_apply = json.loads(res_apply.stdout)
+    assert payload_apply["ok"] is True
+    assert "- short: custom short title" in t1_path.read_text(encoding="utf-8")
+    current_hash = payload_apply["task_hash"]
+
+    # 4. Hash mismatch refusal
+    res_mismatch = run_cli(
+        "set-short", "T001", "updated short", "--expect-task-hash", "0" * 64, "--tasks-dir", str(tasks_dir), "--json"
+    )
+    assert res_mismatch.returncode == 1
+    assert "Task hash mismatch" in json.loads(res_mismatch.stdout)["error"]
+
+    # 5. Matching hash succeeds
+    res_match = run_cli(
+        "set-short", "T001", "updated short", "--expect-task-hash", current_hash, "--tasks-dir", str(tasks_dir), "--json"
+    )
+    assert res_match.returncode == 0
+    assert "- short: updated short" in t1_path.read_text(encoding="utf-8")
+
+
+def test_json_outputs_carry_short_title(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "questions").mkdir(parents=True)
+
+    # Create task with short
+    run_cli(
+        "new",
+        "--title", "User Auth Implementation",
+        "--category", "features",
+        "--goal", "Implement authentication",
+        "--priority-reason", "Security",
+        "--short", "user auth impl",
+        "--tasks-dir", str(tasks_dir),
+    )
+    # Create question
+    run_cli(
+        "questions", "ask",
+        "--question", "Which OAuth provider?",
+        "--context", "Google vs GitHub",
+        "--blocks", "T001",
+        "--open-answer", "yes",
+        "--short", "oauth provider selection",
+        "--tasks-dir", str(tasks_dir),
+    )
+
+    # Create unblocked task for ready queue
+    run_cli(
+        "new",
+        "--title", "Unblocked Ready Task",
+        "--category", "features",
+        "--goal", "Ready to work",
+        "--priority-reason", "Active",
+        "--short", "unblocked ready task",
+        "--tasks-dir", str(tasks_dir),
+    )
+
+    # 1. tasks list --json
+    res_list = run_cli("list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_list.returncode == 0
+    list_data = json.loads(res_list.stdout)
+    node = list_data["all_tasks"][0]
+    assert node["short_title"] == "user auth impl"
+    assert node["short_title_source"] == "field"
+
+    # 2. tasks graph --json
+    res_graph = run_cli("graph", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_graph.returncode == 0
+    graph_data = json.loads(res_graph.stdout)
+    g_node = graph_data["nodes_by_id"]["T001"]
+    assert g_node["short_title"] == "user auth impl"
+    assert g_node["short_title_source"] == "field"
+
+    # 3. questions list --json
+    res_ql = run_cli("questions", "list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_ql.returncode == 0
+    ql_data = json.loads(res_ql.stdout)
+    q_item = ql_data["questions"][0]
+    assert q_item["short_title"] == "oauth provider selection"
+    assert q_item["short_title_source"] == "field"
+
+    # 4. tasks next --json
+    res_next = run_cli("next", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_next.returncode == 0
+    next_data = json.loads(res_next.stdout)
+    assert len(next_data["tasks"]) > 0
+    assert next_data["tasks"][0]["short_title"] == "unblocked ready task"
+    assert next_data["tasks"][0]["short_title_source"] == "field"
+
+
+def test_sync_index_short_title_table_output(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+
+    run_cli(
+        "new",
+        "--title", "Database Index Migration",
+        "--category", "features",
+        "--goal", "Migrate DB index",
+        "--priority-reason", "Performance",
+        "--short", "db index migration",
+        "--tasks-dir", str(tasks_dir),
+    )
+
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        "# Index\n\n"
+        "## Next up\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+
+    res_sync = run_cli("sync-index", "--apply", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_sync.returncode == 0
+    content = index_path.read_text(encoding="utf-8")
+    assert "| T001 (db index migration) |" in content
+
 
 
 

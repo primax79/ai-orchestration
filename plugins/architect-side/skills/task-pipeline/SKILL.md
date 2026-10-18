@@ -17,8 +17,8 @@ description: "Author and maintain a durable, resumable development pipeline as a
 
 ### Format is not optional (every create or edit)
 
-- **Plan tasks** are blocks `### NN.T - <title>` (number, space, hyphen or dash, space, title), each followed by `- **Status:** \`<state>\` · ...`. Never bullets (`- **T1 — ...**`), never table rows, never `T<n>` ids inside a plan (`T###` belongs to emergent tasks), never letter suffixes (`12.2a`: use children `12.2.1`).
-- **Emergent tasks** are created with `ai-orch tasks new --category C --title T --priority P --priority-reason R --goal G [--paths ...] [--executor ...]` (or `--from-note N###` from an inbox note), not by hand-writing a header from memory; then fill Steps and Verification in the created file.
+- **Plan tasks** are blocks `### NN.T - <title>` (number, space, hyphen or dash, space, title), each followed by `- **Status:** \`<state>\` · ...`. Optional status line segment or bullet `**Short:** <3-4 words>`. Never bullets (`- **T1 — ...**`), never table rows, never `T<n>` ids inside a plan (`T###` belongs to emergent tasks), never letter suffixes (`12.2a`: use children `12.2.1`).
+- **Emergent tasks** are created with `ai-orch tasks new --category C --title T [--short S] --priority P --priority-reason R --goal G [--paths ...] [--executor ...]` (or `--from-note N###` from an inbox note), not by hand-writing a header from memory; then fill Steps and Verification in the created file.
 - **After every change under `tasks/`** run `ai-orch tasks validate`: zero errors and no "non-canonical task items" warning for the files you touched, then `ai-orch tasks sync-index --check`. A change that leaves either is not finished.
 - **State follows the work:** assigning a task moves it to `in progress` before the executor starts, the executor's commit + Final Report moves it to `delivered`, and so on, always with `ai-orch tasks transition <id> <state>` (emergent `T###` and plan `NN.T` alike). See `orchestration-workflow`, "Track task state as a path".
 - **Found a project in an older format?** Follow "Normalizing existing tasks" below before adding to it.
@@ -211,14 +211,15 @@ path. A "next steps" paragraph in the chat is not a substitute.
   - `size`: `XS` | `S` | `M` | `L` | `XL` (relative weight; defaults to M for full tasks, XS for microtasks);
   - `kind`: `feature` | `bug` | `fix` | `chore` | `docs` | `investigation` (classification kind; required for microtasks, optional for full tasks);
   - `labels`: free tags matching `[a-z0-9][a-z0-9-]*` (max 24 chars each, comma-separated, e.g. `ui, security`);
-  - `branch`, `worktree`, `run-id`, `use-cases`.
+  - `branch`, `worktree`, `run-id`, `use-cases`;
+  - `short`: `1–5 words, ≤40 chars, no trailing punctuation` (a concise 3-4 word label stored with the item and used whenever cited; see [Citing tasks and questions: id plus a short title](#citing-tasks-and-questions-id-plus-a-short-title)).
 
   **Microtask Form (`tasks/micro/T###-<slug>.md`):**
   A lightweight emergent task for very small work (bug, fix, chore, docs touch-up) that shares the same ID space (`T###`), state machine, and dependency semantics:
-  - **Header (closed set, exact order):** `id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`.
+  - **Header (closed set, exact order):** `id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, `short` (optional).
   - **Body:** one required section, `## What`. No `Goal`/`Steps`/`Verification` skeleton needed.
   - **Size:** defaults to `XS`.
-  - **Commands:** `ai-orch tasks micro --title ... [--kind ...] [--priority ...] [--label ...]` creates a microtask under the task-write lock; `ai-orch tasks promote <id> [--category <cat>]` promotes it to a full task in a chosen category.
+  - **Commands:** `ai-orch tasks micro --title ... [--short ...] [--kind ...] [--priority ...] [--label ...]` creates a microtask under the task-write lock; `ai-orch tasks promote <id> [--category <cat>]` promotes it to a full task in a chosen category.
 
   Other extra fields are not allowed in the header: put the information in the
   body. Then the required sections `## Goal`, `## Steps` and `## Verification`.

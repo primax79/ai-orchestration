@@ -206,11 +206,11 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "Upgrade an existing tasks/ directory to the latest task-pipeline v0.3.0 convention.",
                 },
                 "new": {
-                    "usage": "ai-orch tasks new --from-note <id> [--category <cat>] --title <title> [--parent <id>] [--priority <P0-P3>] [--priority-reason <reason>] [--tasks-dir <dir>] [--json]",
+                    "usage": "ai-orch tasks new --from-note <id> [--category <cat>] --title <title> [--short <words>] [--parent <id>] [--priority <P0-P3>] [--priority-reason <reason>] [--tasks-dir <dir>] [--json]",
                     "description": "Create a new emergent task from an inbox note under the task-write lock.",
                 },
                 "micro": {
-                    "usage": "ai-orch tasks micro --title <title> [--kind <kind>] [--priority <P0-P3>] [--paths <paths>] [--depends-on <ids>] [--label <label>...] [--size <size>] [--executor <exec>] [--what <text>] [--tasks-dir <dir>] [--json]",
+                    "usage": "ai-orch tasks micro --title <title> [--short <words>] [--kind <kind>] [--priority <P0-P3>] [--paths <paths>] [--depends-on <ids>] [--label <label>...] [--size <size>] [--executor <exec>] [--what <text>] [--tasks-dir <dir>] [--json]",
                     "description": "Create a lightweight microtask under tasks/micro/ under the task-write lock.",
                 },
                 "promote": {
@@ -218,7 +218,7 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "Promote a microtask into a full emergent task in a chosen category.",
                 },
                 "child": {
-                    "usage": "ai-orch tasks child add <parent> --title <title> [--kind <kind>] [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "usage": "ai-orch tasks child add <parent> --title <title> [--short <words>] [--kind <kind>] [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
                     "description": "Add a child task under a container or convert an open leaf to a container.",
                 },
                 "expand": {
@@ -265,6 +265,14 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks set-labels <id> [--add <label>...] [--remove <label>...] [--to <labels>] [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
                     "description": "Set labels for a task (removing inherited labels is refused).",
                 },
+                "set-short": {
+                    "usage": "ai-orch tasks set-short <id> <words> [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Set short title (1-5 words, <=40 chars) for an item.",
+                },
+                "next": {
+                    "usage": "ai-orch tasks next [--kind <kind>...] [--label <label>...] [--tasks-dir <dir>] [--json]",
+                    "description": "Show ready queue / next actionable tasks from the dependency graph.",
+                },
                 "labels": {
                     "usage": "ai-orch tasks labels [--tasks-dir <dir>] [--json]",
                     "description": "List all labels currently in use with their occurrence counts.",
@@ -285,7 +293,7 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
                 "add": {
                     "usage": (
-                        "ai-orch inbox add --title <title> --kind <kind> [--body <text> | --body-file <path>] "
+                        "ai-orch inbox add --title <title> --kind <kind> [--short <words>] [--body <text> | --body-file <path>] "
                         "[--about <about>] [--author <author>] [--tasks-dir <dir>] [--json]"
                     ),
                     "description": "Create a new inbox note folder under the task-write lock and return its id.",
@@ -334,7 +342,7 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "ask": {
                     "usage": (
                         "ai-orch questions ask --question <text> (--context <text> | --context-file <path>) "
-                        "[--option <opt>...] [--recommended <label>] [--open-answer yes|no] --blocks <ids> "
+                        "[--short <words>] [--option <opt>...] [--recommended <label>] [--open-answer yes|no] --blocks <ids> "
                         "[--decider <who>] [--asked-by <who>] [--origin-run <run>] [--from-task <id>] [--tasks-dir <dir>] [--json]"
                     ),
                     "description": "File a new blocking question, transitioning blocked tasks to waiting.",
