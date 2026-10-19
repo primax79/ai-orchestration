@@ -24,7 +24,7 @@
 
 ### 16.4 - QualifiedTaskRef, coordinates: links and the placement rule
 
-- **Status:** `in progress` (2026-10-18) · **Short:** Qualified refs and coordination · **Size:** M · **Depends on:** 16.3 · **Repo:** `ai-orchestration/`
+- **Status:** `delivered` (2026-10-19) · **Short:** Qualified refs and coordination · **Size:** M · **Depends on:** 16.3 · **Repo:** `ai-orchestration/`
 - **Goal:** one parser/canonicaliser for `[workspace:][project/]ID` (malformed prefixes are errors); `coordinates:` on workspace-tree tasks resolved read-only to project tasks; `validate` placement warnings; `tasks move ID --to-project P` with preview and a pointer left behind; on-disk `depends-on` unchanged.
 
 ### 16.5 - Broker MCP tools: reads, then deterministic writes
