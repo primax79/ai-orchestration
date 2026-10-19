@@ -13102,6 +13102,26 @@ def move_task(
         flags=re.MULTILINE,
     )
 
+    # Paths and handoff are relative to the tree's root: rebase them from the workspace root to the project root.
+    try:
+        ws_root = pathlib.Path(tasks_dir).resolve().parent
+        proj_root = target_tasks_dir.resolve().parent
+        proj_prefix = proj_root.relative_to(ws_root).as_posix()
+    except (ValueError, OSError):
+        proj_prefix = ""
+    if proj_prefix and proj_prefix != ".":
+        def _rebase_paths(m: "re.Match[str]") -> str:
+            items = [x.strip() for x in m.group(1).split(",")]
+            rebased = [x[len(proj_prefix) + 1:] if x.startswith(proj_prefix + "/") else x for x in items]
+            return "- paths: " + ", ".join(rebased)
+        target_text = re.sub(r"^-\s+paths:\s*(.*)$", _rebase_paths, target_text, count=1, flags=re.MULTILINE)
+    try:
+        old_rel = src_file.resolve().relative_to(pathlib.Path(tasks_dir).resolve().parent).as_posix()
+        new_rel = target_file.resolve().relative_to(target_tasks_dir.resolve().parent).as_posix()
+        target_text = target_text.replace(old_rel, new_rel)
+    except (ValueError, OSError):
+        pass
+
     # Pointer content for source tree
     title = target_task.get("title") or "Task"
     priority = target_task.get("priority") or "P2"

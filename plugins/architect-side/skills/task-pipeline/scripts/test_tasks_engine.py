@@ -8001,3 +8001,23 @@ def test_validate_coordinates_warnings_for_missing_task(tmp_path: pathlib.Path):
 
     errors, warnings, _, _ = te.validate_tasks_tree(ws_tasks)
     assert any("target task 'T999' in project 'proj-a' does not exist" in w for w in warnings)
+
+
+def test_tasks_move_rebases_paths_to_the_project_root(tmp_path: pathlib.Path) -> None:
+    """16.4: a task moved from the workspace tree into a project keeps paths relative to its new root."""
+    ws = tmp_path / "ws"
+    (ws / "tasks").mkdir(parents=True)
+    (ws / "proj" / "tasks").mkdir(parents=True)
+    (ws / "tasks" / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+    (ws / "proj" / "tasks" / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+    res = run_cli("new", "--tasks-dir", str(ws / "tasks"), "--category", "features", "--title", "Misplaced",
+                  "--short", "Misplaced", "--goal", "g", "--priority-reason", "r", "--paths", "proj/src, docs/x.md",
+                  "--json")
+    assert json.loads(res.stdout)["ok"] is True
+    mv = run_cli("move", "T001", "--to-tasks-dir", str(ws / "proj" / "tasks"), "--tasks-dir", str(ws / "tasks"),
+                 "--json")
+    assert json.loads(mv.stdout)["ok"] is True, mv.stdout
+    moved = next((ws / "proj" / "tasks" / "features").glob("T001-*.md")).read_text(encoding="utf-8")
+    assert "- paths: src, docs/x.md" in moved
+    pointer = next((ws / "tasks" / "features").glob("T001-*.md")).read_text(encoding="utf-8")
+    assert "- moved-to:" in pointer
