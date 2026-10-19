@@ -7663,3 +7663,341 @@ def test_broker_singleton_guard_blocks_mutating_commands(tmp_path: pathlib.Path,
     assert res_after.returncode == 0
     p_after = json.loads(res_after.stdout)
     assert p_after["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# Tests for Qualified References, Coordinates, Placement Warnings, and Tasks Move (16.4)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_and_format_qualified_ref():
+    # 1. Successful parses
+    r1 = te.parse_qualified_ref("ai-coding-tools:ai-orchestration/T025")
+    assert r1 == {"workspace": "ai-coding-tools", "project": "ai-orchestration", "id": "T025"}
+    assert te.format_qualified_ref(r1) == "ai-coding-tools:ai-orchestration/T025"
+
+    r2 = te.parse_qualified_ref("ai-orchestration/12.16")
+    assert r2 == {"project": "ai-orchestration", "id": "12.16"}
+    assert te.format_qualified_ref(r2) == "ai-orchestration/12.16"
+
+    r3 = te.parse_qualified_ref("_workspace/T014")
+    assert r3 == {"project": "_workspace", "id": "T014"}
+    assert te.format_qualified_ref(r3) == "_workspace/T014"
+
+    r4 = te.parse_qualified_ref("T025")
+    assert r4 == {"id": "T025"}
+    assert te.format_qualified_ref(r4) == "T025"
+
+    r5 = te.parse_qualified_ref("my-ws:T025")
+    assert r5 == {"workspace": "my-ws", "id": "T025"}
+    assert te.format_qualified_ref(r5) == "my-ws:T025"
+
+    # Format with kwargs
+    assert te.format_qualified_ref(id="T001", project="proj-a") == "proj-a/T001"
+    assert te.format_qualified_ref(id="T001", project="proj-a", workspace="ws") == "ws:proj-a/T001"
+
+    # 2. Malformed cases
+    with pytest.raises(ValueError, match="invalid id"):
+        te.parse_qualified_ref("bad slug")
+
+    with pytest.raises(ValueError, match="invalid project slug"):
+        te.parse_qualified_ref("bad_slug/T025")
+
+    with pytest.raises(ValueError, match="invalid project slug"):
+        te.parse_qualified_ref("a/T025")
+
+    with pytest.raises(ValueError, match="invalid workspace slug"):
+        te.parse_qualified_ref("bad_ws:ai-orchestration/T025")
+
+    with pytest.raises(ValueError, match="missing id"):
+        te.parse_qualified_ref("ai-orchestration/")
+
+    with pytest.raises(ValueError, match="missing id"):
+        te.parse_qualified_ref("ai-coding-tools:ai-orchestration/")
+
+    with pytest.raises(ValueError, match="Empty qualified reference"):
+        te.parse_qualified_ref("")
+
+    with pytest.raises(ValueError, match="invalid id"):
+        te.parse_qualified_ref("ai-orchestration/T025 extra")
+
+    with pytest.raises(ValueError, match="multiple '/'"):
+        te.parse_qualified_ref("ai-orchestration/T025/junk")
+
+    with pytest.raises(ValueError, match="invalid id"):
+        te.parse_qualified_ref("T025 junk")
+
+
+def test_depends_on_rejects_cross_project_qualified_ref(tmp_path: pathlib.Path):
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    task_file = tasks_dir / "features" / "T001-scraper.md"
+    _write_sample_task(task_file, task_id="T001", depends_on="other-proj/T002")
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("cross-project dependencies are v2; use coordinates: from the workspace tree" in e for e in errors)
+
+
+def test_coordinates_header_parsing_and_resolution(tmp_path: pathlib.Path):
+    ws_dir = tmp_path / "workspace"
+    ws_dir.mkdir(parents=True)
+    ws_tasks = ws_dir / "tasks"
+    ws_tasks.mkdir(parents=True)
+
+    proj_a = ws_dir / "projects" / "proj-a"
+    proj_a_tasks = proj_a / "tasks"
+    proj_a_tasks.mkdir(parents=True)
+
+    # Create target task in proj-a
+    _write_sample_task(proj_a_tasks / "core" / "T001-core.md", task_id="T001", title="Core auth logic")
+
+    # In ws_tasks, create an emergent task coordinating proj-a/T001 and unresolved proj-b/T002
+    t_ws = ws_tasks / "orchestration" / "T010-coord.md"
+    _write_sample_task(t_ws, task_id="T010", title="Coordinate auth rollout", category="orchestration")
+    content = t_ws.read_text(encoding="utf-8")
+    content = content.replace("- verifier: -", "- verifier: -\n- coordinates: proj-a/T001, proj-b/T002")
+    t_ws.write_text(content, encoding="utf-8")
+
+    emergent = te.discover_emergent_tasks(ws_tasks)
+    t10 = next(t for t in emergent if t["id"] == "T010")
+    assert len(t10["coordinates"]) == 2
+    c1 = next(c for c in t10["coordinates"] if c["project"] == "proj-a")
+    assert c1["id"] == "T001"
+    assert c1.get("state") == "open"
+    assert "short_title" in c1
+
+    c2 = next(c for c in t10["coordinates"] if c["project"] == "proj-b")
+    assert c2["id"] == "T002"
+    assert "state" not in c2
+    assert "short_title" not in c2
+
+
+def test_validate_coordinates_and_placement_warnings(tmp_path: pathlib.Path):
+    ws_dir = tmp_path / "my-workspace"
+    ws_dir.mkdir(parents=True)
+    ws_tasks = ws_dir / "tasks"
+    ws_tasks.mkdir(parents=True)
+
+    cfg = ws_dir / "orchestration.toml"
+    cfg.write_text(
+        '[workspace]\n'
+        'projects = [\n'
+        '  { slug = "proj-a", path = "projects/proj-a" },\n'
+        '  { slug = "proj-b", path = "projects/proj-b" }\n'
+        ']\n',
+        encoding="utf-8",
+    )
+
+    proj_a_tasks = ws_dir / "projects" / "proj-a" / "tasks"
+    proj_a_tasks.mkdir(parents=True)
+    _write_sample_task(proj_a_tasks / "feat" / "T001-task.md", task_id="T001", title="Task A")
+
+    # 1. Placement warning: task in _workspace with no coordinates whose paths all lie inside proj-a
+    t1 = ws_tasks / "features" / "T001-single.md"
+    _write_sample_task(t1, task_id="T001", title="Task single project paths")
+    c1 = t1.read_text(encoding="utf-8").replace("- paths: src/scraper.py", "- paths: projects/proj-a/src/file.py, projects/proj-a/README.md")
+    t1.write_text(c1, encoding="utf-8")
+
+    # 2. Placement warning: task whose coordinates name a single project
+    t2 = ws_tasks / "features" / "T002-single-coord.md"
+    _write_sample_task(t2, task_id="T002", title="Task single coord")
+    c2 = t2.read_text(encoding="utf-8").replace("- verifier: -", "- verifier: -\n- coordinates: proj-a/T001")
+    t2.write_text(c2, encoding="utf-8")
+
+    errors, warnings, _, _ = te.validate_tasks_tree(ws_tasks)
+    assert any("T001-single.md: belongs in project proj-a; use tasks move" in w for w in warnings)
+    assert any("T002-single-coord.md: belongs in project proj-a; use tasks move" in w for w in warnings)
+
+
+def test_tasks_move_dry_run_and_apply(tmp_path: pathlib.Path):
+    ws_dir = tmp_path / "workspace"
+    ws_dir.mkdir(parents=True)
+    ws_tasks = ws_dir / "tasks"
+    ws_tasks.mkdir(parents=True)
+
+    proj_a_dir = ws_dir / "proj-a"
+    proj_a_tasks = proj_a_dir / "tasks"
+    proj_a_tasks.mkdir(parents=True)
+
+    (ws_tasks / "00-INDEX.md").write_text("# Workspace Index\n", encoding="utf-8")
+    (proj_a_tasks / "00-INDEX.md").write_text("# Project A Index\n", encoding="utf-8")
+
+    _write_sample_task(proj_a_tasks / "features" / "T001-existing.md", task_id="T001", title="Existing")
+
+    src_task = ws_tasks / "refactor" / "T014-clean-db.md"
+    _write_sample_task(src_task, task_id="T014", title="Clean DB schema", category="refactor")
+
+    # 1. Dry run
+    res_dry = te.move_task(
+        tasks_dir=ws_tasks,
+        task_id="T014",
+        to_project="proj-a",
+        to_tasks_dir=proj_a_tasks,
+        dry_run=True,
+    )
+    assert res_dry["ok"] is True
+    assert res_dry["dry_run"] is True
+    assert res_dry["new_task_id"] == "T002"
+    assert "diff_source" in res_dry and "diff_target" in res_dry
+    assert "+- state: moved" in res_dry["diff_source"]
+    assert "+- moved-to: proj-a/T002" in res_dry["diff_source"]
+    assert "+- id: T002" in res_dry["diff_target"]
+    assert not (proj_a_tasks / "refactor" / "T002-clean-db.md").exists()
+
+    # 2. CAS hash failure test
+    res_cas_fail = te.move_task(
+        tasks_dir=ws_tasks,
+        task_id="T014",
+        to_tasks_dir=proj_a_tasks,
+        expect_task_hash="badhash123",
+    )
+    assert res_cas_fail["ok"] is False
+    assert "Task hash mismatch" in res_cas_fail["error"]
+
+    # 3. Apply move
+    res_apply = te.move_task(
+        tasks_dir=ws_tasks,
+        task_id="T014",
+        to_project="proj-a",
+        to_tasks_dir=proj_a_tasks,
+        dry_run=False,
+    )
+    assert res_apply["ok"] is True
+    assert res_apply["new_task_id"] == "T002"
+
+    target_file = proj_a_tasks / "refactor" / "T002-clean-db.md"
+    assert target_file.exists()
+    assert "- id: T002" in target_file.read_text(encoding="utf-8")
+
+    pointer_text = src_task.read_text(encoding="utf-8")
+    assert "- state: moved" in pointer_text
+    assert "- moved-to: proj-a/T002" in pointer_text
+
+    ws_idx = (ws_tasks / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "T014" in ws_idx
+    assert "moved" in ws_idx
+
+    proj_idx = (proj_a_tasks / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "T002" in proj_idx
+
+    err_ws, warn_ws, _, _ = te.validate_tasks_tree(ws_tasks)
+    assert err_ws == []
+
+    err_target, warn_target, _, _ = te.validate_tasks_tree(proj_a_tasks)
+    assert err_target == []
+
+
+def test_tasks_move_folder_task_and_cli(tmp_path: pathlib.Path):
+    ws_dir = tmp_path / "workspace"
+    ws_dir.mkdir(parents=True)
+    ws_tasks = ws_dir / "tasks"
+    ws_tasks.mkdir(parents=True)
+
+    proj_b_tasks = ws_dir / "proj-b" / "tasks"
+    proj_b_tasks.mkdir(parents=True)
+
+    # Create folder task in source
+    folder_task = ws_tasks / "architecture" / "T020-auth-rework"
+    folder_task.mkdir(parents=True)
+    _write_sample_task(folder_task / "README.md", task_id="T020", title="Auth rework", category="architecture")
+    # Add an attachment
+    att_dir = folder_task / "attachments"
+    att_dir.mkdir(parents=True)
+    (att_dir / "spec.txt").write_text("architecture spec", encoding="utf-8")
+
+    # Run CLI with --dry-run
+    res_dry = run_cli(
+        "move", "T020",
+        "--to-project", "proj-b",
+        "--to-tasks-dir", str(proj_b_tasks),
+        "--tasks-dir", str(ws_tasks),
+        "--dry-run",
+        "--json",
+    )
+    assert res_dry.returncode == 0
+    data_dry = json.loads(res_dry.stdout)
+    assert data_dry["ok"] is True
+    assert data_dry["dry_run"] is True
+    assert data_dry["new_task_id"] == "T001"
+    assert not (proj_b_tasks / "architecture" / "T001-auth-rework").exists()
+
+    # Run CLI real move with --idempotency-key
+    res_real = run_cli(
+        "move", "T020",
+        "--to-project", "proj-b",
+        "--to-tasks-dir", str(proj_b_tasks),
+        "--tasks-dir", str(ws_tasks),
+        "--idempotency-key", "key-move-12345",
+        "--json",
+    )
+    assert res_real.returncode == 0
+    data_real = json.loads(res_real.stdout)
+    assert data_real["ok"] is True
+    assert data_real["new_task_id"] == "T001"
+
+    # Target folder exists with attachment
+    target_folder = proj_b_tasks / "architecture" / "T001-auth-rework"
+    assert target_folder.is_dir()
+    assert (target_folder / "README.md").exists()
+    assert "- id: T001" in (target_folder / "README.md").read_text(encoding="utf-8")
+    assert (target_folder / "attachments" / "spec.txt").read_text(encoding="utf-8") == "architecture spec"
+
+    # Source pointer README exists, attachments moved out
+    source_readme = folder_task / "README.md"
+    assert source_readme.exists()
+    assert "- state: moved" in source_readme.read_text(encoding="utf-8")
+    assert "- moved-to: proj-b/T001" in source_readme.read_text(encoding="utf-8")
+    assert not (folder_task / "attachments").exists()
+
+    # Validate source and target
+    err_ws, warn_ws, _, _ = te.validate_tasks_tree(ws_tasks)
+    assert err_ws == []
+    err_t, warn_t, _, _ = te.validate_tasks_tree(proj_b_tasks)
+    assert err_t == []
+
+
+def test_plan_task_coordinates_and_depends_on_validation(tmp_path: pathlib.Path):
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    init_dir = tasks_dir / "01-core"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        "# 01 Core\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Task A\n"
+        "- **Status:** open\n"
+        "- **Goal:** Subtask A\n"
+        "- **Coordinates:** proj-a/T001\n"
+        "- **Depends on:** other-proj/12.2\n",
+        encoding="utf-8",
+    )
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("cross-project dependencies are v2; use coordinates: from the workspace tree" in e for e in errors)
+    assert any("cannot resolve project 'proj-a' for coordinates reference 'proj-a/T001'" in w for w in warnings)
+
+
+def test_validate_coordinates_warnings_for_missing_task(tmp_path: pathlib.Path):
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir(parents=True)
+    ws_tasks = ws_dir / "tasks"
+    ws_tasks.mkdir(parents=True)
+
+    cfg = ws_dir / "orchestration.toml"
+    cfg.write_text(
+        '[workspace]\nprojects = [\n  { slug = "proj-a", path = "proj-a" }\n]\n',
+        encoding="utf-8",
+    )
+
+    proj_a_tasks = ws_dir / "proj-a" / "tasks"
+    proj_a_tasks.mkdir(parents=True)
+    # Project exists, but task T999 does not exist
+    t1 = ws_tasks / "features" / "T001-coord.md"
+    _write_sample_task(t1, task_id="T001", title="Task with missing target")
+    c1 = t1.read_text(encoding="utf-8").replace("- verifier: -", "- verifier: -\n- coordinates: proj-a/T999")
+    t1.write_text(c1, encoding="utf-8")
+
+    errors, warnings, _, _ = te.validate_tasks_tree(ws_tasks)
+    assert any("target task 'T999' in project 'proj-a' does not exist" in w for w in warnings)
