@@ -27,13 +27,25 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 try:
     import fcntl
 except ImportError:
     fcntl = None  # type: ignore
+
+try:
+    import orchestration_registry
+except ImportError:
+    _repo_root = pathlib.Path(__file__).resolve().parents[5]
+    _scripts_dir = _repo_root / "scripts"
+    if _scripts_dir.is_dir() and str(_scripts_dir) not in sys.path:
+        sys.path.insert(0, str(_scripts_dir))
+    try:
+        import orchestration_registry
+    except ImportError:
+        orchestration_registry = None  # type: ignore
 
 CORE_HEADER_FIELDS: tuple[str, ...] = (
     "id",
@@ -63,6 +75,8 @@ OPTIONAL_EXTENSION_FIELDS: tuple[str, ...] = (
     "run-id",
     "use-cases",
     "use_cases",
+    "coordinates",
+    "moved-to",
     "short",
 )
 
@@ -136,9 +150,10 @@ CANONICAL_STATES: set[str] = {
     "done",
     "done with a caveat",
     "dropped",
+    "moved",
 }
 
-TERMINAL_STATES: set[str] = {"done", "done with a caveat", "dropped"}
+TERMINAL_STATES: set[str] = {"done", "done with a caveat", "dropped", "moved"}
 
 # Legal state transitions (canonical base state -> allowed target canonical base states)
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
@@ -153,6 +168,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "done": set(),
     "done with a caveat": set(),
     "dropped": set(),
+    "moved": set(),
 }
 
 REQUIRED_SECTIONS: tuple[str, ...] = ("## Goal", "## Steps", "## Verification")
@@ -266,6 +282,7 @@ def normalize_state(raw_state: str) -> str:
         "verified",
         "done",
         "open",
+        "moved",
     ):
         if s == base or s.startswith(base + ":") or s.startswith(base + " ("):
             return base
@@ -274,6 +291,239 @@ def normalize_state(raw_state: str) -> str:
 
 def is_valid_state(raw_state: str) -> bool:
     return normalize_state(raw_state) in CANONICAL_STATES
+
+
+# ---------------------------------------------------------------------------
+# Qualified References & Project Resolution (Spec §1)
+# ---------------------------------------------------------------------------
+
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,47}$")
+QUALIFIED_REF_ID_RE = re.compile(
+    r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.(?:T)?\d+)*|Q\d{3,}|UC\d{3,}|N\d{3,})$"
+)
+
+
+def parse_qualified_ref(text: str) -> dict[str, str]:
+    """Parse a qualified task reference of the form [workspace ':'] [project '/'] ID.
+
+    Slugs must match '^[a-z0-9][a-z0-9-]{1,47}$' (except project may be '_workspace').
+    ID matches standard id grammar (T###, NN, NN.T…, Q###, UC###, N###).
+    Returns a dict with 'id' and optionally 'workspace' and/or 'project'.
+    Raises ValueError on malformed input.
+    """
+    if not isinstance(text, str):
+        raise ValueError(f"Qualified reference must be a string, got {type(text).__name__}")
+    if not text:
+        raise ValueError("Empty qualified reference")
+
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Malformed qualified ref: multiple ':' in {text!r}")
+        ws_part, rest = parts
+        if not SLUG_RE.match(ws_part):
+            raise ValueError(f"Malformed qualified ref: invalid workspace slug {ws_part!r}")
+        workspace = ws_part
+    else:
+        workspace = None
+        rest = text
+
+    if "/" in rest:
+        parts = rest.split("/")
+        if len(parts) != 2:
+            raise ValueError(f"Malformed qualified ref: multiple '/' in {text!r}")
+        proj_part, id_part = parts
+        if proj_part != "_workspace" and not SLUG_RE.match(proj_part):
+            raise ValueError(f"Malformed qualified ref: invalid project slug {proj_part!r}")
+        project = proj_part
+    else:
+        project = None
+        id_part = rest
+
+    if not id_part:
+        raise ValueError(f"Malformed qualified ref: missing id in {text!r}")
+    if not QUALIFIED_REF_ID_RE.match(id_part):
+        raise ValueError(f"Malformed qualified ref: invalid id {id_part!r} in {text!r}")
+
+    res: dict[str, str] = {"id": id_part}
+    if workspace is not None:
+        res["workspace"] = workspace
+    if project is not None:
+        res["project"] = project
+    return res
+
+
+def format_qualified_ref(
+    ref: dict[str, Any] | str | None = None,
+    *,
+    id: str | None = None,
+    project: str | None = None,
+    workspace: str | None = None,
+) -> str:
+    """Format a qualified reference into [workspace ':'] [project '/'] ID."""
+    if isinstance(ref, dict):
+        id = ref.get("id") or id
+        project = ref.get("project") or project
+        workspace = ref.get("workspace") or workspace
+    elif isinstance(ref, str):
+        parsed = parse_qualified_ref(ref)
+        id = parsed.get("id")
+        project = parsed.get("project")
+        workspace = parsed.get("workspace")
+
+    if not id:
+        raise ValueError("Missing 'id' for format_qualified_ref")
+
+    prefix = ""
+    if workspace:
+        prefix += f"{workspace}:"
+    if project:
+        prefix += f"{project}/"
+    return f"{prefix}{id}"
+
+
+def resolve_project_tasks_dir(project_slug: str, context_tasks_dir: pathlib.Path) -> pathlib.Path | None:
+    """Locate the tasks/ directory for a given project slug relative to workspace configuration."""
+    context_tasks_dir = pathlib.Path(context_tasks_dir).resolve()
+
+    # Special case: _workspace itself
+    if project_slug == "_workspace":
+        return context_tasks_dir
+
+    # 1. Try orchestration_registry SQLite DB if available
+    if orchestration_registry is not None:
+        try:
+            ws, _ = orchestration_registry.resolve_workspace_for_path(context_tasks_dir.parent)
+            if ws is not None:
+                ws_path = pathlib.Path(ws["canonical_path"]).resolve()
+                proj_res = orchestration_registry.list_projects(ws["slug"])
+                for item in proj_res.get("items", []):
+                    if item.get("slug") == project_slug:
+                        cand = (ws_path / item.get("path", "") / "tasks").resolve()
+                        if cand.is_dir() or cand.parent.is_dir():
+                            return cand
+        except Exception:
+            pass
+
+    # 2. Try looking for orchestration.toml or .ai-orchestration.local.toml in workspace root or parents
+    curr: pathlib.Path | None = context_tasks_dir.parent
+    while curr and curr != curr.parent:
+        for cfg_name in (".ai-orchestration.local.toml", "orchestration.toml"):
+            cfg_file = curr / cfg_name
+            if cfg_file.is_file():
+                try:
+                    import tomllib
+                    cfg_data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+                    projects = cfg_data.get("workspace", {}).get("projects", [])
+                    for p in projects:
+                        if p.get("slug") == project_slug or p.get("id") == project_slug:
+                            cand = (curr / p.get("path", "") / "tasks").resolve()
+                            return cand
+                except Exception:
+                    pass
+        curr = curr.parent
+
+    # 3. Check direct folder structure:
+    # If context_tasks_dir is in a workspace, e.g. <ws_root>/tasks:
+    # Check <ws_root>/<project_slug>/tasks or <ws_root>/projects/<project_slug>/tasks
+    ws_cand = context_tasks_dir.parent
+    for sub in (ws_cand / project_slug / "tasks", ws_cand / "projects" / project_slug / "tasks"):
+        if sub.is_dir() or sub.parent.is_dir():
+            return sub.resolve()
+
+    return None
+
+
+def is_workspace_task_tree(tasks_dir: pathlib.Path) -> tuple[bool, list[dict[str, Any]]]:
+    """Check if tasks_dir is the workspace's own tree (_workspace) and return its projects."""
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+
+    # 1. Check orchestration_registry
+    if orchestration_registry is not None:
+        try:
+            ws, proj = orchestration_registry.resolve_workspace_for_path(tasks_dir.parent)
+            if ws is not None:
+                if proj is None or proj.get("slug") == "_workspace":
+                    proj_res = orchestration_registry.list_projects(ws["slug"])
+                    return True, proj_res.get("items", [])
+        except Exception:
+            pass
+
+    # 2. Check orchestration.toml / .ai-orchestration.local.toml
+    curr: pathlib.Path | None = tasks_dir.parent
+    while curr and curr != curr.parent:
+        for cfg_name in (".ai-orchestration.local.toml", "orchestration.toml"):
+            cfg_file = curr / cfg_name
+            if cfg_file.is_file():
+                try:
+                    import tomllib
+                    cfg_data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+                    ws_section = cfg_data.get("workspace")
+                    if ws_section:
+                        if tasks_dir == (curr / "tasks").resolve():
+                            projects = ws_section.get("projects", [])
+                            return True, projects
+                except Exception:
+                    pass
+        curr = curr.parent
+
+    # 3. Check name
+    if tasks_dir.name == "_workspace" or tasks_dir.parent.name == "_workspace":
+        return True, []
+
+    return False, []
+
+
+def resolve_coordinates(
+    coords_refs: list[str],
+    context_tasks_dir: pathlib.Path,
+    project_tree_cache: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Resolve coordinates references read-only against target project trees.
+    Resolved items include {project, id, state?, short_title?}. Unresolved: {project, id}.
+    """
+    if project_tree_cache is None:
+        project_tree_cache = {}
+
+    results: list[dict[str, Any]] = []
+    for ref_str in coords_refs:
+        try:
+            parsed = parse_qualified_ref(ref_str)
+        except Exception:
+            continue
+        proj = parsed.get("project")
+        tid = parsed.get("id")
+        if not proj or not tid:
+            continue
+        entry: dict[str, Any] = {"project": proj, "id": tid}
+
+        proj_tasks = resolve_project_tasks_dir(proj, context_tasks_dir)
+        if proj_tasks is not None and proj_tasks.is_dir():
+            cache_key = str(proj_tasks)
+            if cache_key not in project_tree_cache:
+                try:
+                    p_tree = discover_task_tree(proj_tasks)
+                    p_emergent = discover_emergent_tasks(proj_tasks)
+                    project_tree_cache[cache_key] = (p_tree, p_emergent)
+                except Exception:
+                    project_tree_cache[cache_key] = ({}, [])
+            p_tree, p_emergent = project_tree_cache[cache_key]
+
+            # Look up task in tree
+            target_node = p_tree.get(tid)
+            if target_node:
+                entry["state"] = target_node.state
+                if target_node.short_title:
+                    entry["short_title"] = target_node.short_title
+            else:
+                target_em = next((t for t in p_emergent if t.get("id") == tid), None)
+                if target_em:
+                    entry["state"] = target_em.get("state")
+                    if target_em.get("short_title"):
+                        entry["short_title"] = target_em["short_title"]
+
+        results.append(entry)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -1158,6 +1408,7 @@ class TaskNode:
     short: str | None = None
     short_title: str = ""
     short_title_source: str = "derived"
+    coordinates: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1167,6 +1418,7 @@ class TaskNode:
             "short": self.short,
             "short_title": self.short_title,
             "short_title_source": self.short_title_source,
+            "coordinates": list(self.coordinates),
             "parent": self.parent,
             "depth": self.depth,
             "node_type": self.node_type,
@@ -1989,6 +2241,11 @@ def parse_child_blocks(
                     raw_lbls = str(sub_own_fields["labels"]).strip()
                     c_node.labels = [l.strip() for l in raw_lbls.split(",") if l.strip() and l.strip() != "-"]
                     c_node.label_sources = {l: "own" for l in c_node.labels}
+                if "coordinates" in sub_own_fields and sub_own_fields["coordinates"]:
+                    raw_sub_c = str(sub_own_fields["coordinates"]).strip()
+                    if raw_sub_c and raw_sub_c != "-":
+                        sub_c_refs = [c.strip() for c in raw_sub_c.split(",") if c.strip() and c.strip() != "-"]
+                        c_node.coordinates = resolve_coordinates(sub_c_refs, tasks_dir)
 
                 sub_children = parse_child_blocks(
                     target_readme,
@@ -2038,6 +2295,13 @@ def parse_child_blocks(
                 leaf_st = derive_short_title(ctitle)
                 leaf_st_src = "derived"
 
+            coords_val = own_fields.get("coordinates")
+            if coords_val and str(coords_val).strip() and str(coords_val).strip() != "-":
+                plan_coords_refs = [c.strip() for c in str(coords_val).split(",") if c.strip() and c.strip() != "-"]
+                node_coords = resolve_coordinates(plan_coords_refs, tasks_dir)
+            else:
+                node_coords = []
+
             leaf_node = TaskNode(
                 id=cid,
                 title=ctitle,
@@ -2080,6 +2344,7 @@ def parse_child_blocks(
                 short=leaf_short_val,
                 short_title=leaf_st,
                 short_title_source=leaf_st_src,
+                coordinates=node_coords,
             )
             nodes.append(leaf_node)
 
@@ -3608,7 +3873,7 @@ def archive_misplaced(
 
         misplaced_emergent = [
             t for t in emergent
-            if not t["in_done"] and t["canonical_state"] in TERMINAL_STATES
+            if not t["in_done"] and t["canonical_state"] in TERMINAL_STATES and t["canonical_state"] != "moved" and not t.get("moved_to")
         ]
 
         misplaced_blocks: list[TaskNode] = []
@@ -4566,6 +4831,14 @@ def parse_emergent_task_file(
         st_val = derive_short_title(headers.get("title") or h1_text)
         st_src = "derived"
 
+    raw_coords = headers.get("coordinates")
+    if raw_coords and str(raw_coords).strip() and str(raw_coords).strip() != "-":
+        coords_refs = [c.strip() for c in str(raw_coords).split(",") if c.strip() and c.strip() != "-"]
+        resolved_coords = resolve_coordinates(coords_refs, tasks_dir)
+    else:
+        coords_refs = []
+        resolved_coords = []
+
     task_dict = {
         "kind": headers.get("kind") or "emergent",
         "id": headers.get("id", ""),
@@ -4598,6 +4871,10 @@ def parse_emergent_task_file(
         "verification_pending": verification_pending,
         "header_keys": header_keys,
         "headers": headers,
+        "coordinates": resolved_coords,
+        "coordinates_refs": coords_refs,
+        "coordinates_raw": raw_coords,
+        "moved_to": headers.get("moved-to"),
         "sections_present": sections_present,
         "found_headings": list(found_headings),
         "what_body": next((sec.body for sec in sections if sec.heading == "What"), "").strip(),
@@ -5597,6 +5874,8 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
 
     seen_ids: dict[str, str] = {}
     known_task_ids: set[str] = set()
+    cached_trees: dict[str, dict[str, TaskNode]] = {str(tasks_dir): tree}
+    cached_emergent: dict[str, list[dict[str, Any]]] = {str(tasks_dir): emergent}
 
     for init in initiatives:
         known_task_ids.add(init["id"])
@@ -5670,6 +5949,59 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 for v in validate_short_title(s_val):
                     warnings.append(f"{rel}: short title {s_val!r} on node {nid} violates conventions ({v}).")
 
+        # Check coordinates on plan task node
+        if "coordinates" in node.own_fields and node.own_fields["coordinates"]:
+            raw_c = str(node.own_fields["coordinates"]).strip()
+            if raw_c and raw_c != "-":
+                for ref_str in [c.strip() for c in raw_c.split(",") if c.strip()]:
+                    try:
+                        parsed_c = parse_qualified_ref(ref_str)
+                    except ValueError as ex:
+                        errors.append(f"{rel}: invalid coordinates reference {ref_str!r}: {ex}.")
+                        continue
+                    c_proj = parsed_c.get("project")
+                    c_id = parsed_c.get("id")
+                    if not c_proj:
+                        errors.append(f"{rel}: coordinates reference must be 'project/ID', got {ref_str!r}.")
+                        continue
+                    p_tasks_dir = resolve_project_tasks_dir(c_proj, tasks_dir)
+                    if p_tasks_dir is None:
+                        warnings.append(f"{rel}: cannot resolve project '{c_proj}' for coordinates reference '{ref_str}'.")
+                        continue
+                    if str(p_tasks_dir) not in cached_trees:
+                        try:
+                            cached_trees[str(p_tasks_dir)] = discover_task_tree(p_tasks_dir)
+                        except Exception:
+                            cached_trees[str(p_tasks_dir)] = {}
+                    if str(p_tasks_dir) not in cached_emergent:
+                        try:
+                            cached_emergent[str(p_tasks_dir)] = discover_emergent_tasks(p_tasks_dir)
+                        except Exception:
+                            cached_emergent[str(p_tasks_dir)] = []
+                    p_tree = cached_trees[str(p_tasks_dir)]
+                    p_emergent = cached_emergent[str(p_tasks_dir)]
+                    task_exists = (c_id in p_tree) or any(t["id"] == c_id for t in p_emergent)
+                    if not task_exists:
+                        warnings.append(f"{rel}: target task '{c_id}' in project '{c_proj}' does not exist.")
+
+        # Check cross-project qualified ref in plan task depends-on
+        plan_raw_deps = node.own_fields.get("depends_on") or node.own_fields.get("depends")
+        if plan_raw_deps and plan_raw_deps != "-":
+            for item in str(plan_raw_deps).split(","):
+                clean_item = re.sub(r"\s*\(.*?\)", "", item).strip().strip("`").strip()
+                if not clean_item or clean_item == "-":
+                    continue
+                if ":" in clean_item or "/" in clean_item:
+                    try:
+                        q = parse_qualified_ref(clean_item)
+                        if q.get("project") or q.get("workspace"):
+                            errors.append(
+                                f"{node.rel_path}: cross-project dependencies are v2; use coordinates: from the workspace tree."
+                            )
+                            break
+                    except ValueError:
+                        pass
+
         cstate = node.canonical_state
         if node.in_done and cstate not in TERMINAL_STATES:
             errors.append(f"{rel}: task {nid} is under done/ but state is {node.state!r} (not terminal).")
@@ -5697,6 +6029,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
 
         # Validate header fields & order
         keys = task["header_keys"]
+        is_pointer = (task.get("canonical_state") == "moved") or (task.get("state") == "moved") or ("moved-to" in task.get("headers", {}))
         is_micro = (task.get("folder_category") == "micro") or (task.get("category") == "micro")
         is_full_format = ("handoff" in keys and "category" in keys and ("## Goal" in task.get("found_headings", []) or "## Goal" in task.get("sections_present", [])))
 
@@ -5742,7 +6075,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             cstate = task["canonical_state"]
             if task["in_done"] and cstate not in TERMINAL_STATES:
                 errors.append(f"{rel}: task is under done/ but state is {task['state']!r} (not terminal).")
-            if not task["in_done"] and cstate in TERMINAL_STATES:
+            if not task["in_done"] and cstate in TERMINAL_STATES and cstate != "moved":
                 warnings.append(f"{rel}: task has terminal state {task['state']!r} but has not been moved to done/ (run 'ai-orch tasks archive' to fix).")
 
             # Size (optional)
@@ -5769,21 +6102,23 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 errors.append(f"{rel}: missing required Markdown section '## What'.")
 
         else:
-            missing_core = [k for k in CORE_HEADER_FIELDS if k not in keys]
-            if missing_core:
-                errors.append(f"{rel}: missing mandatory header field(s): {', '.join(missing_core)}.")
+            if not is_pointer:
+                missing_core = [k for k in CORE_HEADER_FIELDS if k not in keys]
+                if missing_core:
+                    errors.append(f"{rel}: missing mandatory header field(s): {', '.join(missing_core)}.")
 
             unknown_keys = [k for k in keys if k not in ALL_ALLOWED_HEADER_FIELDS]
             if unknown_keys:
                 errors.append(f"{rel}: unknown header field(s): {', '.join(unknown_keys)}.")
 
             # Check exact ordering of CORE_HEADER_FIELDS and optional extension fields after handoff
-            present_core = [k for k in keys if k in CORE_HEADER_FIELDS]
-            expected_core = [k for k in CORE_HEADER_FIELDS if k in present_core]
-            if present_core != expected_core:
-                errors.append(
-                    f"{rel}: core header fields out of order: got {present_core}, expected {list(CORE_HEADER_FIELDS)}."
-                )
+            if not is_pointer:
+                present_core = [k for k in keys if k in CORE_HEADER_FIELDS]
+                expected_core = [k for k in CORE_HEADER_FIELDS if k in present_core]
+                if present_core != expected_core:
+                    errors.append(
+                        f"{rel}: core header fields out of order: got {present_core}, expected {list(CORE_HEADER_FIELDS)}."
+                    )
 
             if "handoff" in keys:
                 handoff_pos = keys.index("handoff")
@@ -5796,26 +6131,30 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                     errors.append(f"{rel}: optional header fields out of order: got {present_ext}, expected {expected_ext}.")
 
             # Check empty values
-            for k in CORE_HEADER_FIELDS:
-                if k in task["headers"] and task["headers"][k] == "":
-                    errors.append(f"{rel}: header field '{k}' cannot be empty (use '-' when empty).")
+            if not is_pointer:
+                for k in CORE_HEADER_FIELDS:
+                    if k in task["headers"] and task["headers"][k] == "":
+                        errors.append(f"{rel}: header field '{k}' cannot be empty (use '-' when empty).")
 
             # Category match
-            if task["category"] and task["folder_category"] and task["category"] != task["folder_category"]:
-                errors.append(
-                    f"{rel}: header category {task['category']!r} does not match folder {task['folder_category']!r}."
-                )
+            if not is_pointer:
+                if task["category"] and task["folder_category"] and task["category"] != task["folder_category"]:
+                    errors.append(
+                        f"{rel}: header category {task['category']!r} does not match folder {task['folder_category']!r}."
+                    )
 
             # Priority
             if task["priority"] and task["priority"] not in PRIORITIES:
                 errors.append(f"{rel}: invalid priority {task['priority']!r} (expected one of {sorted(PRIORITIES)}).")
 
-            if not task["priority_reason"] or task["priority_reason"] == "-":
-                errors.append(f"{rel}: 'priority-reason' must be a non-empty explanation.")
+            if not is_pointer:
+                if not task["priority_reason"] or task["priority_reason"] == "-":
+                    errors.append(f"{rel}: 'priority-reason' must be a non-empty explanation.")
 
             # next-up
-            if task["next_up"] not in NEXT_UP_VALUES:
-                errors.append(f"{rel}: invalid next-up {task['next_up']!r} (expected 'yes' or 'no').")
+            if not is_pointer:
+                if task["next_up"] not in NEXT_UP_VALUES:
+                    errors.append(f"{rel}: invalid next-up {task['next_up']!r} (expected 'yes' or 'no').")
 
             # State
             if not task["state"] or not is_valid_state(task["state"]):
@@ -5827,7 +6166,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             cstate = task["canonical_state"]
             if task["in_done"] and cstate not in TERMINAL_STATES:
                 errors.append(f"{rel}: task is under done/ but state is {task['state']!r} (not terminal).")
-            if not task["in_done"] and cstate in TERMINAL_STATES:
+            if not task["in_done"] and cstate in TERMINAL_STATES and cstate != "moved":
                 warnings.append(f"{rel}: task has terminal state {task['state']!r} but has not been moved to done/ (run 'ai-orch tasks archive' to fix).")
 
             # Optional extension fields
@@ -5864,6 +6203,70 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 for v in validate_short_title(s_val):
                     warnings.append(f"{rel}: short title {s_val!r} violates conventions ({v}).")
 
+            # moved-to header validation
+            if "moved-to" in task.get("headers", {}):
+                raw_mt = task["headers"]["moved-to"].strip()
+                if raw_mt and raw_mt != "-":
+                    try:
+                        parsed_mt = parse_qualified_ref(raw_mt)
+                        if not parsed_mt.get("project"):
+                            errors.append(f"{rel}: moved-to reference must be 'project/ID', got {raw_mt!r}.")
+                    except ValueError as ex:
+                        errors.append(f"{rel}: invalid moved-to reference {raw_mt!r}: {ex}.")
+
+            # coordinates header validation
+            if "coordinates" in task.get("headers", {}):
+                raw_c = task["headers"]["coordinates"].strip()
+                if raw_c and raw_c != "-":
+                    for ref_str in [c.strip() for c in raw_c.split(",") if c.strip()]:
+                        try:
+                            parsed_c = parse_qualified_ref(ref_str)
+                        except ValueError as ex:
+                            errors.append(f"{rel}: invalid coordinates reference {ref_str!r}: {ex}.")
+                            continue
+                        c_proj = parsed_c.get("project")
+                        c_id = parsed_c.get("id")
+                        if not c_proj:
+                            errors.append(f"{rel}: coordinates reference must be 'project/ID', got {ref_str!r}.")
+                            continue
+                        p_tasks_dir = resolve_project_tasks_dir(c_proj, tasks_dir)
+                        if p_tasks_dir is None:
+                            warnings.append(f"{rel}: cannot resolve project '{c_proj}' for coordinates reference '{ref_str}'.")
+                            continue
+                        if str(p_tasks_dir) not in cached_trees:
+                            try:
+                                cached_trees[str(p_tasks_dir)] = discover_task_tree(p_tasks_dir)
+                            except Exception:
+                                cached_trees[str(p_tasks_dir)] = {}
+                        if str(p_tasks_dir) not in cached_emergent:
+                            try:
+                                cached_emergent[str(p_tasks_dir)] = discover_emergent_tasks(p_tasks_dir)
+                            except Exception:
+                                cached_emergent[str(p_tasks_dir)] = []
+                        p_tree = cached_trees[str(p_tasks_dir)]
+                        p_emergent = cached_emergent[str(p_tasks_dir)]
+                        task_exists = (c_id in p_tree) or any(t["id"] == c_id for t in p_emergent)
+                        if not task_exists:
+                            warnings.append(f"{rel}: target task '{c_id}' in project '{c_proj}' does not exist.")
+
+            # cross-project depends-on validation (Requirement 5)
+            raw_deps = task["headers"].get("depends-on")
+            if raw_deps and raw_deps != "-":
+                for item in str(raw_deps).split(","):
+                    clean_item = re.sub(r"\s*\(.*?\)", "", item).strip().strip("`").strip()
+                    if not clean_item or clean_item == "-":
+                        continue
+                    if ":" in clean_item or "/" in clean_item:
+                        try:
+                            q = parse_qualified_ref(clean_item)
+                            if q.get("project") or q.get("workspace"):
+                                errors.append(
+                                    f"{rel}: cross-project dependencies are v2; use coordinates: from the workspace tree."
+                                )
+                                break
+                        except ValueError:
+                            pass
+
             # Legacy decider warning
             raw_dec = task.get("decider", "").strip()
             if raw_dec and raw_dec != "-":
@@ -5874,9 +6277,10 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                     )
 
             # Required sections
-            missing_sections = [s for s in REQUIRED_SECTIONS if s not in task["sections_present"]]
-            if missing_sections:
-                errors.append(f"{rel}: missing required Markdown section(s): {', '.join(missing_sections)}.")
+            if not is_pointer:
+                missing_sections = [s for s in REQUIRED_SECTIONS if s not in task["sections_present"]]
+                if missing_sections:
+                    errors.append(f"{rel}: missing required Markdown section(s): {', '.join(missing_sections)}.")
 
     # Validate dependency DAG acyclicity & valid dependency references
     adj: dict[str, list[str]] = {}
@@ -6204,6 +6608,89 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 if ref not in seen_uc_ids:
                     warnings.append(f"{node.rel_path}: task references unknown use case {ref!r}.")
 
+    # Placement warnings (Requirement 3)
+    is_ws, ws_projects = is_workspace_task_tree(tasks_dir)
+    if is_ws:
+        for task in emergent:
+            if task.get("canonical_state") == "moved" or task.get("moved_to"):
+                continue
+            rel = task["rel_path"]
+            raw_c = task["headers"].get("coordinates", "")
+            has_coords = raw_c and raw_c.strip() and raw_c.strip() != "-"
+            if has_coords:
+                projs = set()
+                for c in raw_c.split(","):
+                    c_s = c.strip()
+                    if c_s:
+                        try:
+                            parsed_c = parse_qualified_ref(c_s)
+                            if parsed_c.get("project"):
+                                projs.add(parsed_c["project"])
+                        except ValueError:
+                            pass
+                if len(projs) == 1:
+                    single_p = next(iter(projs))
+                    warnings.append(f"{rel}: belongs in project {single_p}; use tasks move.")
+            else:
+                raw_paths = task["headers"].get("paths", "")
+                if raw_paths and raw_paths.strip() and raw_paths.strip() != "-":
+                    paths_list = [p.strip() for p in raw_paths.split(",") if p.strip() and p.strip() != "-"]
+                    if paths_list:
+                        for p in ws_projects:
+                            p_slug = p.get("slug")
+                            if not p_slug or p_slug == "_workspace":
+                                continue
+                            p_path = p.get("path", "").strip("/")
+                            if not p_path:
+                                continue
+                            def _is_inside(fpath: str, pdir: str) -> bool:
+                                norm_f = os.path.normpath(fpath).replace("\\", "/")
+                                norm_p = os.path.normpath(pdir).replace("\\", "/")
+                                return norm_f == norm_p or norm_f.startswith(norm_p + "/")
+                            if all(_is_inside(pth, p_path) for pth in paths_list):
+                                warnings.append(f"{rel}: belongs in project {p_slug}; use tasks move.")
+                                break
+
+        for nid, node in tree.items():
+            if not node.is_leaf or nid.startswith("T"):
+                continue
+            rel = node.rel_path
+            raw_c = str(node.own_fields.get("coordinates", ""))
+            has_coords = raw_c and raw_c.strip() and raw_c.strip() != "-"
+            if has_coords:
+                projs = set()
+                for c in raw_c.split(","):
+                    c_s = c.strip()
+                    if c_s:
+                        try:
+                            parsed_c = parse_qualified_ref(c_s)
+                            if parsed_c.get("project"):
+                                projs.add(parsed_c["project"])
+                        except ValueError:
+                            pass
+                if len(projs) == 1:
+                    single_p = next(iter(projs))
+                    warnings.append(f"{rel}: belongs in project {single_p}; use tasks move.")
+            else:
+                raw_paths = str(node.fields.get("paths", {}).get("value") or node.own_fields.get("paths", ""))
+                if raw_paths and raw_paths.strip() and raw_paths.strip() != "-":
+                    paths_list = [p.strip() for p in raw_paths.split(",") if p.strip() and p.strip() != "-"]
+                    if paths_list:
+                        for p in ws_projects:
+                            p_slug = p.get("slug")
+                            if not p_slug or p_slug == "_workspace":
+                                continue
+                            p_path = p.get("path", "").strip("/")
+                            if not p_path:
+                                continue
+                            def _is_inside_node(fpath: str, pdir: str) -> bool:
+                                norm_f = os.path.normpath(fpath).replace("\\", "/")
+                                norm_p = os.path.normpath(pdir).replace("\\", "/")
+                                return norm_f == norm_p or norm_f.startswith(norm_p + "/")
+                            if all(_is_inside_node(pth, p_path) for pth in paths_list):
+                                warnings.append(f"{rel}: belongs in project {p_slug}; use tasks move.")
+                                break
+
     return errors, warnings, emergent, initiatives
 
 
@@ -6271,7 +6758,7 @@ def _update_task_file_headers_and_state(
 
     if verifier is not None and verifier_line_idx is None and handoff_line_idx is not None:
         insert_pos = header_end
-        fields_after_verifier = {"size", "kind", "labels", "branch", "worktree", "run-id", "use-cases", "use_cases", "short"}
+        fields_after_verifier = {"size", "kind", "labels", "branch", "worktree", "run-id", "use-cases", "use_cases", "coordinates", "moved-to", "short"}
         for i in range(handoff_line_idx + 1, header_end):
             m_key = HEADER_LINE_RE.match(lines[i])
             if m_key and m_key.group(1) in fields_after_verifier:
@@ -7482,9 +7969,10 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
     done_content = "\n".join(done_lines)
 
-    if not existing_index.strip():
+    if not existing_index.strip() or not has_generated_markers(existing_index):
+        title_header = existing_index.strip() if existing_index.strip() else "# Task Index"
         return (
-            "# Task Index\n\n"
+            f"{title_header}\n\n"
             "## Next up\n\n"
             f"<!-- ai-orch:generated next-up -->\n{next_up_content}\n<!-- /ai-orch:generated next-up -->\n\n"
             "## Tasks by category\n\n"
@@ -7849,7 +8337,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
     tree_dicts = {nid: node.to_dict() for nid, node in tree.items()}
     tree_keys = ("parent", "depth", "node_type", "is_leaf", "is_container", "derived_state", "leaves_done",
-                 "leaves_total", "labels", "fields", "expanded_depends_on", "children", "size", "size_source", "priority_source")
+                 "leaves_total", "labels", "fields", "expanded_depends_on", "children", "size", "size_source", "priority_source", "coordinates")
 
     # Emergent roots keep their full header dict (the UI reads sources/paths/next-up...), plus tree info.
     all_tasks: list[dict[str, Any]] = []
@@ -12506,6 +12994,281 @@ def cmd_tasks_promote(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def move_task(
+    tasks_dir: pathlib.Path,
+    task_id: str,
+    to_project: str | None = None,
+    to_tasks_dir: pathlib.Path | None = None,
+    dry_run: bool = False,
+    expect_task_hash: str | None = None,
+) -> dict[str, Any]:
+    src_tasks_dir = pathlib.Path(tasks_dir).resolve()
+
+    if not to_project and not to_tasks_dir:
+        return {"ok": False, "error": "Either --to-project or --to-tasks-dir must be specified."}
+
+    if to_tasks_dir is not None:
+        target_tasks_dir = pathlib.Path(to_tasks_dir).resolve()
+        target_proj_slug = to_project or target_tasks_dir.parent.name
+    else:
+        assert to_project is not None
+        target_proj_slug = to_project
+        resolved = resolve_project_tasks_dir(to_project, src_tasks_dir)
+        if resolved is None:
+            return {
+                "ok": False,
+                "error": f"Cannot resolve target project {to_project!r} from workspace configuration.",
+            }
+        target_tasks_dir = resolved
+
+    # Validate task_id format
+    if not EMERGENT_ID_RE.match(task_id):
+        return {"ok": False, "error": f"tasks move only supports emergent tasks (T###), got {task_id!r}."}
+
+    emergent = discover_emergent_tasks(src_tasks_dir)
+    target_task = next((t for t in emergent if t.get("id") == task_id), None)
+    if not target_task:
+        return {"ok": False, "error": f"Task {task_id!r} not found in {src_tasks_dir}."}
+
+    if target_task.get("canonical_state") == "moved" or target_task.get("moved_to"):
+        return {"ok": False, "error": f"Task {task_id!r} has already been moved ({target_task.get('moved_to')})."}
+
+    # Check CAS hash if provided
+    if expect_task_hash is not None:
+        curr_b_hash = target_task.get("bundle_sha256", "")
+        curr_f_hash = _file_sha256(pathlib.Path(target_task["file_path"]))
+        exp = expect_task_hash.strip().lower()
+        if curr_b_hash.lower() != exp and curr_f_hash.lower() != exp:
+            return {
+                "ok": False,
+                "error": f"Task hash mismatch: expected {expect_task_hash}, actual bundle={curr_b_hash}, file={curr_f_hash}.",
+                "expected": expect_task_hash,
+                "actual": curr_b_hash,
+            }
+
+    # Find next free T### in target tree
+    target_nums: list[int] = []
+    if target_tasks_dir.is_dir():
+        target_emergent = discover_emergent_tasks(target_tasks_dir)
+        for t in target_emergent:
+            tid = t.get("id", "")
+            if tid and EMERGENT_ID_RE.match(tid):
+                target_nums.append(int(tid[1:]))
+        for p in target_tasks_dir.rglob("T[0-9][0-9][0-9]*"):
+            m_t = re.match(r"^(T\d{3,})", p.name)
+            if m_t:
+                target_nums.append(int(m_t.group(1)[1:]))
+
+    next_num = max(target_nums, default=0) + 1
+    new_tid = f"T{next_num:03d}"
+
+    category = target_task.get("folder_category") or target_task.get("category") or "tasks"
+    src_file = pathlib.Path(target_task["file_path"])
+    is_folder = target_task.get("is_folder", False)
+    src_root = pathlib.Path(target_task["task_root"])
+    src_stem = src_root.name if is_folder else src_file.stem
+    slug = re.sub(r"^T\d{3,}-", "", src_stem) or target_task.get("slug") or slugify(target_task.get("title", "task"))
+
+    target_cat_dir = target_tasks_dir / category
+    if is_folder:
+        target_task_root = target_cat_dir / f"{new_tid}-{slug}"
+        target_file = target_task_root / "README.md"
+    else:
+        target_task_root = target_cat_dir
+        target_file = target_cat_dir / f"{new_tid}-{slug}.md"
+
+    # Rewrite target content: replace ID in header and title
+    src_old_text = src_file.read_text(encoding="utf-8")
+    target_text = re.sub(
+        r"^-\s+id:\s*.*$",
+        f"- id: {new_tid}",
+        src_old_text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    target_text = re.sub(
+        r"^-\s+category:\s*.*$",
+        f"- category: {category}",
+        target_text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    # Heading rewrite: `# T### ...` -> `# T### ...`
+    target_text = re.sub(
+        rf"^#\s+{re.escape(task_id)}\b",
+        f"# {new_tid}",
+        target_text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+
+    # Paths and handoff are relative to the tree's root: rebase them from the workspace root to the project root.
+    try:
+        ws_root = pathlib.Path(tasks_dir).resolve().parent
+        proj_root = target_tasks_dir.resolve().parent
+        proj_prefix = proj_root.relative_to(ws_root).as_posix()
+    except (ValueError, OSError):
+        proj_prefix = ""
+    if proj_prefix and proj_prefix != ".":
+        def _rebase_paths(m: "re.Match[str]") -> str:
+            items = [x.strip() for x in m.group(1).split(",")]
+            rebased = [x[len(proj_prefix) + 1:] if x.startswith(proj_prefix + "/") else x for x in items]
+            return "- paths: " + ", ".join(rebased)
+        target_text = re.sub(r"^-\s+paths:\s*(.*)$", _rebase_paths, target_text, count=1, flags=re.MULTILINE)
+    try:
+        old_rel = src_file.resolve().relative_to(pathlib.Path(tasks_dir).resolve().parent).as_posix()
+        new_rel = target_file.resolve().relative_to(target_tasks_dir.resolve().parent).as_posix()
+        target_text = target_text.replace(old_rel, new_rel)
+    except (ValueError, OSError):
+        pass
+
+    # Pointer content for source tree
+    title = target_task.get("title") or "Task"
+    priority = target_task.get("priority") or "P2"
+    executor = target_task.get("executor") or "kilo"
+    pointer_text = f"""# {task_id} - {title} (moved)
+
+- id: {task_id}
+- title: {title} (moved)
+- category: {category}
+- priority: {priority}
+- priority-reason: Moved to {target_proj_slug}/{new_tid}
+- next-up: no
+- state: moved
+- executor: {executor}
+- depends-on: -
+- decider: -
+- sources: -
+- paths: -
+- handoff: Moved to {target_proj_slug}/{new_tid}
+- moved-to: {target_proj_slug}/{new_tid}
+
+## Goal
+
+Task moved to {target_proj_slug} as {new_tid}.
+
+## Steps
+
+- [x] Moved to {target_proj_slug} as {new_tid}.
+
+## Verification
+
+- [x] Moved to {target_proj_slug} as {new_tid}.
+"""
+
+    diff_source = "".join(difflib.unified_diff(
+        src_old_text.splitlines(keepends=True),
+        pointer_text.splitlines(keepends=True),
+        fromfile=str(src_file),
+        tofile=f"{src_file} (pointer)",
+    ))
+    diff_target = "".join(difflib.unified_diff(
+        [],
+        target_text.splitlines(keepends=True),
+        fromfile="/dev/null",
+        tofile=str(target_file),
+    ))
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "task_id": task_id,
+            "new_task_id": new_tid,
+            "to_project": target_proj_slug,
+            "source_file": str(src_file),
+            "target_file": str(target_file),
+            "diff_source": diff_source,
+            "diff_target": diff_target,
+            "diffs": [diff_source, diff_target],
+        }
+
+    # Non-dry-run: write files and sync both indexes under lock
+    lock_dirs = sorted([src_tasks_dir, target_tasks_dir], key=lambda p: str(p))
+    with task_write_lock(lock_dirs[0]):
+        with task_write_lock(lock_dirs[1]):
+            # 1. Write target
+            target_cat_dir.mkdir(parents=True, exist_ok=True)
+            if is_folder:
+                target_task_root.mkdir(parents=True, exist_ok=True)
+                for item in src_root.iterdir():
+                    if item.name == "README.md":
+                        continue
+                    if item.is_file():
+                        shutil.copy2(item, target_task_root / item.name)
+                    elif item.is_dir():
+                        shutil.copytree(item, target_task_root / item.name, dirs_exist_ok=True)
+                target_file.write_text(target_text, encoding="utf-8")
+                for item in src_root.iterdir():
+                    if item.name == "README.md":
+                        continue
+                    if item.is_file():
+                        item.unlink()
+                    elif item.is_dir():
+                        shutil.rmtree(item)
+                src_file.write_text(pointer_text, encoding="utf-8")
+            else:
+                target_file.write_text(target_text, encoding="utf-8")
+                src_file.write_text(pointer_text, encoding="utf-8")
+
+            # 2. Sync source index with --apply
+            src_index_file = src_tasks_dir / "00-INDEX.md"
+            src_index_txt = src_index_file.read_text(encoding="utf-8") if src_index_file.exists() else ""
+            new_src_index = render_synced_index(src_tasks_dir, src_index_txt, adopt=True)
+            src_index_file.write_text(new_src_index, encoding="utf-8")
+
+            # 3. Sync target index with --apply
+            target_index_file = target_tasks_dir / "00-INDEX.md"
+            target_index_txt = target_index_file.read_text(encoding="utf-8") if target_index_file.exists() else ""
+            new_target_index = render_synced_index(target_tasks_dir, target_index_txt, adopt=True)
+            target_index_file.write_text(new_target_index, encoding="utf-8")
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "task_id": task_id,
+        "new_task_id": new_tid,
+        "to_project": target_proj_slug,
+        "source_file": str(src_file),
+        "target_file": str(target_file),
+        "diff_source": diff_source,
+        "diff_target": diff_target,
+    }
+
+
+def cmd_tasks_move(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(getattr(args, "tasks_dir", "tasks")).resolve()
+    to_proj = getattr(args, "to_project", None)
+    to_tasks = getattr(args, "to_tasks_dir", None)
+    to_tasks_dir = pathlib.Path(to_tasks).resolve() if to_tasks else None
+    dry_run = getattr(args, "dry_run", False)
+    expect_hash = getattr(args, "expect_task_hash", None)
+
+    res = move_task(
+        tasks_dir=tasks_dir,
+        task_id=args.task_id,
+        to_project=to_proj,
+        to_tasks_dir=to_tasks_dir,
+        dry_run=dry_run,
+        expect_task_hash=expect_hash,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if not res.get("ok"):
+            print(f"[FAIL] {res.get('error', 'tasks move failed')}", file=sys.stderr)
+            return 1
+        if dry_run:
+            print(f"Preview: move {args.task_id} to project {res.get('to_project')} as {res.get('new_task_id')}")
+            print(f"--- Source diff: {res.get('source_file')} ---")
+            print(res.get("diff_source", ""), end="")
+            print(f"--- Target diff: {res.get('target_file')} ---")
+            print(res.get("diff_target", ""), end="")
+        else:
+            print(f"[ok] Moved {args.task_id} to {res.get('to_project')}/{res.get('new_task_id')} ({res.get('target_file')})")
+    return 0 if res.get("ok") else 1
+
+
 def cmd_set_kind(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     expect_task_hash = getattr(args, "expect_task_hash", None)
@@ -12782,6 +13545,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_ireop.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_ireop.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_ireop.set_defaults(func=cmd_inbox_reopen)
+
+    # tasks move
+    p_move = sub.add_parser("move", help="Move an emergent task from the workspace tree into a project")
+    p_move.add_argument("task_id", help="ID of the emergent task to move (e.g. T014)")
+    p_move.add_argument("--to-project", "-p", dest="to_project", default=None, help="Target project slug")
+    p_move.add_argument("--to-tasks-dir", dest="to_tasks_dir", default=None, help="Explicit target tasks/ directory")
+    p_move.add_argument("--dry-run", action="store_true", help="Preview move without writing files")
+    p_move.add_argument("--expect-task-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task file/bundle hash")
+    p_move.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_move.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_move.set_defaults(func=cmd_tasks_move)
 
     # tasks new
     p_new = sub.add_parser("new", help="Create a new task from an inbox note")

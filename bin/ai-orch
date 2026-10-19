@@ -219,6 +219,10 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks promote <task_id> [--category <cat>] [--tasks-dir <dir>] [--json]",
                     "description": "Promote a microtask into a full emergent task in a chosen category.",
                 },
+                "move": {
+                    "usage": "ai-orch tasks move <task_id> --to-project <p> [--to-tasks-dir <dir>] [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Move an emergent task from the workspace tree into a project tree.",
+                },
                 "child": {
                     "usage": "ai-orch tasks child add <parent> --title <title> [--short <words>] [--kind <kind>] [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
                     "description": "Add a child task under a container or convert an open leaf to a container.",
