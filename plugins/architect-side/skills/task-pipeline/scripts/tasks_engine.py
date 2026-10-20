@@ -9413,6 +9413,10 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
         else:
             if diff_str:
                 sys.stdout.write(diff_str)
+                print(
+                    f"[preview] apply with: --adopt --apply --expect-hash {current_hash}",
+                    file=sys.stderr,
+                )
             else:
                 print(f"[ok] {index_path} already has markers and is in sync")
         return 0
