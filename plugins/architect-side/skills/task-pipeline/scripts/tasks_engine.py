@@ -77,6 +77,7 @@ OPTIONAL_EXTENSION_FIELDS: tuple[str, ...] = (
     "use_cases",
     "coordinates",
     "moved-to",
+    "conditions",
     "short",
 )
 
@@ -94,6 +95,7 @@ MICRO_HEADER_FIELDS: tuple[str, ...] = (
     "depends-on",
     "size",
     "labels",
+    "conditions",
     "short",
 )
 
@@ -241,20 +243,19 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
 """
 
-TASK_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.\d+)*)$")
-TASK_NODE_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.\d+)*)$")
-CHILD_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)+|\d{2,}(?:\.\d+)+)$")
+TASK_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.\d+[a-z]?)*)$")
+TASK_NODE_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.\d+[a-z]?)*)$")
+CHILD_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)+|\d{2,}(?:\.\d+[a-z]?)+)$")
 ROOT_INITIATIVE_ID_RE = re.compile(r"^\d{2,}$")
 EMERGENT_ID_RE = re.compile(r"^T\d{3,}$")
 INITIATIVE_DIR_RE = re.compile(r"^(\d{2,})-(.+)$")
 HEADER_LINE_RE = re.compile(r"^-\s+([a-z][a-z0-9-]*):\s*(.*)$")
-INLINE_TASK_HEADING_RE = re.compile(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+)+)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
-INLINE_ANY_HEADING_RE = re.compile(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+)*)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
+INLINE_TASK_HEADING_RE = re.compile(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+[a-z]?)+)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
+INLINE_ANY_HEADING_RE = re.compile(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+[a-z]?)*)\s+[—–-]\s+(.+?)\s*$", re.MULTILINE)
 EXPANDED_BULLET_RE = re.compile(r"^\s*[-*]\s+\*\*Expanded:\*\*\s*\[([^\]]+)\]\(([^)]+)\)", re.IGNORECASE)
 # Node ids in `Depends on` / `blocks` (spec subtasks S7, §3 "any node id"): `NN`, `NN.T[.n...]`,
-# `T###[.n...]`. A letter-suffixed id (`12.2a`) is not an id and must not match as its prefix `12`
-# (plan_format_warnings flags such headings).
-DEP_ID_RE = re.compile(r"\b((?:T\d{3,}|\d{2,})(?:\.\d+)*)(?![\w.]|\.\w)")
+# `T###[.n...]`, including plan task ids with one lowercase letter suffix `NN.T<letter>` (e.g. `06.1b`, `12.2a`).
+DEP_ID_RE = re.compile(r"\b((?:T\d{3,}|\d{2,})(?:\.\d+[a-z]?)*)(?![\w.]|\.\w)")
 NODE_TYPES: set[str] = {"initiative", "container", "leaf", "microtask"}
 INHERITED_FIELDS: tuple[str, ...] = ("executor", "priority", "profile", "repo", "paths")
 
@@ -299,7 +300,7 @@ def is_valid_state(raw_state: str) -> bool:
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,47}$")
 QUALIFIED_REF_ID_RE = re.compile(
-    r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.(?:T)?\d+)*|Q\d{3,}|UC\d{3,}|N\d{3,})$"
+    r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.(?:T)?\d+[a-z]?)*|Q\d{3,}|UC\d{3,}|N\d{3,})$"
 )
 
 
@@ -1092,7 +1093,7 @@ def derive_short_title(title: str) -> str:
     text = title.replace("`", "")
     # 2. Strip leading ID pattern: T###, Q###, UC###, N###, NN.T, NN
     text = re.sub(
-        r"^(?:T\d{3,}(?:\.\d+)*|Q\d{3,}|UC\d{3,}|N\d{3,}|\d{2,}(?:\.\d+)*)\s*[:—–-]?\s*",
+        r"^(?:T\d{3,}(?:\.\d+)*|Q\d{3,}|UC\d{3,}|N\d{3,}|\d{2,}(?:\.\d+[a-z]?)*)\s*[:—–-]?\s*",
         "",
         text.strip(),
     )
@@ -1233,8 +1234,8 @@ def _parse_depends_on_items(raw_val: str) -> tuple[list[tuple[str, str]], str]:
     items: list[tuple[str, str]] = []
     pos = 0
     item_re = re.compile(r"\s*`?" + DEP_ID_RE.pattern + r"`?(\s*\([^()]*\))?")
-    # Letter-suffixed legacy ids (`12.2a`) are kept verbatim in the list but are not ids.
-    legacy_re = re.compile(r"\s*`?(\d{2,}(?:\.\d+)+[a-z])`?(\s*\([^()]*\))?(?![\w.])")
+    # Multi-letter suffixed legacy ids (`12.2ab`) are kept verbatim in the list but are not ids.
+    legacy_re = re.compile(r"\s*`?(\d{2,}(?:\.\d+)+[a-z]{2,})`?(\s*\([^()]*\))?(?![\w.])")
     sep_re = re.compile(r"\s*,")
     last_end = 0
     while True:
@@ -1364,6 +1365,54 @@ def _normalize_id_list(raw_ids: list[str] | str | None) -> list[str]:
     return result
 
 
+def parse_conditions_field(raw_val: Any) -> list[str]:
+    """Parse comma-separated question IDs from conditions header/field, e.g. 'Q003, Q007' -> ['Q003', 'Q007']."""
+    if not raw_val or str(raw_val).strip() in ("", "-"):
+        return []
+    return [p.strip() for p in str(raw_val).split(",") if p.strip() and p.strip() != "-"]
+
+
+def resolve_task_conditions(
+    tasks_dir: pathlib.Path,
+    cond_ids: list[str],
+    task_state: str,
+    questions_map: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Resolve condition question IDs to [{id, status, short_title}] and compute conditional boolean.
+
+    A task in state done (or verified/delivered) whose conditions include at least one question
+    NOT yet answered is 'conditional'.
+    """
+    if not cond_ids:
+        return [], False
+    if questions_map is None:
+        all_q = discover_questions(tasks_dir)
+        questions_map = {q["id"]: q for q in all_q}
+
+    conditions_list: list[dict[str, Any]] = []
+    for qid in cond_ids:
+        q = questions_map.get(qid)
+        if q:
+            conditions_list.append({
+                "id": qid,
+                "status": q.get("status", "unknown"),
+                "short_title": q.get("short_title", qid),
+            })
+        else:
+            conditions_list.append({
+                "id": qid,
+                "status": "unknown",
+                "short_title": qid,
+            })
+
+    canon = normalize_state(task_state)
+    is_conditional = (
+        canon in ("done", "done with a caveat", "verified", "delivered")
+        and any(c["status"] != "answered" for c in conditions_list)
+    )
+    return conditions_list, is_conditional
+
+
 @dataclass
 class TaskNode:
     id: str
@@ -1409,6 +1458,9 @@ class TaskNode:
     short_title: str = ""
     short_title_source: str = "derived"
     coordinates: list[dict[str, Any]] = field(default_factory=list)
+    conditions: list[dict[str, Any]] = field(default_factory=list)
+    conditional: bool = False
+    own_conditions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1419,6 +1471,8 @@ class TaskNode:
             "short_title": self.short_title,
             "short_title_source": self.short_title_source,
             "coordinates": list(self.coordinates),
+            "conditions": list(self.conditions),
+            "conditional": self.conditional,
             "parent": self.parent,
             "depth": self.depth,
             "node_type": self.node_type,
@@ -1822,24 +1876,15 @@ def move_block_to_open(
     closed_start = m_closed2.start() if m_closed2 else len(text_without)
 
     open_headings = list(re.finditer(
-        r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+)+)\s+[—–-]\s+",
+        r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+[a-z]?)+)\s+[—–-]\s+",
         text_without[:closed_start],
         re.MULTILINE,
     ))
 
-    def _split_id(tid: str) -> list[Any]:
-        res = []
-        for p in tid.split("."):
-            try:
-                res.append(int(p))
-            except ValueError:
-                res.append(p)
-        return res
-
-    target_key = _split_id(task_id)
+    target_key = _natural_sort_key(task_id)
     insert_pos = None
     for oh in open_headings:
-        if _split_id(oh.group(1)) > target_key:
+        if _natural_sort_key(oh.group(1)) > target_key:
             insert_pos = oh.start()
             break
 
@@ -2144,7 +2189,7 @@ def parse_child_blocks(
             m_sec = re.match(r"^##\s+(Closed\b.*)", sline.text, re.IGNORECASE)
             current_closed = in_closed_section or (m_sec is not None)
         elif sline.text.startswith("### "):
-            m_head = re.match(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+)+)\s+[—–-]\s+(.+?)\s*$", sline.text)
+            m_head = re.match(r"^###\s+((?:T\d{3,}|\d{2,})(?:\.\d+[a-z]?)+)\s+[—–-]\s+(.+?)\s*$", sline.text)
             if m_head:
                 cid = m_head.group(1)
                 ctitle = m_head.group(2).strip()
@@ -2302,6 +2347,9 @@ def parse_child_blocks(
             else:
                 node_coords = []
 
+            cond_ids = parse_conditions_field(own_fields.get("conditions"))
+            cond_list, is_cond = resolve_task_conditions(tasks_dir, cond_ids, raw_status)
+
             leaf_node = TaskNode(
                 id=cid,
                 title=ctitle,
@@ -2345,6 +2393,9 @@ def parse_child_blocks(
                 short_title=leaf_st,
                 short_title_source=leaf_st_src,
                 coordinates=node_coords,
+                conditions=cond_list,
+                conditional=is_cond,
+                own_conditions=cond_ids,
             )
             nodes.append(leaf_node)
 
@@ -2738,6 +2789,9 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             short=node_short_val,
             short_title=node_st,
             short_title_source=node_st_src,
+            conditions=et.get("conditions", []),
+            conditional=et.get("conditional", False),
+            own_conditions=et.get("conditions_ids", []),
         )
         tree[tid] = node
         for sn in sub_nodes:
@@ -2812,6 +2866,9 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                             short=m_short_val,
                             short_title=m_st,
                             short_title_source=m_st_src,
+                            conditions=et_parsed.get("conditions", []),
+                            conditional=et_parsed.get("conditional", False),
+                            own_conditions=et_parsed.get("conditions_ids", []),
                         )
 
     # 4. Connect children
@@ -2826,13 +2883,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                 p_node.node_type = "container"
 
     for node in tree.values():
-        def _child_sort_key(cid: str):
-            parts = cid.split(".")
-            try:
-                return [int(p) if p.isdigit() else p for p in parts]
-            except Exception:
-                return [cid]
-        node.children.sort(key=_child_sort_key)
+        node.children.sort(key=_natural_sort_key)
 
     # 5. Top-down inheritance
     for root_id in [nid for nid, n in tree.items() if n.parent is None]:
@@ -2863,7 +2914,7 @@ def allocate_child_id(tree: dict[str, TaskNode], parent_id: str, tasks_dir: path
     suffixes: list[int] = []
     for node in tree.values():
         if node.parent == parent_id:
-            m = re.match(rf"^{re.escape(parent_id)}\.(\d+)$", node.id)
+            m = re.match(rf"^{re.escape(parent_id)}\.(\d+)[a-z]?$", node.id)
             if m:
                 suffixes.append(int(m.group(1)))
 
@@ -2875,7 +2926,7 @@ def allocate_child_id(tree: dict[str, TaskNode], parent_id: str, tasks_dir: path
             closed_sec = find_markdown_section(text, "Closed")
             if closed_sec:
                 for line in closed_sec.lines:
-                    m = re.match(rf"^###\s+{re.escape(parent_id)}\.(\d+)\b", line.text)
+                    m = re.match(rf"^###\s+{re.escape(parent_id)}\.(\d+)[a-z]?\b", line.text)
                     if m:
                         suffixes.append(int(m.group(1)))
 
@@ -2884,7 +2935,7 @@ def allocate_child_id(tree: dict[str, TaskNode], parent_id: str, tasks_dir: path
         if done_dir.is_dir():
             for child in done_dir.iterdir():
                 if child.is_dir():
-                    m = re.match(rf"^{re.escape(parent_id)}\.(\d+)-", child.name)
+                    m = re.match(rf"^{re.escape(parent_id)}\.(\d+)[a-z]?-", child.name)
                     if m:
                         suffixes.append(int(m.group(1)))
 
@@ -4839,6 +4890,10 @@ def parse_emergent_task_file(
         coords_refs = []
         resolved_coords = []
 
+    raw_cond = headers.get("conditions")
+    cond_ids = parse_conditions_field(raw_cond)
+    cond_list, is_cond = resolve_task_conditions(tasks_dir, cond_ids, raw_state or ("open" if is_micro else ""))
+
     task_dict = {
         "kind": headers.get("kind") or "emergent",
         "id": headers.get("id", ""),
@@ -4861,6 +4916,10 @@ def parse_emergent_task_file(
         "decider": headers.get("decider", "-"),
         "sources": headers.get("sources", "-"),
         "paths": headers.get("paths", "-"),
+        "conditions": cond_list,
+        "conditional": is_cond,
+        "conditions_ids": cond_ids,
+        "conditions_raw": raw_cond or "-",
         "handoff": headers.get("handoff", f"Read {rel_path} and fix it." if is_micro else ""),
         "labels": labels_list,
         "node_type": "microtask" if is_micro else "leaf",
@@ -5757,6 +5816,8 @@ def _node_task_dict(cn: "TaskNode") -> dict[str, Any]:
         "fields": cn.fields,
         "labels": cn.labels,
         "in_closed_section": cn.in_closed_section,
+        "conditions": list(cn.conditions),
+        "conditional": cn.conditional,
     }
 
 
@@ -5833,7 +5894,7 @@ _LEGACY_PLAN_ITEM_RES = (
     ("bullet task `T<n>`", re.compile(r"^\s*[-*]\s+\*{0,2}T\d+[a-z]?\b")),
     ("table row task `T<n>`", re.compile(r"^\|\s*\*{0,2}T\d+[a-z]?\*{0,2}\s*\|")),
     ("heading task `T<n>`", re.compile(r"^#{2,4}\s+T\d+[a-z]?\b")),
-    ("`NN.T` heading without ' - ' separator", re.compile(r"^#{2,4}\s+\d{2,}\.\d+(?!\d)(?!\s+[\u2014\u2013-]\s)")),
+    ("`NN.T` heading without ' - ' separator", re.compile(r"^#{2,4}\s+\d{2,}(?:\.\d+[a-z]?)+(?!\w)(?!\s+[\u2014\u2013-]\s)")),
 )
 
 
@@ -5871,6 +5932,8 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
     tree = discover_task_tree(tasks_dir)
     emergent = discover_emergent_tasks(tasks_dir)
     initiatives = discover_initiatives(tasks_dir)
+    all_questions = discover_questions(tasks_dir)
+    known_question_ids = {q["id"] for q in all_questions}
 
     seen_ids: dict[str, str] = {}
     known_task_ids: set[str] = set()
@@ -5883,7 +5946,25 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             known_task_ids.add(t["id"])
         rel_plan = init.get("rel_path")
         if rel_plan and rel_plan.endswith("plan.md"):
-            warnings.extend(plan_format_warnings(tasks_dir / rel_plan, rel_plan))
+            plan_path = tasks_dir / rel_plan
+            warnings.extend(plan_format_warnings(plan_path, rel_plan))
+            if plan_path.is_file():
+                try:
+                    p_text = plan_path.read_text(encoding="utf-8")
+                    scanned_lines, _ = scan_markdown_blocks(p_text)
+                    in_task_sec = False
+                    for sline in scanned_lines:
+                        if sline.is_fenced:
+                            continue
+                        if sline.text.startswith("## "):
+                            in_task_sec = bool(re.search(r"\b(?:tasks|closed|subtasks)\b", sline.text, re.IGNORECASE))
+                        elif in_task_sec and sline.text.startswith("### "):
+                            if not INLINE_TASK_HEADING_RE.match(sline.text):
+                                errors.append(
+                                    f"{rel_plan}: heading {sline.text.strip()!r} in task section does not parse as a task."
+                                )
+                except OSError:
+                    pass
 
     for task in emergent:
         tid = task["id"]
@@ -5948,6 +6029,16 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 s_val = str(node.own_fields["short"]).strip()
                 for v in validate_short_title(s_val):
                     warnings.append(f"{rel}: short title {s_val!r} on node {nid} violates conventions ({v}).")
+
+        # Check conditions on plan task node
+        if "conditions" in node.own_fields and node.own_fields["conditions"]:
+            raw_cond = str(node.own_fields["conditions"]).strip()
+            if raw_cond and raw_cond != "-":
+                for qid in parse_conditions_field(raw_cond):
+                    if not QUESTION_ID_RE.match(qid):
+                        errors.append(f"{rel}: invalid question id {qid!r} in conditions on node {nid}.")
+                    elif qid not in known_question_ids:
+                        errors.append(f"{rel}: condition question {qid!r} on node {nid} not found in questions/.")
 
         # Check coordinates on plan task node
         if "coordinates" in node.own_fields and node.own_fields["coordinates"]:
@@ -6266,6 +6357,16 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                                 break
                         except ValueError:
                             pass
+
+            # conditions validation
+            if "conditions" in task.get("headers", {}):
+                raw_cond = str(task["headers"]["conditions"]).strip()
+                if raw_cond and raw_cond != "-":
+                    for qid in parse_conditions_field(raw_cond):
+                        if not QUESTION_ID_RE.match(qid):
+                            errors.append(f"{rel}: invalid question id {qid!r} in conditions.")
+                        elif qid not in known_question_ids:
+                            errors.append(f"{rel}: condition question {qid!r} not found in questions/.")
 
             # Legacy decider warning
             raw_dec = task.get("decider", "").strip()
@@ -7418,6 +7519,22 @@ def adopt_markers(existing_index: str) -> str:
                 new_sec = sec.rstrip() + "\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
             updated = updated[:m.start()] + new_sec + updated[m.end():]
 
+    # 3.5. Conditional
+    pat_cond = re.compile(r"^##\s+Conditional\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+    m_cond = pat_cond.search(updated)
+    if m_cond:
+        sec = m_cond.group(0)
+        if not _marker_pattern("conditional").search(sec):
+            lines = sec.splitlines(keepends=True)
+            start_idx, end_idx = _find_table_range(lines)
+            if start_idx is not None and end_idx is not None:
+                tbl = "".join(lines[start_idx:end_idx + 1]).strip()
+                replacement = f"<!-- ai-orch:generated conditional -->\n{tbl}\n<!-- /ai-orch:generated conditional -->\n"
+                new_sec = "".join(lines[:start_idx]) + replacement + "".join(lines[end_idx + 1:])
+            else:
+                new_sec = sec.rstrip() + "\n\n<!-- ai-orch:generated conditional -->\n<!-- /ai-orch:generated conditional -->\n\n"
+            updated = updated[:m_cond.start()] + new_sec + updated[m_cond.end():]
+
     # 4. Done
     pat_done = re.compile(r"^##\s+Done\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
     m = pat_done.search(updated)
@@ -7494,7 +7611,7 @@ def _extract_existing_initiative_next_up_rows(existing_index: str) -> list[str]:
         if not cells:
             continue
         row_id = cells[0]
-        if re.match(r"^\d{2,}\.\d+$", row_id) or row_id.startswith("INIT-"):
+        if re.match(r"^\d{2,}(?:\.\d+[a-z]?)+$", row_id) or row_id.startswith("INIT-"):
             rows.append(line_s)
     return rows
 
@@ -7502,8 +7619,9 @@ def _extract_existing_initiative_next_up_rows(existing_index: str) -> list[str]:
 def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: bool = False) -> str:
     emergent = discover_emergent_tasks(tasks_dir)
     initiatives = discover_initiatives(tasks_dir)
-    active_tasks = [t for t in emergent if not t["in_done"] and t["canonical_state"] not in TERMINAL_STATES]
-    done_tasks = [t for t in emergent if t["in_done"] or t["canonical_state"] in TERMINAL_STATES]
+    conditional_tasks = [t for t in emergent if t.get("conditional")]
+    active_tasks = [t for t in emergent if not t["in_done"] and t["canonical_state"] not in TERMINAL_STATES and not t.get("conditional")]
+    done_tasks = [t for t in emergent if (t["in_done"] or t["canonical_state"] in TERMINAL_STATES) and not t.get("conditional")]
 
     active_tasks.sort(key=lambda t: (PRIORITY_SORT_KEY.get(t["priority"], 99), t["id"]))
     done_tasks.sort(key=lambda t: t["id"], reverse=True)
@@ -7640,7 +7758,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
     for row_id, cells, raw_line in existing_next_rows:
         base_id = re.sub(r"\s*\(.*?\)", "", row_id).strip()
-        if re.match(r"^\d{2,}\.\d+$", base_id) or base_id.startswith("INIT-"):
+        if re.match(r"^\d{2,}(?:\.\d+[a-z]?)+$", base_id) or base_id.startswith("INIT-"):
             seen_next_ids.add(base_id)
             next_up_lines.append(raw_line)
         elif base_id in emergent_next_map:
@@ -7920,6 +8038,19 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         "| Id | Task | Result | Closed |",
         "| --- | --- | --- | --- |",
     )
+    hdr_cond = "| Id | Task | Result | Closed |"
+    sep_cond = "| --- | --- | --- | --- |"
+    cond_lines = [hdr_cond, sep_cond]
+    for ct in sorted(conditional_tasks, key=lambda t: t["id"], reverse=True):
+        st_disp = f" ({ct['short_title']})" if ct.get("short_title") else ""
+        task_cell = f"[{ct['title']}]({ct['rel_path']})"
+        open_qids = [c["id"] for c in ct.get("conditions", []) if c.get("status") != "answered"]
+        qids_str = ", ".join(open_qids) if open_qids else "-"
+        res_str = f"done, conditional ({qids_str})"
+        closed_val = _git_closed_date(tasks_dir, ct["rel_path"])
+        cond_lines.append(f"| {ct['id']}{st_disp} | {task_cell} | {res_str} | {closed_val} |")
+    cond_content = "\n".join(cond_lines)
+
     done_lines = [hdr_done, sep_done]
 
     existing_done_rows: list[tuple[str, list[str]]] = []
@@ -7939,6 +8070,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
     for row_id, cells in existing_done_rows:
         base_id = re.sub(r"\s*\(.*?\)", "", row_id).strip()
+        if any(ct["id"] == base_id for ct in conditional_tasks):
+            continue
         if base_id in done_tasks_map:
             dt = done_tasks_map[base_id]
             seen_done_ids.add(base_id)
@@ -7971,6 +8104,12 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
     if not existing_index.strip() or not has_generated_markers(existing_index):
         title_header = existing_index.strip() if existing_index.strip() else "# Task Index"
+        cond_block = ""
+        if conditional_tasks:
+            cond_block = (
+                "## Conditional\n\n"
+                f"<!-- ai-orch:generated conditional -->\n{cond_content}\n<!-- /ai-orch:generated conditional -->\n\n"
+            )
         return (
             f"{title_header}\n\n"
             "## Next up\n\n"
@@ -7979,6 +8118,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             f"<!-- ai-orch:generated tasks-by-category -->\n{cat_content}\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
             "## Decisions waiting\n\n"
             f"<!-- ai-orch:generated decisions -->\n{dec_content}\n<!-- /ai-orch:generated decisions -->\n\n"
+            f"{cond_block}"
             "## Done\n\n"
             f"<!-- ai-orch:generated done -->\n{done_content}\n<!-- /ai-orch:generated done -->\n"
         )
@@ -7987,6 +8127,28 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     updated = _replace_generated_region(updated, "next-up", next_up_content)
     updated = _replace_generated_region(updated, "tasks-by-category", cat_content)
     updated = _replace_generated_region(updated, "decisions", dec_content)
+
+    if conditional_tasks:
+        cond_block = (
+            "## Conditional\n\n"
+            f"<!-- ai-orch:generated conditional -->\n{cond_content}\n<!-- /ai-orch:generated conditional -->\n\n"
+        )
+        if _marker_pattern("conditional").search(updated):
+            updated = _replace_generated_region(updated, "conditional", cond_content)
+        else:
+            pat_done = re.compile(r"^##\s+Done\b.*", re.MULTILINE)
+            m_d = pat_done.search(updated)
+            if m_d:
+                updated = updated[:m_d.start()] + cond_block + updated[m_d.start():]
+            else:
+                updated = updated.rstrip() + "\n\n" + cond_block
+    else:
+        pat_cond = re.compile(r"^##\s+Conditional\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+        m_c = pat_cond.search(updated)
+        if m_c:
+            updated = updated[:m_c.start()] + updated[m_c.end():]
+            updated = re.sub(r"\n{3,}", "\n\n", updated)
+
     updated = _replace_generated_region(updated, "done", done_content)
     return updated
 
@@ -8337,7 +8499,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
     tree_dicts = {nid: node.to_dict() for nid, node in tree.items()}
     tree_keys = ("parent", "depth", "node_type", "is_leaf", "is_container", "derived_state", "leaves_done",
-                 "leaves_total", "labels", "fields", "expanded_depends_on", "children", "size", "size_source", "priority_source", "coordinates")
+                 "leaves_total", "labels", "fields", "expanded_depends_on", "children", "size", "size_source", "priority_source", "coordinates", "conditions", "conditional")
 
     # Emergent roots keep their full header dict (the UI reads sources/paths/next-up...), plus tree info.
     all_tasks: list[dict[str, Any]] = []
@@ -9658,6 +9820,7 @@ def answer_question(
     choice: str,
     text: str | None = None,
     by: str = "owner",
+    changes_result: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -9790,13 +9953,67 @@ def answer_question(
                         actor=by or "owner",
                     )
 
-                return True, {
+                # Check tasks with conditions listing this question
+                conditions_resolved: list[str] = []
+                resolved_tasks: list[dict[str, Any]] = []
+
+                for et_item in emergent:
+                    raw_c = et_item.get("headers", {}).get("conditions", "")
+                    if question_id in parse_conditions_field(raw_c):
+                        conditions_resolved.append(et_item["id"])
+                        resolved_tasks.append(et_item)
+
+                for n_id, n_node in tree.items():
+                    if n_node.is_leaf and n_node.own_fields.get("conditions"):
+                        raw_c = n_node.own_fields["conditions"]
+                        if question_id in parse_conditions_field(raw_c) and n_id not in conditions_resolved:
+                            conditions_resolved.append(n_id)
+                            resolved_tasks.append({
+                                "id": n_id,
+                                "title": n_node.title,
+                                "category": n_node.category,
+                                "rel_path": n_node.rel_path,
+                            })
+
+                follow_up_tasks: list[str] = []
+                if changes_result:
+                    for rt in resolved_tasks:
+                        cat = rt.get("category")
+                        if not cat or cat == "micro" or cat.startswith((".", "_")) or INITIATIVE_DIR_RE.match(cat):
+                            cat = "server-and-bindings"
+                        category_dir = tasks_dir / cat
+                        if not category_dir.is_dir() or cat in RESERVED_DIRS:
+                            cat = "server-and-bindings"
+                        fu_title = f"Follow-up for {rt['id']}: {question_id} answered"
+                        sources_val = f"{rt['id']}, {question_id}"
+                        goal_val = f"Address changes to finished result of {rt['id']} after {question_id} was answered ({choice})."
+                        pri_reason = f"Follow-up required because {question_id} answer changes result of {rt['id']}."
+                        ok_fu, res_fu = tasks_new_from_note(
+                            tasks_dir=tasks_dir,
+                            from_note=None,
+                            category=cat,
+                            title=fu_title,
+                            priority="P2",
+                            priority_reason=pri_reason,
+                            goal=goal_val,
+                            sources=sources_val,
+                        )
+                        if ok_fu:
+                            follow_up_tasks.append(res_fu["id"])
+
+                ret_payload: dict[str, Any] = {
                     "ok": True,
                     "id": question_id,
                     "status": "answered",
                     "choice": choice,
                     "unblocked_tasks": unblocked,
+                    "conditions_resolved": conditions_resolved,
                 }
+                if changes_result:
+                    ret_payload["follow_up_tasks"] = follow_up_tasks
+                    ret_payload["follow_up_id"] = follow_up_tasks[0] if follow_up_tasks else None
+
+                return True, ret_payload
             except Exception:
                 for mp, orig_text in modified_files.items():
                     try:
@@ -10095,19 +10312,25 @@ def cmd_questions_ask(args: argparse.Namespace) -> int:
 
 def cmd_questions_answer(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    changes_result = getattr(args, "changes_result", False)
     ok, res = answer_question(
         tasks_dir=tasks_dir,
         question_id=args.question_id,
         choice=args.choice,
         text=args.text,
         by=args.by,
+        changes_result=changes_result,
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
         if ok:
             unb = ", ".join(res["unblocked_tasks"]) if res["unblocked_tasks"] else "none"
-            print(f"[ok] Answered {res['id']} with choice {res['choice']!r} (unblocked tasks: {unb})")
+            cond_res = ", ".join(res.get("conditions_resolved", [])) if res.get("conditions_resolved") else "none"
+            msg = f"[ok] Answered {res['id']} with choice {res['choice']!r} (unblocked tasks: {unb}; conditions resolved: {cond_res})"
+            if res.get("follow_up_tasks"):
+                msg += f" [created follow-up: {', '.join(res['follow_up_tasks'])}]"
+            print(msg)
         else:
             print(f"[FAIL] {res.get('error', 'answer failed')}", file=sys.stderr)
     return 0 if ok else 1
@@ -12009,7 +12232,7 @@ def tasks_new_from_note(
             existing_nums = []
             for t in emergent:
                 tid = t.get("id", "")
-                if tid and TASK_ID_RE.match(tid):
+                if tid and EMERGENT_ID_RE.match(tid):
                     existing_nums.append(int(tid[1:]))
 
             next_num = max(existing_nums, default=0) + 1
@@ -12469,7 +12692,7 @@ def tasks_attach(
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     target_clean = (target or "").strip()
-    if re.match(r"^\d{2,}(?:\.\d+)*$", target_clean):
+    if re.match(r"^\d{2,}(?:\.\d+[a-z]?)*$", target_clean):
         return False, {
             "ok": False,
             "error": "plan-task-attachments-unsupported",
@@ -12615,7 +12838,7 @@ def tasks_detach(
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     target_clean = (target or "").strip()
-    if re.match(r"^\d{2,}(?:\.\d+)*$", target_clean):
+    if re.match(r"^\d{2,}(?:\.\d+[a-z]?)*$", target_clean):
         return False, {
             "ok": False,
             "error": "plan-task-attachments-unsupported",
@@ -13416,6 +13639,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_qans.add_argument("--choice", required=True, help="Selected option label or 'open'")
     p_qans.add_argument("--text", default=None, help="Free-text answer")
     p_qans.add_argument("--by", default="owner", help="Who answered the question")
+    p_qans.add_argument("--changes-result", action="store_true", default=False, help="Flag that answer changes a finished task's result, creating follow-up task(s)")
     p_qans.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_qans.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_qans.set_defaults(func=cmd_questions_answer)

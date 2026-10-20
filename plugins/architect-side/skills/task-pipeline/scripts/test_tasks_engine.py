@@ -3211,9 +3211,10 @@ def test_plan_format_warnings_flag_non_canonical_task_items(tmp_path: pathlib.Pa
     plan.write_text(
         "# Plan\n\n## Tasks\n\n"
         "### 05.1 - Canonical task\n"
+        "### 05.1b - Canonical task with letter suffix\n"
         "### 05.12 - Canonical two-digit task\n"
-        "### 05.2a - Letter suffix is not an id\n"
-        "### 05.3 Missing separator\n"
+        "### 05.2 Missing separator\n"
+        "### 05.3 Also missing separator\n"
         "- **T1 — Bullet task**: text\n"
         "| **T2** | **Table task** | x |\n"
         "#### T3 - Heading with T id\n"
@@ -3228,7 +3229,7 @@ def test_plan_format_warnings_flag_non_canonical_task_items(tmp_path: pathlib.Pa
     assert "1 table row task `T<n>`" in w
     assert "1 heading task `T<n>`" in w
 
-    plan.write_text("### 05.1 - Fine\n### 05.10 — Em dash is accepted\n", encoding="utf-8")
+    plan.write_text("### 05.1 - Fine\n### 05.1b - Letter suffix is accepted\n### 05.10 — Em dash is accepted\n", encoding="utf-8")
     assert te.plan_format_warnings(plan, "05-x/plan.md") == []
 
 
@@ -3832,24 +3833,25 @@ def test_question_blocking_leaf_works_blocking_container_refused(tmp_path: pathl
 
 
 def test_block_ends_at_non_canonical_heading_and_legacy_dep_ids(tmp_path: pathlib.Path) -> None:
-    """A block stops at any `###` heading (a letter-suffixed `### 12.2a - ...` included), so it never
-    absorbs the next item's bullets; letter-suffixed ids are not dependency ids and are kept on rewrite."""
+    """A block stops at any `###` heading. Single-letter suffixed ids (12.2a) are valid plan task ids;
+    multi-letter suffixed ids (12.2ab) are legacy and kept on rewrite."""
     tasks_dir = tmp_path / "tasks"
     (tasks_dir / "12-sample").mkdir(parents=True)
     plan = tasks_dir / "12-sample" / "plan.md"
     plan.write_text(
         "# 12 - Sample\n\n## Tasks\n\n"
         "### 12.1 - A\n\n- **Status:** `open` · **Depends on:** 07.12\n- **Goal:** g\n\n"
-        "### 12.2a - Legacy\n\n- **Status:** `done` · **Depends on:** 10.4 (lane end)\n- **Goal:** g\n\n"
-        "### 12.3 - B\n\n- **Status:** `open` · **Depends on:** 12.2a, 07.11 (runs lane end), 12.1\n- **Goal:** g\n",
+        "### 12.2a - Valid single-letter suffix\n\n- **Status:** `done` · **Depends on:** 10.4 (lane end)\n- **Goal:** g\n\n"
+        "### 12.3 - B\n\n- **Status:** `open` · **Depends on:** 12.2a, 12.2ab, 07.11 (runs lane end), 12.1\n- **Goal:** g\n",
         encoding="utf-8",
     )
     tree = te.discover_task_tree(tasks_dir)
     assert tree["12.1"].depends_on == ["07.12"] and tree["12.1"].canonical_state == "open"
-    assert "12.2a" not in tree
-    assert tree["12.3"].own_depends_on == ["07.11", "12.1"]
-    assert te.update_depends_on_field("12.2a, 07.11 (runs lane end), 12.1", ["07.11", "12.1"]) == (
-        "12.2a, 07.11 (runs lane end), 12.1"
+    assert "12.2a" in tree and tree["12.2a"].canonical_state == "done"
+    assert "12.2a" in tree["12.3"].own_depends_on
+    assert "12.2ab" not in tree
+    assert te.update_depends_on_field("12.2ab, 07.11 (runs lane end), 12.1", ["07.11", "12.1"]) == (
+        "12.2ab, 07.11 (runs lane end), 12.1"
     )
     before = plan.read_text(encoding="utf-8")
     ok, res = te.transition_task(tasks_dir, "12.1", "in progress", actor="claude", expect_task_hash=tree["12.1"].task_hash)
@@ -8021,3 +8023,374 @@ def test_tasks_move_rebases_paths_to_the_project_root(tmp_path: pathlib.Path) ->
     assert "- paths: src, docs/x.md" in moved
     pointer = next((ws / "tasks" / "features").glob("T001-*.md")).read_text(encoding="utf-8")
     assert "- moved-to:" in pointer
+
+
+def test_t029_plan_task_ids_with_letter_suffix(tmp_path: pathlib.Path) -> None:
+    """T029: plan tasks with letter suffixes (NN.T<letter>, e.g. 06.1b) are parsed consistently,
+    ordered 06.1 < 06.1b < 06.2 in list/tree/initiatives/graph, can be transitioned and depended on;
+    malformed headings in a plan's task section emit a validate error."""
+    tasks_dir = tmp_path / "tasks"
+    init_dir = tasks_dir / "06-control-plane"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        "# 06 - Control Plane\n\n"
+        "## Tasks\n\n"
+        "### 06.1 - First task\n\n"
+        "- **Status:** `open`\n"
+        "- **Goal:** First goal.\n\n"
+        "### 06.1b - Middle task with letter suffix\n\n"
+        "- **Status:** `open`\n"
+        "- **Goal:** Middle goal.\n\n"
+        "### 06.2 - Second task\n\n"
+        "- **Status:** `open` · **Depends on:** 06.1b\n"
+        "- **Goal:** Second goal.\n",
+        encoding="utf-8",
+    )
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert "06.1" in tree
+    assert "06.1b" in tree
+    assert "06.2" in tree
+
+    # Children ordering: 06.1 < 06.1b < 06.2
+    assert tree["06"].children == ["06.1", "06.1b", "06.2"]
+
+    # Depends-on accepts 06.1b
+    assert tree["06.2"].depends_on == ["06.1b"]
+
+    # Initiative counts and task list
+    inits = te.discover_initiatives(tasks_dir, tree)
+    assert len(inits) == 1
+    init = inits[0]
+    assert [t["id"] for t in init["tasks"]] == ["06.1", "06.1b", "06.2"]
+    assert init["leaves_total"] == 3
+
+    # Graph includes all three
+    graph = te.compute_tasks_graph(tasks_dir)
+    graph_ids = [n["id"] for n in graph["nodes"]]
+    assert "06.1" in graph_ids
+    assert "06.1b" in graph_ids
+    assert "06.2" in graph_ids
+
+    # Transition 06.1b to in progress
+    ok, res = te.transition_task(tasks_dir, "06.1b", "in progress", actor="kilo")
+    assert ok is True, res
+    tree_after = te.discover_task_tree(tasks_dir)
+    assert tree_after["06.1b"].canonical_state == "in progress"
+    assert tree_after["06"].children == ["06.1", "06.1b", "06.2"]
+
+    # Transition 06.1b through delivered and verified to done (moves to ## Closed)
+    ok_del, res_del = te.transition_task(tasks_dir, "06.1b", "delivered", actor="kilo")
+    assert ok_del is True, res_del
+    ok_ver, res_ver = te.transition_task(tasks_dir, "06.1b", "verified", actor="verifier")
+    assert ok_ver is True, res_ver
+    ok_done, res_done = te.transition_task(tasks_dir, "06.1b", "done", actor="kilo")
+    assert ok_done is True, res_done
+    tree_done = te.discover_task_tree(tasks_dir)
+    assert tree_done["06.1b"].canonical_state == "done"
+
+    # Validate passes on clean plan
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == [], errors
+
+    # Malformed heading in task section emits a validate error
+    plan_text = plan_file.read_text(encoding="utf-8")
+    malformed_plan = plan_text + "\n### malformed heading\n\n- **Status:** `open`\n- **Goal:** Bad.\n"
+    plan_file.write_text(malformed_plan, encoding="utf-8")
+    errs_malformed, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("heading '### malformed heading' in task section does not parse as a task" in e for e in errs_malformed)
+
+
+def test_t030_conditions_header_validation_and_status(tmp_path: pathlib.Path) -> None:
+    """T030: conditions: header validation (must reference known Q### questions),
+    conditional boolean and status resolution."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "server-and-bindings").mkdir(parents=True)
+    (tasks_dir / "questions").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # Ask two questions (blocks="-" means blocking no task)
+    ok_q1, q1 = te.ask_question(
+        tasks_dir=tasks_dir,
+        question="Question 1?",
+        context="Context 1",
+        options=[("A", "Option A", None), ("B", "Option B", None)],
+        blocks="-",
+    )
+    assert ok_q1 is True, q1
+    ok_q2, q2 = te.ask_question(
+        tasks_dir=tasks_dir,
+        question="Question 2?",
+        context="Context 2",
+        options=[("yes", "Yes", None), ("no", "No", None)],
+        blocks="-",
+    )
+    assert ok_q2 is True, q2
+
+    # Create task with conditions header in canonical order
+    task_file = tasks_dir / "server-and-bindings" / "T001-conditional-task.md"
+    task_file.write_text(
+        f"# T001 Conditional Task\n\n"
+        f"- id: T001\n"
+        f"- title: Conditional Task\n"
+        f"- category: server-and-bindings\n"
+        f"- priority: P2\n"
+        f"- priority-reason: test\n"
+        f"- next-up: no\n"
+        f"- state: open\n"
+        f"- executor: kilo\n"
+        f"- depends-on: -\n"
+        f"- decider: -\n"
+        f"- sources: -\n"
+        f"- paths: -\n"
+        f"- handoff: -\n"
+        f"- conditions: {q1['id']}, {q2['id']}\n"
+        f"- short: Conditional\n\n"
+        f"## Goal\nWork\n\n"
+        f"## Steps\n1. Do\n\n"
+        f"## Verification\nPass\n",
+        encoding="utf-8",
+    )
+
+    # Valid tree passes validation
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == [], errors
+
+    # Check parsed state: open -> conditional: False
+    t_parsed = te.parse_emergent_task_file(task_file, tasks_dir)
+    assert t_parsed["conditional"] is False
+    assert len(t_parsed["conditions"]) == 2
+    assert t_parsed["conditions"][0]["status"] == "open"
+
+    # Set state to done -> conditional: True
+    task_file.write_text(task_file.read_text(encoding="utf-8").replace("- state: open", "- state: done"), encoding="utf-8")
+    t_parsed_done = te.parse_emergent_task_file(task_file, tasks_dir)
+    assert t_parsed_done["conditional"] is True
+
+    # Error on unknown question in conditions
+    bad_task = task_file.read_text(encoding="utf-8").replace(f"- conditions: {q1['id']}, {q2['id']}", "- conditions: Q999")
+    task_file.write_text(bad_task, encoding="utf-8")
+    errs_unknown, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("condition question 'Q999' not found in questions/" in e for e in errs_unknown)
+
+    # Error on malformed question id
+    malformed_task = task_file.read_text(encoding="utf-8").replace("- conditions: Q999", "- conditions: NOT_A_QUESTION")
+    task_file.write_text(malformed_task, encoding="utf-8")
+    errs_bad_id, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("invalid question id 'NOT_A_QUESTION' in conditions" in e for e in errs_bad_id)
+
+
+def test_t030_sync_index_conditional_section_and_questions_answer(tmp_path: pathlib.Path) -> None:
+    """T030: sync-index renders a Conditional section above Done; when conditions answered,
+    task leaves Conditional section and appears in Done; questions answer --changes-result creates follow-up task."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "server-and-bindings").mkdir(parents=True)
+    (tasks_dir / "questions").mkdir(parents=True)
+
+    # Ask Q001
+    ok_q, q1 = te.ask_question(
+        tasks_dir=tasks_dir,
+        question="Keep feature X?",
+        context="Context",
+        options=[("keep", "Keep", None), ("drop", "Drop", None)],
+        blocks="-",
+    )
+    assert ok_q is True, q1
+    q1_id = q1["id"]
+
+    # Create T001 (done, with condition Q001)
+    t1_file = tasks_dir / "server-and-bindings" / "T001-conditional-done.md"
+    t1_file.write_text(
+        f"# T001 Feature X Implementation\n\n"
+        f"- id: T001\n"
+        f"- title: Feature X Implementation\n"
+        f"- category: server-and-bindings\n"
+        f"- priority: P2\n"
+        f"- priority-reason: test\n"
+        f"- next-up: no\n"
+        f"- state: done\n"
+        f"- executor: kilo\n"
+        f"- depends-on: -\n"
+        f"- decider: -\n"
+        f"- sources: -\n"
+        f"- paths: -\n"
+        f"- handoff: -\n"
+        f"- conditions: {q1_id}\n"
+        f"- short: Feature X\n\n"
+        f"## Goal\nImplemented.\n\n"
+        f"## Steps\n1. Do\n\n"
+        f"## Verification\nPass.\n",
+        encoding="utf-8",
+    )
+
+    # Initial index sync
+    run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    index_text = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+
+    # ## Conditional must appear ABOVE ## Done
+    assert "## Conditional" in index_text
+    assert "## Done" in index_text
+    cond_pos = index_text.index("## Conditional")
+    done_pos = index_text.index("## Done")
+    assert cond_pos < done_pos
+
+    # T001 is listed as `done, conditional (Q001)` in Conditional
+    assert f"done, conditional ({q1_id})" in index_text
+    # T001 is NOT listed in ## Done
+    done_section = index_text[done_pos:]
+    assert "T001" not in done_section
+
+    # Now answer Q001 with --changes-result
+    ok_ans, ans_res = te.answer_question(
+        tasks_dir=tasks_dir,
+        question_id=q1_id,
+        choice="drop",
+        text="Decision is to drop feature X",
+        changes_result=True,
+    )
+    assert ok_ans is True
+    assert ans_res["conditions_resolved"] == ["T001"]
+    assert "follow_up_tasks" in ans_res
+    assert len(ans_res["follow_up_tasks"]) == 1
+    fu_id = ans_res["follow_up_tasks"][0]
+
+    # Verify follow-up task was created and linked via sources:
+    fu_task = te.discover_emergent_tasks(tasks_dir)
+    fu_match = next((t for t in fu_task if t["id"] == fu_id), None)
+    assert fu_match is not None
+    assert f"T001, {q1_id}" in fu_match["headers"]["sources"]
+
+    # Sync index again
+    run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    index_text_after = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+
+    # Since all conditions of T001 are now answered, T001 leaves Conditional and is in Done.
+    # No more conditional tasks -> ## Conditional and its marker are GONE!
+    assert "## Conditional" not in index_text_after
+    assert "<!-- ai-orch:generated conditional -->" not in index_text_after
+    done_sec_after = index_text_after[index_text_after.index("## Done"):]
+    assert "T001" in done_sec_after
+
+
+def test_t029_parse_qualified_ref_letter_suffix() -> None:
+    """T029: parse_qualified_ref accepts plan task ids with lowercase letter suffixes."""
+    ref1 = te.parse_qualified_ref("06.1b")
+    assert ref1["id"] == "06.1b"
+    ref2 = te.parse_qualified_ref("my-proj/06.1b")
+    assert ref2["project"] == "my-proj"
+    assert ref2["id"] == "06.1b"
+    ref3 = te.parse_qualified_ref("ws:my-proj/06.10a")
+    assert ref3["workspace"] == "ws"
+    assert ref3["project"] == "my-proj"
+    assert ref3["id"] == "06.10a"
+
+
+def test_t030_plan_task_conditions_and_json_output(tmp_path: pathlib.Path) -> None:
+    """T030: plan-task conditions status line (**Conditions:** Q###), validation, JSON output,
+    and questions answer --changes-result on plan tasks."""
+    tasks_dir = tmp_path / "tasks"
+    init_dir = tasks_dir / "06-control-plane"
+    init_dir.mkdir(parents=True)
+    (tasks_dir / "questions").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # Ask Q001
+    ok_q, q1 = te.ask_question(
+        tasks_dir=tasks_dir,
+        question="Plan condition question?",
+        context="Context",
+        options=[("opt1", "Option 1", None), ("opt2", "Option 2", None)],
+        blocks="-",
+    )
+    assert ok_q is True
+    q1_id = q1["id"]
+
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        "# 06 - Control Plane\n\n"
+        "## Tasks\n\n"
+        f"### 06.1 - First task\n\n"
+        f"- **Status:** `done` · **Conditions:** {q1_id}\n"
+        f"- **Goal:** Test plan conditions.\n",
+        encoding="utf-8",
+    )
+
+    # Valid tree passes validation
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == [], errors
+
+    tree = te.discover_task_tree(tasks_dir)
+    node = tree["06.1"]
+    assert node.conditional is True
+    assert len(node.conditions) == 1
+    assert node.conditions[0]["id"] == q1_id
+    assert node.conditions[0]["status"] == "open"
+
+    # Check to_dict() carries conditions and conditional
+    d = node.to_dict()
+    assert d["conditional"] is True
+    assert d["conditions"] == node.conditions
+
+    # Check cmd_list json output carries conditions and conditional
+    res_list = run_cli("list", "--tasks-dir", str(tasks_dir), "--json")
+    list_payload = json.loads(res_list.stdout)
+    assert list_payload["ok"] is True
+    node_in_list = list_payload["tree"]["06.1"]
+    assert node_in_list["conditional"] is True
+    assert len(node_in_list["conditions"]) == 1
+
+    # Answering Q001 with --changes-result resolves condition for 06.1 and creates follow-up task
+    ok_ans, ans_res = te.answer_question(
+        tasks_dir=tasks_dir,
+        question_id=q1_id,
+        choice="opt1",
+        changes_result=True,
+    )
+    assert ok_ans is True
+    assert "06.1" in ans_res["conditions_resolved"]
+    assert len(ans_res["follow_up_tasks"]) == 1
+
+
+def test_t030_canonical_optional_headers_order(tmp_path: pathlib.Path) -> None:
+    """T030: conditions: header must follow canonical optional-field order (after moved-to, before short)."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "server-and-bindings").mkdir(parents=True)
+    (tasks_dir / "questions").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    ok_q, q1 = te.ask_question(
+        tasks_dir=tasks_dir,
+        question="Header order?",
+        context="Context",
+        options=[("a", "A", None), ("b", "B", None)],
+        blocks="-",
+    )
+    assert ok_q is True
+    q1_id = q1["id"]
+
+    # Out-of-order: conditions before size (size is an optional field before conditions)
+    bad_task = tasks_dir / "server-and-bindings" / "T001-bad-order.md"
+    bad_task.write_text(
+        f"# T001 Bad Order\n\n"
+        f"- id: T001\n"
+        f"- title: Bad Order\n"
+        f"- category: server-and-bindings\n"
+        f"- priority: P2\n"
+        f"- priority-reason: test\n"
+        f"- next-up: no\n"
+        f"- state: open\n"
+        f"- executor: kilo\n"
+        f"- depends-on: -\n"
+        f"- decider: -\n"
+        f"- sources: -\n"
+        f"- paths: -\n"
+        f"- handoff: -\n"
+        f"- conditions: {q1_id}\n"
+        f"- size: M\n\n"
+        f"## Goal\nG\n\n## Steps\n1. S\n\n## Verification\nV\n",
+        encoding="utf-8",
+    )
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("optional header fields out of order" in e for e in errors)

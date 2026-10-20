@@ -64,7 +64,16 @@ Permitted by `task-pipeline` ("A project that needs extra fields lists them in `
 - `worktree`: Relative or absolute physical filesystem path to the active worktree checkout (e.g. `.kilo/worktrees/08-t1-app-shell`).
 - `run-id`: Unique identifier of the executing run or background MCP task handle (e.g. `ctask_123` or `ses_abc`).
 - `use-cases`: Comma-separated list of linked use-case IDs (e.g. `UC001, UC004`).
+- `moved-to`: Relocated task reference (`project/ID`) when a task has moved to another project or workspace.
+- `conditions`: Comma-separated list of question IDs (`Q###`) whose answer may change a finished result (e.g. `conditions: Q003, Q007`). Distinct from `blocks:` on questions: conditions do not block a task from finishing, but mark its result as conditional if questions remain open. In plan tasks, written as `- **Conditions:** Q003, Q007` on the status/field line. Placed in canonical optional-field order after `moved-to` and before `short`. Validation errors if any referenced question does not exist.
 - `short`: `1–5 words, ≤40 chars, no trailing punctuation` (a concise 3-4 word label stored with the item and used in citations: `ID (short title)`). Optional for existing files; deterministically derived via `derive_short_title` when omitted. Validation reports violations as warnings.
+
+### 2.2.1 Plan Task ID Grammar & Letter Suffixes (`NN.T<letter>`)
+
+Initiative plan tasks accept an optional single lowercase letter suffix: `NN.T<letter>`, e.g. `06.1b`, `12.2a`.
+- **Ordering:** Natural ordering is preserved across all tools: `06.1 < 06.1a < 06.1b < 06.2`.
+- **Scope:** Supported consistently in plan headings (`### NN.T<letter> - <title>`), `depends-on` fields, transitions, `parse_qualified_ref`, `sync-index`, and dependency graphs.
+- **Validation:** Validation raises an error for any `###` heading inside a plan's task section (`## Tasks`, `## Closed`, `## Subtasks`) that does not parse as a task heading. Task blocks are never dropped silently.
 
 ### 2.3 Required Body Sections (Full Tasks)
 1. `## Goal`
@@ -123,6 +132,13 @@ flowchart TB
    - When verification fails, the failing criterion or blocking findings (`B1..Bn`) are appended to `PROGRESS.md` and passed back to the **same** Executor session (`continue_session_id`).
 4. **Closure Side-Effect (`→ done` / `done with a caveat` / `dropped`):**
    - Moves the task file/folder via `git mv` into `tasks/done/<category>/`, rewrites relative links if needed, and updates `tasks/00-INDEX.md`.
+
+### 3.1 "Conditional Done" State (`done, conditional`)
+
+When a task reaches a terminal or delivered state (`done`, `done with a caveat`, `verified`, `delivered`), but its `conditions:` header lists at least one question that is NOT yet answered:
+- **Status:** The task's status is reported as `done, conditional (Q###, ...)`.
+- **JSON Output:** Task objects carry `conditional: true` and `conditions: [{id, status, short_title}]`. When all listed questions are answered, `conditional: false`.
+- **Index Presentation:** `sync-index` renders a dedicated **"Conditional"** table section directly ABOVE "Done". When all conditions on a task are answered, the task leaves "Conditional" and moves to the "Done" table. If no tasks remain conditional, the "Conditional" section and its generated marker are omitted entirely.
 
 ---
 
