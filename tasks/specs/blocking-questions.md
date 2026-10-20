@@ -41,6 +41,11 @@
   - Distinct from `blocks:` (which lives on question files and forces tasks into state `waiting`), `conditions:` is a header on tasks (`conditions: Q003, Q007` on emergent tasks, `**Conditions:** Q003, Q007` in plan status lines) listing open questions whose eventual answer may alter a finished task's result without preventing the task from completing.
   - When `questions answer Q###` resolves a question, any task listing that question in its `conditions:` is reported under `conditions_resolved`.
   - Passing `--changes-result` to `questions answer` flags that the selected choice/answer modifies the outcome of finished work. For each resolved conditional task, the engine automatically creates a follow-up task (`tasks new`, with `sources: <task_id>, <question_id>`, `priority: P2`, and category matching the task) and reports its ID.
+- **Q13 — §2 condition question age, decider, stale condition tracking, and header position** (T031; follow-up of T030).
+  - In `00-INDEX.md`'s `## Conditional` section (rendered by `sync-index`), each condition question is displayed per task with its age in whole days since `asked:` and its `decider`: `Q003 (9 d, owner)`.
+  - When any open condition question exceeds 7 days of age, a `Stale conditions (> 7 days): Q003 (9 d, owner) on T012, …` line is rendered below the conditional table.
+  - In all JSON outputs (`cmd_list`, `cmd_graph`, tree nodes), `conditions` is serialized as `[{id, status, short_title, age_days, decider}]`.
+  - The `conditions:` header on tasks is an optional extension field and follows the canonical header sequence (placed after `moved-to` and before `short`). When optional headers are placed out of order, validator error messages explicitly state the expected order, list the canonical sequence, and identify where misplaced fields belong.
 
 ## 1. Problem
 
@@ -153,6 +158,8 @@ In `tasks_engine.py` (same parser, same validator, stdlib only). Every subcomman
   | Key | Question | Blocks | Decider | Recommended |
   | --- | --- | --- | --- | --- |
   | [Q004](questions/Q004-headless-permission-mode.md) | Which permission mode should headless Claude runs use by default? | T013, 07.3 | owner | A |
+
+- `sync-index` also renders `## Conditional` (above `## Done`) listing finished tasks with unresolved conditions, showing each question with its age in days and decider (`done, conditional (Q003 (9 d, owner))`), and appends a `Stale conditions (> 7 days): ...` summary line when any open condition is older than 7 days.
 
 ## 4. Agents asking
 
