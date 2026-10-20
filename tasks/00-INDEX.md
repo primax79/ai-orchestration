@@ -74,6 +74,7 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T029 (Letter-suffix plan ids) | P2 | [Plan task ids with a letter suffix drop out of the index](server-and-bindings/T029-plan-task-ids-with-a-letter-suffix-drop-out-of-the.md) | delivered | kilo | - |
 | T030 (Conditional done) | P2 | [conditions: header for tasks done with open questions that may change the result](server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md) | delivered | kilo | - |
 | T031 (Conditional done follow-ups) | P3 | [Conditional done: question age in the index; conditions: header position](server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md) | delivered | kilo | - |
+| T032 (CLI writes through broker) | P1 | [CLI writes reach a live broker; guard ignores a stale manifest](server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md) | open | kilo | - |
 
 ### micro
 
