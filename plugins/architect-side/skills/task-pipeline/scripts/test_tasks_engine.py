@@ -2,6 +2,7 @@
 """Unit tests for tasks_engine.py."""
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import os
@@ -8236,8 +8237,8 @@ def test_t030_sync_index_conditional_section_and_questions_answer(tmp_path: path
     done_pos = index_text.index("## Done")
     assert cond_pos < done_pos
 
-    # T001 is listed as `done, conditional (Q001)` in Conditional
-    assert f"done, conditional ({q1_id})" in index_text
+    # T001 is listed as `done, conditional (Q001 (0 d, owner))` in Conditional
+    assert f"done, conditional ({q1_id} (0 d, owner))" in index_text
     # T001 is NOT listed in ## Done
     done_section = index_text[done_pos:]
     assert "T001" not in done_section
@@ -8394,3 +8395,211 @@ def test_t030_canonical_optional_headers_order(tmp_path: pathlib.Path) -> None:
     )
     errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
     assert any("optional header fields out of order" in e for e in errors)
+
+
+def test_t031_conditional_done_followups(tmp_path: pathlib.Path) -> None:
+    """T031: Condition age in days, decider in index; stale conditions line (>7d); JSON outputs."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "server-and-bindings").mkdir(parents=True)
+    (tasks_dir / "questions").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n\n## Next up\n\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n## Decisions waiting\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n", encoding="utf-8")
+
+    today = datetime.date.today()
+    date_9d = (today - datetime.timedelta(days=9)).isoformat()
+    date_2d = (today - datetime.timedelta(days=2)).isoformat()
+
+    # Create Q003 (asked 9 days ago, decider owner)
+    q3_file = tasks_dir / "questions" / "Q003-old-condition.md"
+    q3_file.write_text(
+        "# Q003 Old Condition\n\n"
+        "- id: Q003\n"
+        "- question: Old condition question?\n"
+        "- status: open\n"
+        "- blocks: -\n"
+        "- decider: owner\n"
+        "- asked-by: owner\n"
+        f"- asked: {date_9d}\n"
+        "- origin-run: -\n"
+        "- open-answer: yes\n"
+        "- recommended: -\n"
+        "- short: Old condition\n\n"
+        "## Context\nOld context.\n\n"
+        "## Options\n- **A** — Opt A: consequence\n- **B** — Opt B: consequence\n\n"
+        "## Answer\n- choice: -\n- text: -\n- answered-by: -\n- answered: -\n",
+        encoding="utf-8",
+    )
+
+    # Create Q004 (asked 2 days ago, decider team)
+    q4_file = tasks_dir / "questions" / "Q004-new-condition.md"
+    q4_file.write_text(
+        "# Q004 New Condition\n\n"
+        "- id: Q004\n"
+        "- question: New condition question?\n"
+        "- status: open\n"
+        "- blocks: -\n"
+        "- decider: team\n"
+        "- asked-by: owner\n"
+        f"- asked: {date_2d}\n"
+        "- origin-run: -\n"
+        "- open-answer: yes\n"
+        "- recommended: -\n"
+        "- short: New condition\n\n"
+        "## Context\nNew context.\n\n"
+        "## Options\n- **A** — Opt A: consequence\n- **B** — Opt B: consequence\n\n"
+        "## Answer\n- choice: -\n- text: -\n- answered-by: -\n- answered: -\n",
+        encoding="utf-8",
+    )
+
+    # Create T012 (done, condition Q003)
+    t12_file = tasks_dir / "server-and-bindings" / "T012-first-task.md"
+    t12_file.write_text(
+        "# T012 First Task\n\n"
+        "- id: T012\n"
+        "- title: First Task\n"
+        "- category: server-and-bindings\n"
+        "- priority: P2\n"
+        "- priority-reason: test\n"
+        "- next-up: no\n"
+        "- state: done\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: -\n"
+        "- conditions: Q003\n"
+        "- short: First\n\n"
+        "## Goal\nG1\n\n## Steps\n1. S1\n\n## Verification\nV1\n",
+        encoding="utf-8",
+    )
+
+    # Create T015 (done, condition Q004)
+    t15_file = tasks_dir / "server-and-bindings" / "T015-second-task.md"
+    t15_file.write_text(
+        "# T015 Second Task\n\n"
+        "- id: T015\n"
+        "- title: Second Task\n"
+        "- category: server-and-bindings\n"
+        "- priority: P2\n"
+        "- priority-reason: test\n"
+        "- next-up: no\n"
+        "- state: done\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: -\n"
+        "- conditions: Q004\n"
+        "- short: Second\n\n"
+        "## Goal\nG2\n\n## Steps\n1. S2\n\n## Verification\nV2\n",
+        encoding="utf-8",
+    )
+
+    # Sync index
+    run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    index_text = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+
+    # Check table rows: age in whole days and decider
+    assert "done, conditional (Q003 (9 d, owner))" in index_text
+    assert "done, conditional (Q004 (2 d, team))" in index_text
+
+    # Check stale line: Q003 (>7d) listed, Q004 (2d) NOT listed
+    assert "Stale conditions (> 7 days): Q003 (9 d, owner) on T012" in index_text
+    assert "on T015" not in index_text
+
+    # Check JSON output
+    res_list = run_cli("list", "--tasks-dir", str(tasks_dir), "--json")
+    payload = json.loads(res_list.stdout)
+    assert payload["ok"] is True
+    t12_json = payload["tree"]["T012"]
+    assert t12_json["conditional"] is True
+    assert t12_json["conditions"] == [
+        {
+            "id": "Q003",
+            "status": "open",
+            "short_title": "Old condition",
+            "age_days": 9,
+            "decider": "owner",
+        }
+    ]
+    t15_json = payload["tree"]["T015"]
+    assert t15_json["conditional"] is True
+    assert t15_json["conditions"] == [
+        {
+            "id": "Q004",
+            "status": "open",
+            "short_title": "New condition",
+            "age_days": 2,
+            "decider": "team",
+        }
+    ]
+
+    # When no conditions are stale (> 7 days), stale conditions line is omitted
+    date_5d = (today - datetime.timedelta(days=5)).isoformat()
+    q3_file.write_text(q3_file.read_text(encoding="utf-8").replace(f"- asked: {date_9d}", f"- asked: {date_5d}"), encoding="utf-8")
+    run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    index_text_fresh = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "done, conditional (Q003 (5 d, owner))" in index_text_fresh
+    assert "Stale conditions" not in index_text_fresh
+
+
+def test_t031_header_field_order_error(tmp_path: pathlib.Path) -> None:
+    """T031: Header field order error lists canonical sequence and identifies where misplaced field belongs."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "server-and-bindings").mkdir(parents=True)
+    (tasks_dir / "questions").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    ok_q, q1 = te.ask_question(
+        tasks_dir=tasks_dir,
+        question="Header order check?",
+        context="Context",
+        options=[("a", "A", None), ("b", "B", None)],
+        blocks="-",
+    )
+    assert ok_q is True
+    q1_id = q1["id"]
+
+    # Place conditions directly after handoff, but before verifier (canonical: verifier before conditions)
+    bad_task = tasks_dir / "server-and-bindings" / "T020-bad-field-order.md"
+    bad_task.write_text(
+        f"# T020 Bad Field Order\n\n"
+        f"- id: T020\n"
+        f"- title: Bad Field Order\n"
+        f"- category: server-and-bindings\n"
+        f"- priority: P2\n"
+        f"- priority-reason: test\n"
+        f"- next-up: no\n"
+        f"- state: open\n"
+        f"- executor: kilo\n"
+        f"- depends-on: -\n"
+        f"- decider: -\n"
+        f"- sources: -\n"
+        f"- paths: -\n"
+        f"- handoff: -\n"
+        f"- conditions: {q1_id}\n"
+        f"- verifier: owner\n\n"
+        f"## Goal\nG\n\n## Steps\n1. S\n\n## Verification\nV\n",
+        encoding="utf-8",
+    )
+
+    errors, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert len(errors) > 0
+    err = next(e for e in errors if "optional header fields out of order" in e)
+    # Checks expected order
+    assert "got ['conditions', 'verifier'], expected ['verifier', 'conditions']" in err
+    # Checks canonical sequence is listed
+    assert "Canonical sequence: ['profile', 'verification-mode', 'verifier', 'size', 'kind', 'labels', 'branch', 'worktree', 'run-id', 'use-cases', 'use_cases', 'coordinates', 'moved-to', 'conditions', 'short']" in err
+    # Checks where misplaced fields belong
+    assert "field 'conditions' belongs after 'moved-to' and before 'short'" in err
+    assert "field 'verifier' belongs after 'verification-mode' and before 'size'" in err
+
+    # Now fix the order: verifier before conditions
+    good_task = bad_task.read_text(encoding="utf-8").replace(
+        f"- conditions: {q1_id}\n- verifier: owner\n",
+        f"- verifier: owner\n- conditions: {q1_id}\n",
+    )
+    bad_task.write_text(good_task, encoding="utf-8")
+    errors_fixed, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors_fixed == [], errors_fixed

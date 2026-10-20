@@ -1378,7 +1378,7 @@ def resolve_task_conditions(
     task_state: str,
     questions_map: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Resolve condition question IDs to [{id, status, short_title}] and compute conditional boolean.
+    """Resolve condition question IDs to [{id, status, short_title, age_days, decider}] and compute conditional boolean.
 
     A task in state done (or verified/delivered) whose conditions include at least one question
     NOT yet answered is 'conditional'.
@@ -1389,20 +1389,34 @@ def resolve_task_conditions(
         all_q = discover_questions(tasks_dir)
         questions_map = {q["id"]: q for q in all_q}
 
+    today = datetime.date.today()
     conditions_list: list[dict[str, Any]] = []
     for qid in cond_ids:
         q = questions_map.get(qid)
         if q:
+            asked_str = q.get("asked", "")
+            age_days = 0
+            if asked_str:
+                try:
+                    asked_date = datetime.date.fromisoformat(str(asked_str).strip()[:10])
+                    age_days = max(0, (today - asked_date).days)
+                except Exception:
+                    age_days = 0
+            decider_val = q.get("decider", "").strip() or "owner"
             conditions_list.append({
                 "id": qid,
                 "status": q.get("status", "unknown"),
                 "short_title": q.get("short_title", qid),
+                "age_days": age_days,
+                "decider": decider_val,
             })
         else:
             conditions_list.append({
                 "id": qid,
                 "status": "unknown",
                 "short_title": qid,
+                "age_days": 0,
+                "decider": "-",
             })
 
     canon = normalize_state(task_state)
@@ -5163,6 +5177,16 @@ def parse_question_file(
         q_st_val = derive_short_title(title or headers.get("question", ""))
         q_st_src = "derived"
 
+    today = datetime.date.today()
+    asked_str = headers.get("asked", "")
+    age_days = 0
+    if asked_str:
+        try:
+            asked_date = datetime.date.fromisoformat(str(asked_str).strip()[:10])
+            age_days = max(0, (today - asked_date).days)
+        except Exception:
+            age_days = 0
+
     return {
         "id": headers.get("id", ""),
         "question": headers.get("question", ""),
@@ -5175,6 +5199,7 @@ def parse_question_file(
         "decider": headers.get("decider", ""),
         "asked_by": headers.get("asked-by", ""),
         "asked": headers.get("asked", ""),
+        "age_days": age_days,
         "origin_run": headers.get("origin-run", ""),
         "open_answer": headers.get("open-answer", ""),
         "recommended": headers.get("recommended", ""),
@@ -6136,8 +6161,20 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             present_micro = [k for k in keys if k in MICRO_HEADER_FIELDS]
             expected_micro = [k for k in MICRO_HEADER_FIELDS if k in present_micro]
             if present_micro != expected_micro:
+                misplaced_m = []
+                seen_m = set()
+                for k in present_micro:
+                    if present_micro.index(k) != expected_micro.index(k) and k not in seen_m:
+                        seen_m.add(k)
+                        c_idx = MICRO_HEADER_FIELDS.index(k)
+                        prec = MICRO_HEADER_FIELDS[c_idx - 1] if c_idx > 0 else None
+                        succ = MICRO_HEADER_FIELDS[c_idx + 1] if c_idx + 1 < len(MICRO_HEADER_FIELDS) else None
+                        where_str = (f"after '{prec}'" if prec else "") + (f" and before '{succ}'" if prec and succ else (f"before '{succ}'" if succ else ""))
+                        misplaced_m.append(f"field '{k}' belongs {where_str}")
+                where_msg_m = f" ({'; '.join(misplaced_m)})" if misplaced_m else ""
                 errors.append(
-                    f"{rel}: microtask header fields out of order: got {present_micro}, expected {expected_micro}."
+                    f"{rel}: microtask header fields out of order: got {present_micro}, expected {expected_micro}. "
+                    f"Canonical sequence: {list(MICRO_HEADER_FIELDS)}.{where_msg_m}"
                 )
 
             # Check empty values
@@ -6219,7 +6256,21 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 present_ext = [k for k in keys if k in OPTIONAL_EXTENSION_FIELDS and keys.index(k) > handoff_pos]
                 expected_ext = [k for k in OPTIONAL_EXTENSION_FIELDS if k in present_ext]
                 if present_ext != expected_ext:
-                    errors.append(f"{rel}: optional header fields out of order: got {present_ext}, expected {expected_ext}.")
+                    misplaced = []
+                    seen_misplaced = set()
+                    for k in present_ext:
+                        if present_ext.index(k) != expected_ext.index(k) and k not in seen_misplaced:
+                            seen_misplaced.add(k)
+                            c_idx = OPTIONAL_EXTENSION_FIELDS.index(k)
+                            prec = OPTIONAL_EXTENSION_FIELDS[c_idx - 1] if c_idx > 0 else "handoff"
+                            succ = OPTIONAL_EXTENSION_FIELDS[c_idx + 1] if c_idx + 1 < len(OPTIONAL_EXTENSION_FIELDS) else None
+                            where_str = f"after '{prec}'" + (f" and before '{succ}'" if succ else "")
+                            misplaced.append(f"field '{k}' belongs {where_str}")
+                    where_msg = f" ({'; '.join(misplaced)})" if misplaced else ""
+                    errors.append(
+                        f"{rel}: optional header fields out of order: got {present_ext}, expected {expected_ext}. "
+                        f"Canonical sequence: {list(OPTIONAL_EXTENSION_FIELDS)}.{where_msg}"
+                    )
 
             # Check empty values
             if not is_pointer:
@@ -7528,6 +7579,9 @@ def adopt_markers(existing_index: str) -> str:
             lines = sec.splitlines(keepends=True)
             start_idx, end_idx = _find_table_range(lines)
             if start_idx is not None and end_idx is not None:
+                for idx in range(end_idx + 1, len(lines)):
+                    if "Stale conditions" in lines[idx]:
+                        end_idx = idx
                 tbl = "".join(lines[start_idx:end_idx + 1]).strip()
                 replacement = f"<!-- ai-orch:generated conditional -->\n{tbl}\n<!-- /ai-orch:generated conditional -->\n"
                 new_sec = "".join(lines[:start_idx]) + replacement + "".join(lines[end_idx + 1:])
@@ -8041,15 +8095,25 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     hdr_cond = "| Id | Task | Result | Closed |"
     sep_cond = "| --- | --- | --- | --- |"
     cond_lines = [hdr_cond, sep_cond]
+    stale_entries: list[str] = []
     for ct in sorted(conditional_tasks, key=lambda t: t["id"], reverse=True):
         st_disp = f" ({ct['short_title']})" if ct.get("short_title") else ""
         task_cell = f"[{ct['title']}]({ct['rel_path']})"
-        open_qids = [c["id"] for c in ct.get("conditions", []) if c.get("status") != "answered"]
-        qids_str = ", ".join(open_qids) if open_qids else "-"
+        open_conditions = [c for c in ct.get("conditions", []) if c.get("status") != "answered"]
+        cond_list_to_show = open_conditions if open_conditions else ct.get("conditions", [])
+        cond_tokens: list[str] = []
+        for c in cond_list_to_show:
+            cond_str = f"{c['id']} ({c.get('age_days', 0)} d, {c.get('decider', 'owner')})"
+            cond_tokens.append(cond_str)
+            if c.get("status") != "answered" and c.get("age_days", 0) > 7:
+                stale_entries.append(f"{cond_str} on {ct['id']}")
+        qids_str = ", ".join(cond_tokens) if cond_tokens else "-"
         res_str = f"done, conditional ({qids_str})"
         closed_val = _git_closed_date(tasks_dir, ct["rel_path"])
         cond_lines.append(f"| {ct['id']}{st_disp} | {task_cell} | {res_str} | {closed_val} |")
     cond_content = "\n".join(cond_lines)
+    if stale_entries:
+        cond_content += f"\n\nStale conditions (> 7 days): {', '.join(stale_entries)}"
 
     done_lines = [hdr_done, sep_done]
 
