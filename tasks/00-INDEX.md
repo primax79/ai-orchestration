@@ -73,7 +73,7 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T028 (Unattended turn hardening) | P1 | [Unattended turns: enforce reduced capability on every tool and harden the untrusted-data delimiters](server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md) | delivered | kilo | - |
 | T029 (Letter-suffix plan ids) | P2 | [Plan task ids with a letter suffix drop out of the index](server-and-bindings/T029-plan-task-ids-with-a-letter-suffix-drop-out-of-the.md) | delivered | kilo | - |
 | T030 (Conditional done) | P2 | [conditions: header for tasks done with open questions that may change the result](server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md) | delivered | kilo | - |
-| T031 (Conditional done follow-ups) | P3 | [Conditional done: question age in the index; conditions: header position](server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md) | in progress | kilo | - |
+| T031 (Conditional done follow-ups) | P3 | [Conditional done: question age in the index; conditions: header position](server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md) | delivered | kilo | - |
 
 ### micro
 
