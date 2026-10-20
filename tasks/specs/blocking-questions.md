@@ -37,6 +37,10 @@
   - the validator warning is `context-not-completed`.
 - **Q10 — §5 rendering.** The context and options are rendered under spec 06 A12 (HTML escaped, safe links, CSP).
 - **Q11 — §2 origin-session header field** (spec 12 E10). Added directly after `origin-run`: records the session ID or role that asked the question (e.g. `orchestrator`), enabling `resume-origin` or routing answers back to the originating session. Defaults to `-` when absent. When both `origin-run` and an origin role exist, the run takes precedence for `resume-origin`.
+- **Q12 — §2 conditions vs blocks, and `--changes-result` flag on `questions answer`** (T030; owner decision Q005 / method docs/08 §7.15).
+  - Distinct from `blocks:` (which lives on question files and forces tasks into state `waiting`), `conditions:` is a header on tasks (`conditions: Q003, Q007` on emergent tasks, `**Conditions:** Q003, Q007` in plan status lines) listing open questions whose eventual answer may alter a finished task's result without preventing the task from completing.
+  - When `questions answer Q###` resolves a question, any task listing that question in its `conditions:` is reported under `conditions_resolved`.
+  - Passing `--changes-result` to `questions answer` flags that the selected choice/answer modifies the outcome of finished work. For each resolved conditional task, the engine automatically creates a follow-up task (`tasks new`, with `sources: <task_id>, <question_id>`, `priority: P2`, and category matching the task) and reports its ID.
 
 ## 1. Problem
 
