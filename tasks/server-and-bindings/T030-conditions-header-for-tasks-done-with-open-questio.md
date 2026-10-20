@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Forwarded by the Evolution Assurance central session (its T023, owner decision Q005, method docs/08 §7.15)
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: -
 - handoff: Read tasks/server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md, do the open steps, run the Verification, update the task and the registry.
 - short: Conditional done
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 

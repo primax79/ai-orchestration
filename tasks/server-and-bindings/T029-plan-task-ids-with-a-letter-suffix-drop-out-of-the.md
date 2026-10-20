@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Forwarded by the Evolution Assurance central session (its T021): ### 06.1b tasks silently vanish from the index and the initiative count
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: -
 - handoff: Read tasks/server-and-bindings/T029-plan-task-ids-with-a-letter-suffix-drop-out-of-the.md, do the open steps, run the Verification, update the task and the registry.
 - short: Letter-suffix plan ids
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 

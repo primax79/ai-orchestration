@@ -71,8 +71,8 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T026 (Trigger enqueue race) | P1 | [Trigger enqueue races the orchestrator queue and advances the role cursor too early](server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md) | delivered | kilo | - |
 | T027 (Duplicate turn resumption) | P1 | [Stale-claim recovery relaunches a turn whose child process has not written its pid yet](server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md) | delivered | kilo | - |
 | T028 (Unattended turn hardening) | P1 | [Unattended turns: enforce reduced capability on every tool and harden the untrusted-data delimiters](server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md) | delivered | kilo | - |
-| T029 (Letter-suffix plan ids) | P2 | [Plan task ids with a letter suffix drop out of the index](server-and-bindings/T029-plan-task-ids-with-a-letter-suffix-drop-out-of-the.md) | in progress | kilo | - |
-| T030 (Conditional done) | P2 | [conditions: header for tasks done with open questions that may change the result](server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md) | in progress | kilo | - |
+| T029 (Letter-suffix plan ids) | P2 | [Plan task ids with a letter suffix drop out of the index](server-and-bindings/T029-plan-task-ids-with-a-letter-suffix-drop-out-of-the.md) | delivered | kilo | - |
+| T030 (Conditional done) | P2 | [conditions: header for tasks done with open questions that may change the result](server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md) | delivered | kilo | - |
 
 ### micro
 
