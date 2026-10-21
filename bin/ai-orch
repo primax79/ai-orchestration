@@ -220,8 +220,12 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "Upgrade an existing tasks/ directory to the latest task-pipeline v0.3.0 convention.",
                 },
                 "new": {
-                    "usage": "ai-orch tasks new --from-note <id> [--category <cat>] --title <title> [--short <words>] [--parent <id>] [--priority <P0-P3>] [--priority-reason <reason>] [--tasks-dir <dir>] [--json]",
+                    "usage": "ai-orch tasks new --from-note <id> [--category <cat>] --title <title> [--step <step>...] [--verification <check>...] [--short <words>] [--parent <id>] [--priority <P0-P3>] [--priority-reason <reason>] [--tasks-dir <dir>] [--json]",
                     "description": "Create a new emergent task from an inbox note under the task-write lock.",
+                },
+                "step": {
+                    "usage": "ai-orch tasks step <list|add|check|uncheck> <task_id> [args...] [--tasks-dir <dir>] [--json]",
+                    "description": "List, add, check, or uncheck checklist items under ## Steps of an emergent task.",
                 },
                 "micro": {
                     "usage": "ai-orch tasks micro --title <title> [--short <words>] [--kind <kind>] [--priority <P0-P3>] [--paths <paths>] [--depends-on <ids>] [--label <label>...] [--size <size>] [--executor <exec>] [--what <text>] [--tasks-dir <dir>] [--json]",

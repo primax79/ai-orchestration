@@ -187,6 +187,10 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 REQUIRED_SECTIONS: tuple[str, ...] = ("## Goal", "## Steps", "## Verification")
 RESERVED_DIRS: set[str] = {"_inbox", "_reviews", "specs", "done", "merged", "notes", "reviews", "questions", "use-cases"}
 
+STEP_ITEM_RE = re.compile(r"^(\s*[-*]|\s*\d+\.)\s+\[([ xX])\]\s*(.*)$")
+STEP_PLACEHOLDER_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+(?:\[[ xX]\]\s+)?(?:TODO:\s*)?Step\s+1\.?\s*$", re.IGNORECASE)
+VERIFICATION_PLACEHOLDER_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+(?:\[[ xX]\]\s+)?(?:TODO:\s*)?Command or check(?:\s+that proves completion)?\.?\s*$", re.IGNORECASE)
+
 QUESTION_MANDATORY_HEADER_FIELDS: tuple[str, ...] = (
     "id",
     "question",
@@ -5049,6 +5053,18 @@ def parse_emergent_task_file(
     found_headings = {sec.heading for sec in sections if sec.heading}
     sections_present = [sec for sec in REQUIRED_SECTIONS if sec in found_headings]
 
+    step_placeholders: list[str] = []
+    verification_placeholders: list[str] = []
+    for sec in sections:
+        if sec.heading == "## Steps":
+            for sline in sec.lines[1:]:
+                if not sline.is_fenced and STEP_PLACEHOLDER_RE.match(sline.text):
+                    step_placeholders.append(sline.text.strip())
+        elif sec.heading == "## Verification":
+            for sline in sec.lines[1:]:
+                if not sline.is_fenced and VERIFICATION_PLACEHOLDER_RE.match(sline.text):
+                    verification_placeholders.append(sline.text.strip())
+
     # Determine expected category from directory layout
     parts = file_path.relative_to(tasks_dir).parts
     if in_done:
@@ -5146,6 +5162,8 @@ def parse_emergent_task_file(
         "moved_to": headers.get("moved-to"),
         "sections_present": sections_present,
         "found_headings": list(found_headings),
+        "step_placeholders": step_placeholders,
+        "verification_placeholders": verification_placeholders,
         "what_body": next((sec.body for sec in sections if sec.heading == "What"), "").strip(),
         "is_folder": is_folder,
         "in_done": in_done,
@@ -6653,6 +6671,22 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 missing_sections = [s for s in REQUIRED_SECTIONS if s not in task["sections_present"]]
                 if missing_sections:
                     errors.append(f"{rel}: missing required Markdown section(s): {', '.join(missing_sections)}.")
+
+                if not is_micro:
+                    cstate = task.get("canonical_state") or normalize_state(task.get("state", "open"))
+                    is_active_or_terminal = cstate in ("in progress", "delivered", "verified", "done", "done with a caveat")
+
+                    for ph in task.get("step_placeholders", []):
+                        if is_active_or_terminal:
+                            errors.append(f"{rel}: task in state {task['state']!r} contains unedited placeholder in ## Steps: {ph!r}.")
+                        else:
+                            warnings.append(f"{rel}: task contains unedited placeholder in ## Steps: {ph!r}.")
+
+                    for ph in task.get("verification_placeholders", []):
+                        if is_active_or_terminal:
+                            errors.append(f"{rel}: task in state {task['state']!r} contains unedited placeholder in ## Verification: {ph!r}.")
+                        else:
+                            warnings.append(f"{rel}: task contains unedited placeholder in ## Verification: {ph!r}.")
 
     # Validate dependency DAG acyclicity & valid dependency references
     adj: dict[str, list[str]] = {}
@@ -13202,6 +13236,8 @@ def tasks_new_from_note(
     paths: str | None = None,
     parent: str | None = None,
     short: str | None = None,
+    steps: list[str] | None = None,
+    verifications: list[str] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Create an emergent task `T###`, from an inbox note (`from_note`) or standalone
     (then `goal` and `priority_reason` are required), or as a child under `parent`."""
@@ -13473,6 +13509,37 @@ def tasks_new_from_note(
             goal = _rewrite_attachment_references_to_local(goal.strip())
 
             short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(title.strip())
+
+            if steps:
+                steps_formatted = []
+                for s in steps:
+                    s_str = s.strip()
+                    if not s_str:
+                        continue
+                    if re.match(r"^[-*]\s+\[[ xX]\]\s+", s_str):
+                        steps_formatted.append(s_str)
+                    elif re.match(r"^\[[ xX]\]\s+", s_str):
+                        steps_formatted.append(f"- {s_str}")
+                    else:
+                        steps_formatted.append(f"- [ ] {s_str}")
+                steps_block = "\n".join(steps_formatted) if steps_formatted else "- [ ] Step 1"
+            else:
+                steps_block = "- [ ] Step 1"
+
+            if verifications:
+                verifs_formatted = []
+                for v in verifications:
+                    v_str = v.strip()
+                    if not v_str:
+                        continue
+                    if re.match(r"^[-*]\s+", v_str):
+                        verifs_formatted.append(v_str)
+                    else:
+                        verifs_formatted.append(f"- {v_str}")
+                verifs_block = "\n".join(verifs_formatted) if verifs_formatted else "- Command or check that proves completion"
+            else:
+                verifs_block = "- Command or check that proves completion"
+
             task_content = f"""# {t_id} {title.strip()}
 
 - id: {t_id}
@@ -13496,11 +13563,11 @@ def tasks_new_from_note(
 
 ## Steps
 
-- [ ] Implement task steps.
+{steps_block}
 
 ## Verification
 
-- [ ] Verify task implementation.
+{verifs_block}
 """
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -13553,6 +13620,9 @@ def tasks_new_from_note(
             }
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
+
+
+create_new_task = tasks_new_from_note
 
 
 def tasks_micro(
@@ -14082,6 +14152,416 @@ def tasks_detach(
             }
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
+
+
+def _parse_task_step_items(text: str) -> tuple[MarkdownSection | None, list[dict[str, Any]]]:
+    """Parse checklist items in ## Steps of a markdown task file.
+    Returns (steps_section, items_list) where items_list has dicts:
+    {"index": 1-based int, "checked": bool, "text": str, "line_number": int, "line_idx": int}
+    """
+    sections = parse_markdown_sections(text, heading_prefix="## ")
+    sec = next((s for s in sections if s.heading == "## Steps"), None)
+    if not sec:
+        return None, []
+    items: list[dict[str, Any]] = []
+    idx = 1
+    for sline in sec.lines[1:]:
+        if sline.is_fenced:
+            continue
+        m = STEP_ITEM_RE.match(sline.text)
+        if m:
+            checked = m.group(2).lower() == "x"
+            step_text = m.group(3).strip()
+            items.append({
+                "index": idx,
+                "checked": checked,
+                "text": step_text,
+                "line_number": sline.line_number,
+                "line_idx": sline.line_number - 1,
+            })
+            idx += 1
+    return sec, items
+
+
+def tasks_step_list(tasks_dir: pathlib.Path, task_id: str) -> tuple[bool, dict[str, Any]]:
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    target_clean = (task_id or "").strip()
+    if re.match(r"^t\d{3,}$", target_clean):
+        target_clean = target_clean.upper()
+    all_emergent = discover_emergent_tasks(tasks_dir)
+    task = next((t for t in all_emergent if t.get("id") == target_clean), None)
+    if not task:
+        tree = discover_task_tree(tasks_dir)
+        if target_clean in tree:
+            return False, {"ok": False, "error": f"Plan task ({target_clean}) does not have a ## Steps section; only emergent tasks (T###) support step commands."}
+        return False, {"ok": False, "error": f"Task {target_clean!r} not found in {tasks_dir}."}
+
+    task_file = pathlib.Path(task["file_path"])
+    try:
+        content = task_file.read_text(encoding="utf-8")
+    except OSError as e:
+        return False, {"ok": False, "error": f"Failed to read task file {task_file}: {e}"}
+
+    sec, items = _parse_task_step_items(content)
+    if sec is None:
+        return False, {"ok": False, "error": f"Task {target_clean!r} has no '## Steps' section."}
+
+    clean_items = [{"index": it["index"], "checked": it["checked"], "text": it["text"]} for it in items]
+    return True, {
+        "ok": True,
+        "task_id": target_clean,
+        "steps": clean_items,
+        "count": len(clean_items),
+    }
+
+
+def tasks_step_add(
+    tasks_dir: pathlib.Path,
+    task_id: str,
+    text: str,
+    expect_task_hash: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+    if not text or not text.strip():
+        return False, {"ok": False, "error": "Step text cannot be empty."}
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    target_clean = (task_id or "").strip()
+    if re.match(r"^t\d{3,}$", target_clean):
+        target_clean = target_clean.upper()
+
+    try:
+        with task_write_lock(tasks_dir):
+            all_emergent = discover_emergent_tasks(tasks_dir)
+            task = next((t for t in all_emergent if t.get("id") == target_clean), None)
+            if not task:
+                tree = discover_task_tree(tasks_dir)
+                if target_clean in tree:
+                    return False, {"ok": False, "error": f"Plan task ({target_clean}) does not have a ## Steps section; only emergent tasks (T###) support step commands."}
+                return False, {"ok": False, "error": f"Task {target_clean!r} not found in {tasks_dir}."}
+
+            task_file = pathlib.Path(task["file_path"])
+            if expect_task_hash:
+                actual_hash = task_bundle_sha256(task_file)
+                if actual_hash != expect_task_hash:
+                    return False, {
+                        "ok": False,
+                        "error": "stale-task-hash",
+                        "message": f"Task bundle hash mismatch: expected {expect_task_hash}, actual {actual_hash}",
+                        "expected": expect_task_hash,
+                        "actual": actual_hash,
+                    }
+
+            content = task_file.read_text(encoding="utf-8")
+            sec, items = _parse_task_step_items(content)
+            if sec is None:
+                return False, {"ok": False, "error": f"Task {target_clean!r} has no '## Steps' section."}
+
+            raw_s = text.strip()
+            if re.match(r"^[-*]\s+\[\s*\]\s*", raw_s):
+                clean_text = re.sub(r"^[-*]\s+\[\s*\]\s*", "", raw_s).strip()
+                new_step_line = f"- [ ] {clean_text}"
+            elif re.match(r"^[-*]\s+\[[xX]\]\s*", raw_s):
+                clean_text = re.sub(r"^[-*]\s+\[[xX]\]\s*", "", raw_s).strip()
+                new_step_line = f"- [x] {clean_text}"
+            elif re.match(r"^\[\s*\]\s*", raw_s):
+                clean_text = re.sub(r"^\[\s*\]\s*", "", raw_s).strip()
+                new_step_line = f"- [ ] {clean_text}"
+            elif re.match(r"^\[[xX]\]\s*", raw_s):
+                clean_text = re.sub(r"^\[[xX]\]\s*", "", raw_s).strip()
+                new_step_line = f"- [x] {clean_text}"
+            else:
+                clean_text = raw_s
+                new_step_line = f"- [ ] {clean_text}"
+
+            lines = content.splitlines(keepends=True)
+            nl = "\r\n" if "\r\n" in content else "\n"
+
+            # Check if replacing a solitary placeholder
+            only_placeholder = (
+                len(items) == 1
+                and (
+                    STEP_PLACEHOLDER_RE.match(lines[items[0]["line_idx"]])
+                    or items[0]["text"].lower() in ("step 1", "todo: step 1", "implement task steps.", "implement task steps")
+                )
+            )
+
+            if only_placeholder:
+                target_idx = items[0]["line_idx"]
+                orig_ending = nl
+                if lines[target_idx].endswith("\r\n"):
+                    orig_ending = "\r\n"
+                elif lines[target_idx].endswith("\n"):
+                    orig_ending = "\n"
+                lines[target_idx] = new_step_line + orig_ending
+            else:
+                if items:
+                    last_idx = items[-1]["line_idx"]
+                    orig_ending = nl
+                    if lines[last_idx].endswith("\r\n"):
+                        orig_ending = "\r\n"
+                    elif lines[last_idx].endswith("\n"):
+                        orig_ending = "\n"
+                    lines.insert(last_idx + 1, new_step_line + orig_ending)
+                else:
+                    head_idx = sec.lines[0].line_number - 1
+                    insert_at = head_idx + 1
+                    if insert_at < len(lines) and lines[insert_at].strip() == "":
+                        insert_at += 1
+                    else:
+                        lines.insert(insert_at, nl)
+                        insert_at += 1
+                    lines.insert(insert_at, new_step_line + nl)
+
+            new_content = "".join(lines)
+            _atomic_write_text(task_file, new_content, encoding="utf-8")
+
+            _, updated_items = _parse_task_step_items(new_content)
+            clean_updated = [{"index": it["index"], "checked": it["checked"], "text": it["text"]} for it in updated_items]
+            added_it = next((it for it in clean_updated if it["text"] == clean_text), clean_updated[-1] if clean_updated else None)
+            new_hash = task_bundle_sha256(task_file)
+
+            _emit_event(
+                tasks_dir,
+                "task.updated",
+                {
+                    "field": "steps",
+                    "action": "add",
+                    "text": clean_text,
+                    "index": added_it["index"] if added_it else len(clean_updated),
+                },
+                subject=target_clean,
+                actor="owner",
+            )
+
+            return True, {
+                "ok": True,
+                "task_id": target_clean,
+                "step": added_it,
+                "steps": clean_updated,
+                "task_hash": new_hash,
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def _toggle_task_step(
+    tasks_dir: pathlib.Path,
+    task_id: str,
+    target: str,
+    check: bool,
+    expect_task_hash: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+    target_str = str(target).strip()
+    if not target_str:
+        return False, {"ok": False, "error": "Target step index or substring is required."}
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    target_clean = (task_id or "").strip()
+    if re.match(r"^t\d{3,}$", target_clean):
+        target_clean = target_clean.upper()
+
+    try:
+        with task_write_lock(tasks_dir):
+            all_emergent = discover_emergent_tasks(tasks_dir)
+            task = next((t for t in all_emergent if t.get("id") == target_clean), None)
+            if not task:
+                tree = discover_task_tree(tasks_dir)
+                if target_clean in tree:
+                    return False, {"ok": False, "error": f"Plan task ({target_clean}) does not have a ## Steps section; only emergent tasks (T###) support step commands."}
+                return False, {"ok": False, "error": f"Task {target_clean!r} not found in {tasks_dir}."}
+
+            task_file = pathlib.Path(task["file_path"])
+            if expect_task_hash:
+                actual_hash = task_bundle_sha256(task_file)
+                if actual_hash != expect_task_hash:
+                    return False, {
+                        "ok": False,
+                        "error": "stale-task-hash",
+                        "message": f"Task bundle hash mismatch: expected {expect_task_hash}, actual {actual_hash}",
+                        "expected": expect_task_hash,
+                        "actual": actual_hash,
+                    }
+
+            content = task_file.read_text(encoding="utf-8")
+            sec, items = _parse_task_step_items(content)
+            if sec is None:
+                return False, {"ok": False, "error": f"Task {target_clean!r} has no '## Steps' section."}
+            if not items:
+                return False, {"ok": False, "error": f"Task {target_clean} has no step checklist items."}
+
+            try:
+                t_idx = int(target_str)
+                is_int = True
+            except ValueError:
+                is_int = False
+
+            if is_int:
+                if 1 <= t_idx <= len(items):
+                    matched_item = items[t_idx - 1]
+                else:
+                    return False, {"ok": False, "error": f"Step index {t_idx} out of range (1..{len(items)})."}
+            else:
+                sub_lower = target_str.lower()
+                matches = [it for it in items if sub_lower in it["text"].lower()]
+                if len(matches) == 0:
+                    return False, {"ok": False, "error": f"No step matching {target_str!r} found in task {target_clean}."}
+                if len(matches) > 1:
+                    matched_desc = ", ".join(f"#{m['index']} ({m['text']})" for m in matches)
+                    return False, {
+                        "ok": False,
+                        "error": f"Multiple steps match {target_str!r} in task {target_clean} ({len(matches)} matches: {matched_desc}). Use index or more specific text.",
+                    }
+                matched_item = matches[0]
+
+            lines = content.splitlines(keepends=True)
+            line_idx = matched_item["line_idx"]
+            old_line = lines[line_idx]
+
+            if check:
+                new_line = re.sub(r"^(\s*[-*]|\s*\d+\.)(\s+\[)[ ](\]\s*)", r"\g<1>\g<2>x\g<3>", old_line)
+            else:
+                new_line = re.sub(r"^(\s*[-*]|\s*\d+\.)(\s+\[)[xX](\]\s*)", r"\g<1>\g<2> \g<3>", old_line)
+
+            lines[line_idx] = new_line
+            new_content = "".join(lines)
+            _atomic_write_text(task_file, new_content, encoding="utf-8")
+
+            _, updated_items = _parse_task_step_items(new_content)
+            clean_updated = [{"index": it["index"], "checked": it["checked"], "text": it["text"]} for it in updated_items]
+            updated_it = clean_updated[matched_item["index"] - 1]
+            new_hash = task_bundle_sha256(task_file)
+
+            action_name = "check" if check else "uncheck"
+            _emit_event(
+                tasks_dir,
+                "task.updated",
+                {
+                    "field": "steps",
+                    "action": action_name,
+                    "index": updated_it["index"],
+                    "text": updated_it["text"],
+                    "checked": updated_it["checked"],
+                },
+                subject=target_clean,
+                actor="owner",
+            )
+
+            return True, {
+                "ok": True,
+                "task_id": target_clean,
+                "step": updated_it,
+                "steps": clean_updated,
+                "task_hash": new_hash,
+            }
+    except Exception as e:
+        return False, {"ok": False, "error": str(e)}
+
+
+def tasks_step_check(
+    tasks_dir: pathlib.Path,
+    task_id: str,
+    target: str,
+    expect_task_hash: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    return _toggle_task_step(tasks_dir, task_id, target, check=True, expect_task_hash=expect_task_hash)
+
+
+def tasks_step_uncheck(
+    tasks_dir: pathlib.Path,
+    task_id: str,
+    target: str,
+    expect_task_hash: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    return _toggle_task_step(tasks_dir, task_id, target, check=False, expect_task_hash=expect_task_hash)
+
+
+def cmd_tasks_step_list(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = tasks_step_list(tasks_dir, args.task_id)
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            steps = res.get("steps", [])
+            if not steps:
+                print(f"No steps found for {res['task_id']}.")
+            else:
+                print(f"Step checklist for {res['task_id']} ({len(steps)} items):")
+                for s in steps:
+                    box = "[x]" if s["checked"] else "[ ]"
+                    print(f"  {s['index']}. {box} {s['text']}")
+        else:
+            print(f"[FAIL] {res.get('error', 'tasks step list failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_tasks_step_add(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = tasks_step_add(
+        tasks_dir=tasks_dir,
+        task_id=args.task_id,
+        text=args.text,
+        expect_task_hash=getattr(args, "expect_task_hash", None),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            step = res.get("step") or {}
+            print(f"[ok] Added step {step.get('index', '?')} to {res['task_id']}: {step.get('text', '')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'tasks step add failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_tasks_step_check(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = tasks_step_check(
+        tasks_dir=tasks_dir,
+        task_id=args.task_id,
+        target=args.target,
+        expect_task_hash=getattr(args, "expect_task_hash", None),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            step = res.get("step") or {}
+            print(f"[ok] Marked step {step.get('index', '?')} of {res['task_id']} as checked: {step.get('text', '')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'tasks step check failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_tasks_step_uncheck(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = tasks_step_uncheck(
+        tasks_dir=tasks_dir,
+        task_id=args.task_id,
+        target=args.target,
+        expect_task_hash=getattr(args, "expect_task_hash", None),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            step = res.get("step") or {}
+            print(f"[ok] Marked step {step.get('index', '?')} of {res['task_id']} as unchecked: {step.get('text', '')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'tasks step uncheck failed')}", file=sys.stderr)
+    return 0 if ok else 1
 
 
 def cmd_inbox_list(args: argparse.Namespace) -> int:
@@ -14902,6 +15382,8 @@ def cmd_tasks_new(args: argparse.Namespace) -> int:
         paths=getattr(args, "paths", None),
         parent=getattr(args, "parent", None),
         short=getattr(args, "short", None),
+        steps=getattr(args, "steps", None),
+        verifications=getattr(args, "verifications", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -15562,6 +16044,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--depends-on", default="-", help="Dependencies")
     p_new.add_argument("--decider", default="-", help="Decider")
     p_new.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
+    p_new.add_argument("--step", action="append", dest="steps", metavar="STEP", default=None, help="Add a step item under ## Steps (repeatable)")
+    p_new.add_argument("--verification", action="append", dest="verifications", metavar="VERIFICATION", default=None, help="Add a verification item under ## Verification (repeatable)")
     p_new.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_new.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_new.set_defaults(func=cmd_tasks_new)
@@ -15824,6 +16308,46 @@ def build_parser() -> argparse.ArgumentParser:
     uc_camp.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     uc_camp.set_defaults(func=cmd_use_cases_campaign)
 
+    # tasks step
+    p_step = sub.add_parser("step", help="Checklist commands for ## Steps of an emergent task")
+    p_step.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_step.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    step_sub = _instrument_subparsers(p_step.add_subparsers(dest="step_cmd", required=True))
+
+    # step list
+    p_sl = step_sub.add_parser("list", help="List checklist items in ## Steps of a task")
+    p_sl.add_argument("task_id", help="Task ID (e.g. T001)")
+    p_sl.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_sl.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_sl.set_defaults(func=cmd_tasks_step_list)
+
+    # step add
+    p_sa = step_sub.add_parser("add", help="Add a checklist item to ## Steps of a task")
+    p_sa.add_argument("task_id", help="Task ID (e.g. T001)")
+    p_sa.add_argument("text", help="Step text to add")
+    p_sa.add_argument("--expect-task-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task bundle SHA256")
+    p_sa.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_sa.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_sa.set_defaults(func=cmd_tasks_step_add)
+
+    # step check
+    p_sc = step_sub.add_parser("check", help="Mark a step in ## Steps as checked (- [x])")
+    p_sc.add_argument("task_id", help="Task ID (e.g. T001)")
+    p_sc.add_argument("target", metavar="index-or-substring", help="1-based step index or substring to match")
+    p_sc.add_argument("--expect-task-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task bundle SHA256")
+    p_sc.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_sc.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_sc.set_defaults(func=cmd_tasks_step_check)
+
+    # step uncheck
+    p_suc = step_sub.add_parser("uncheck", help="Mark a step in ## Steps as unchecked (- [ ])")
+    p_suc.add_argument("task_id", help="Task ID (e.g. T001)")
+    p_suc.add_argument("target", metavar="index-or-substring", help="1-based step index or substring to match")
+    p_suc.add_argument("--expect-task-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task bundle SHA256")
+    p_suc.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_suc.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_suc.set_defaults(func=cmd_tasks_step_uncheck)
+
     # feedback (T034)
     p_fb = sub.add_parser("feedback", help="Report tooling needs, defects, or improvements")
     p_fb.add_argument("--kind", choices=["bug", "feature", "idea", "request"], default=None, help="Kind of feedback")
@@ -15872,6 +16396,9 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
     if cmd == "child":
         child_cmd = getattr(args, "child_cmd", None)
         return child_cmd == "add"
+    if cmd == "step":
+        step_cmd = getattr(args, "step_cmd", None)
+        return step_cmd in ("add", "check", "uncheck")
     if cmd in (
         "close",
         "transition",

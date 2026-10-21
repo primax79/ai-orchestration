@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Top change of two sessions; ~40 hand rewrites; placeholder tasks pass validate
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -15,18 +15,19 @@
 - handoff: Read tasks/tasks/T036-steps-and-verification-authored-by-command-placeho.md, do the open steps, run the Verification, update the task and the registry.
 - short: Steps by command
 
+verification pending: ~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py -k "step or placeholder or new"
+
 ## Goal
 
 'tasks new' takes repeatable --step and --verification; 'tasks step add|check|uncheck <id> "<text>"' edits the checklist with the usual preview/hash; validate errors (or warns, decided by the spec) on the placeholder lines 'Implement task steps.' / 'Verify task implementation.'.
 
 ## Steps
 
-- [ ] Implement task steps.
+- [x] Add --step and --verification repeatable arguments to tasks new
+- [x] Enforce placeholder rejection/warnings in tasks validate
+- [x] Add tasks step list, add, check, and uncheck subcommands and register in is_mutating_command
+- [x] Add unit tests in test_tasks_engine.py and verify all tests pass
 
 ## Verification
 
-- [ ] Verify task implementation.
-
-## Log (newest first)
-
-- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T036 (Steps by command, --step/--verification on tasks new, placeholder rejection in validate) to Kilo
+- `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py -k "step or placeholder or new"` passes.

@@ -122,7 +122,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | delivered | kilo | - |
-| T036 (Steps by command) | P1 | [Steps and verification authored by command; placeholders rejected](engine/T036-steps-and-verification-authored-by-command-placeho.md) | open | kilo | - |
+| T036 (Steps by command) | P1 | [Steps and verification authored by command; placeholders rejected](engine/T036-steps-and-verification-authored-by-command-placeho.md) | delivered | kilo | - |
 | T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | open | kilo | - |
 | T041 (Question workflow gaps) | P1 | [Questions: unapplied answers surfaced, moved-to-tracker status, Notes section](engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | delivered | kilo | - |
 | T039 (Adoption helpers) | P2 | [Adopting existing trees: legacy plans/, next-id preview, discover before registering](engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md) | open | kilo | - |
