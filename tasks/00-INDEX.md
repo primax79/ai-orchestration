@@ -76,6 +76,7 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T032 (CLI writes through broker) | P1 | [CLI writes reach a live broker; guard ignores a stale manifest](server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md) | open | kilo | - |
 | T033 (Test config isolation) | P1 | [Test sessions isolated from the user's global config](server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md) | delivered | self | - |
 | T040 (Workspace next) | P2 | [Workspace-wide next-up and open tasks across projects](server-and-bindings/T040-workspace-wide-next-up-and-open-tasks-across-proje.md) | open | kilo | - |
+| T043 (Cross-workspace task links) | P2 | [Cross-workspace executor and depends-on links with live state](server-and-bindings/T043-cross-workspace-executor-and-depends-on-links-with.md) | open | kilo | - |
 
 ### micro
 
@@ -122,6 +123,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | open | kilo | - |
 | T041 (Question workflow gaps) | P1 | [Questions: unapplied answers surfaced, moved-to-tracker status, Notes section](engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | open | kilo | - |
 | T039 (Adoption helpers) | P2 | [Adopting existing trees: legacy plans/, next-id preview, discover before registering](engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md) | open | kilo | - |
+| T042 (Waiting-on qualifier) | P2 | [Waiting-on qualifier for waiting tasks](engine/T042-waiting-on-qualifier-for-waiting-tasks.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
