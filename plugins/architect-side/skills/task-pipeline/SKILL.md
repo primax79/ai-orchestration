@@ -12,15 +12,49 @@ description: "Author and maintain a durable, resumable development pipeline as a
 | **Audience / Role** | Architect / Orchestrator (`orchestration` profile) |
 | **When to Load** | Structuring a multi-task `tasks/` pipeline, capturing emergent mid-session tasks (`T###`), transitioning task states, or syncing `tasks/00-INDEX.md` |
 | **Execution Modes Supported** | **Single-Framework Native** (parallel native worktrees/subagents) and **Multi-Framework MCP / CLI** |
-| **Companion Scripts** | `scripts/tasks_engine.py`, `bin/ai-orch` |
+| **Engine Access (3 Progressive Tiers)** | 1) **Plain Markdown + Git** (`tasks/AGENTS.md` + `references/template.md` — zero install, works without extension, MCP, or CLI), 2) **Standalone CLI** (`~/.local/bin/ai-orch` or stdlib-only `python3 scripts/tasks_engine.py` — no MCP or extension needed), 3) **Broker MCP tools** (`ai-orch mcp`, preferred when installed) |
 | **Related Skills** | `orchestration-workflow`, `task-spec-authoring`, `orchestration-setup` |
+
+## Reaching the task engine
+
+The `tasks/` tree is plain, Git-tracked Markdown by design: every file (`00-INDEX.md`, `CONTEXT.md`, `AGENTS.md`, `NN-<slug>/plan.md`, `<category>/T###-<slug>.md`, `questions/Q###-<slug>.md`, `_inbox/`) is usable directly by any developer or AI assistant — even on a machine without the VS Code extension, the broker MCP server, or the `ai-orch` CLI installed. Use the highest tier available in the current environment, and never run the engine from a versioned plugin-cache path or a stale vendored copy:
+
+1. **Tier 1 — Broker MCP tools (`ai-orch mcp`, preferred when registered):**
+   - `whoami` — Report broker identity (`pid`, `version`, `started_at`) and `unread_mail`.
+   - `workspaces.list` — List registered workspaces (`uuid`, `slug`, `title`, `path`, `orchestrator`, `unread_mail`), paged.
+   - `projects.list` — List projects (`uuid`, `slug`, `path`, `kind`) in a `workspace`, paged.
+   - `tasks.list` — Return compact, paged task rows for `workspace` and `project` (filterable by `state`, `kind`, `label`, `text`).
+   - `tasks.show` — Return full details (`header`, `goal`, `steps`, `verification`, `children`, `attachments`, `hash`, `path`) for one task `(workspace, project, id)`.
+   - `tasks.next` — Return actionable ready-queue tasks for `workspace` (and optional `project`), paged.
+   - `tasks.graph` — Return the dependency graph (`nodes`, `edges`, `ready` queue) for `workspace` and `project`.
+   - `tasks.new` — Create an emergent task in `(workspace, project)` (`title`, `short`, `goal`, optional `category`, `priority`, `priority_reason`, `kind`, `parent`, `idempotency_key`, `expect_hash`, `preview`).
+   - `tasks.transition` — Transition task state in `(workspace, project, id, to)` (optional `note`, `idempotency_key`, `expect_hash`, `preview`).
+   - `tasks.set` — Update a task field (`priority`, `size`, `deps`, `kind`, `labels`, `short`) on `(workspace, project, id)` (optional `idempotency_key`, `expect_hash`, `preview`).
+   - `questions.list` — List blocking questions for `workspace` (and optional `project`, `status`), paged.
+   - `questions.ask` — File a blocking question in `(workspace, project)` (`question`, `short`, `context`, `options`, optional `recommended`, `blocks`, `idempotency_key`, `expect_hash`, `preview`).
+   - `questions.answer` — Record an answer to a blocking question `(workspace, project, id, choice)` and unblock waiting tasks (optional `text`, `idempotency_key`, `expect_hash`, `preview`).
+   - `inbox.add_note` — Add an inbox note in `(workspace, project)` (`title`, `body`, optional `kind`, `idempotency_key`, `expect_hash`, `preview`).
+   - `orchestrator.status` — Inspect workspace orchestrator status (`state`, `tool`, `model`, `generation`, `queue_length`, `worker`, `unread_mail`).
+   - **Broker MCP conventions:**
+     - **Addressing:** Every tool takes explicit `workspace` (slug or uuid) and, where it acts on a task tree, `project` (slug, or `_workspace` for the workspace-level coordination tree). Inside a project, task/question/note IDs are bare (`T###`, `NN.T`, `Q###`, `N###`).
+     - **Mutations:** Every mutating tool (`tasks.new`, `tasks.transition`, `tasks.set`, `questions.ask`, `questions.answer`, `inbox.add_note`) accepts `expect_hash` (optimistic CAS against the hash from the last read), `idempotency_key` (safe retry returning the stored result), and `preview: true` (dry-run without writing), and returns the new `hash`.
+     - **Paging:** List tools (`workspaces.list`, `projects.list`, `tasks.list`, `tasks.next`, `questions.list`) return compact rows with `cursor` / `next_cursor` (`limit` default 50, max 200; responses capped at 256 KiB with `truncated: true`); fetch full task bodies on demand with `tasks.show`.
+     - **No nulls:** Tool arguments and responses never carry `null` fields (omitted instead of `null`).
+   - **Setup:** The Environment Doctor (`ai-orch env status`) detects missing or stale broker MCP registrations across Claude Code, Kilo, and Codex and offers a preview/apply plan (`ai-orch env register-broker --assistants all --apply --expect-hash <hash>`). `ai-orch install-launcher` (`--apply --expect-hash <hash>`) writes the version-free launcher at `~/.local/bin/ai-orch` so MCP registrations (`~/.local/bin/ai-orch mcp`) survive plugin updates.
+2. **Tier 2 — Standalone CLI (no MCP server and no VS Code extension required):**
+   - When a session has no broker MCP tools, run the CLI through the version-free launcher path (`~/.local/bin/ai-orch tasks …`, `ai-orch questions …`, `ai-orch inbox …`), or invoke the bundled stdlib-only script (`python3 <skill-dir>/scripts/tasks_engine.py …`) when only this skill is installed.
+3. **Tier 3 — Direct Markdown + Git (zero install: no extension, no MCP, and no CLI installed):**
+   - When neither the VS Code extension, nor the MCP server, nor the `ai-orch` CLI is installed, read, create, transition, and close tasks directly in Markdown + Git (`git mv` to `tasks/done/<category>/`) following the format rules, header field order, section skeletons (`references/template.md`), and `00-INDEX.md` table columns documented in this skill and in `tasks/AGENTS.md`. Preserve the `<!-- ai-orch:generated ... -->` HTML comment markers in `tasks/00-INDEX.md` when updating tables by hand so later CLI/UI syncs remain lossless.
+- **Citation rule:** Always cite tasks and questions as `ID (short title)`, qualified as `project/ID (short title)` across projects (see "Citing tasks and questions: id plus a short title" below).
 
 ### Format is not optional (every create or edit)
 
-- **Plan tasks** are blocks `### NN.T - <title>` (number, space, hyphen or dash, space, title), each followed by `- **Status:** \`<state>\` · ...`. Optional status line segment or bullet `**Short:** <3-4 words>`. Never bullets (`- **T1 — ...**`), never table rows, never `T<n>` ids inside a plan (`T###` belongs to emergent tasks), never letter suffixes (`12.2a`: use children `12.2.1`).
-- **Emergent tasks** are created with `ai-orch tasks new --category C --title T [--short S] --priority P --priority-reason R --goal G [--paths ...] [--executor ...]` (or `--from-note N###` from an inbox note), not by hand-writing a header from memory; then fill Steps and Verification in the created file.
-- **After every change under `tasks/`** run `ai-orch tasks validate`: zero errors and no "non-canonical task items" warning for the files you touched, then `ai-orch tasks sync-index --check`. A change that leaves either is not finished.
-- **State follows the work:** assigning a task moves it to `in progress` before the executor starts, the executor's commit + Final Report moves it to `delivered`, and so on, always with `ai-orch tasks transition <id> <state>` (emergent `T###` and plan `NN.T` alike). See `orchestration-workflow`, "Track task state as a path".
+Through the broker or the CLI, the engine writes the format for you; when neither MCP nor CLI is installed (or whenever a file is touched by hand), follow these exact rules so every file remains 100% compatible with the engine and UI:
+
+- **Plan tasks** are blocks `### NN.T - <title>` (number, space, hyphen or dash, space, title), each followed by `- **Status:** \`<state>\` · ...`. Optional status line segment or bullet `**Short:** <3-4 words>`. Never bullets (`- **T1 — ...**`), never table rows, never `T<n>` ids inside a plan (`T###` belongs to emergent tasks). Prefer children (`12.2.1`) over letter suffixes (`12.2a`), which are accepted but harder to extend.
+- **Emergent tasks** are created with the broker tool `tasks.new`, `ai-orch tasks new --category C --title T [--short S] --priority P --priority-reason R --goal G [--paths ...] [--executor ...]` (or `--from-note N###` from an inbox note), or — when no tool is installed — by copying the exact header order (`id`, `title`, `category`, `priority`, `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`, plus optional `short`) and required sections (`## Goal`, `## Steps`, `## Verification`) from "Where and how" below and [`references/template.md`](references/template.md).
+- **After every change under `tasks/`:** when `ai-orch` or `scripts/tasks_engine.py` is available, run `ai-orch tasks validate` (zero errors and no "non-canonical task items" warning for the files you touched) and `ai-orch tasks sync-index --check` (or `--apply`). When no CLI is installed, update the matching row in `tasks/00-INDEX.md` inside the `<!-- ai-orch:generated ... -->` markers in the same commit.
+- **State follows the work:** assigning a task moves it to `in progress` before the executor starts, the executor's commit + Final Report moves it to `delivered`, and so on — through the engine (`tasks.transition` or `ai-orch tasks transition <id> <state>`) when available, or by updating `- state:` (and `- **Status:** \`<state>\`` in `plan.md`) plus `tasks/00-INDEX.md` directly when working in plain Markdown. See `orchestration-workflow`, "Track task state as a path".
 - **Found a project in an older format?** Follow "Normalizing existing tasks" below before adding to it.
 
 ## Purpose
@@ -348,7 +382,7 @@ about one project** is kept in that project, not in the workspace tree:
 - **Paths and ids.** A pseudo-task is a normal workspace task (own `T###`,
   category, priority with a reason, `paths` = the project tasks folder). Never
   reuse a project id in the workspace or the reverse; cite project tasks as
-  `<project>:T###`.
+  `<project>/T### (short title)`.
 - **Moving a project out.** When a project leaves the workspace, move its tasks
   with it, update the pseudo-task's pointer, and keep the pseudo-task until the
   workspace no longer needs to track the project.
@@ -380,9 +414,11 @@ that something does not exist cites the command that searched for it.
 The owner cannot map bare ids to work. Whenever you mention a task, plan task,
 initiative, use case or question in chat, in a summary, in a Final Report or in
 a question's text, write the id followed by a 3-4 word short title in
-parentheses: "T007 (shared release manager)", "12.16 (UI proposal confirm)",
-"Q007 (security-audit release)". Never a bare id, tables included (add a
-short-title column or put the title next to the id).
+parentheses: `T007 (shared release manager)`, `12.16 (UI proposal confirm)`,
+`Q007 (security-audit release)`. Across projects, qualify the id as
+`project/ID (short title)` (and across workspaces as `workspace:project/ID (short title)`).
+Never use a bare id, tables included (add a short-title column or put the title
+next to the id).
 
 - Take the short title from the task's `Short:` / `short:` field when it exists;
   otherwise derive 3-4 words from its full title (keep them stable within a session).
@@ -562,50 +598,32 @@ Use Cases represent end-to-end capabilities from the user/actor perspective. The
 3. **Autonomous AI Validation:** Once linked tasks are delivered, the operator can trigger AI testing of the scenario (`ai-orch use-cases validate UC001` or UI "Validate with AI"), which records evidence into `## AI Validation Log`.
 4. **Product Validation Campaigns:** Running `ai-orch use-cases campaign` validates all active Use Cases across the assembled product and detects regressions.
 
-## Companion script: `scripts/tasks_engine.py`
+## CLI fallback (`ai-orch tasks …`)
 
-Deterministic, stdlib-only CLI engine for parsing, validating, transitioning,
-and syncing the `tasks/` tree (supports `--json` on every subcommand):
+When a session has no broker MCP tools, use the version-free launcher (`~/.local/bin/ai-orch`, or `ai-orch` on `PATH`; see "Reaching the task engine" above):
 
 ```bash
-# List all parsed emergent tasks (active + done/) and initiatives
-python3 scripts/tasks_engine.py [--json] list [--tasks-dir tasks]
+# List, show, or validate tasks
+ai-orch tasks list [--tasks-dir tasks] [--json]
+ai-orch tasks validate [--tasks-dir tasks] [--json]
+ai-orch tasks sync-index [--tasks-dir tasks] [--apply | --check] [--json]
 
-# Validate header grammar, unique IDs, state/priority/profile values,
-# dependency DAG acyclicity, and required sections (## Goal, ## Steps, ## Verification)
-python3 scripts/tasks_engine.py [--json] validate [--tasks-dir tasks]
+# Create, transition, or update tasks
+ai-orch tasks new --category C --title T --short S --priority P --priority-reason R --goal G [--json]
+ai-orch tasks transition <task_id> <new_state> [--actor <actor>] [--verifier <verifier>] [--reason "<text>"] [--json]
+ai-orch tasks set <task_id> <field> <value...> [--expect-hash <hash>] [--json]
 
-# Transition a task's state while enforcing state-machine guards
-# (blocks open/in progress -> done; enforces verifier != executor or owner approval on delivered -> verified)
-python3 scripts/tasks_engine.py [--json] transition <task_id> <new_state> \
-  [--actor <actor>] [--verifier <verifier>] [--reason "<text>"] [--tasks-dir tasks]
+# Manage blocking questions and inbox notes
+ai-orch questions list [--status open|answered|withdrawn|all] [--json]
+ai-orch questions ask --question "..." --short "..." --context "..." --option "A=..." --blocks T### [--json]
+ai-orch questions answer Q### --choice A [--text "..."] [--json]
+ai-orch inbox add --title "..." --kind idea --body "..." [--json]
 
-# Deterministically regenerate or verify tasks/00-INDEX.md tables from task headers on disk
-python3 scripts/tasks_engine.py [--json] sync-index [--tasks-dir tasks] [--apply | --check]
-
-# Manage blocking questions (ask, answer, withdraw, list, show)
-python3 scripts/tasks_engine.py [--json] questions list [--status open|answered|withdrawn|all]
-python3 scripts/tasks_engine.py [--json] questions ask --question "..." --context "..." --option "A=..." --blocks T###
-python3 scripts/tasks_engine.py [--json] questions answer Q### --choice A [--text "..."]
-python3 scripts/tasks_engine.py [--json] questions withdraw Q### --reason "..."
-
-# Attachments on emergent tasks and inbox notes (images, PDFs, text files; <=10MB)
-python3 scripts/tasks_engine.py [--json] attach <task_id> --file <path> [--name <stem>] [--expect-task-hash <hash>]
-python3 scripts/tasks_engine.py [--json] detach <task_id> --name <filename> [--expect-task-hash <hash>]
-python3 scripts/tasks_engine.py [--json] inbox attach <note_id> --file <path> [--name <stem>] [--expect-hash <hash>]
-python3 scripts/tasks_engine.py [--json] inbox detach <note_id> --name <filename> [--expect-hash <hash>]
-
-# Ship a completed initiative (creates summary.md skeleton, moves to done/, rewrites references)
-python3 scripts/tasks_engine.py [--json] ship <id> [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir tasks]
-
-# Fix misplaced closed items at every level (blocks to ## Closed, folder children and tasks to done/)
-python3 scripts/tasks_engine.py [--json] archive [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir tasks]
-
-# Reopen a closed leaf task (restores ancestors from done/ if needed)
-python3 scripts/tasks_engine.py [--json] reopen <id> --reason "..." [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir tasks]
-
-# Upgrade an older tasks/ tree to the latest task-pipeline convention
-python3 scripts/tasks_engine.py [--json] upgrade [--tasks-dir tasks]
+# Ship, archive, reopen, or upgrade a tasks/ tree
+ai-orch tasks ship <id> [--dry-run] [--expect-plan-hash <hash>] [--json]
+ai-orch tasks archive [--dry-run] [--expect-plan-hash <hash>] [--json]
+ai-orch tasks reopen <id> --reason "..." [--dry-run] [--expect-plan-hash <hash>] [--json]
+ai-orch tasks upgrade [--tasks-dir tasks] [--json]
 ```
 
 ## Upgrading an Existing Project to the Latest Convention

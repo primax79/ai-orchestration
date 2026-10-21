@@ -166,10 +166,21 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
                 "register-mcp": {
                     "usage": (
-                        "ai-orch env register-mcp <kilo-mcp|claude-mcp|codex-mcp> "
-                        "[--assistants kilo claude codex | all] [--scope global|project] [--provision-venv] [--json]"
+                        "ai-orch env register-mcp <ai-orchestration|kilo-mcp|claude-mcp|codex-mcp> "
+                        "[--assistants kilo claude codex | all] [--scope global|project] [--apply --expect-hash <hash>] [--provision-venv] [--json]"
                     ),
-                    "description": "Provision and register an MCP server across assistants.",
+                    "description": "Provision and register the orchestration broker or an MCP server across assistants.",
+                },
+                "register-broker": {
+                    "usage": (
+                        "ai-orch env register-broker [--assistants kilo claude codex | all] "
+                        "[--scope global|project] [--dry-run | --apply --expect-hash <hash>] [--json]"
+                    ),
+                    "description": "Preview or apply broker MCP shim registration across Claude Code, Kilo, and Codex.",
+                },
+                "install-launcher": {
+                    "usage": "ai-orch env install-launcher [--dry-run | --apply --expect-hash <hash>] [--path <file>] [--json]",
+                    "description": "Preview or install the version-free ~/.local/bin/ai-orch launcher.",
                 },
                 "remove-skill": {
                     "usage": "ai-orch env remove-skill <skill_name> --assistant <kilo|claude|codex> [--scope global|project] [--json]",
@@ -574,14 +585,28 @@ CLI_DESCRIPTION: dict[str, Any] = {
         },
         "broker": {
             "script": str(ORCH_BROKER_LOCK_SCRIPT.relative_to(REPO_ROOT)),
-            "usage": "ai-orch broker status [--config-dir <dir>] [--json]",
-            "description": "Inspect orchestration broker singleton lock status and readiness manifest.",
+            "usage": "ai-orch broker status|serve [--config-dir <dir>] [--json]",
+            "description": "Inspect orchestration broker singleton lock status or run the broker daemon.",
             "subcommands": {
                 "status": {
                     "usage": "ai-orch broker status [--config-dir <dir>] [--json]",
                     "description": "Probe broker singleton lock and display broker status.",
                 },
+                "serve": {
+                    "usage": "ai-orch broker serve [--port <port>] [--idle-timeout <sec>]",
+                    "description": "Run the orchestration broker daemon.",
+                },
             },
+        },
+        "mcp": {
+            "script": "ai-orchestration-ui/backend/broker/shim.py",
+            "usage": "ai-orch mcp",
+            "description": "Run the stdio MCP shim that proxies to the per-user orchestration broker daemon.",
+        },
+        "install-launcher": {
+            "script": str(ORCH_ENV_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch install-launcher [--dry-run | --apply --expect-hash <hash>] [--path <file>] [--json]",
+            "description": "Preview or install the version-free ~/.local/bin/ai-orch launcher.",
         },
         "workspace": {
             "script": str(ORCH_REGISTRY_SCRIPT.relative_to(REPO_ROOT)),
@@ -625,6 +650,38 @@ CLI_DESCRIPTION: dict[str, Any] = {
 }
 
 
+def _resolve_ui_broker_root() -> pathlib.Path | None:
+    env_ui = os.environ.get("AI_ORCH_UI_ROOT")
+    if env_ui and env_ui.strip():
+        cand = pathlib.Path(env_ui).expanduser().resolve()
+        if (cand / "backend" / "broker" / "shim.py").is_file():
+            return cand
+    for parent in [REPO_ROOT.parent, *REPO_ROOT.parents]:
+        cand = parent / "ai-orchestration-ui"
+        if (cand / "backend" / "broker" / "shim.py").is_file():
+            return cand
+    for cand in (
+        pathlib.Path.home() / "works" / "ai-coding-tools" / "ai-orchestration-ui",
+        pathlib.Path.home() / ".ai-orchestration" / "repos" / "ai-orchestration-ui",
+    ):
+        if (cand / "backend" / "broker" / "shim.py").is_file():
+            return cand
+    return None
+
+
+def _run_ui_broker(subcommand: str, extra_args: list[str]) -> int:
+    ui_root = _resolve_ui_broker_root()
+    if ui_root is None:
+        print("Error: sibling repo 'ai-orchestration-ui' with backend/broker not found.", file=sys.stderr)
+        return 1
+    venv_py = ui_root / ".venv" / "bin" / "python"
+    py_exe = str(venv_py) if venv_py.is_file() else sys.executable
+    env = os.environ.copy()
+    env.setdefault("AI_ORCH_BIN", str(pathlib.Path(__file__).resolve()))
+    proc = subprocess.run([py_exe, "-m", "backend.broker", subcommand, *extra_args], cwd=str(ui_root), env=env, check=False)
+    return proc.returncode
+
+
 def print_help() -> None:
     print(__doc__.strip())
     print("\nSubcommands:")
@@ -650,12 +707,19 @@ def main() -> int:
 
     group = argv[0]
     rest = argv[1:]
-    if top_json and "--json" not in rest:
+    if top_json and "--json" not in rest and group not in ("mcp",):
         rest = rest + ["--json"]
 
     if group == "describe":
         print(json.dumps(CLI_DESCRIPTION, indent=2))
         return 0
+
+    if group == "install-launcher":
+        proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), "install-launcher", *rest], check=False)
+        return proc.returncode
+
+    if group == "mcp":
+        return _run_ui_broker("shim", rest)
 
     if group == "setup":
         proc = subprocess.run([sys.executable, str(ORCH_CONFIG_SCRIPT), "setup", *rest], check=False)
@@ -710,6 +774,8 @@ def main() -> int:
         return proc.returncode
 
     if group == "broker":
+        if rest and rest[0] in ("serve", "shim"):
+            return _run_ui_broker(rest[0], rest[1:])
         proc = subprocess.run([sys.executable, str(ORCH_BROKER_LOCK_SCRIPT), *rest], check=False)
         return proc.returncode
 

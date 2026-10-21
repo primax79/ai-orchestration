@@ -3393,6 +3393,413 @@ def test_p3d_generalized_trigger_conflicts_and_plugin_advice(tmp_path: pathlib.P
     assert "other-helper-b" in advice
 
 
+# ---------------------------------------------------------------------------
+# Task 16.6 Tests: Version-Free Launcher, Doctor Broker MCP Detection & Plan,
+# and Skill Regeneration Idempotence
+# ---------------------------------------------------------------------------
+
+
+def test_16_6_launcher_preview_apply_update_in_place_and_refuse_foreign(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    launcher_path = fake_home / ".local" / "bin" / "ai-orch"
+
+    # 1. Preview (default when --apply is omitted) does not write to disk
+    preview = run_env(["install-launcher"], fake_home)
+    assert preview["ok"] is True
+    assert preview["dry_run"] is True
+    assert preview["applied"] is False
+    assert preview["path"] == str(launcher_path)
+    assert preview["current_state"] == "missing"
+    assert preview["plan"][0]["action"] == "create"
+    assert not launcher_path.exists()
+    plan_hash = preview["plan_hash"]
+    assert preview["expect_hash"] == plan_hash
+
+    # 2. Apply with mismatched hash is refused
+    bad_apply = run_env_raw(["install-launcher", "--apply", "--expect-hash", "deadbeef"], fake_home)
+    assert bad_apply.returncode != 0
+    bad_payload = json.loads(bad_apply.stdout)
+    assert bad_payload["ok"] is False
+    assert "Plan hash mismatch" in bad_payload["error"]
+    assert not launcher_path.exists()
+
+    # 3. Apply with matching --expect-hash creates executable launcher
+    applied = run_env(["install-launcher", "--apply", "--expect-hash", plan_hash], fake_home)
+    assert applied["ok"] is True
+    assert applied["dry_run"] is False
+    assert applied["applied"] is True
+    assert applied["action"] == "create"
+    assert launcher_path.is_file()
+    assert os.access(launcher_path, os.X_OK)
+    content = launcher_path.read_text(encoding="utf-8")
+    assert "# ai-orchestration-launcher-v1" in content
+
+    # 4. Subsequent preview on up-to-date launcher is noop
+    noop_preview = run_env(["install-launcher"], fake_home)
+    assert noop_preview["ok"] is True
+    assert noop_preview["current_state"] == "up-to-date"
+    assert noop_preview["plan"][0]["action"] == "noop"
+
+    # 5. Existing launcher of ours with older content is updated in place
+    launcher_path.write_text("#!/usr/bin/env python3\n# ai-orchestration-launcher-v1\n# older copy\n", encoding="utf-8")
+    upd_preview = run_env(["install-launcher"], fake_home)
+    assert upd_preview["ok"] is True
+    assert upd_preview["current_state"] == "outdated"
+    assert upd_preview["plan"][0]["action"] == "update"
+    upd_apply = run_env(["install-launcher", "--apply", "--expect-hash", upd_preview["expect_hash"]], fake_home)
+    assert upd_apply["ok"] is True
+    assert upd_apply["applied"] is True
+    assert upd_apply["action"] == "update"
+    assert launcher_path.read_text(encoding="utf-8") == content
+    assert (launcher_path.parent / "ai-orch.ai-orch.bak").is_file()
+
+    # 6. Refusal to overwrite an unrelated (foreign) file
+    foreign_text = "#!/bin/sh\necho 'unrelated user binary'\n"
+    launcher_path.write_text(foreign_text, encoding="utf-8")
+    foreign_preview = run_env_raw(["install-launcher", "--json"], fake_home)
+    assert foreign_preview.returncode != 0
+    fp_data = json.loads(foreign_preview.stdout)
+    assert fp_data["ok"] is False
+    assert fp_data["current_state"] == "foreign"
+    assert fp_data["plan"][0]["action"] == "refuse"
+
+    foreign_apply = run_env_raw(["install-launcher", "--apply", "--json"], fake_home)
+    assert foreign_apply.returncode != 0
+    fa_data = json.loads(foreign_apply.stdout)
+    assert fa_data["ok"] is False
+    assert launcher_path.read_text(encoding="utf-8") == foreign_text
+
+
+def test_16_6_launcher_execs_newest_plugin_cache_or_configured_checkout(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+
+    # Install launcher into fake_home
+    prev = run_env(["install-launcher"], fake_home)
+    run_env(["install-launcher", "--apply", "--expect-hash", prev["expect_hash"]], fake_home)
+    launcher = fake_home / ".local" / "bin" / "ai-orch"
+
+    # Create two cached plugin versions in fake_home: 0.3.0 and 0.5.0
+    for ver in ("0.3.0", "0.5.0"):
+        bdir = fake_home / ".claude" / "plugins" / "cache" / "ai-orchestration" / "architect-side" / ver / "bin"
+        bdir.mkdir(parents=True)
+        bfile = bdir / "ai-orch"
+        bfile.write_text(f"import sys; print('CACHE_VER={ver}:' + ','.join(sys.argv[1:]))\n", encoding="utf-8")
+        bfile.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HOME": str(fake_home),
+        "AI_ORCH_HOME": str(fake_home),
+        "AI_ORCHESTRATION_CONFIG": str(cfg_dir),
+    }
+    res_cache = subprocess.run([str(launcher), "tasks", "list"], capture_output=True, text=True, env=env, check=True)
+    assert res_cache.stdout.strip() == "CACHE_VER=0.5.0:tasks,list"
+
+    # Configure a source checkout in AI_ORCHESTRATION_CONFIG/orchestration.toml -> takes precedence
+    checkout_dir = tmp_path / "source-checkout"
+    (checkout_dir / "bin").mkdir(parents=True)
+    (checkout_dir / ".claude-plugin").mkdir(parents=True)
+    (checkout_dir / ".claude-plugin" / "marketplace.json").write_text(
+        json.dumps({"version": "0.6.0"}), encoding="utf-8"
+    )
+    (checkout_dir / "bin" / "ai-orch").write_text(
+        "import sys; print('SOURCE_CHECKOUT:' + ','.join(sys.argv[1:]))\n", encoding="utf-8"
+    )
+    (cfg_dir / "orchestration.toml").write_text(
+        f'[launcher]\nsource_checkout = "{checkout_dir}"\n', encoding="utf-8"
+    )
+    res_src = subprocess.run([str(launcher), "mcp"], capture_output=True, text=True, env=env, check=True)
+    assert res_src.stdout.strip() == "SOURCE_CHECKOUT:mcp"
+
+
+def test_16_6_doctor_detects_missing_stale_and_correct_registrations_all_clients(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    expected_launcher = str(fake_home / ".local" / "bin" / "ai-orch")
+
+    # 1. Missing registrations across all three clients -> warning finding per client + info finding for missing launcher
+    st_missing = run_env(["status"], fake_home)
+    bm_missing = st_missing["broker_mcp"]["clients"]
+    for asst in ("claude", "kilo", "codex"):
+        assert bm_missing[asst]["state"] == "missing"
+        assert st_missing["environments"][asst]["global"]["broker_mcp"]["state"] == "missing"
+        fg = next(g for g in st_missing["finding_groups"] if g["group_key"] == f"missing-broker-mcp:{asst}")
+        assert fg["kind"] == "missing-broker-mcp"
+        assert fg["group"] == "Broker MCP registration"
+        assert fg["severity"] == "warning"
+        assert fg["fixable"] is True
+        assert fg["actionable"] is True
+        assert asst in fg["message"]
+        assert bm_missing[asst]["config_path"] in fg["message"]
+        assert f"ai-orch env register-broker --assistants {asst}" in fg["fix_command"]
+        assert f"ai-orch env register-broker --assistants {asst}" in fg["message"]
+        assert len(fg["actions"]) == 1
+        assert fg["actions"][0]["fix_command"] == f"ai-orch env register-broker --assistants {asst}"
+
+    assert st_missing["summary"]["warning"] == 3
+    l_fg_missing = next(g for g in st_missing["finding_groups"] if g["group_key"] == "missing-launcher:ai-orch")
+    assert l_fg_missing["severity"] == "info"
+    assert l_fg_missing["fix_command"] == "ai-orch install-launcher"
+    assert "ai-orch install-launcher" in l_fg_missing["message"]
+    assert st_missing["summary"]["info"] == 1
+
+    # 2. Stale registrations (versioned plugin-cache paths & format pitfalls) on fixture files -> error finding per client
+    versioned_bin = str(
+        fake_home / ".claude" / "plugins" / "cache" / "ai-orchestration" / "architect-side" / "0.3.0" / "bin" / "ai-orch"
+    )
+    # Claude fixture: versioned path + null field
+    (fake_home / ".claude.json").write_text(
+        json.dumps({
+            "mcpServers": {
+                "ai-orchestration": {
+                    "type": "stdio",
+                    "command": versioned_bin,
+                    "args": ["mcp"],
+                    "env": None,
+                }
+            }
+        }, indent=2),
+        encoding="utf-8",
+    )
+    # Kilo fixture: versioned path
+    kilo_dir = fake_home / ".config" / "kilo"
+    kilo_dir.mkdir(parents=True)
+    (kilo_dir / "kilo.jsonc").write_text(
+        "// Kilo JSONC config\n"
+        + json.dumps({
+            "mcp": {
+                "ai-orchestration": {
+                    "type": "local",
+                    "command": [versioned_bin, "mcp"],
+                    "environment": {},
+                }
+            }
+        }, indent=2),
+        encoding="utf-8",
+    )
+    # Codex fixture: versioned path + missing default_tools_approval_mode
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "config.toml").write_text(
+        f'[mcp_servers.ai-orchestration]\ncommand = "{versioned_bin}"\nargs = ["mcp"]\n',
+        encoding="utf-8",
+    )
+
+    st_stale = run_env(["status"], fake_home)
+    bm_stale = st_stale["broker_mcp"]["clients"]
+    for asst in ("claude", "kilo", "codex"):
+        assert bm_stale[asst]["state"] == "stale"
+        assert any("versioned path" in r for r in bm_stale[asst]["reasons"])
+        fg = next(g for g in st_stale["finding_groups"] if g["group_key"] == f"stale-broker-mcp:{asst}")
+        assert fg["kind"] == "stale-broker-mcp"
+        assert fg["group"] == "Broker MCP registration"
+        assert fg["severity"] == "error"
+        assert fg["fixable"] is True
+        assert asst in fg["message"]
+        assert bm_stale[asst]["config_path"] in fg["message"]
+        assert f"ai-orch env register-broker --assistants {asst}" in fg["fix_command"]
+        assert f"ai-orch env register-broker --assistants {asst}" in fg["message"]
+        assert fg["actions"][0]["action"] == "replace"
+        assert fg["actions"][0]["fix_command"] == f"ai-orch env register-broker --assistants {asst}"
+
+    assert st_stale["summary"]["error"] == 3
+    assert any("null fields" in r for r in bm_stale["claude"]["reasons"])
+    assert any("default_tools_approval_mode" in r for r in bm_stale["codex"]["reasons"])
+
+    # 3. Preview and apply repair plan + install launcher -> zero findings across all clients and launcher
+    l_prev = run_env(["install-launcher"], fake_home)
+    run_env(["install-launcher", "--apply", "--expect-hash", l_prev["expect_hash"]], fake_home)
+
+    plan_preview = run_env(["register-broker", "--assistants", "all"], fake_home)
+    assert plan_preview["ok"] is True
+    assert plan_preview["dry_run"] is True
+    assert plan_preview["applied"] == 0
+
+    plan_apply = run_env(
+        ["register-broker", "--assistants", "all", "--apply", "--expect-hash", plan_preview["expect_hash"]],
+        fake_home,
+    )
+    assert plan_apply["ok"] is True
+    assert plan_apply["dry_run"] is False
+    assert plan_apply["applied"] == 3
+
+    st_ok = run_env(["status"], fake_home)
+    bm_ok = st_ok["broker_mcp"]["clients"]
+    for asst in ("claude", "kilo", "codex"):
+        assert bm_ok[asst]["state"] == "registered"
+        assert bm_ok[asst]["reasons"] == []
+        assert bm_ok[asst]["expected_command"] == expected_launcher
+    assert st_ok["launcher"]["state"] == "up-to-date"
+    assert st_ok["finding_groups"] == []
+    assert st_ok["summary"]["total_groups"] == 0
+    assert st_ok["summary"]["error"] == 0
+    assert st_ok["summary"]["warning"] == 0
+    assert st_ok["summary"]["info"] == 0
+
+
+def test_16_6_launcher_findings_and_acknowledge_mechanism(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    launcher_path = fake_home / ".local" / "bin" / "ai-orch"
+
+    # Register all 3 clients first so we isolate launcher findings
+    reg_prev = run_env(["register-broker", "--assistants", "all"], fake_home)
+    run_env(["register-broker", "--assistants", "all", "--apply", "--expect-hash", reg_prev["expect_hash"]], fake_home)
+
+    # 1. Missing launcher -> severity info, fix is `ai-orch install-launcher`
+    st1 = run_env(["status"], fake_home)
+    assert len(st1["finding_groups"]) == 1
+    lf1 = st1["finding_groups"][0]
+    assert lf1["group_key"] == "missing-launcher:ai-orch"
+    assert lf1["kind"] == "missing-launcher"
+    assert lf1["severity"] == "info"
+    assert lf1["fix_command"] == "ai-orch install-launcher"
+    assert str(launcher_path) in lf1["message"]
+
+    # 2. Outdated launcher -> severity warning, fix is `ai-orch install-launcher`
+    launcher_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher_path.write_text("#!/usr/bin/env python3\n# ai-orchestration-launcher-v1\n# outdated\n", encoding="utf-8")
+    launcher_path.chmod(0o755)
+    st2 = run_env(["status"], fake_home)
+    assert len(st2["finding_groups"]) == 1
+    lf2 = st2["finding_groups"][0]
+    assert lf2["group_key"] == "outdated-launcher:ai-orch"
+    assert lf2["kind"] == "outdated-launcher"
+    assert lf2["severity"] == "warning"
+    assert lf2["fix_command"] == "ai-orch install-launcher"
+    assert st2["summary"]["warning"] == 1
+
+    # 3. Acknowledge outdated launcher via 13.2 ack -> severity drops to info and acknowledged == True
+    ack_res = run_env(["ack", "outdated-launcher:ai-orch", "--note", "defer launcher update"], fake_home)
+    assert ack_res["ok"] is True
+    st_acked = run_env(["status"], fake_home)
+    lf_acked = st_acked["finding_groups"][0]
+    assert lf_acked["acknowledged"] is True
+    assert lf_acked["severity"] == "info"
+    assert st_acked["summary"]["acknowledged"] == 1
+    assert st_acked["summary"]["warning"] == 0
+
+    # Unack restores warning
+    unack_res = run_env(["unack", "outdated-launcher:ai-orch"], fake_home)
+    assert unack_res["ok"] is True
+    st_unacked = run_env(["status"], fake_home)
+    assert st_unacked["finding_groups"][0]["severity"] == "warning"
+
+    # 4. Install up-to-date launcher -> zero findings
+    l_prev = run_env(["install-launcher"], fake_home)
+    run_env(["install-launcher", "--apply", "--expect-hash", l_prev["expect_hash"]], fake_home)
+    st3 = run_env(["status"], fake_home)
+    assert st3["finding_groups"] == []
+    assert st3["summary"]["total_groups"] == 0
+
+
+def test_16_6_registration_plan_content_per_client_format(tmp_path: pathlib.Path) -> None:
+    from orchestration_env import _has_null_values, parse_jsonc
+    import tomllib
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    expected_launcher = str(fake_home / ".local" / "bin" / "ai-orch")
+
+    preview = run_env(["register-broker", "--assistants", "all"], fake_home)
+    assert preview["ok"] is True
+    assert preview["dry_run"] is True
+    by_asst = {item["assistant"]: item for item in preview["plan"]}
+
+    # Claude format: stdio, launcher mcp, strictly zero null values anywhere
+    claude_item = by_asst["claude"]
+    assert claude_item["server_config"] == {
+        "type": "stdio",
+        "command": expected_launcher,
+        "args": ["mcp"],
+    }
+    assert not _has_null_values(claude_item["server_config"])
+    claude_doc = json.loads(claude_item["content"])
+    assert not _has_null_values(claude_doc)
+    assert "null" not in claude_item["content"]
+    assert claude_doc["mcpServers"]["ai-orchestration"] == claude_item["server_config"]
+
+    # Codex format: [mcp_servers.ai-orchestration] with default_tools_approval_mode = "approve"
+    codex_item = by_asst["codex"]
+    assert codex_item["server_config"] == {
+        "command": expected_launcher,
+        "args": ["mcp"],
+        "default_tools_approval_mode": "approve",
+    }
+    codex_doc = tomllib.loads(codex_item["content"])
+    assert codex_doc["mcp_servers"]["ai-orchestration"] == {
+        "command": expected_launcher,
+        "args": ["mcp"],
+        "default_tools_approval_mode": "approve",
+    }
+
+    # Kilo format: "mcp": {"ai-orchestration": {"type": "local", "command": [launcher, "mcp"], "environment": {}, "enabled": true}}
+    kilo_item = by_asst["kilo"]
+    assert kilo_item["server_config"] == {
+        "type": "local",
+        "command": [expected_launcher, "mcp"],
+        "environment": {},
+        "enabled": True,
+    }
+    kilo_doc = parse_jsonc(kilo_item["content"])
+    assert kilo_doc["mcp"]["ai-orchestration"] == kilo_item["server_config"]
+
+
+def test_16_6_skills_regeneration_idempotence_and_broker_tools_section() -> None:
+    repo_root = SCRIPT.parent.parent
+    regen_script = repo_root / "scripts" / "regenerate_generic_skills.py"
+    tp_skill = repo_root / "plugins" / "architect-side" / "skills" / "task-pipeline" / "SKILL.md"
+    ow_skill = repo_root / "plugins" / "architect-side" / "skills" / "orchestration-workflow" / "SKILL.md"
+
+    # First run and second run must leave zero diff and pass --check
+    r1 = subprocess.run([sys.executable, str(regen_script)], capture_output=True, text=True, check=False)
+    assert r1.returncode == 0, r1.stderr
+    after_first = ow_skill.read_text(encoding="utf-8")
+
+    r2 = subprocess.run([sys.executable, str(regen_script)], capture_output=True, text=True, check=False)
+    assert r2.returncode == 0, r2.stderr
+    after_second = ow_skill.read_text(encoding="utf-8")
+    assert after_first == after_second
+
+    r_check = subprocess.run([sys.executable, str(regen_script), "--check"], capture_output=True, text=True, check=False)
+    assert r_check.returncode == 0, r_check.stderr
+
+    implemented_tools = [
+        "whoami",
+        "workspaces.list",
+        "projects.list",
+        "tasks.list",
+        "tasks.show",
+        "tasks.next",
+        "tasks.graph",
+        "tasks.new",
+        "tasks.transition",
+        "tasks.set",
+        "questions.list",
+        "questions.ask",
+        "questions.answer",
+        "inbox.add_note",
+        "orchestrator.status",
+    ]
+    for skill_file in (tp_skill, ow_skill):
+        text = skill_file.read_text(encoding="utf-8")
+        assert "## Reaching the task engine" in text
+        assert "## Tooling feedback" in text
+        assert "project/ID" in text
+        assert "expect_hash" in text
+        assert "idempotency_key" in text
+        for tname in implemented_tools:
+            assert f"`{tname}`" in text, f"Missing tool {tname} in {skill_file}"
+        # Unimplemented 16.7 / 16.8 tools must not be listed
+        assert "`mail.send`" not in text
+        assert "`orchestrator.ask`" not in text
+
+
+
 
 
 
