@@ -2,7 +2,7 @@
 
 - id: Q009
 - question: How do we close delivered features that no user session uses, so nobody can validate them by use?
-- status: open
+- status: answered
 - blocks: -
 - decider: owner
 - asked-by: ai-coding-tools
@@ -10,7 +10,6 @@
 - origin-run: -
 - open-answer: no
 - recommended: C
-- short: Unused features validation
 
 ## Context
 
@@ -25,6 +24,6 @@ Owner rule (2026-10-21): delivered items are validated by the sessions that use 
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: C
+- answered-by: owner
+- answered: 2026-10-21

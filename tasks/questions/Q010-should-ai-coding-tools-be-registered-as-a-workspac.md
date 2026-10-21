@@ -2,7 +2,7 @@
 
 - id: Q010
 - question: Should ai-coding-tools be registered as a workspace with its three projects (ai-orchestration, ai-swissknife, claude-mcp)?
-- status: open
+- status: answered
 - blocks: -
 - decider: owner
 - asked-by: ai-coding-tools
@@ -10,7 +10,6 @@
 - origin-run: -
 - open-answer: no
 - recommended: A
-- short: Register ai-coding-tools workspace
 
 ## Context
 
@@ -24,6 +23,6 @@ The VS Code extension 0.6.0 shows 'Projects discovered, not registered' on ~/wor
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-21
