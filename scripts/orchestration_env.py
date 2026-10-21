@@ -392,7 +392,18 @@ def get_home_dir() -> pathlib.Path:
 
 
 def get_config_dir(home: pathlib.Path | None = None) -> pathlib.Path:
-    h = home or get_home_dir()
+    if home is not None:
+        return home / ".config" / "ai-orchestration"
+    env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
+    if env_cfg and env_cfg.strip():
+        p = pathlib.Path(env_cfg).expanduser().resolve()
+        if p.is_file() or p.suffix.lower() == ".toml":
+            return p.parent
+        return p
+    env_dir = os.environ.get("AI_ORCH_CONFIG_DIR")
+    if env_dir and env_dir.strip():
+        return pathlib.Path(env_dir).expanduser().resolve()
+    h = get_home_dir()
     return h / ".config" / "ai-orchestration"
 
 
@@ -1518,13 +1529,1060 @@ def is_claude_running() -> bool:
     return False
 
 
-def format_toml_server_entry(name: str, command: str, args: list[str]) -> str:
+def format_toml_server_entry(
+    name: str,
+    command: str,
+    args: list[str],
+    extra_fields: dict[str, Any] | None = None,
+) -> str:
     """Format a surgical [mcp_servers.<name>] TOML table block."""
     key = name if re.match(r"^[A-Za-z0-9_-]+$", name) else json.dumps(name)
     lines = [f"[mcp_servers.{key}]"]
     lines.append(f"command = {json.dumps(command)}")
     lines.append(f"args = {json.dumps(args)}")
+    if extra_fields:
+        for fk, fv in extra_fields.items():
+            if fv is None:
+                continue
+            lines.append(f"{fk} = {json.dumps(fv)}")
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Version-Free Launcher & Broker MCP Registration (Task 16.6)
+# ---------------------------------------------------------------------------
+
+LAUNCHER_MARKER = "# ai-orchestration-launcher-v1"
+BROKER_MCP_SERVER_NAME = "ai-orchestration"
+BROKER_MCP_NAMES = ("ai-orchestration", "orchestration-broker", "ai-orchestration-broker")
+VERSIONED_PATH_RE = re.compile(r"(/plugins/cache/|/v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?/)")
+
+
+def _strip_nulls(obj: Any) -> Any:
+    """Recursively drop None values from dicts and lists (Claude Code rejects null fields)."""
+    if isinstance(obj, dict):
+        return {k: _strip_nulls(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_strip_nulls(v) for v in obj if v is not None]
+    return obj
+
+
+def _has_null_values(obj: Any) -> bool:
+    """Return True if obj or any nested dict value / list item is None."""
+    if obj is None:
+        return True
+    if isinstance(obj, dict):
+        return any(_has_null_values(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_has_null_values(x) for x in obj)
+    return False
+
+
+def _is_versioned_path(path_str: str) -> bool:
+    """Return True if path_str contains a plugin-cache or semver directory segment."""
+    if not path_str:
+        return False
+    norm = str(path_str).replace("\\", "/")
+    return bool(VERSIONED_PATH_RE.search(norm))
+
+
+def get_launcher_path(
+    home: pathlib.Path | None = None,
+    custom_path: pathlib.Path | str | None = None,
+) -> pathlib.Path:
+    """Return the version-free launcher path (default: <home>/.local/bin/ai-orch)."""
+    if custom_path is not None:
+        return pathlib.Path(custom_path).expanduser().resolve()
+    h = home or get_home_dir()
+    return h / ".local" / "bin" / "ai-orch"
+
+
+def is_our_launcher(path: pathlib.Path) -> bool:
+    """Return True if `path` is a launcher script managed by ai-orchestration."""
+    if path.is_symlink():
+        try:
+            target_raw = os.readlink(path)
+            if "ai-orchestration" in target_raw and target_raw.endswith("ai-orch"):
+                return True
+            resolved = path.resolve()
+            if resolved.is_file():
+                head = resolved.read_text(encoding="utf-8", errors="replace")[:4096]
+                return LAUNCHER_MARKER in head
+        except Exception:
+            return False
+        return False
+    if not path.is_file():
+        return False
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:4096]
+        return LAUNCHER_MARKER in head
+    except Exception:
+        return False
+
+
+def render_launcher_script(fallback_repo_root: pathlib.Path | None = None) -> str:
+    """Render the executable version-free launcher script content."""
+    default_repo = str((fallback_repo_root or REPO_ROOT).resolve())
+    template = '''#!/usr/bin/env python3
+__LAUNCHER_MARKER__
+"""Version-free launcher for ai-orchestration (execs newest installed copy)."""
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import re
+import sys
+
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib  # type: ignore
+    except ImportError:
+        tomllib = None  # type: ignore
+
+DEFAULT_SOURCE_REPO = __DEFAULT_SOURCE_REPO__
+
+
+def _get_home_dir() -> pathlib.Path:
+    raw = os.environ.get("AI_ORCH_HOME")
+    if raw and raw.strip():
+        return pathlib.Path(raw).expanduser().resolve()
+    return pathlib.Path.home().resolve()
+
+
+def _get_config_dir(home: pathlib.Path) -> pathlib.Path:
+    raw = os.environ.get("AI_ORCHESTRATION_CONFIG")
+    if raw and raw.strip():
+        p = pathlib.Path(raw).expanduser().resolve()
+        if p.is_file() or p.suffix.lower() == ".toml":
+            return p.parent
+        return p
+    raw_dir = os.environ.get("AI_ORCH_CONFIG_DIR")
+    if raw_dir and raw_dir.strip():
+        return pathlib.Path(raw_dir).expanduser().resolve()
+    return home / ".config" / "ai-orchestration"
+
+
+def _parse_semver(v_str: str) -> tuple[int, ...]:
+    nums = [int(x) for x in re.findall(r"\\d+", str(v_str))]
+    return tuple(nums) if nums else (0, 0, 0)
+
+
+def _read_version_for_bin(bin_path: pathlib.Path) -> tuple[int, ...]:
+    root = bin_path.parent.parent
+    best: tuple[int, ...] = (0, 0, 0)
+    if re.match(r"^v?\\d+\\.\\d+\\.\\d+", root.name):
+        best = max(best, _parse_semver(root.name))
+    for rel in (
+        ".claude-plugin/plugin.json",
+        "plugin.json",
+        "plugins/architect-side/.claude-plugin/plugin.json",
+        ".claude-plugin/marketplace.json",
+        "marketplace.json",
+    ):
+        cand = root / rel
+        if cand.is_file():
+            try:
+                data = json.loads(cand.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    if "version" in data and data["version"]:
+                        best = max(best, _parse_semver(str(data["version"])))
+                    for p in data.get("plugins", []):
+                        if isinstance(p, dict) and p.get("version"):
+                            best = max(best, _parse_semver(str(p["version"])))
+            except Exception:
+                pass
+    return best
+
+
+def _configured_checkout_from_toml(cfg_dir: pathlib.Path) -> pathlib.Path | None:
+    toml_file = cfg_dir / "orchestration.toml"
+    if not toml_file.is_file():
+        return None
+    raw = toml_file.read_text(encoding="utf-8", errors="replace")
+    data = None
+    if tomllib is not None:
+        try:
+            data = tomllib.loads(raw)
+        except Exception:
+            data = None
+    if isinstance(data, dict):
+        for k in ("source_checkout", "source_repo", "ai_orchestration_root"):
+            v = data.get(k)
+            if isinstance(v, str) and v.strip():
+                return pathlib.Path(v).expanduser().resolve()
+        for sec in ("launcher", "paths", "repos"):
+            sub = data.get(sec)
+            if isinstance(sub, dict):
+                for k in ("source_checkout", "source_repo", "source_path", "repo_path", "path", "ai_orchestration", "ai-orchestration"):
+                    v = sub.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return pathlib.Path(v).expanduser().resolve()
+    m = re.search(r'(?:source_checkout|source_repo|source_path|ai_orchestration)\\s*=\\s*"([^"]+)"', raw)
+    if m:
+        return pathlib.Path(m.group(1)).expanduser().resolve()
+    return None
+
+
+def resolve_ai_orch_bin() -> pathlib.Path:
+    env_root = os.environ.get("AI_ORCH_SOURCE_ROOT")
+    if env_root and env_root.strip():
+        cand = pathlib.Path(env_root).expanduser().resolve() / "bin" / "ai-orch"
+        if cand.is_file():
+            return cand
+
+    home = _get_home_dir()
+    cfg_dir = _get_config_dir(home)
+
+    candidates: list[tuple[tuple[int, ...], int, float, pathlib.Path]] = []
+    seen: set[str] = set()
+
+    def _add(bin_p: pathlib.Path, is_configured: int = 0, explicit_ver: str | None = None) -> None:
+        if not bin_p.is_file():
+            return
+        key = str(bin_p.resolve())
+        if key in seen:
+            return
+        seen.add(key)
+        ver = _parse_semver(explicit_ver) if explicit_ver else _read_version_for_bin(bin_p)
+        if is_configured and ver == (0, 0, 0):
+            ver = (9999, 0, 0)
+        try:
+            mtime = bin_p.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        candidates.append((ver, is_configured, mtime, bin_p))
+
+    cfg_checkout = _configured_checkout_from_toml(cfg_dir)
+    if cfg_checkout is not None:
+        _add(cfg_checkout / "bin" / "ai-orch", is_configured=1)
+
+    reg_file = home / ".claude" / "plugins" / "installed_plugins.json"
+    if reg_file.is_file():
+        try:
+            reg_data = json.loads(reg_file.read_text(encoding="utf-8"))
+            plugins_map = reg_data.get("plugins", dict()) if isinstance(reg_data, dict) else dict()
+            if isinstance(plugins_map, dict):
+                for pid, entries in plugins_map.items():
+                    if "ai-orchestration" not in str(pid) or not isinstance(entries, list):
+                        continue
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        ip = entry.get("installPath")
+                        ver_str = str(entry.get("version") or "")
+                        if ip:
+                            ip_path = pathlib.Path(str(ip))
+                            _add(ip_path / "bin" / "ai-orch", explicit_ver=ver_str or None)
+                            _add(ip_path.parent.parent / "bin" / "ai-orch", explicit_ver=ver_str or None)
+        except Exception:
+            pass
+
+    cache_root = home / ".claude" / "plugins" / "cache" / "ai-orchestration"
+    if cache_root.is_dir():
+        for b in cache_root.glob("*/*/bin/ai-orch"):
+            _add(b, explicit_ver=b.parent.parent.name)
+        for b in cache_root.glob("*/bin/ai-orch"):
+            _add(b, explicit_ver=b.parent.parent.name)
+
+    mkt_bin = home / ".claude" / "plugins" / "marketplaces" / "ai-orchestration" / "bin" / "ai-orch"
+    _add(mkt_bin)
+
+    repos_bin = home / ".ai-orchestration" / "repos" / "ai-orchestration" / "bin" / "ai-orch"
+    _add(repos_bin)
+
+    if candidates:
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        return candidates[0][3]
+
+    fallback_bin = pathlib.Path(DEFAULT_SOURCE_REPO) / "bin" / "ai-orch"
+    return fallback_bin
+
+
+def main() -> None:
+    target = resolve_ai_orch_bin()
+    if not target.is_file():
+        sys.stderr.write(f"ai-orch launcher error: target binary not found at {target}\\n")
+        sys.exit(1)
+    os.execv(sys.executable, [sys.executable, str(target), *sys.argv[1:]])
+
+
+if __name__ == "__main__":
+    main()
+'''
+    return (
+        template
+        .replace("__LAUNCHER_MARKER__", LAUNCHER_MARKER)
+        .replace("__DEFAULT_SOURCE_REPO__", json.dumps(default_repo))
+    )
+
+
+def install_launcher(
+    home: pathlib.Path | None = None,
+    target_path: pathlib.Path | str | None = None,
+    source_repo: pathlib.Path | None = None,
+    dry_run: bool = False,
+    apply: bool = False,
+    expect_hash: str | None = None,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    """Preview or install the version-free `ai-orch` launcher executable.
+
+    Follows the preview -> `--apply --expect-hash` flow:
+    - Never overwrites an unrelated (foreign) file.
+    - Updates an existing launcher of ours in place.
+    """
+    h = home or get_home_dir()
+    launcher_path = get_launcher_path(h, target_path)
+    expected = expect_hash if expect_hash is not None else expect_plan_hash
+    effective_dry_run = bool(dry_run) or not (bool(apply) or expected is not None)
+    new_content = render_launcher_script(source_repo or REPO_ROOT)
+    after_sha = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
+
+    def _build_plan() -> tuple[list[dict[str, Any]], str, bool]:
+        before_sha = compute_target_hash(launcher_path)
+        exists = launcher_path.exists() or launcher_path.is_symlink()
+        if exists:
+            if (launcher_path.is_dir() and not launcher_path.is_symlink()) or not is_our_launcher(launcher_path):
+                p_item = {
+                    "action": "refuse",
+                    "path": str(launcher_path),
+                    "reason": f"Refusing to overwrite unrelated file at {launcher_path}",
+                    "current_state": "foreign",
+                    "before_sha256": before_sha,
+                    "after_sha256": None,
+                }
+                return [p_item], "foreign", True
+            try:
+                cur_text = launcher_path.read_text(encoding="utf-8")
+            except Exception:
+                cur_text = ""
+            is_exec = os.access(launcher_path, os.X_OK)
+            if cur_text == new_content and is_exec:
+                p_item = {
+                    "action": "noop",
+                    "path": str(launcher_path),
+                    "reason": "Version-free launcher already up to date",
+                    "current_state": "up-to-date",
+                    "before_sha256": before_sha,
+                    "after_sha256": after_sha,
+                }
+                return [p_item], "up-to-date", False
+            p_item = {
+                "action": "update",
+                "path": str(launcher_path),
+                "reason": "Update existing ai-orchestration launcher in place",
+                "current_state": "outdated",
+                "before_sha256": before_sha,
+                "after_sha256": after_sha,
+            }
+            return [p_item], "outdated", False
+        else:
+            p_item = {
+                "action": "create",
+                "path": str(launcher_path),
+                "reason": "Install version-free ai-orch launcher",
+                "current_state": "missing",
+                "before_sha256": None,
+                "after_sha256": after_sha,
+            }
+            return [p_item], "missing", False
+
+    plan, cur_state, is_foreign = _build_plan()
+    plan_hash = compute_plan_hash(plan)
+
+    if is_foreign:
+        return {
+            "ok": False,
+            "error": f"Refusing to overwrite unrelated file at {launcher_path}",
+            "dry_run": effective_dry_run,
+            "applied": False,
+            "path": str(launcher_path),
+            "current_state": cur_state,
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "hash": plan_hash,
+            "expect_hash": plan_hash,
+        }
+
+    valid_hashes = {plan_hash, after_sha}
+    if plan[0].get("before_sha256"):
+        valid_hashes.add(plan[0]["before_sha256"])
+
+    if expected is not None and expected not in valid_hashes:
+        return {
+            "ok": False,
+            "error": f"Plan hash mismatch: expected {expected}, but recomputed plan hash is {plan_hash}",
+            "dry_run": effective_dry_run,
+            "applied": False,
+            "path": str(launcher_path),
+            "current_state": cur_state,
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "hash": plan_hash,
+            "expect_hash": plan_hash,
+        }
+
+    if effective_dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "applied": False,
+            "action": plan[0]["action"],
+            "path": str(launcher_path),
+            "current_state": cur_state,
+            "content": new_content,
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "hash": plan_hash,
+            "expect_hash": plan_hash,
+        }
+
+    with env_lock(h):
+        plan, cur_state, is_foreign = _build_plan()
+        plan_hash = compute_plan_hash(plan)
+        if is_foreign:
+            return {
+                "ok": False,
+                "error": f"Refusing to overwrite unrelated file at {launcher_path}",
+                "dry_run": False,
+                "applied": False,
+                "path": str(launcher_path),
+                "current_state": cur_state,
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "hash": plan_hash,
+                "expect_hash": plan_hash,
+            }
+        valid_hashes = {plan_hash, after_sha}
+        if plan[0].get("before_sha256"):
+            valid_hashes.add(plan[0]["before_sha256"])
+        if expected is not None and expected not in valid_hashes:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expected}, but recomputed plan hash is {plan_hash}",
+                "dry_run": False,
+                "applied": False,
+                "path": str(launcher_path),
+                "current_state": cur_state,
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "hash": plan_hash,
+                "expect_hash": plan_hash,
+            }
+
+        launcher_path.parent.mkdir(parents=True, exist_ok=True)
+        if launcher_path.is_symlink():
+            launcher_path.unlink()
+        _atomic_write_with_backup(launcher_path, new_content)
+        launcher_path.chmod(0o755)
+        new_sha = compute_target_hash(launcher_path) or after_sha
+
+        return {
+            "ok": True,
+            "dry_run": False,
+            "applied": True,
+            "action": plan[0]["action"],
+            "path": str(launcher_path),
+            "current_state": cur_state,
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "hash": new_sha,
+            "expect_hash": plan_hash,
+        }
+
+
+def _looks_like_broker_entry(name: str, cfg: Any) -> bool:
+    """Return True if an MCP server entry is the orchestration broker shim."""
+    if name in BROKER_MCP_NAMES:
+        return True
+    if not isinstance(cfg, dict):
+        return False
+    cmd_str, args_list, _ = normalize_mcp_config(cfg)
+    tokens = ([cmd_str] if cmd_str else []) + list(args_list)
+    joined = " ".join(str(t) for t in tokens if t)
+    if "ai-orch" in joined and "mcp" in tokens:
+        return True
+    if "backend.broker" in joined or "ai-orch-broker" in joined:
+        return True
+    if any(str(t).endswith("broker/shim.py") for t in tokens):
+        return True
+    return False
+
+
+def build_client_broker_mcp_config(
+    assistant: str,
+    launcher_path: pathlib.Path | str,
+) -> dict[str, Any]:
+    """Build normative broker MCP configuration for a client per spec §3a."""
+    l_str = str(launcher_path)
+    if assistant == "claude":
+        # Spec §3a: Claude Code rejects null fields
+        return _strip_nulls({
+            "type": "stdio",
+            "command": l_str,
+            "args": ["mcp"],
+        })
+    if assistant == "kilo":
+        # Spec §3a: Kilo uses "mcp": {"<name>": {"type": "local", "command": [...], "environment": {...}}}
+        return _strip_nulls({
+            "type": "local",
+            "command": [l_str, "mcp"],
+            "environment": {},
+            "enabled": True,
+        })
+    if assistant == "codex":
+        # Spec §3a: Codex needs per-server default_tools_approval_mode = "approve"
+        return _strip_nulls({
+            "command": l_str,
+            "args": ["mcp"],
+            "default_tools_approval_mode": "approve",
+        })
+    raise ValueError(f"Unknown assistant: {assistant}")
+
+
+def _upsert_codex_toml_server(
+    raw_toml: str,
+    server_name: str,
+    command: str,
+    args: list[str],
+    approval_mode: str = "approve",
+) -> str:
+    """Insert or replace [mcp_servers.<server_name>] in Codex config.toml with default_tools_approval_mode."""
+    if raw_toml.strip():
+        try:
+            parsed = tomllib.loads(raw_toml)
+            if not isinstance(parsed, dict):
+                raise ValueError("Top-level TOML is not a table")
+        except Exception as exc:
+            raise ValueError(f"Invalid TOML ({exc})") from exc
+
+    cleaned = raw_toml
+    for prefix in ("mcp_servers", "mcp.servers"):
+        pat = rf'(?ms)^\[{re.escape(prefix)}\.(?:{re.escape(server_name)}|"{re.escape(server_name)}")\]\s*\n.*?(?=^\[|\Z)'
+        cleaned = re.sub(pat, "", cleaned)
+
+    entry_block = format_toml_server_entry(
+        server_name,
+        command,
+        args,
+        extra_fields={"default_tools_approval_mode": approval_mode},
+    )
+    cleaned = cleaned.rstrip()
+    if cleaned:
+        new_toml = cleaned + "\n\n" + entry_block
+    else:
+        new_toml = entry_block
+
+    # Validate generated TOML
+    tomllib.loads(new_toml)
+    return new_toml
+
+
+def _resolve_client_broker_config_path(
+    assistant: str,
+    scope: str,
+    workspace: pathlib.Path | None,
+    home: pathlib.Path,
+) -> pathlib.Path:
+    """Resolve the config file path to inspect/update for broker MCP registration."""
+    ws = workspace.resolve() if workspace else pathlib.Path.cwd()
+    if assistant == "claude":
+        if scope == "global":
+            claude_json = home / ".claude.json"
+            settings_json = home / ".claude" / "settings.json"
+            if claude_json.is_file():
+                return claude_json
+            if settings_json.is_file():
+                try:
+                    sdata = json.loads(settings_json.read_text(encoding="utf-8"))
+                    if isinstance(sdata, dict) and ("mcpServers" in sdata or "mcp_servers" in sdata):
+                        return settings_json
+                except Exception:
+                    pass
+            return claude_json
+        return ws / ".mcp.json"
+    if assistant == "kilo":
+        if scope == "global":
+            candidates = [
+                home / ".config" / "kilo" / "kilo.jsonc",
+                home / ".config" / "kilo" / "kilo.json",
+                home / ".config" / "kilo" / "config.json",
+                home / ".kilo" / "kilo.jsonc",
+                home / ".kilo" / "kilo.json",
+            ]
+            # Prefer a file that already defines mcp/mcpServers
+            for cand in candidates:
+                if cand.is_file():
+                    try:
+                        d = parse_jsonc(cand.read_text(encoding="utf-8"))
+                        if isinstance(d, dict) and ("mcp" in d or "mcpServers" in d):
+                            return cand
+                    except Exception:
+                        return cand
+            for cand in candidates:
+                if cand.is_file():
+                    return cand
+            return home / ".config" / "kilo" / "kilo.json"
+        for cand in (ws / ".kilo" / "kilo.jsonc", ws / ".kilo" / "kilo.json", ws / "kilo.jsonc", ws / "kilo.json"):
+            if cand.is_file():
+                return cand
+        return ws / ".kilo" / "kilo.json"
+    if assistant == "codex":
+        return (home / ".codex" / "config.toml") if scope == "global" else (ws / ".codex" / "config.toml")
+    raise ValueError(f"Unknown assistant: {assistant}")
+
+
+def inspect_broker_mcp_client(
+    assistant: str,
+    scope: str = "global",
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    launcher_path: pathlib.Path | None = None,
+    preferred_server_name: str | None = None,
+) -> dict[str, Any]:
+    """Inspect a client's config for the broker MCP registration and build a registration/repair plan item."""
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+    l_path = launcher_path or get_launcher_path(h)
+    expected_cmd = str(l_path)
+    expected_args = ["mcp"]
+    cfg_path = _resolve_client_broker_config_path(assistant, scope, ws, h)
+    target_server_cfg = build_client_broker_mcp_config(assistant, l_path)
+
+    found_name: str | None = None
+    found_cfg: Any = None
+    found_container: str | None = None
+    parse_error: str | None = None
+    raw_text = ""
+    parsed_doc: dict[str, Any] = {}
+
+    if cfg_path.is_file():
+        try:
+            raw_text = cfg_path.read_text(encoding="utf-8")
+            if assistant == "codex":
+                parsed_doc = tomllib.loads(raw_text) if raw_text.strip() else {}
+                if not isinstance(parsed_doc, dict):
+                    parse_error = "Top-level TOML is not a table"
+                else:
+                    mcp_tbl = parsed_doc.get("mcp_servers")
+                    if isinstance(mcp_tbl, dict):
+                        for k, v in mcp_tbl.items():
+                            if _looks_like_broker_entry(k, v):
+                                found_name, found_cfg, found_container = k, v, "mcp_servers"
+                                break
+                    if found_name is None:
+                        mcp_sub = parsed_doc.get("mcp", {})
+                        if isinstance(mcp_sub, dict) and isinstance(mcp_sub.get("servers"), dict):
+                            for k, v in mcp_sub["servers"].items():
+                                if _looks_like_broker_entry(k, v):
+                                    found_name, found_cfg, found_container = k, v, "mcp.servers"
+                                    break
+            elif assistant == "claude":
+                parsed_doc = json.loads(raw_text) if raw_text.strip() else {}
+                if not isinstance(parsed_doc, dict):
+                    parse_error = "Top-level JSON is not an object"
+                else:
+                    for container_key in ("mcpServers", "mcp_servers"):
+                        sub = parsed_doc.get(container_key)
+                        if isinstance(sub, dict):
+                            for k, v in sub.items():
+                                if _looks_like_broker_entry(k, v):
+                                    found_name, found_cfg, found_container = k, v, container_key
+                                    break
+                        if found_name is not None:
+                            break
+            elif assistant == "kilo":
+                parsed_doc = parse_jsonc(raw_text) if raw_text.strip() else {}
+                if not isinstance(parsed_doc, dict):
+                    parse_error = "Top-level JSON/JSONC is not an object"
+                else:
+                    for container_key in ("mcp", "mcpServers"):
+                        sub = parsed_doc.get(container_key)
+                        if isinstance(sub, dict):
+                            for k, v in sub.items():
+                                if _looks_like_broker_entry(k, v):
+                                    found_name, found_cfg, found_container = k, v, container_key
+                                    break
+                        if found_name is not None:
+                            break
+        except Exception as exc:
+            parse_error = str(exc)
+
+    server_name = preferred_server_name or found_name or BROKER_MCP_SERVER_NAME
+    reasons: list[str] = []
+    cur_cmd: Any = None
+    cur_args: list[str] = []
+
+    if parse_error:
+        state = "stale"
+        reasons.append(f"unparseable config ({parse_error})")
+    elif found_name is None:
+        state = "missing"
+        reasons.append("not registered")
+    else:
+        if not isinstance(found_cfg, dict):
+            reasons.append("server entry is not an object/table")
+        else:
+            cur_cmd, cur_args, _ = normalize_mcp_config(found_cfg)
+            all_tokens = ([cur_cmd] if cur_cmd else []) + list(cur_args)
+            if any(_is_versioned_path(str(t)) for t in all_tokens if t):
+                reasons.append(f"versioned path ({' '.join(str(t) for t in all_tokens if t)})")
+
+            if assistant == "claude":
+                if found_container != "mcpServers":
+                    reasons.append(f"wrong top-level key '{found_container}' (expected 'mcpServers')")
+                if _has_null_values(found_cfg):
+                    reasons.append("contains null fields rejected by Claude Code")
+                raw_c = found_cfg.get("command")
+                raw_a = found_cfg.get("args")
+                if not isinstance(raw_c, str) or raw_c != expected_cmd or raw_a != expected_args:
+                    if not any("versioned path" in r for r in reasons):
+                        reasons.append(f"wrong command ({raw_c!r} {raw_a!r}, expected {expected_cmd!r} {expected_args!r})")
+                if found_cfg.get("type") not in (None, "stdio"):
+                    reasons.append(f"unexpected transport type {found_cfg.get('type')!r} (expected 'stdio')")
+
+            elif assistant == "codex":
+                if found_container != "mcp_servers":
+                    reasons.append(f"wrong TOML table '[{found_container}.{found_name}]' (expected '[mcp_servers.{found_name}]')")
+                if _has_null_values(found_cfg):
+                    reasons.append("contains null fields")
+                raw_c = found_cfg.get("command")
+                raw_a = found_cfg.get("args")
+                if not isinstance(raw_c, str) or raw_c != expected_cmd or raw_a != expected_args:
+                    if not any("versioned path" in r for r in reasons):
+                        reasons.append(f"wrong command ({raw_c!r} {raw_a!r}, expected {expected_cmd!r} {expected_args!r})")
+                approval = found_cfg.get("default_tools_approval_mode")
+                if approval != "approve":
+                    reasons.append(f"missing or wrong default_tools_approval_mode ({approval!r}, expected 'approve')")
+
+            elif assistant == "kilo":
+                if found_container != "mcp":
+                    reasons.append(f"wrong top-level key '{found_container}' (Kilo uses 'mcp')")
+                if _has_null_values(found_cfg):
+                    reasons.append("contains null fields")
+                if found_cfg.get("type") != "local":
+                    reasons.append(f"missing or wrong type ({found_cfg.get('type')!r}, expected 'local')")
+                raw_c = found_cfg.get("command")
+                if raw_c != [expected_cmd, *expected_args]:
+                    if not any("versioned path" in r for r in reasons):
+                        reasons.append(f"wrong command ({raw_c!r}, expected {[expected_cmd, *expected_args]!r})")
+                if not isinstance(found_cfg.get("environment"), dict):
+                    reasons.append("missing 'environment' object in Kilo MCP config")
+                if found_cfg.get("enabled") is False:
+                    reasons.append("server is disabled (enabled: false)")
+
+        state = "stale" if reasons else "registered"
+
+    # Build new file content and plan item
+    before_sha = compute_target_hash(cfg_path)
+    if parse_error:
+        plan_item: dict[str, Any] = {
+            "action": "refuse",
+            "assistant": assistant,
+            "scope": scope,
+            "server": server_name,
+            "path": str(cfg_path),
+            "command": expected_cmd,
+            "args": expected_args,
+            "server_config": target_server_cfg,
+            "content": None,
+            "reason": f"Refusing to modify unparseable {cfg_path.name}: {parse_error}",
+            "current_state": state,
+            "before_sha256": before_sha,
+            "after_sha256": None,
+        }
+    elif state == "registered":
+        plan_item = {
+            "action": "noop",
+            "assistant": assistant,
+            "scope": scope,
+            "server": server_name,
+            "path": str(cfg_path),
+            "command": expected_cmd,
+            "args": expected_args,
+            "server_config": target_server_cfg,
+            "content": raw_text,
+            "reason": f"Broker MCP '{server_name}' already registered in {assistant} ({scope})",
+            "current_state": "registered",
+            "before_sha256": before_sha,
+            "after_sha256": before_sha,
+        }
+    else:
+        if assistant == "claude":
+            new_doc = _strip_nulls(json.loads(json.dumps(parsed_doc))) if parsed_doc else {}
+            if "mcp_servers" in new_doc and isinstance(new_doc["mcp_servers"], dict) and found_name in new_doc["mcp_servers"]:
+                del new_doc["mcp_servers"][found_name]
+                if not new_doc["mcp_servers"]:
+                    del new_doc["mcp_servers"]
+            mcp_srvs = new_doc.setdefault("mcpServers", {})
+            if found_name and found_name != server_name and found_name in mcp_srvs:
+                del mcp_srvs[found_name]
+            mcp_srvs[server_name] = target_server_cfg
+            new_doc = _strip_nulls(new_doc)
+            new_content = json.dumps(new_doc, indent=2) + "\n"
+        elif assistant == "kilo":
+            new_doc = _strip_nulls(json.loads(json.dumps(parsed_doc))) if parsed_doc else {"$schema": "https://app.kilo.ai/config.json"}
+            if "mcpServers" in new_doc and isinstance(new_doc["mcpServers"], dict) and found_name in new_doc["mcpServers"]:
+                del new_doc["mcpServers"][found_name]
+                if not new_doc["mcpServers"]:
+                    del new_doc["mcpServers"]
+            mcp_map = new_doc.setdefault("mcp", {})
+            if found_name and found_name != server_name and found_name in mcp_map:
+                del mcp_map[found_name]
+            mcp_map[server_name] = target_server_cfg
+            new_doc = _strip_nulls(new_doc)
+            new_content = json.dumps(new_doc, indent=2) + "\n"
+        elif assistant == "codex":
+            new_content = _upsert_codex_toml_server(
+                raw_text,
+                server_name,
+                expected_cmd,
+                expected_args,
+                approval_mode="approve",
+            )
+        else:
+            raise ValueError(f"Unknown assistant: {assistant}")
+
+        after_sha = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
+        act = "replace" if state == "stale" else ("edit" if cfg_path.exists() else "create")
+        if state == "stale":
+            reason_str = f"Repair stale broker MCP '{server_name}' in {assistant} ({scope}): {'; '.join(reasons)}"
+        else:
+            reason_str = f"Register broker MCP '{server_name}' in {assistant} ({scope}) with {expected_cmd} mcp"
+
+        plan_item = {
+            "action": act,
+            "assistant": assistant,
+            "scope": scope,
+            "server": server_name,
+            "path": str(cfg_path),
+            "command": expected_cmd,
+            "args": expected_args,
+            "server_config": target_server_cfg,
+            "content": new_content,
+            "reason": reason_str,
+            "current_state": state,
+            "before_sha256": before_sha,
+            "after_sha256": after_sha,
+        }
+
+    return {
+        "assistant": assistant,
+        "scope": scope,
+        "state": state,
+        "server_name": server_name,
+        "config_path": str(cfg_path),
+        "command": cur_cmd,
+        "args": cur_args,
+        "expected_command": expected_cmd,
+        "expected_args": expected_args,
+        "reasons": reasons,
+        "server_config": target_server_cfg,
+        "plan_item": plan_item,
+    }
+
+
+def inspect_broker_mcp_registrations(
+    home: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+    scope: str = "global",
+) -> dict[str, Any]:
+    """Inspect Claude Code, Kilo, and Codex for broker MCP registration and return findings + repair plan."""
+    h = home or get_home_dir()
+    l_info = install_launcher(home=h, dry_run=True)
+    l_path = pathlib.Path(l_info["path"])
+
+    clients: dict[str, dict[str, Any]] = {}
+    plan: list[dict[str, Any]] = []
+    for asst in ("claude", "kilo", "codex"):
+        c_info = inspect_broker_mcp_client(asst, scope=scope, workspace=workspace, home=h, launcher_path=l_path)
+        clients[asst] = c_info
+        plan.append(c_info["plan_item"])
+
+    plan_hash = compute_plan_hash(plan)
+    return {
+        "launcher": {
+            "path": str(l_path),
+            "state": l_info["current_state"],
+            "exists": l_path.exists() or l_path.is_symlink(),
+            "plan": l_info["plan"],
+            "plan_hash": l_info["plan_hash"],
+        },
+        "clients": clients,
+        "plan": plan,
+        "plan_hash": plan_hash,
+        "hash": plan_hash,
+        "expect_hash": plan_hash,
+    }
+
+
+def register_broker_mcp(
+    assistants: list[str] | None = None,
+    scope: str = "global",
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    server_name: str | None = None,
+    dry_run: bool = False,
+    apply: bool = False,
+    expect_hash: str | None = None,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    """Preview or apply broker MCP registration/repair across Claude Code, Kilo, and Codex."""
+    h = home or get_home_dir()
+    ws = workspace.resolve() if workspace else None
+    broker_order = ("claude", "kilo", "codex")
+    if not assistants or "all" in assistants or set(assistants) == set(broker_order):
+        target_assistants = list(broker_order)
+    else:
+        target_assistants = list(assistants)
+    if "codex" in target_assistants and scope != "global":
+        raise ValueError("Codex does not support project-scoped MCP registration. Only global scope is supported.")
+
+    expected = expect_hash if expect_hash is not None else expect_plan_hash
+    effective_dry_run = bool(dry_run) or not (bool(apply) or expected is not None)
+    l_path = get_launcher_path(h)
+
+    def _build() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        p: list[dict[str, Any]] = []
+        inspections: list[dict[str, Any]] = []
+        for asst in target_assistants:
+            c_info = inspect_broker_mcp_client(
+                asst,
+                scope=scope,
+                workspace=ws,
+                home=h,
+                launcher_path=l_path,
+                preferred_server_name=server_name,
+            )
+            inspections.append(c_info)
+            p.append(c_info["plan_item"])
+        return p, inspections
+
+    plan, inspections = _build()
+    plan_hash = compute_plan_hash(plan)
+
+    refused = [it for it in plan if it["action"] == "refuse"]
+    if refused:
+        return {
+            "ok": False,
+            "error": refused[0]["reason"],
+            "dry_run": effective_dry_run,
+            "applied": 0,
+            "server": server_name or BROKER_MCP_SERVER_NAME,
+            "command": str(l_path),
+            "args": ["mcp"],
+            "updated_configs": [],
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "hash": plan_hash,
+            "expect_hash": plan_hash,
+        }
+
+    if expected is not None and expected != plan_hash:
+        return {
+            "ok": False,
+            "error": f"Plan hash mismatch: expected {expected}, but recomputed plan hash is {plan_hash}",
+            "dry_run": effective_dry_run,
+            "applied": 0,
+            "server": server_name or BROKER_MCP_SERVER_NAME,
+            "command": str(l_path),
+            "args": ["mcp"],
+            "updated_configs": [],
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "hash": plan_hash,
+            "expect_hash": plan_hash,
+        }
+
+    if effective_dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "applied": 0,
+            "server": server_name or BROKER_MCP_SERVER_NAME,
+            "command": str(l_path),
+            "args": ["mcp"],
+            "updated_configs": [],
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "hash": plan_hash,
+            "expect_hash": plan_hash,
+        }
+
+    with env_lock(h):
+        plan, inspections = _build()
+        plan_hash = compute_plan_hash(plan)
+        refused = [it for it in plan if it["action"] == "refuse"]
+        if refused:
+            return {
+                "ok": False,
+                "error": refused[0]["reason"],
+                "dry_run": False,
+                "applied": 0,
+                "server": server_name or BROKER_MCP_SERVER_NAME,
+                "command": str(l_path),
+                "args": ["mcp"],
+                "updated_configs": [],
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "hash": plan_hash,
+                "expect_hash": plan_hash,
+            }
+        if expected is not None and expected != plan_hash:
+            return {
+                "ok": False,
+                "error": f"Plan hash mismatch: expected {expected}, but recomputed plan hash is {plan_hash}",
+                "dry_run": False,
+                "applied": 0,
+                "server": server_name or BROKER_MCP_SERVER_NAME,
+                "command": str(l_path),
+                "args": ["mcp"],
+                "updated_configs": [],
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "hash": plan_hash,
+                "expect_hash": plan_hash,
+            }
+
+        updated_configs: list[str] = []
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        for item in plan:
+            if item["action"] in ("create", "edit", "replace") and item.get("content") is not None:
+                cfg_p = pathlib.Path(item["path"])
+                cfg_p.parent.mkdir(parents=True, exist_ok=True)
+                if cfg_p.exists():
+                    # Back up a copy into centralized Doctor trash as well as .ai-orch.bak
+                    bak_copy = cfg_p.with_name(cfg_p.name + ". doctor-tmp-bak")
+                    shutil.copy2(cfg_p, bak_copy)
+                    trash_path(
+                        bak_copy,
+                        assistant=item["assistant"],
+                        scope=item["scope"],
+                        kind="mcp",
+                        reason=item["reason"],
+                        workspace=ws,
+                        home=h,
+                        timestamp=ts,
+                    )
+                _atomic_write_with_backup(cfg_p, item["content"])
+                updated_configs.append(str(cfg_p))
+
+        return {
+            "ok": True,
+            "dry_run": False,
+            "applied": len(updated_configs),
+            "server": server_name or BROKER_MCP_SERVER_NAME,
+            "command": str(l_path),
+            "args": ["mcp"],
+            "updated_configs": updated_configs,
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "hash": plan_hash,
+            "expect_hash": plan_hash,
+        }
 
 
 def normalize_mcp_config(cfg: Any) -> tuple[str | None, list[str], dict[str, str]]:
@@ -3905,6 +4963,52 @@ def inspect_environment(
                             "count": 1,
                         })
 
+    # Inspect version-free launcher and broker MCP registrations across Claude, Kilo, and Codex
+    broker_mcp_report = inspect_broker_mcp_registrations(home=h, workspace=ws, scope="global")
+    for asst, b_info in broker_mcp_report["clients"].items():
+        if asst in environments and "global" in environments[asst]:
+            environments[asst]["global"]["broker_mcp"] = b_info
+        b_state = b_info["state"]
+        if b_state in ("missing", "stale"):
+            b_kind = "missing-broker-mcp" if b_state == "missing" else "stale-broker-mcp"
+            b_gkey = f"{b_kind}:{asst}"
+            b_sname = b_info["server_name"]
+            b_entries = [{
+                "name": b_sname,
+                "path": b_info["config_path"],
+                "origin": "mcp",
+                "scope": "global",
+                "enabled": True,
+                "state": b_state,
+            }]
+            b_acked, _ = is_finding_acknowledged(b_kind, [b_sname], b_entries, acks, group_key=b_gkey)
+            b_plan_item = b_info["plan_item"]
+            b_fixable = b_plan_item["action"] != "refuse"
+            if b_state == "missing":
+                b_advice = [
+                    f"Broker MCP shim is not registered in {asst} (global). "
+                    f"Register `{b_info['expected_command']} mcp` via `ai-orch env register-mcp ai-orchestration --assistants {asst} --apply --expect-hash <hash>`."
+                ]
+            else:
+                b_advice = [
+                    f"Broker MCP registration '{b_sname}' in {asst} (global) is stale ({'; '.join(b_info['reasons'])}). "
+                    f"Repair to `{b_info['expected_command']} mcp` via `ai-orch env register-mcp ai-orchestration --assistants {asst} --apply --expect-hash <hash>`."
+                ]
+            finding_groups.append({
+                "group_key": b_gkey,
+                "kind": b_kind,
+                "names": [b_sname],
+                "severity": "info" if b_acked else "warning",
+                "acknowledged": b_acked,
+                "locations": [{"assistant": asst, "scope": "global"}],
+                "entries": b_entries,
+                "fixable": b_fixable,
+                "actionable": b_fixable,
+                "actions": [b_plan_item] if b_fixable else [],
+                "advice": b_advice,
+                "count": 1,
+            })
+
     sev_rank = {"error": 0, "warning": 1, "info": 2, "neutral": 3}
     finding_groups.sort(key=lambda g: (sev_rank.get(g["severity"], 9), g["group_key"]))
 
@@ -3932,6 +5036,8 @@ def inspect_environment(
         "summary": summary,
         "severity_counts": summary,
         "kilo_effective": kilo_effective,
+        "launcher": broker_mcp_report["launcher"],
+        "broker_mcp": broker_mcp_report,
     }
 
 
@@ -5023,9 +6129,25 @@ def register_mcp_server(
     dry_run: bool = False,
     expect_plan_hash: str | None = None,
     claude_running_detector: Any = None,
+    apply: bool = False,
+    expect_hash: str | None = None,
 ) -> dict[str, Any]:
     h = home or get_home_dir()
     ws = workspace.resolve() if workspace else pathlib.Path.cwd()
+
+    if server_repo in (*BROKER_MCP_NAMES, "broker"):
+        target_name = BROKER_MCP_SERVER_NAME if server_repo == "broker" else server_repo
+        return register_broker_mcp(
+            assistants=assistants,
+            scope=scope,
+            workspace=workspace,
+            home=h,
+            server_name=target_name,
+            dry_run=dry_run,
+            apply=apply,
+            expect_hash=expect_hash,
+            expect_plan_hash=expect_plan_hash,
+        )
 
     if "all" in assistants:
         assistants = [a for a in ASSISTANTS if not (a == "kilo" and server_repo == "kilo-mcp")]
@@ -5468,6 +6590,15 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("\n=== Stray Config Files ===")
         for s in report["stray"]:
             print(f"  ! STRAY: {s} (not read by tool)")
+
+    if report.get("broker_mcp"):
+        bm = report["broker_mcp"]
+        linfo = bm.get("launcher", {})
+        print(f"\n=== Launcher & Broker MCP Registration (plan hash: {bm.get('plan_hash', '')}) ===")
+        print(f"  launcher          : [{linfo.get('state')}] {linfo.get('path')}")
+        for asst, cinfo in bm.get("clients", {}).items():
+            rs = f" ({'; '.join(cinfo.get('reasons', []))})" if cinfo.get("reasons") and cinfo.get("state") != "registered" else ""
+            print(f"  {asst:<18}: [{cinfo.get('state')}] {cinfo.get('config_path')}{rs}")
     return 0
 
 
@@ -5532,10 +6663,13 @@ def cmd_install_skills(args: argparse.Namespace) -> int:
 
 
 def cmd_register_mcp(args: argparse.Namespace) -> int:
-    if "all" in args.assistants:
+    raw_assistants = args.assistants
+    if raw_assistants is None:
+        raw_assistants = ["all"] if args.server in (*BROKER_MCP_NAMES, "broker") else ["claude", "codex"]
+    if "all" in raw_assistants:
         assistants = [a for a in ASSISTANTS if not (a == "kilo" and args.server == "kilo-mcp")]
     else:
-        assistants = args.assistants
+        assistants = raw_assistants
     ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
     try:
         res = register_mcp_server(
@@ -5547,6 +6681,8 @@ def cmd_register_mcp(args: argparse.Namespace) -> int:
             home=args.home,
             dry_run=args.dry_run,
             expect_plan_hash=args.expect_plan_hash,
+            apply=getattr(args, "apply", False),
+            expect_hash=getattr(args, "expect_hash", None),
         )
     except (ValueError, FileNotFoundError, RuntimeError) as exc:
         if args.json:
@@ -5566,6 +6702,60 @@ def cmd_register_mcp(args: argparse.Namespace) -> int:
                 print(f"  {item['action'].upper():<8} {item['path']} ({item['reason']})")
         else:
             print(f"[ok] Registered MCP server '{args.server}' in: {', '.join(res['updated_configs'])}. Plan hash: {res['plan_hash']}.")
+    return 0 if res.get("ok") else 1
+
+
+def cmd_install_launcher(args: argparse.Namespace) -> int:
+    src_repo = pathlib.Path(args.source_repo).resolve() if getattr(args, "source_repo", None) else None
+    res = install_launcher(
+        home=args.home,
+        target_path=getattr(args, "path", None),
+        source_repo=src_repo,
+        dry_run=args.dry_run,
+        apply=getattr(args, "apply", False),
+        expect_hash=getattr(args, "expect_hash", None),
+        expect_plan_hash=args.expect_plan_hash,
+    )
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        if not res.get("ok"):
+            print(f"[error] {res.get('error', 'Execution refused')}", file=sys.stderr)
+        elif res.get("dry_run"):
+            print(f"[preview] Launcher plan (hash: {res['plan_hash']}):")
+            for item in res["plan"]:
+                print(f"  {item['action'].upper():<8} {item['path']} ({item['reason']})")
+            print(f"To apply: ai-orch install-launcher --apply --expect-hash {res['plan_hash']}")
+        else:
+            print(f"[ok] Launcher {res.get('action', 'installed')} at {res['path']} (hash: {res['plan_hash']}).")
+    return 0 if res.get("ok") else 1
+
+
+def cmd_register_broker(args: argparse.Namespace) -> int:
+    ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
+    res = register_broker_mcp(
+        assistants=args.assistants,
+        scope=args.scope,
+        workspace=ws,
+        home=args.home,
+        server_name=getattr(args, "server_name", None),
+        dry_run=args.dry_run,
+        apply=getattr(args, "apply", False),
+        expect_hash=getattr(args, "expect_hash", None),
+        expect_plan_hash=args.expect_plan_hash,
+    )
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        if not res.get("ok"):
+            print(f"[error] {res.get('error', 'Execution refused')}", file=sys.stderr)
+        elif res.get("dry_run"):
+            print(f"[preview] Broker MCP registration plan ({len(res['plan'])} client(s), hash: {res['plan_hash']}):")
+            for item in res["plan"]:
+                print(f"  {item['action'].upper():<8} [{item.get('assistant', '')}] {item['path']} ({item['reason']})")
+            print(f"To apply: ai-orch env register-broker --apply --expect-hash {res['plan_hash']}")
+        else:
+            print(f"[ok] Registered broker MCP in: {', '.join(res['updated_configs']) or 'already up to date'}. Plan hash: {res['plan_hash']}.")
     return 0 if res.get("ok") else 1
 
 
@@ -5884,6 +7074,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--json", dest="parent_json", action="store_true", default=False, help="Output structured JSON on stdout")
     ap.add_argument("--dry-run", dest="parent_dry_run", action="store_true", default=False, help="Compute and output execution plan without modifying disk")
     ap.add_argument("--expect-plan-hash", dest="parent_expect_plan_hash", default=None, help="Refuse execution if recomputed plan hash does not match")
+    ap.add_argument("--expect-hash", dest="parent_expect_hash", default=None, help="Alias for --expect-plan-hash")
 
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -5891,6 +7082,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_st.add_argument("--workspace", default=None, help="Optional project workspace to inspect project-scope installs")
     p_st.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
     p_st.set_defaults(func=cmd_status)
+
+    p_il = sub.add_parser("install-launcher", help="Preview or install the version-free ~/.local/bin/ai-orch launcher")
+    p_il.add_argument("--path", default=None, help="Custom launcher destination path (default: <home>/.local/bin/ai-orch)")
+    p_il.add_argument("--source-repo", default=None, help="Fallback source repo root baked into launcher")
+    p_il.add_argument("--dry-run", action="store_true", default=False, help="Preview plan without modifying disk (default when --apply is omitted)")
+    p_il.add_argument("--apply", action="store_true", default=False, help="Write launcher executable")
+    p_il.add_argument("--expect-hash", default=None, help="Refuse execution if plan/content hash does not match")
+    p_il.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
+    p_il.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
+    p_il.set_defaults(func=cmd_install_launcher)
+
+    p_rb = sub.add_parser("register-broker", help="Preview or apply broker MCP shim registration across Claude Code, Kilo, and Codex")
+    p_rb.add_argument("--assistants", nargs="+", choices=[*ASSISTANTS, "all"], default=["all"])
+    p_rb.add_argument("--scope", choices=SCOPES, default="global")
+    p_rb.add_argument("--server-name", default=None, help="Override MCP server name (default: ai-orchestration)")
+    p_rb.add_argument("--workspace", default=None)
+    p_rb.add_argument("--dry-run", action="store_true", default=False, help="Preview plan without modifying disk (default when --apply is omitted)")
+    p_rb.add_argument("--apply", action="store_true", default=False, help="Write client MCP config registrations")
+    p_rb.add_argument("--expect-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
+    p_rb.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
+    p_rb.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
+    p_rb.set_defaults(func=cmd_register_broker)
 
     p_fr = sub.add_parser("fetch-repos", help="Clone or update ai-orchestration / kilo-mcp in ~/.ai-orchestration/repos/")
     p_fr.add_argument("--repos", nargs="+", default=["ai-orchestration", "kilo-mcp"])
@@ -5913,13 +7126,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_is.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
     p_is.set_defaults(func=cmd_install_skills)
 
-    p_rm = sub.add_parser("register-mcp", help="Provision and register kilo-mcp, claude-mcp, or codex-mcp across assistants")
-    p_rm.add_argument("server", choices=("kilo-mcp", "claude-mcp", "codex-mcp"))
-    p_rm.add_argument("--assistants", nargs="+", choices=[*ASSISTANTS, "all"], default=["claude", "codex"])
+    p_rm = sub.add_parser("register-mcp", help="Provision and register ai-orchestration broker, kilo-mcp, claude-mcp, or codex-mcp across assistants")
+    p_rm.add_argument("server", choices=("kilo-mcp", "claude-mcp", "codex-mcp", *BROKER_MCP_NAMES, "broker"))
+    p_rm.add_argument("--assistants", nargs="+", choices=[*ASSISTANTS, "all"], default=None)
     p_rm.add_argument("--scope", choices=SCOPES, default="global")
     p_rm.add_argument("--provision-venv", action="store_true", help="Create .venv and pip install -e if missing")
     p_rm.add_argument("--workspace", default=None)
     p_rm.add_argument("--dry-run", action="store_true", default=False, help="Compute and output execution plan without modifying disk")
+    p_rm.add_argument("--apply", action="store_true", default=False, help="Apply registration plan")
+    p_rm.add_argument("--expect-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
     p_rm.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
     p_rm.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
     p_rm.set_defaults(func=cmd_register_mcp)
@@ -5976,6 +7191,8 @@ def main() -> None:
     args.dry_run = bool(getattr(args, "parent_dry_run", False) or getattr(args, "dry_run", False))
     if not getattr(args, "expect_plan_hash", None) and getattr(args, "parent_expect_plan_hash", None):
         args.expect_plan_hash = args.parent_expect_plan_hash
+    if not getattr(args, "expect_hash", None) and getattr(args, "parent_expect_hash", None):
+        args.expect_hash = args.parent_expect_hash
     sys.exit(args.func(args))
 
 
