@@ -582,3 +582,88 @@ def test_projects_discover_unregistered_workspace(isolated_env: pathlib.Path, tm
     again_data = json.loads(res_again.stdout)
     assert again_data["ok"] is True
     assert again_data["workspace_registered"] is True
+
+
+def test_discovery_hygiene_git_ignored_nested_repo_symlinks_and_projects_ignore(
+    isolated_env: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Verify T049 discovery hygiene:
+    1. Only folders with tasks/00-INDEX.md are proposed (never bare tasks/ like Ansible roles or bare .git).
+    2. Named git-ignored folders are skipped even when they contain their own .git repo (e.g. ansible-playbooks/, security_audit/).
+    3. Symlinks (to folders or to tasks/) are never followed.
+    4. .ai-orchestration/projects-ignore and [workspace.discovery] exclude by project name/slug and by folder subtree, with !negation.
+    """
+    ws_dir = tmp_path / "hygiene_ws"
+    ws_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=str(ws_dir), check=True)
+    (ws_dir / ".gitignore").write_text("/ansible-playbooks/\nsecurity_audit/\n", encoding="utf-8")
+
+    # Root task tree
+    (ws_dir / "tasks").mkdir(parents=True)
+    (ws_dir / "tasks" / "00-INDEX.md").write_text("# Root\n", encoding="utf-8")
+
+    # Git-ignored nested repo with both Ansible role tasks/main.yml AND a real tasks/00-INDEX.md inside it
+    ans_repo = ws_dir / "ansible-playbooks"
+    ans_repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=str(ans_repo), check=True)
+    (ans_repo / "roles" / "389ds_backup" / "tasks").mkdir(parents=True)
+    (ans_repo / "roles" / "389ds_backup" / "tasks" / "main.yml").write_text("---\n", encoding="utf-8")
+    (ans_repo / "nested-with-index" / "tasks").mkdir(parents=True)
+    (ans_repo / "nested-with-index" / "tasks" / "00-INDEX.md").write_text("# Should be ignored\n", encoding="utf-8")
+
+    # Non-ignored Ansible role folder (has tasks/main.yml, no 00-INDEX.md) and bare git submodule (no tasks/00-INDEX.md)
+    (ws_dir / "infrastructure" / "roles" / "apache_conf" / "tasks").mkdir(parents=True)
+    (ws_dir / "infrastructure" / "roles" / "apache_conf" / "tasks" / "main.yml").write_text("---\n", encoding="utf-8")
+    bare_sub = ws_dir / "modules" / "bare-git-lib"
+    bare_sub.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=str(bare_sub), check=True)
+
+    # Symlink to an external project with tasks/00-INDEX.md
+    ext_proj = tmp_path / "external_lib"
+    (ext_proj / "tasks").mkdir(parents=True)
+    (ext_proj / "tasks" / "00-INDEX.md").write_text("# External\n", encoding="utf-8")
+    (ws_dir / "libs-jdk17").symlink_to(ext_proj)
+
+    # Real subprojects under source_codes/ and modules/
+    for rel in (
+        "source_codes/legacy-a",
+        "source_codes/legacy-b",
+        "modules/portal-accept-invite-portlet",
+        "modules/portal-messages-portlet",
+        "modules/active-service",
+    ):
+        p = ws_dir / rel / "tasks"
+        p.mkdir(parents=True)
+        (p / "00-INDEX.md").write_text(f"# {rel}\n", encoding="utf-8")
+
+    # Add .ai-orchestration/projects-ignore:
+    # - ignore whole subtree `source_codes/`
+    # - ignore by name/slug `portal-*-portlet`
+    # - re-include `!portal-messages-portlet`
+    ign_file = ws_dir / ".ai-orchestration" / "projects-ignore"
+    ign_file.parent.mkdir(parents=True, exist_ok=True)
+    ign_file.write_text(
+        "# Ignore whole source_codes subtree\n"
+        "source_codes/\n"
+        "# Ignore portlets by slug glob, except messages\n"
+        "portal-*-portlet\n"
+        "!portal-messages-portlet\n",
+        encoding="utf-8",
+    )
+
+    plan = reg.plan_projects_discover(str(ws_dir), config_dir=isolated_env)
+    disc_ids = [p["id"] for p in plan["discovered"]]
+    assert "_workspace" in disc_ids
+    assert "active-service" in disc_ids
+    assert "portal-messages-portlet" in disc_ids
+    assert "portal-accept-invite-portlet" not in disc_ids
+    assert "legacy-a" not in disc_ids
+    assert "legacy-b" not in disc_ids
+    assert "389ds-backup" not in disc_ids
+    assert "nested-with-index" not in disc_ids
+    assert "apache-conf" not in disc_ids
+    assert "bare-git-lib" not in disc_ids
+    assert "libs-jdk17" not in disc_ids
+    assert "external-lib" not in disc_ids
+    assert set(disc_ids) == {"_workspace", "active-service", "portal-messages-portlet"}
+

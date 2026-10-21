@@ -356,20 +356,20 @@ def _git_repo_root(path: pathlib.Path) -> pathlib.Path | None:
     return None
 
 
-def is_git_ignored(path: pathlib.Path, ws_path: pathlib.Path) -> bool:
-    """Check whether `path` is ignored by git, asked of the repository that owns it.
+def _check_git_ignore_in_repo(repo: pathlib.Path, target: pathlib.Path, is_nested_repo: bool) -> bool:
+    """Ask `repo` whether `target` is git-ignored.
 
-    A workspace often groups nested repositories (each sub-project its own repo) under an outer repo whose
-    .gitignore is an allowlist; the outer repo then "ignores" every nested repo. A nested repository root is
-    therefore never ignored, and a path inside a nested repository is checked against that repository only.
+    If `target` is itself a nested git repository (`is_nested_repo=True`), it is only
+    considered ignored by `repo` when `repo`'s matching ignore rule is NOT a blanket
+    root wildcard (`*` or `/*` used in allowlist wrapper workspaces like ai-coding-tools).
     """
     try:
-        if (path / ".git").exists():
-            return False
-        repo = _git_repo_root(path)
-        if repo is None:
-            return False
-        rel = path.relative_to(repo)
+        rel = target.relative_to(repo)
+    except ValueError:
+        return False
+    if str(rel) in ("", "."):
+        return False
+    if not is_nested_repo:
         proc = subprocess.run(
             ["git", "check-ignore", "-q", str(rel)],
             cwd=str(repo),
@@ -377,8 +377,188 @@ def is_git_ignored(path: pathlib.Path, ws_path: pathlib.Path) -> bool:
             check=False,
         )
         return proc.returncode == 0
+    proc = subprocess.run(
+        ["git", "check-ignore", "-v", str(rel)],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return False
+    # Output format: <source>:<linenum>:<pattern>\t<pathname>
+    for line in (proc.stdout or "").splitlines():
+        tab_part = line.split("\t", 1)[0]
+        parts = tab_part.split(":", 2)
+        if len(parts) == 3:
+            pattern = parts[2].strip()
+            if pattern in ("*", "/*"):
+                return False
+    return True
+
+
+def is_git_ignored(path: pathlib.Path, ws_path: pathlib.Path) -> bool:
+    """Check whether `path` is ignored by git, asked of the workspace repo and enclosing repo.
+
+    A workspace may group nested repositories under an outer allowlist `.gitignore` (`/*`),
+    or it may contain git-ignored reference clones/directories (e.g. `security_audit/`,
+    `/ansible-playbooks/`, `/liferay62/`) that happen to contain their own `.git`.
+    Named ignore rules in the workspace or parent repo always win, even when `path/.git` exists.
+    """
+    try:
+        has_own_git = (path / ".git").exists()
+        ws_repo = _git_repo_root(ws_path)
+        parent_repo = _git_repo_root(path.parent) if has_own_git else _git_repo_root(path)
+
+        repos_to_check: list[pathlib.Path] = []
+        if ws_repo is not None:
+            repos_to_check.append(ws_repo)
+        if parent_repo is not None and parent_repo not in repos_to_check:
+            repos_to_check.append(parent_repo)
+
+        for repo in repos_to_check:
+            if _check_git_ignore_in_repo(repo, path, is_nested_repo=(has_own_git and repo != path)):
+                return True
+        return False
     except Exception:
         return False
+
+
+def _match_ignore_pattern(rel_posix: str, name: str, slug: str, raw_pat: str) -> bool:
+    """Match a single gitignore-style pattern against a workspace-relative path, folder name, or slug."""
+    import fnmatch
+
+    pat = raw_pat.strip()
+    if not pat:
+        return False
+    while pat.startswith("./"):
+        pat = pat[2:]
+    anchored = pat.startswith("/")
+    if anchored:
+        pat = pat.lstrip("/")
+    dir_only = pat.endswith("/")
+    if dir_only:
+        pat = pat.rstrip("/")
+    if not pat:
+        return False
+
+    rel_norm = rel_posix.strip("/")
+    if not rel_norm or rel_norm == ".":
+        return False
+
+    has_slash = "/" in pat
+    if has_slash or anchored or dir_only:
+        if rel_norm == pat or rel_norm.startswith(pat + "/"):
+            return True
+        if fnmatch.fnmatchcase(rel_norm, pat) or fnmatch.fnmatchcase(rel_norm, pat + "/*"):
+            return True
+        parts = rel_norm.split("/")
+        for i in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:i])
+            if fnmatch.fnmatchcase(prefix, pat):
+                return True
+        return False
+
+    # Bare name/slug pattern (no slash, not anchored): matches folder name, project slug, or any path segment
+    if fnmatch.fnmatchcase(name, pat) or fnmatch.fnmatchcase(slug, pat):
+        return True
+    for part in rel_norm.split("/"):
+        if fnmatch.fnmatchcase(part, pat) or fnmatch.fnmatchcase(sanitize_slug(part), pat):
+            return True
+    return False
+
+
+class WorkspaceDiscoveryFilter:
+    """Evaluates `[workspace.discovery]` include/exclude globs and `.ai-orchestration/projects-ignore`."""
+
+    def __init__(
+        self,
+        include_patterns: list[str] | None = None,
+        ignore_rules: list[tuple[str, bool]] | None = None,
+    ) -> None:
+        self.include_patterns: list[str] = [p.strip() for p in (include_patterns or []) if p and p.strip()]
+        # Each rule is (pattern, is_negated)
+        self.ignore_rules: list[tuple[str, bool]] = ignore_rules or []
+        self.has_negations: bool = any(neg for _, neg in self.ignore_rules)
+
+    def is_excluded(self, rel_posix: str, name: str, slug: str) -> bool:
+        excluded = False
+        for pat, is_negated in self.ignore_rules:
+            if _match_ignore_pattern(rel_posix, name, slug, pat):
+                excluded = not is_negated
+        return excluded
+
+    def can_prune_dir(self, rel_posix: str, dir_name: str) -> bool:
+        """Return True if a directory can be skipped during tree walk without descending."""
+        if self.has_negations:
+            return False
+        slug = sanitize_slug(dir_name)
+        return self.is_excluded(rel_posix, dir_name, slug)
+
+    def allows_project(self, rel_posix: str, name: str, slug: str) -> bool:
+        if rel_posix in (".", ""):
+            return not self.is_excluded(rel_posix, "_workspace", "_workspace")
+        if self.is_excluded(rel_posix, name, slug):
+            return False
+        if self.include_patterns:
+            return any(_match_ignore_pattern(rel_posix, name, slug, inc) for inc in self.include_patterns)
+        return True
+
+
+def load_workspace_discovery_filter(ws_path: pathlib.Path) -> WorkspaceDiscoveryFilter:
+    """Load discovery include/exclude rules from `orchestration.toml` and `.ai-orchestration/projects-ignore`."""
+    include_patterns: list[str] = []
+    ignore_rules: list[tuple[str, bool]] = []
+
+    for cfg_cand in (
+        ws_path / "orchestration.toml",
+        ws_path / ".ai-orchestration" / "orchestration.toml",
+        ws_path / ".ai-orchestration.local.toml",
+    ):
+        if cfg_cand.is_file() and not cfg_cand.is_symlink():
+            try:
+                data = oc.load_toml_file(cfg_cand)
+                ws_sec = data.get("workspace")
+                if isinstance(ws_sec, dict):
+                    disc = ws_sec.get("discovery")
+                    if isinstance(disc, dict):
+                        inc = disc.get("include")
+                        if isinstance(inc, list):
+                            include_patterns.extend(str(x) for x in inc if x)
+                        for key in ("exclude", "ignore"):
+                            exc = disc.get(key)
+                            if isinstance(exc, list):
+                                for item in exc:
+                                    s = str(item).strip()
+                                    if not s or s.startswith("#"):
+                                        continue
+                                    if s.startswith("!"):
+                                        ignore_rules.append((s[1:].strip(), True))
+                                    else:
+                                        ignore_rules.append((s, False))
+            except Exception:
+                pass
+
+    for ign_file in (
+        ws_path / ".ai-orchestration" / "projects-ignore",
+        ws_path / ".ai-orchignore",
+    ):
+        if ign_file.is_file() and not ign_file.is_symlink():
+            try:
+                for raw_line in ign_file.read_text(encoding="utf-8").splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("!"):
+                        pat = line[1:].strip()
+                        if pat:
+                            ignore_rules.append((pat, True))
+                    else:
+                        ignore_rules.append((line, False))
+            except Exception:
+                pass
+
+    return WorkspaceDiscoveryFilter(include_patterns=include_patterns, ignore_rules=ignore_rules)
 
 
 def compute_plan_hash(payload: dict[str, Any]) -> str:
@@ -1049,12 +1229,20 @@ def plan_projects_discover(
 
         # Discover folders containing tasks/00-INDEX.md
         candidate_folders: list[pathlib.Path] = []
+        disc_filter = load_workspace_discovery_filter(ws_path)
 
         # Check workspace root
-        if (ws_path / "tasks" / "00-INDEX.md").is_file():
+        root_tasks_dir = ws_path / "tasks"
+        root_index = root_tasks_dir / "00-INDEX.md"
+        if (
+            not root_tasks_dir.is_symlink()
+            and not root_index.is_symlink()
+            and root_index.is_file()
+            and disc_filter.allows_project(".", "_workspace", "_workspace")
+        ):
             candidate_folders.append(ws_path)
 
-        for root, dirs, _ in os.walk(str(ws_path)):
+        for root, dirs, _ in os.walk(str(ws_path), followlinks=False):
             # Prune hidden dirs and excluded dirs in-place
             dirs[:] = [
                 d
@@ -1064,7 +1252,17 @@ def plan_projects_discover(
             ]
 
             for d in list(dirs):
-                folder_p = (pathlib.Path(root) / d).resolve()
+                raw_p = pathlib.Path(root) / d
+                if raw_p.is_symlink():
+                    dirs.remove(d)
+                    continue
+
+                folder_p = raw_p.resolve()
+                try:
+                    rel_posix = folder_p.relative_to(ws_path).as_posix()
+                except ValueError:
+                    dirs.remove(d)
+                    continue
 
                 # Check if folder or any parent is an inner workspace
                 is_inner = any(
@@ -1079,8 +1277,17 @@ def plan_projects_discover(
                     dirs.remove(d)
                     continue
 
-                index_file = folder_p / "tasks" / "00-INDEX.md"
-                if index_file.is_file():
+                if disc_filter.can_prune_dir(rel_posix, d):
+                    dirs.remove(d)
+                    continue
+
+                tasks_dir = folder_p / "tasks"
+                index_file = tasks_dir / "00-INDEX.md"
+                if (
+                    not tasks_dir.is_symlink()
+                    and not index_file.is_symlink()
+                    and index_file.is_file()
+                ):
                     candidate_folders.append(folder_p)
 
         # Build proposed projects list
@@ -1095,8 +1302,10 @@ def plan_projects_discover(
                 rel_path = "."
                 p_id = "_workspace"
             else:
-                rel_path = str(folder.relative_to(ws_path))
+                rel_path = folder.relative_to(ws_path).as_posix()
                 raw_slug = sanitize_slug(folder.name)
+                if not disc_filter.allows_project(rel_path, folder.name, raw_slug):
+                    continue
                 p_id = raw_slug
                 suffix = 2
                 while p_id in used_slugs:
@@ -1237,6 +1446,8 @@ def list_projects(
     db_path = get_db_path(config_dir)
     conn = get_connection(db_path)
     try:
+        disc_filter = load_workspace_discovery_filter(ws_path)
+
         # Load inner registered workspaces
         other_workspaces = conn.execute(
             "SELECT * FROM workspaces WHERE uuid != ?", (ws["uuid"],)
@@ -1245,6 +1456,9 @@ def list_projects(
         for ow in other_workspaces:
             ow_path = pathlib.Path(ow["canonical_path"]).resolve()
             if ws_path in ow_path.parents:
+                rel_ow = ow_path.relative_to(ws_path).as_posix()
+                if not disc_filter.allows_project(rel_ow, ow_path.name, ow["slug"]):
+                    continue
                 inner_ws.append({
                     "uuid": ow["uuid"],
                     "slug": ow["slug"],
@@ -1260,6 +1474,10 @@ def list_projects(
 
         items: list[dict[str, Any]] = []
         for pr in proj_rows:
+            rel_p = str(pr["rel_path"]).replace("\\", "/")
+            name_p = "_workspace" if pr["slug"] == "_workspace" else pathlib.PurePosixPath(rel_p).name
+            if not disc_filter.allows_project(rel_p, name_p, pr["slug"]):
+                continue
             kind = "_workspace" if pr["slug"] == "_workspace" else "project"
             items.append({
                 "uuid": pr["uuid"],
