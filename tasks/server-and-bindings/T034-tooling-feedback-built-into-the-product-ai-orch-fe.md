@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Owner 2026-10-21: every session using the tooling must report needs and improvements; the rule must live in the product, not in messages
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: bin/ai-orch, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, plugins/*/skills/*/SKILL.template.md, bindings
 - handoff: Read tasks/server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md, do the open steps, run the Verification, update the task and the registry.
 - short: Built-in feedback channel
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
