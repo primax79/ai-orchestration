@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Agents move to the broker MCP (16.6); what remains is the CLI fallback and small fixes
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: 16.6
 - decider: -
@@ -14,6 +14,8 @@
 - paths: bin/ai-orch, scripts/orchestration_env.py, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Read tasks/tooling/T038-stable-ai-orch-entry-point-clean-adoption-by-upgra.md, do the open steps, run the Verification, update the task and the registry.
 - short: Stable entry point
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
