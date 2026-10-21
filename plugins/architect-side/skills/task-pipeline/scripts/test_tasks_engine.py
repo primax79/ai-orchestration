@@ -9026,3 +9026,303 @@ def test_upgrade_creates_and_updates_tasks_gitignore(tmp_path: pathlib.Path) -> 
     assert res3["ok"] is True
     assert str(custom_gi) not in res3["created"]
     assert str(custom_gi) not in res3["updated"]
+
+
+# ===========================================================================
+# T035 One-Shot Close, Derived State Refusal, Bulk Set-Short, Transition --to
+# ===========================================================================
+
+
+def test_one_shot_close_emergent_and_plan_task(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # 1. 00-INDEX.md
+    index_file = tasks_dir / "00-INDEX.md"
+    index_file.write_text(
+        "# Tasks\n\n"
+        "## Initiatives\n\n"
+        "<!-- ai-orch:generated initiatives -->\n"
+        "| Priority | ID | Title | Status | Next up | Leaves Done | Short |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| P1 | 01 | Setup Initiative | open | yes | 0/1 | Setup |\n"
+        "<!-- /ai-orch:generated initiatives -->\n\n"
+        "## Tasks by category\n\n"
+        "### features\n\n"
+        "<!-- ai-orch:generated category:features -->\n"
+        "| Priority | ID | Title | State | Next up | Executor | Decider |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| P1 | T001 | Test Emergent | in progress | yes | kilo | - |\n"
+        "<!-- /ai-orch:generated category:features -->\n\n"
+        "## Done\n\n"
+        "<!-- ai-orch:generated done -->\n"
+        "| Priority | ID | Title | Closed | Short |\n"
+        "|---|---|---|---|---|\n"
+        "<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+
+    # 2. Emergent folder task
+    folder_task_dir = tasks_dir / "features" / "T001-emergent"
+    folder_task_dir.mkdir(parents=True)
+    _write_sample_task(
+        folder_task_dir / "README.md",
+        task_id="T001",
+        title="Test Emergent",
+        category="features",
+        state="in progress",
+        executor="kilo",
+    )
+    (folder_task_dir / "PROGRESS.md").write_text("# Progress\n\n## Log (newest first)\n\n", encoding="utf-8")
+
+    # 3. Plan task under 01-setup
+    init_dir = tasks_dir / "01-setup"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        "# 01 Setup Initiative\n\n"
+        "- **Goal:** Setup goal.\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Setup Plan Task\n\n"
+        "- **Status:** `in progress`\n"
+        "- **Executor:** kilo\n"
+        "- **Goal:** Do setup\n\n"
+        "## Closed\n",
+        encoding="utf-8",
+    )
+
+    # Refusal when verifier == executor without owner approval
+    res_bad_ver = run_cli("close", "T001", "--verifier", "kilo", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_bad_ver.returncode == 1
+    assert "Closing task requires an independent verifier" in res_bad_ver.stderr or "Closing task requires an independent verifier" in res_bad_ver.stdout
+
+    # Close emergent task T001 with --verifier reviewer
+    res_close_t001 = run_cli("close", "T001", "--verifier", "reviewer", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_close_t001.returncode == 0
+    t001_data = json.loads(res_close_t001.stdout)
+    assert t001_data["ok"] is True
+    assert t001_data["old_state"] == "in progress"
+    assert t001_data["new_state"] == "done"
+    assert len(t001_data["transitions"]) == 3
+    assert [t["to"] for t in t001_data["transitions"]] == ["delivered", "verified", "done"]
+
+    # Verify emergent task moved to done/
+    assert not (folder_task_dir / "README.md").exists()
+    done_readme = tasks_dir / "done" / "features" / "T001-emergent" / "README.md"
+    done_progress = tasks_dir / "done" / "features" / "T001-emergent" / "PROGRESS.md"
+    assert done_readme.is_file()
+    assert done_progress.is_file()
+
+    # Verify all intermediate transitions recorded in PROGRESS.md
+    prog_content = done_progress.read_text(encoding="utf-8")
+    assert "state `in progress` -> `delivered`" in prog_content
+    assert "state `delivered` -> `verified`" in prog_content
+    assert "state `verified` -> `done`" in prog_content
+
+    # Close plan task 01.1 with --verifier reviewer
+    res_close_plan = run_cli("close", "01.1", "--verifier", "reviewer", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_close_plan.returncode == 0
+    plan_data = json.loads(res_close_plan.stdout)
+    assert plan_data["ok"] is True
+    assert plan_data["old_state"] == "in progress"
+    assert plan_data["new_state"] == "done"
+    assert len(plan_data["transitions"]) == 3
+
+    # Verify inline plan task is now in ## Closed
+    plan_text = plan_file.read_text(encoding="utf-8")
+    closed_part = plan_text.split("## Closed", 1)[1]
+    assert "### 01.1 - Setup Plan Task" in closed_part
+    assert "- **Status:** `done`" in closed_part
+
+    # Verify 00-INDEX.md is updated
+    index_text = index_file.read_text(encoding="utf-8")
+    assert "T001" in index_text
+    done_sec = index_text.split("## Done", 1)[1]
+    assert "T001" in done_sec
+
+
+def test_one_shot_close_caveat_and_owner_approved(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    task_file = tasks_dir / "features" / "T002-caveat.md"
+    _write_sample_task(
+        task_file,
+        task_id="T002",
+        title="Caveat test",
+        category="features",
+        state="in progress",
+        executor="kilo",
+    )
+
+    # Close with --caveat and --owner-approved
+    res = run_cli(
+        "close",
+        "T002",
+        "--caveat",
+        "manual testing only",
+        "--owner-approved",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--json",
+    )
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    assert data["new_state"] == "done with a caveat: manual testing only"
+    assert (tasks_dir / "done" / "features" / "T002-caveat.md").is_file()
+
+
+def test_initiative_derived_state_transition_refusal(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    init_dir = tasks_dir / "01-core"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        "# 01 Core Initiative\n\n"
+        "- **Goal:** Core initiative goal.\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Task Alpha\n\n"
+        "- **Status:** `open`\n"
+        "- **Short:** Alpha\n"
+        "- **Goal:** Alpha\n\n"
+        "### 01.2 - Task Beta\n\n"
+        "- **Status:** `in progress`\n"
+        "- **Short:** Beta\n"
+        "- **Goal:** Beta\n\n"
+        "## Closed\n",
+        encoding="utf-8",
+    )
+
+    # 1. Plain CLI transition on initiative 01
+    res = run_cli("transition", "01", "in progress", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 1
+    assert "Initiative '01' state is derived from its child tasks" in res.stderr
+    assert "01.1 (Alpha): open" in res.stderr
+    assert "01.2 (Beta): in progress" in res.stderr
+    assert 'ai-orch tasks ship 01 --summary "..."' in res.stderr
+
+    # 2. JSON mode
+    res_json = run_cli("transition", "01", "--to", "delivered", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_json.returncode == 1
+    data = json.loads(res_json.stdout)
+    assert data["ok"] is False
+    assert data["error"] == "derived state; transition its leaves"
+    assert "Initiative '01' state is derived from its child tasks" in data["message"]
+    assert len(data["open_children"]) == 2
+    assert data["open_children"][0]["id"] == "01.1"
+    assert data["open_children"][1]["id"] == "01.2"
+
+
+def test_bulk_set_short_from_sources(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # 00-INDEX.md
+    index_file = tasks_dir / "00-INDEX.md"
+    index_file.write_text(
+        "# Tasks\n\n"
+        "## Initiatives\n\n"
+        "<!-- ai-orch:generated initiatives -->\n"
+        "| Priority | ID | Title | Status | Next up | Leaves Done | Short |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| P1 | 01 | Setup Initiative | open | yes | 0/1 | Old |\n"
+        "<!-- /ai-orch:generated initiatives -->\n\n"
+        "## Tasks by category\n\n"
+        "### features\n\n"
+        "<!-- ai-orch:generated category:features -->\n"
+        "| Priority | ID | Title | State | Next up | Executor | Decider |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| P1 | T001 | Test Emergent | open | yes | kilo | - |\n"
+        "<!-- /ai-orch:generated category:features -->\n\n"
+        "## Done\n\n"
+        "<!-- ai-orch:generated done -->\n"
+        "| Priority | ID | Title | Closed | Short |\n"
+        "|---|---|---|---|---|\n"
+        "<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+
+    # Emergent task
+    t001_file = tasks_dir / "features" / "T001-scraper.md"
+    _write_sample_task(t001_file, task_id="T001", title="Scraper Task", category="features")
+
+    # Plan task
+    init_dir = tasks_dir / "01-setup"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        "# 01 Setup Initiative\n\n"
+        "- **Goal:** Setup goal.\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Setup Task\n\n"
+        "- **Status:** `open`\n"
+        "- **Goal:** Setup\n\n"
+        "## Closed\n",
+        encoding="utf-8",
+    )
+
+    # 1. Bulk set-short with inline JSON string
+    inline_json = json.dumps({"T001": "Short Scraper", "01.1": "Short Setup"})
+    res_inline = run_cli("set-short", "--from", inline_json, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_inline.returncode == 0
+    data_inline = json.loads(res_inline.stdout)
+    assert data_inline["ok"] is True
+    assert len(data_inline["updated"]) == 2
+    assert {u["id"]: u["short_title"] for u in data_inline["updated"]} == {
+        "T001": "Short Scraper",
+        "01.1": "Short Setup",
+    }
+
+    # Verify task contents
+    assert "- short: Short Scraper" in t001_file.read_text(encoding="utf-8")
+    assert "**Short:** Short Setup" in plan_file.read_text(encoding="utf-8")
+
+    # 2. Bulk set-short from lines file (key=value / id: short)
+    pairs_file = tmp_path / "shorts.txt"
+    pairs_file.write_text("T001: Fast Scraper\n01.1=Fast Setup\n", encoding="utf-8")
+
+    res_file = run_cli("set-short", "--from", str(pairs_file), "--tasks-dir", str(tasks_dir), "--json")
+    assert res_file.returncode == 0
+    data_file = json.loads(res_file.stdout)
+    assert data_file["ok"] is True
+    assert {u["id"]: u["short_title"] for u in data_file["updated"]} == {
+        "T001": "Fast Scraper",
+        "01.1": "Fast Setup",
+    }
+    assert "- short: Fast Scraper" in t001_file.read_text(encoding="utf-8")
+    assert "**Short:** Fast Setup" in plan_file.read_text(encoding="utf-8")
+
+
+def test_transition_to_flag_and_positional(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    task_file = tasks_dir / "features" / "T001-flag.md"
+    _write_sample_task(task_file, task_id="T001", state="open")
+
+    # 1. --to flag
+    res_flag = run_cli("transition", "T001", "--to", "in progress", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_flag.returncode == 0
+    data_flag = json.loads(res_flag.stdout)
+    assert data_flag["ok"] is True
+    assert data_flag["new_state"] == "in progress"
+
+    # 2. Positional
+    res_pos = run_cli("transition", "T001", "delivered", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_pos.returncode == 0
+    data_pos = json.loads(res_pos.stdout)
+    assert data_pos["ok"] is True
+    assert data_pos["new_state"] == "delivered"
+
+    # 3. Missing target state -> exit 2
+    res_missing = run_cli("transition", "T001", "--tasks-dir", str(tasks_dir))
+    assert res_missing.returncode == 2
+    assert "Missing target state" in res_missing.stderr
+
+    # 4. Conflicting target states -> exit 2
+    res_conflict = run_cli("transition", "T001", "verified", "--to", "bounced", "--tasks-dir", str(tasks_dir))
+    assert res_conflict.returncode == 2
+    assert "Conflicting target states" in res_conflict.stderr

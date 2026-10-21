@@ -244,8 +244,9 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 
 - **Three progressive ways to use `tasks/` (no hard dependency on extension or MCP):**
   1. **Plain Markdown + Git (zero install — no extension, no MCP, no CLI required):** Every file under `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `AGENTS.md`, `NN-<slug>/plan.md`, `<category>/T###-<slug>.md`, `questions/Q###-<slug>.md`, `_inbox/`) is plain Markdown. Create, edit, transition, and close (`git mv` to `tasks/done/<category>/`) files directly following the format rules below, and update the corresponding row inside the `<!-- ai-orch:generated ... -->` markers in `00-INDEX.md`.
-  2. **Standalone CLI (no extension or MCP required):** Run `~/.local/bin/ai-orch tasks …` (or the stdlib-only `python3 <path-to>/tasks_engine.py …`) to create, transition, validate (`tasks validate`), and sync (`tasks sync-index --apply`).
+  2. **Standalone CLI (no extension or MCP required):** Run `~/.local/bin/ai-orch tasks …` (or the stdlib-only `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py …` / `python3 <path-to>/tasks_engine.py …`) to create, transition, validate (`tasks validate`), and sync (`tasks sync-index --apply`).
   3. **Broker MCP / Web UI / VS Code Extension (when installed):** Use the `ai-orchestration` MCP tools (`tasks.*`, `questions.*`, `inbox.add_note`) or the UI dashboard.
+- **Cross-framework skill loading (any AI assistant / framework):** Claude Code loads `.claude/skills/` and Kilo Code loads `.kilo/skills/`. Any other AI coding framework or assistant (Codex, Gemini CLI, Copilot, Cursor, etc.) that reads `AGENTS.md` without native `.claude/skills/` discovery MUST read the project-versioned orchestration skills directly from `.claude/skills/<skill>/SKILL.md` (specifically `.claude/skills/task-pipeline/SKILL.md`, `.claude/skills/orchestration-workflow/SKILL.md`, `.claude/skills/task-spec-authoring/SKILL.md`, `.claude/skills/executor-contract/SKILL.md`) and use `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py` when `ai-orch` is not on `PATH`.
 - **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `### NN.T - <title>` followed by `- **Status:** \\`<state>\\` · ...`, sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
 - **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
 - **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
@@ -7135,6 +7136,13 @@ def _append_progress_log(
 ) -> pathlib.Path | None:
     file_path = pathlib.Path(task_info["file_path"])
     progress_path = file_path.parent / "PROGRESS.md" if task_info["is_folder"] else None
+    if progress_path is None:
+        if (file_path.parent / "PROGRESS.md").exists():
+            progress_path = file_path.parent / "PROGRESS.md"
+        elif file_path.is_file():
+            content = file_path.read_text(encoding="utf-8")
+            if "## Log" in content or verifier or reason:
+                progress_path = file_path
     if progress_path is None and not (file_path.parent / "PROGRESS.md").exists():
         # For single-file tasks that bounce or get owner-verified, only write PROGRESS.md if it's a folder task
         return None
@@ -7199,6 +7207,26 @@ def _move_task_to_done(task_info: dict[str, Any], tasks_dir: pathlib.Path) -> pa
     return dest_root / "README.md" if task_info["is_folder"] else dest_root
 
 
+def _collect_descendant_leaves(node_id: str, tree: dict[str, TaskNode]) -> list[TaskNode]:
+    result: list[TaskNode] = []
+    if node_id not in tree:
+        return result
+    stack = list(tree[node_id].children)
+    seen = set()
+    while stack:
+        cid = stack.pop(0)
+        if cid in seen or cid not in tree:
+            continue
+        seen.add(cid)
+        cnode = tree[cid]
+        if cnode.is_leaf:
+            result.append(cnode)
+        else:
+            stack.extend(cnode.children)
+    result.sort(key=lambda c: _natural_sort_key(c.id))
+    return result
+
+
 def transition_task(
     tasks_dir: pathlib.Path,
     task_id: str,
@@ -7237,6 +7265,45 @@ def transition_task(
 
             node = tree[task_id]
             if not node.is_leaf:
+                is_initiative = (
+                    node.node_type == "initiative"
+                    or node.kind == "initiative"
+                    or bool(re.match(r"^\d{2}(-[a-z0-9-]+)?$", task_id))
+                )
+                if is_initiative:
+                    init_num = task_id.split("-", 1)[0]
+                    leaves = _collect_descendant_leaves(task_id, tree)
+                    open_children = [c for c in leaves if c.canonical_state not in TERMINAL_STATES]
+                    if open_children:
+                        child_lines = "\n".join(
+                            f"  - {c.id} ({c.short_title or (c.short if c.short else derive_short_title(c.title))}): {c.state}"
+                            for c in open_children
+                        )
+                        msg = (
+                            f"Initiative '{task_id}' state is derived from its child tasks.\n"
+                            f"Open child tasks:\n{child_lines}\n"
+                            f"To ship a completed initiative once all children are closed, run: ai-orch tasks ship {init_num} --summary \"...\""
+                        )
+                    else:
+                        msg = (
+                            f"Initiative '{task_id}' state is derived from its child tasks.\n"
+                            f"All child tasks are closed.\n"
+                            f"To ship a completed initiative once all children are closed, run: ai-orch tasks ship {init_num} --summary \"...\""
+                        )
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "error": "derived state; transition its leaves",
+                        "message": msg,
+                        "open_children": [
+                            {
+                                "id": c.id,
+                                "short_title": c.short_title or (c.short if c.short else derive_short_title(c.title)),
+                                "state": c.state,
+                            }
+                            for c in open_children
+                        ],
+                    }
                 return False, {
                     "ok": False,
                     "task_id": task_id,
@@ -7578,6 +7645,237 @@ def transition_task(
                 "file_path": str(final_path),
                 "rel_path": final_path.relative_to(tasks_dir).as_posix(),
                 "bundle_sha256": new_bundle_hash,
+            }
+    except LockTimeoutError as e:
+        return False, {
+            "ok": False,
+            "task_id": task_id,
+            "error": "lock-timeout",
+            "message": str(e),
+        }
+    except UnsupportedPlatformError as e:
+        return False, {
+            "ok": False,
+            "task_id": task_id,
+            "error": "unsupported-platform",
+            "message": str(e),
+        }
+
+
+def close_task(
+    tasks_dir: pathlib.Path,
+    task_id: str,
+    actor: str | None = None,
+    verifier: str | None = None,
+    reason: str | None = None,
+    owner_approved: bool = False,
+    caveat: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "task_id": task_id,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    try:
+        with task_write_lock(tasks_dir):
+            tree = discover_task_tree(tasks_dir)
+            if task_id not in tree:
+                return False, {
+                    "ok": False,
+                    "task_id": task_id,
+                    "error": f"Task {task_id!r} not found in {tasks_dir}.",
+                }
+
+            node = tree[task_id]
+            if not node.is_leaf:
+                is_initiative = (
+                    node.node_type == "initiative"
+                    or node.kind == "initiative"
+                    or bool(re.match(r"^\d{2}(-[a-z0-9-]+)?$", task_id))
+                )
+                if is_initiative:
+                    init_num = task_id.split("-", 1)[0]
+                    leaves = _collect_descendant_leaves(task_id, tree)
+                    open_children = [c for c in leaves if c.canonical_state not in TERMINAL_STATES]
+                    if open_children:
+                        child_lines = "\n".join(
+                            f"  - {c.id} ({c.short_title or (c.short if c.short else derive_short_title(c.title))}): {c.state}"
+                            for c in open_children
+                        )
+                        msg = (
+                            f"Initiative '{task_id}' state is derived from its child tasks.\n"
+                            f"Open child tasks:\n{child_lines}\n"
+                            f"To ship a completed initiative once all children are closed, run: ai-orch tasks ship {init_num} --summary \"...\""
+                        )
+                    else:
+                        msg = (
+                            f"Initiative '{task_id}' state is derived from its child tasks.\n"
+                            f"All child tasks are closed.\n"
+                            f"To ship a completed initiative once all children are closed, run: ai-orch tasks ship {init_num} --summary \"...\""
+                        )
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "error": "derived state; transition its leaves",
+                        "message": msg,
+                        "open_children": [
+                            {
+                                "id": c.id,
+                                "short_title": c.short_title or (c.short if c.short else derive_short_title(c.title)),
+                                "state": c.state,
+                            }
+                            for c in open_children
+                        ],
+                    }
+                return False, {
+                    "ok": False,
+                    "task_id": task_id,
+                    "error": "derived state; transition its leaves",
+                }
+
+            curr_state = node.state
+            curr_canon = node.canonical_state
+            if curr_canon in TERMINAL_STATES or node.in_done or node.in_closed_section:
+                return False, {
+                    "ok": False,
+                    "task_id": task_id,
+                    "error": f"Task {task_id!r} is already closed in state '{curr_state}'.",
+                }
+
+            valid_start = ("open", "in progress", "delivered", "verified", "bounced")
+            if curr_canon not in valid_start:
+                return False, {
+                    "ok": False,
+                    "task_id": task_id,
+                    "error": f"Cannot close task from state '{curr_state}'. Expected one of: {', '.join(valid_start)}.",
+                }
+
+            executor = node.executor or "kilo"
+            vmode = None
+            if node.block_text is not None:
+                vmode = node.fields.get("verification_mode", {}).get("value") or node.own_fields.get("verification_mode")
+            else:
+                emergent = discover_emergent_tasks(tasks_dir)
+                target = next((t for t in emergent if t["id"] == task_id), None)
+                if target:
+                    vmode = (target.get("verification_mode") or "cross-agent").strip()
+                    executor = target.get("executor") or executor
+            if vmode in (None, "", "-"):
+                vmode = "cross-agent"
+
+            is_already_verified = (curr_canon == "verified")
+            is_self_vmode = (vmode == "self")
+
+            if not is_already_verified and not is_self_vmode:
+                if owner_approved:
+                    pass
+                elif verifier:
+                    exec_norm = executor.strip().lower()
+                    verif_norm = verifier.strip().lower()
+                    tool_prefix = verif_norm.split(":", 1)[0].strip()
+                    if verif_norm == exec_norm or tool_prefix == exec_norm:
+                        return False, {
+                            "ok": False,
+                            "task_id": task_id,
+                            "error": (
+                                f"Closing task requires an independent verifier (--verifier <v>, different from executor {executor!r}) "
+                                "or owner approval (--owner-approved)."
+                            ),
+                        }
+                else:
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "error": (
+                            f"Closing task requires an independent verifier (--verifier <v>, different from executor {executor!r}) "
+                            "or owner approval (--owner-approved)."
+                        ),
+                    }
+
+            if caveat and caveat.strip():
+                c_text = caveat.strip()
+                target_terminal = c_text if c_text.startswith("done with a caveat") else f"done with a caveat: {c_text}"
+            elif is_self_vmode and not verifier and not owner_approved:
+                target_terminal = "done with a caveat: self-verified only"
+            else:
+                target_terminal = "done"
+
+            steps: list[str] = []
+            if curr_canon in ("open", "bounced"):
+                steps.extend(["in progress", "delivered"])
+            elif curr_canon == "in progress":
+                steps.append("delivered")
+
+            if is_self_vmode and not verifier and not owner_approved:
+                pass
+            elif curr_canon == "verified":
+                pass
+            else:
+                steps.append("verified")
+
+            steps.append(target_terminal)
+
+            transitions_recorded: list[dict[str, Any]] = []
+            last_payload: dict[str, Any] = {}
+
+            for next_st in steps:
+                next_canon = normalize_state(next_st)
+                if next_canon == "verified":
+                    step_actor = "owner" if owner_approved else (actor or "owner")
+                    step_verifier = verifier or ("owner" if owner_approved else None)
+                elif next_canon in TERMINAL_STATES:
+                    step_actor = "owner" if owner_approved else (actor or verifier or executor or "owner")
+                    step_verifier = verifier or ("owner" if owner_approved else None)
+                else:
+                    step_actor = actor or executor
+                    step_verifier = verifier or ("owner" if owner_approved else None)
+                step_reason = reason
+
+                ok, res = transition_task(
+                    tasks_dir=tasks_dir,
+                    task_id=task_id,
+                    new_state=next_st,
+                    actor=step_actor,
+                    verifier=step_verifier,
+                    reason=step_reason,
+                )
+                if not ok:
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "error": f"Failed during transition to '{next_st}': {res.get('error')}",
+                        "details": res,
+                        "completed_transitions": transitions_recorded,
+                    }
+                last_payload = res
+                transitions_recorded.append({
+                    "from": res.get("old_state"),
+                    "to": res.get("new_state"),
+                    "task_hash": res.get("bundle_sha256") or res.get("task_hash"),
+                })
+
+            idx_path = tasks_dir / "00-INDEX.md"
+            if idx_path.is_file():
+                existing_idx = idx_path.read_text(encoding="utf-8")
+                rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
+                _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
+
+            return True, {
+                "ok": True,
+                "task_id": task_id,
+                "old_state": curr_state,
+                "new_state": last_payload.get("new_state", target_terminal),
+                "verifier": verifier or ("owner" if owner_approved else None),
+                "reason": reason,
+                "transitions": transitions_recorded,
+                "rel_path": last_payload.get("rel_path"),
+                "file_path": last_payload.get("file_path"),
+                "task_hash": last_payload.get("task_hash") or last_payload.get("bundle_sha256"),
+                "bundle_sha256": last_payload.get("bundle_sha256") or last_payload.get("task_hash"),
             }
     except LockTimeoutError as e:
         return False, {
@@ -8941,10 +9239,36 @@ def cmd_transition(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     expect_task_hash = getattr(args, "expect_task_hash", None)
     force_unblock = getattr(args, "force_unblock", False)
+    is_json = getattr(args, "json", False)
+
+    pos_state = getattr(args, "new_state", None)
+    flag_state = getattr(args, "to_state", None)
+
+    if pos_state and flag_state:
+        if pos_state != flag_state:
+            err_msg = f"Conflicting target states provided: positional '{pos_state}' vs --to '{flag_state}'."
+            if is_json:
+                print(json.dumps({"ok": False, "error": "conflicting-states", "message": err_msg}, indent=2))
+            else:
+                print(f"[FAIL] {err_msg}", file=sys.stderr)
+            return 2
+        effective_new_state = pos_state
+    elif pos_state:
+        effective_new_state = pos_state
+    elif flag_state:
+        effective_new_state = flag_state
+    else:
+        err_msg = "Missing target state: provide either positional <state> or --to <state>."
+        if is_json:
+            print(json.dumps({"ok": False, "error": "missing-state", "message": err_msg}, indent=2))
+        else:
+            print(f"[FAIL] {err_msg}", file=sys.stderr)
+        return 2
+
     ok, payload = transition_task(
         tasks_dir=tasks_dir,
         task_id=args.task_id,
-        new_state=args.new_state,
+        new_state=effective_new_state,
         actor=args.actor,
         verifier=args.verifier,
         reason=args.reason,
@@ -8962,6 +9286,39 @@ def cmd_transition(args: argparse.Namespace) -> int:
             if "expected" in payload and "actual" in payload:
                 print(f"[FAIL] {err}: expected {payload['expected']}, got {payload['actual']}", file=sys.stderr)
             elif "message" in payload:
+                print(f"[FAIL] {err}: {payload['message']}", file=sys.stderr)
+            else:
+                print(f"[FAIL] {err}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_close(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    task_id = getattr(args, "task_id", None) or getattr(args, "id", None)
+    verifier = getattr(args, "verifier", None)
+    reason = getattr(args, "reason", None)
+    actor = getattr(args, "actor", None)
+    owner_approved = getattr(args, "owner_approved", False)
+    caveat = getattr(args, "caveat", None)
+
+    ok, payload = close_task(
+        tasks_dir=tasks_dir,
+        task_id=task_id,
+        actor=actor,
+        verifier=verifier,
+        reason=reason,
+        owner_approved=owner_approved,
+        caveat=caveat,
+    )
+    args._last_result = payload
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        if ok:
+            print(f"[ok] Closed {task_id}: {payload['old_state']!r} -> {payload['new_state']!r} ({payload.get('rel_path', '')})")
+        else:
+            err = payload.get("error", "close failed")
+            if "message" in payload:
                 print(f"[FAIL] {err}: {payload['message']}", file=sys.stderr)
             else:
                 print(f"[FAIL] {err}", file=sys.stderr)
@@ -9269,10 +9626,118 @@ def cmd_set_labels(args: argparse.Namespace) -> int:
     return 0 if res.get("ok") else 1
 
 
+def _parse_bulk_short_source(source: str) -> list[tuple[str, str]]:
+    raw = source.strip()
+    if raw == "-":
+        content = sys.stdin.read()
+    elif pathlib.Path(raw).is_file():
+        content = pathlib.Path(raw).read_text(encoding="utf-8")
+    else:
+        content = raw
+
+    content = content.strip()
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            return [(str(k).strip(), str(v).strip()) for k, v in data.items() if str(k).strip()]
+        elif isinstance(data, list):
+            items: list[tuple[str, str]] = []
+            for entry in data:
+                if isinstance(entry, dict):
+                    k = entry.get("id") or entry.get("task_id") or entry.get("node_id")
+                    v = entry.get("short") or entry.get("short_title") or entry.get("title")
+                    if k and v:
+                        items.append((str(k).strip(), str(v).strip()))
+            return items
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    items = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            items.append((k.strip(), v.strip()))
+        elif ":" in line:
+            k, v = line.split(":", 1)
+            items.append((k.strip(), v.strip()))
+    return items
+
+
 def cmd_set_short(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    from_source = getattr(args, "from_source", None)
     expect_task_hash = getattr(args, "expect_task_hash", None)
     dry_run = getattr(args, "dry_run", False)
+    is_json = getattr(args, "json", False)
+
+    if from_source is not None:
+        try:
+            pairs = _parse_bulk_short_source(from_source)
+        except Exception as e:
+            err_msg = f"Failed parsing --from source: {e}"
+            if is_json:
+                print(json.dumps({"ok": False, "error": err_msg}, indent=2))
+            else:
+                print(f"[FAIL] {err_msg}", file=sys.stderr)
+            return 2
+
+        if not pairs:
+            err_msg = "No short title pairs found in --from source."
+            if is_json:
+                print(json.dumps({"ok": False, "error": err_msg}, indent=2))
+            else:
+                print(f"[FAIL] {err_msg}", file=sys.stderr)
+            return 2
+
+        updated: list[dict[str, Any]] = []
+        with task_write_lock(tasks_dir):
+            for item_id, short_title in pairs:
+                res = set_short(
+                    tasks_dir=tasks_dir,
+                    node_id=item_id,
+                    short_title=short_title,
+                    dry_run=dry_run,
+                    expect_task_hash=expect_task_hash,
+                )
+                if not res.get("ok"):
+                    err_msg = f"Failed setting short title on {item_id}: {res.get('error')}"
+                    args._last_result = {"ok": False, "error": err_msg, "failed_id": item_id, "updated": updated}
+                    if is_json:
+                        print(json.dumps(args._last_result, indent=2))
+                    else:
+                        print(f"[FAIL] {err_msg}", file=sys.stderr)
+                    return 1
+                th = res.get("new_task_hash") or res.get("task_hash")
+                updated.append({"id": item_id, "short_title": short_title, "task_hash": th})
+
+            if not dry_run and updated:
+                idx_path = tasks_dir / "00-INDEX.md"
+                if idx_path.is_file():
+                    existing_idx = idx_path.read_text(encoding="utf-8")
+                    rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
+                    _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
+
+        payload = {"ok": True, "updated": updated}
+        args._last_result = payload
+        if is_json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"[ok] Updated short title for {len(updated)} item(s)")
+            for u in updated:
+                print(f"  - {u['id']}: {u['short_title']}")
+        return 0
+
+    if not getattr(args, "id", None) or not getattr(args, "short", None):
+        err_msg = "Both item ID and short title are required unless --from is provided."
+        if is_json:
+            print(json.dumps({"ok": False, "error": err_msg}, indent=2))
+        else:
+            print(f"[FAIL] {err_msg}", file=sys.stderr)
+        return 2
+
     res = set_short(
         tasks_dir=tasks_dir,
         node_id=args.id,
@@ -9283,7 +9748,7 @@ def cmd_set_short(args: argparse.Namespace) -> int:
     if res.get("task_hash") and "plan_hash" not in res:
         res["plan_hash"] = res["task_hash"]  # same name the UI/VS Code bridges use for the other set-* commands
     args._last_result = res
-    if getattr(args, "json", False):
+    if is_json:
         print(json.dumps(res, indent=2))
     else:
         if res.get("ok"):
@@ -14455,7 +14920,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tr = sub.add_parser("transition", help="Transition a task to a new state enforcing state-machine guards")
     p_tr.add_argument("task_id", help="Task ID (e.g. T001)")
-    p_tr.add_argument("new_state", help="New state (e.g. 'in progress', 'delivered', 'verified', 'bounced', 'done')")
+    p_tr.add_argument("new_state", nargs="?", default=None, help="New state (e.g. 'in progress', 'delivered', 'verified', 'bounced', 'done')")
+    p_tr.add_argument("--to", dest="to_state", default=None, help="Target state (alternative to positional new_state)")
     p_tr.add_argument("--actor", default=None, help="Actor performing the transition (e.g. kilo, claude, owner)")
     p_tr.add_argument("--verifier", default=None, help="Independent verifier identifier (e.g. claude:deep-reasoning, blind-subagent:deep-reasoning, owner)")
     p_tr.add_argument("--reason", default=None, help="Bounce findings (B1..Bn), caveat reason, or transition note")
@@ -14464,6 +14930,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_tr.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_tr.set_defaults(func=cmd_transition)
+
+    p_close = sub.add_parser("close", help="One-shot close a task through legal intermediate transitions to done")
+    p_close.add_argument("task_id", metavar="id", help="Task ID (e.g. T001, 01.1)")
+    p_close.add_argument("--verifier", default=None, help="Independent verifier identifier (e.g. reviewer, owner)")
+    p_close.add_argument("--reason", default=None, help="Closure reason or caveat reason")
+    p_close.add_argument("--actor", default=None, help="Actor performing the close")
+    p_close.add_argument("--owner-approved", action="store_true", default=False, help="Flag indicating explicit owner approval for verification")
+    p_close.add_argument("--caveat", default=None, help="Caveat description for closing to 'done with a caveat'")
+    p_close.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_close.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_close.set_defaults(func=cmd_close)
 
     p_q = sub.add_parser("questions", help="Manage blocking question files (Q###) and task decision linkage")
     p_q.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
@@ -14829,8 +15306,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # tasks set-short
     p_sshort = sub.add_parser("set-short", help="Set short title (1-5 words, <=40 chars) for an item")
-    p_sshort.add_argument("id", help="Node or item ID (e.g. T001, 08.1, Q004, UC001, N001)")
-    p_sshort.add_argument("short", help="Short title (1-5 words, <=40 chars, no trailing punctuation)")
+    p_sshort.add_argument("id", nargs="?", default=None, help="Node or item ID (e.g. T001, 08.1, Q004, UC001, N001)")
+    p_sshort.add_argument("short", nargs="?", default=None, help="Short title (1-5 words, <=40 chars, no trailing punctuation)")
+    p_sshort.add_argument("--from", dest="from_source", default=None, help="Path to JSON or pairs file, inline JSON string, or '-' for stdin")
     p_sshort.add_argument("--dry-run", action="store_true", help="Print diff without writing")
     p_sshort.add_argument("--expect-task-hash", "--expect-plan-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task block/file/plan hash")
     p_sshort.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
@@ -14978,6 +15456,7 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
         child_cmd = getattr(args, "child_cmd", None)
         return child_cmd == "add"
     if cmd in (
+        "close",
         "transition",
         "new",
         "attach",
