@@ -465,6 +465,19 @@ multiple tasks or sessions.
 
 A task being worked on while still `open`, or finished while still `in progress`, is a bookkeeping bug: fix it before anything else. `ai-orch run start` performs the dispatch transition itself; for every other way of dispatching, you do.
 
+## Tooling feedback
+
+When you hit friction, a defect, a missing feature or a wrong default in `ai-orch`, its UI, the VS Code extension or the delegation tooling, or when a new need appears, report it at once with `ai-orch feedback`:
+
+```bash
+ai-orch feedback --kind bug|feature|idea|request --title "<short>" --body "<what, where, expected vs actual>"
+```
+
+- **Report immediately:** do not work around tooling issues silently.
+- **One note per item:** capture what you ran, what you expected, and what happened.
+- **No sensitive data:** never include secrets, private hostnames, or audit findings in notes.
+- **Triage:** maintainers triage notes into tasks and reply with the task ID and short title.
+
 {{BLOCK:closing_note}}Remember: if the Executor exposes semantic codebase search as a standing
 capability, it's useful for your own exploration and Q&A too - use it even
 when you are not delegating anything.{{/BLOCK}}
