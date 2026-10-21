@@ -18,7 +18,7 @@
 
 ### 16.5 - Broker MCP tools: reads, then deterministic writes
 
-- **Status:** `delivered` (2026-10-20) · **Short:** Broker MCP tools · **Size:** L · **Depends on:** 16.1, 16.2, 16.4 · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
+- **Status:** `bounced` (2026-10-21; Validation NOT OK: 'ai-orch mcp --local' (in-process tools) promised by the Goal is missing; error codes and project field off-spec. Fix in T045 (Broker validation follow-ups).) · **Short:** Broker MCP tools · **Size:** L · **Depends on:** 16.1, 16.2, 16.4 · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
 - **Goal:** spec §3: the broker from the UI backend; read tools; deterministic writes applied directly with optional `expect_hash`, `preview: true`, idempotency keys; `confirm_token` only for destructive/owner-facing actions; lazy console binding with explicit workspace/project (never the broker's cwd); `ai-orch mcp --local`.
 
 ### 16.6 - Skills switched to the broker

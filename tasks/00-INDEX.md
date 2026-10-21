@@ -22,7 +22,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | in progress (done: 12.3–12.4, 12.11–12.14; to verify: 12.1, 12.5–12.10, 12.15–12.17) | 07, 08, 11 | L |
 | 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (done: 13.1, 13.4, 13.6; to verify: 13.2–13.3, 13.5, 13.7) | 06 | M |
 | 15 | 15 | [Use-Case Driven Specification, Task Definition & Product Validation](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
-| 16 | 16 | [Orchestration broker: one MCP server per user, workspaces, projects, mail](16-orchestration-broker/plan.md) | in progress (done: 16.1, 16.3, 16.9; running: 16.6; to verify: 16.2, 16.4–16.5) | T026, T027, T028 | L |
+| 16 | 16 | [Orchestration broker: one MCP server per user, workspaces, projects, mail](16-orchestration-broker/plan.md) | in progress (done: 16.1, 16.3, 16.9; running: 16.5–16.6; to verify: 16.2, 16.4) | T026, T027, T028 | L |
 
 ## Specs
 
@@ -79,6 +79,7 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T043 (Cross-workspace task links) | P2 | [Cross-workspace executor and depends-on links with live state](server-and-bindings/T043-cross-workspace-executor-and-depends-on-links-with.md) | open | kilo | - |
 | T045 (Broker validation follow-ups) | P1 | [Broker follow-ups from validation: mcp --local, stable error codes, project field](server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md) | open | kilo | - |
 | T046 (Compact common queue) | P3 | [Common view Queue: compact next-up list and kind on rows](server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md) | open | kilo | - |
+| T047 (Architect verification without users) | P2 | [Architect verification of delivered items that have no user session](server-and-bindings/T047-architect-verification-of-delivered-items-that-hav.md) | open | ai-coding-tools | - |
 
 ### micro
 
