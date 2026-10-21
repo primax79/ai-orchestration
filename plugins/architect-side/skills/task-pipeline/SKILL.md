@@ -44,6 +44,17 @@ Always reach the task engine through the per-user orchestration broker MCP serve
 - **Fallback — CLI via the launcher:** When a session has no broker MCP tools, run the CLI through the version-free launcher path (`~/.local/bin/ai-orch tasks …`, `ai-orch questions …`, `ai-orch inbox …`). When the broker holds the lock for the workspace, mutating CLI calls fail fast (`broker-owns-writes`) and direct you to use the broker MCP tools.
 - **Citation rule:** Always cite tasks and questions as `ID (short title)`, qualified as `project/ID (short title)` across projects (see "Citing tasks and questions: id plus a short title" below).
 
+### Format is not optional (every create or edit)
+
+Through the broker or the CLI, the engine writes the format for you; these rules matter whenever a file is touched by
+hand or a tool is missing:
+
+- **Plan tasks** are blocks `### NN.T - <title>` (number, space, hyphen or dash, space, title), each followed by `- **Status:** \`<state>\` · ...`. Optional status line segment or bullet `**Short:** <3-4 words>`. Never bullets (`- **T1 — ...**`), never table rows, never `T<n>` ids inside a plan (`T###` belongs to emergent tasks). Prefer children (`12.2.1`) over letter suffixes (`12.2a`), which are accepted but harder to extend.
+- **Emergent tasks** are created with the broker tool `tasks.new` or `ai-orch tasks new --category C --title T [--short S] --priority P --priority-reason R --goal G [--paths ...] [--executor ...]` (or `--from-note N###` from an inbox note), not by hand-writing a header from memory; then fill Steps and Verification in the created file.
+- **After every change under `tasks/`** run `ai-orch tasks validate`: zero errors and no "non-canonical task items" warning for the files you touched, then `ai-orch tasks sync-index --check`. A change that leaves either is not finished.
+- **State follows the work:** assigning a task moves it to `in progress` before the executor starts, the executor's commit + Final Report moves it to `delivered`, and so on, always through the engine (`tasks.transition` or `ai-orch tasks transition <id> <state>`), for emergent `T###` and plan `NN.T` alike. See `orchestration-workflow`, "Track task state as a path".
+- **Found a project in an older format?** Follow "Normalizing existing tasks" below before adding to it.
+
 ## Purpose
 
 Produce a durable, resumable home for development work too large for one
