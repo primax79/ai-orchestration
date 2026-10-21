@@ -244,8 +244,9 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 
 - **Three progressive ways to use `tasks/` (no hard dependency on extension or MCP):**
   1. **Plain Markdown + Git (zero install — no extension, no MCP, no CLI required):** Every file under `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `AGENTS.md`, `NN-<slug>/plan.md`, `<category>/T###-<slug>.md`, `questions/Q###-<slug>.md`, `_inbox/`) is plain Markdown. Create, edit, transition, and close (`git mv` to `tasks/done/<category>/`) files directly following the format rules below, and update the corresponding row inside the `<!-- ai-orch:generated ... -->` markers in `00-INDEX.md`.
-  2. **Standalone CLI (no extension or MCP required):** Run `~/.local/bin/ai-orch tasks …` (or the stdlib-only `python3 <path-to>/tasks_engine.py …`) to create, transition, validate (`tasks validate`), and sync (`tasks sync-index --apply`).
+  2. **Standalone CLI (no extension or MCP required):** Run `~/.local/bin/ai-orch tasks …` (or the stdlib-only `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py …` / `python3 <path-to>/tasks_engine.py …`) to create, transition, validate (`tasks validate`), and sync (`tasks sync-index --apply`).
   3. **Broker MCP / Web UI / VS Code Extension (when installed):** Use the `ai-orchestration` MCP tools (`tasks.*`, `questions.*`, `inbox.add_note`) or the UI dashboard.
+- **Cross-framework skill loading (any AI assistant / framework):** Claude Code loads `.claude/skills/` and Kilo Code loads `.kilo/skills/`. Any other AI coding framework or assistant (Codex, Gemini CLI, Copilot, Cursor, etc.) that reads `AGENTS.md` without native `.claude/skills/` discovery MUST read the project-versioned orchestration skills directly from `.claude/skills/<skill>/SKILL.md` (specifically `.claude/skills/task-pipeline/SKILL.md`, `.claude/skills/orchestration-workflow/SKILL.md`, `.claude/skills/task-spec-authoring/SKILL.md`, `.claude/skills/executor-contract/SKILL.md`) and use `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py` when `ai-orch` is not on `PATH`.
 - **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `### NN.T - <title>` followed by `- **Status:** \\`<state>\\` · ...`, sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
 - **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
 - **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
@@ -7140,7 +7141,7 @@ def _append_progress_log(
             progress_path = file_path.parent / "PROGRESS.md"
         elif file_path.is_file():
             content = file_path.read_text(encoding="utf-8")
-            if "## Log" in content:
+            if "## Log" in content or verifier or reason:
                 progress_path = file_path
     if progress_path is None and not (file_path.parent / "PROGRESS.md").exists():
         # For single-file tasks that bounce or get owner-verified, only write PROGRESS.md if it's a folder task
