@@ -111,7 +111,7 @@ Tasks in `tooling`. Owner session: unassigned ([README](tooling/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T038 (Stable entry point) | P1 | [Stable ai-orch entry point; clean adoption by upgrade](tooling/T038-stable-ai-orch-entry-point-clean-adoption-by-upgra.md) | open | kilo | - |
+| T038 (Stable entry point) | P2 | [Stable ai-orch entry point; clean adoption by upgrade](tooling/T038-stable-ai-orch-entry-point-clean-adoption-by-upgra.md) | open | kilo | 16.6 |
 
 ### engine
 

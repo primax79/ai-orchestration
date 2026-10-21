@@ -3,12 +3,12 @@
 - id: T038
 - title: Stable ai-orch entry point; clean adoption by upgrade
 - category: tooling
-- priority: P1
-- priority-reason: Sessions run tasks_engine.py from a versioned plugin-cache path or a vendored copy, which breaks on update and misses fixes (suffixed ids)
+- priority: P2
+- priority-reason: Agents move to the broker MCP (16.6); what remains is the CLI fallback and small fixes
 - next-up: no
 - state: open
 - executor: kilo
-- depends-on: -
+- depends-on: 16.6
 - decider: -
 - sources: feedback round 2026-10-21: inbox N003, N010, N011, N012
 - paths: bin/ai-orch, scripts/orchestration_env.py, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
@@ -17,7 +17,7 @@
 
 ## Goal
 
-Every session can run 'ai-orch' from a version-free path (installer or setup adds it to PATH, or a stable shim), the plugin README says so, running the engine script directly never warns about orchestration_events, and 'tasks upgrade' writes tasks/.gitignore with the lock. Vendored copies are detected by the Doctor and reported as stale.
+Re-scoped 2026-10-21 (owner): agents reach the engine through the broker MCP (16.6), which also gives the shim a version-free path; this task keeps only the CLI fallback and small fixes. For sessions that work without MCP, 'ai-orch' runs from the same version-free path (documented in the plugin README); running the engine script directly never warns about orchestration_events; 'tasks upgrade' writes tasks/.gitignore with the lock; the Doctor reports vendored copies of tasks_engine.py inside projects as stale.
 
 ## Steps
 

@@ -35,7 +35,8 @@
 ### 16.6 - Skills switched to the broker
 
 - **Status:** `open` · **Short:** Skills use the broker · **Size:** M · **Depends on:** 16.5 · **Repo:** `ai-orchestration/` + `kilo-mcp/`
-- **Goal:** spec §7: generic templates and bindings tell sessions to use the broker tools, `orchestrator.ask` for formalisation and state updates, the citation rule with qualified refs, `unread_mail`; CLI instructions kept as fallback; MCP registration of the shim offered by the Doctor/setup (preview, never silent).
+- **Goal:** spec §7: generic templates and bindings tell sessions to use the broker tools, `orchestrator.ask` for formalisation and state updates, the citation rule with qualified refs, `unread_mail`; CLI instructions kept as fallback; MCP registration of the shim offered by the Doctor/setup (preview, never silent), with a version-free command path so registrations survive plugin updates.
+- **Priority (owner, 2026-10-21):** next major item, with T032 (CLI writes through broker). It answers the first feedback round: versioned plugin-cache paths and stale vendored engine copies (inbox N003, N010), and gives every session the same engine. Feedback items on the engine (T035, T036, T041) land in the engine, so both the broker tools and the CLI get them.
 
 ### 16.7 - Orchestrator workers inside the broker; recovery; orchestrator.ask tickets
 
