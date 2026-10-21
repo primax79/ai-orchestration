@@ -7668,6 +7668,272 @@ def test_broker_singleton_guard_blocks_mutating_commands(tmp_path: pathlib.Path,
     assert p_after["ok"] is True
 
 
+def test_stale_broker_manifest_allows_mutating_cli(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_dir = tmp_path / "broker_cfg"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_dir))
+    monkeypatch.delenv("AI_ORCH_BROKER_CHILD", raising=False)
+
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    t_path = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(t_path, task_id="T001", state="open")
+
+    repo_root = te._find_repo_root()
+    if repo_root:
+        sys.path.insert(0, str(repo_root / "scripts"))
+    import orchestration_broker_lock as obl
+
+    handle = obl.acquire_broker_lock(cfg_dir)
+    assert handle is not None
+
+    # Spawn short-lived process to obtain a dead PID
+    sub = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead_pid = sub.pid
+    sub.wait()
+
+    obl.write_broker_manifest(cfg_dir, pid=dead_pid, port=8888, started_at="2026-10-18T12:00:00Z")
+
+    env = os.environ.copy()
+    env["AI_ORCHESTRATION_CONFIG"] = str(cfg_dir)
+    env.pop("AI_ORCH_BROKER_CHILD", None)
+
+    # Status check confirms held is False
+    st = obl.broker_status(cfg_dir)
+    assert st.held is False
+    assert st.pid_alive is False
+    assert st.live_pid is None
+
+    # Mutating command must succeed (exit 0) and not cite dead pid
+    res = subprocess.run(
+        [sys.executable, str(SCRIPT_PATH), "transition", "T001", "in progress", "--tasks-dir", str(tasks_dir), "--json"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert res.returncode == 0
+    p = json.loads(res.stdout)
+    assert p["ok"] is True
+    assert p["new_state"] == "in progress"
+    assert str(dead_pid) not in res.stdout
+    assert str(dead_pid) not in res.stderr
+
+    handle.release()
+
+
+def test_live_broker_forwards_cli_writes(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import http.server
+    import threading
+
+    cfg_dir = tmp_path / "broker_cfg"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_dir))
+    monkeypatch.delenv("AI_ORCH_BROKER_CHILD", raising=False)
+
+    token_file = cfg_dir / "ui-token"
+    token_file.write_text("tok-secret-1234\n", encoding="utf-8")
+
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    t_path = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(t_path, task_id="T001", state="open")
+
+    received = []
+
+    class MockBrokerHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path == "/cli":
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length).decode("utf-8")
+                received.append({"path": "/cli", "token": self.headers.get("x-ai-orch-token"), "body": json.loads(body)})
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                resp = {
+                    "returncode": 0,
+                    "stdout": json.dumps({"ok": True, "from_broker": True, "action": "forwarded"}),
+                    "stderr": "",
+                }
+                self.wfile.write(json.dumps(resp).encode("utf-8"))
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_GET(self):
+            if self.path == "/health":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status": "ok"}')
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), MockBrokerHandler)
+    port = server.server_address[1]
+    th = threading.Thread(target=server.serve_forever, daemon=True)
+    th.start()
+
+    repo_root = te._find_repo_root()
+    if repo_root:
+        sys.path.insert(0, str(repo_root / "scripts"))
+    import orchestration_broker_lock as obl
+
+    handle = obl.acquire_broker_lock(cfg_dir)
+    assert handle is not None
+
+    obl.write_broker_manifest(
+        cfg_dir,
+        pid=os.getpid(),
+        port=port,
+        started_at="2026-10-18T12:00:00Z",
+        token_file=str(token_file),
+    )
+
+    try:
+        env = os.environ.copy()
+        env["AI_ORCHESTRATION_CONFIG"] = str(cfg_dir)
+        env.pop("AI_ORCH_BROKER_CHILD", None)
+
+        # 1. transition command forwards to broker
+        res_trans = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "transition", "T001", "in progress", "--tasks-dir", str(tasks_dir), "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert res_trans.returncode == 0
+        p_trans = json.loads(res_trans.stdout)
+        assert p_trans["from_broker"] is True
+
+        # 2. set-short command forwards to broker
+        res_short = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "set-short", "T001", "my short", "--tasks-dir", str(tasks_dir), "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert res_short.returncode == 0
+        p_short = json.loads(res_short.stdout)
+        assert p_short["from_broker"] is True
+
+        # 3. new command forwards to broker
+        res_new = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "new", "--title", "Emergent item", "--short", "emergent", "--category", "features", "--tasks-dir", str(tasks_dir), "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert res_new.returncode == 0
+        p_new = json.loads(res_new.stdout)
+        assert p_new["from_broker"] is True
+
+        # Verify all received calls had the UI token
+        assert len(received) == 3
+        for call in received:
+            assert call["token"] == "tok-secret-1234"
+
+    finally:
+        server.shutdown()
+        server.server_close()
+        handle.release()
+
+
+def test_live_broker_fallback_to_child_channel_when_cli_404(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import http.server
+    import threading
+
+    cfg_dir = tmp_path / "broker_cfg"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_dir))
+    monkeypatch.delenv("AI_ORCH_BROKER_CHILD", raising=False)
+
+    token_file = cfg_dir / "ui-token"
+    token_file.write_text("tok-fallback-5678\n", encoding="utf-8")
+
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    t_path = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(t_path, task_id="T001", state="open")
+
+    class HealthOnlyBrokerHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            # No /cli endpoint (e.g. MCP streamable-HTTP only)
+            self.send_response(404)
+            self.end_headers()
+
+        def do_GET(self):
+            if self.path == "/health":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status": "ok"}')
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), HealthOnlyBrokerHandler)
+    port = server.server_address[1]
+    th = threading.Thread(target=server.serve_forever, daemon=True)
+    th.start()
+
+    repo_root = te._find_repo_root()
+    if repo_root:
+        sys.path.insert(0, str(repo_root / "scripts"))
+    import orchestration_broker_lock as obl
+
+    handle = obl.acquire_broker_lock(cfg_dir)
+    assert handle is not None
+
+    obl.write_broker_manifest(
+        cfg_dir,
+        pid=os.getpid(),
+        port=port,
+        started_at="2026-10-18T12:00:00Z",
+        token_file=str(token_file),
+    )
+
+    try:
+        env = os.environ.copy()
+        env["AI_ORCHESTRATION_CONFIG"] = str(cfg_dir)
+        env.pop("AI_ORCH_BROKER_CHILD", None)
+
+        # Mutating transition executes locally via child channel and succeeds
+        res = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "transition", "T001", "in progress", "--tasks-dir", str(tasks_dir), "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert res.returncode == 0
+        p = json.loads(res.stdout)
+        assert p["ok"] is True
+        assert p["new_state"] == "in progress"
+    finally:
+        server.shutdown()
+        server.server_close()
+        handle.release()
+
+
+def test_ai_orch_mcp_help() -> None:
+    repo_root = te._find_repo_root()
+    bin_ai_orch = repo_root / "bin" / "ai-orch"
+    res = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "mcp", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0
+    assert "--local" in res.stdout
+    assert "in-process" in res.stdout or "stdio" in res.stdout
+
+
 # ---------------------------------------------------------------------------
 # Tests for Qualified References, Coordinates, Placement Warnings, and Tasks Move (16.4)
 # ---------------------------------------------------------------------------

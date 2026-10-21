@@ -110,3 +110,60 @@ def test_broker_status_with_helper_process(tmp_path: pathlib.Path) -> None:
     st_ended = obl.broker_status(cfg)
     assert st_ended.held is False
     assert st_ended.pid == proc.pid  # Json data preserved, but held is False
+    assert st_ended.pid_alive is False
+    assert st_ended.live_pid is None
+
+
+def test_is_pid_alive() -> None:
+    # 1. Current process is alive
+    assert obl.is_pid_alive(os.getpid()) is True
+
+    # 2. None, 0, or negative pid
+    assert obl.is_pid_alive(None) is False
+    assert obl.is_pid_alive(0) is False
+    assert obl.is_pid_alive(-1) is False
+
+    # 3. Dead process
+    import subprocess
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead_pid = proc.pid
+    proc.wait()
+    assert obl.is_pid_alive(dead_pid) is False
+
+
+def test_stale_manifest_with_inherited_lock_fd(tmp_path: pathlib.Path) -> None:
+    """If broker.json has a dead pid, held MUST be False even if broker.lock is held."""
+    cfg = tmp_path / "stale_cfg"
+    cfg.mkdir(parents=True, exist_ok=True)
+
+    # Acquire lock in current process (simulating an orphan child that inherited the lock fd)
+    handle = obl.acquire_broker_lock(cfg)
+    assert handle is not None
+
+    # Spawn short-lived process to obtain a definitively dead PID
+    import subprocess
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead_pid = proc.pid
+    proc.wait()
+
+    token_file = cfg / "ui-token"
+    token_file.write_text("test-token-1234\n", encoding="utf-8")
+
+    obl.write_broker_manifest(
+        cfg,
+        pid=dead_pid,
+        port=7777,
+        started_at="2026-10-18T10:00:00Z",
+        token_file=str(token_file),
+    )
+
+    # Status check MUST report held=False because the broker pid in broker.json is dead
+    st = obl.broker_status(cfg)
+    assert st.held is False
+    assert st.pid == dead_pid
+    assert st.pid_alive is False
+    assert st.live_pid is None
+    assert st.port == 7777
+    assert st.token_file == str(token_file)
+
+    handle.release()
