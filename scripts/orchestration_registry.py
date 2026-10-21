@@ -1553,6 +1553,28 @@ def cli_projects_list(args: argparse.Namespace) -> int:
         return 2
 
 
+def cli_workspace_next(args: argparse.Namespace) -> int:
+    ws_target = getattr(args, "root", None) or getattr(args, "workspace", None)
+    engine_script = (
+        REPO_ROOT
+        / "plugins"
+        / "architect-side"
+        / "skills"
+        / "task-pipeline"
+        / "scripts"
+        / "tasks_engine.py"
+    )
+    cmd = [sys.executable, str(engine_script), "next", "--all-projects"]
+    if ws_target:
+        cmd.extend(["--workspace", ws_target])
+    if getattr(args, "limit", None) is not None:
+        cmd.extend(["--limit", str(args.limit)])
+    if getattr(args, "json", False):
+        cmd.append("--json")
+    proc = subprocess.run(cmd, check=False)
+    return proc.returncode
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_args = list(argv if argv is not None else sys.argv[1:])
 
@@ -1603,6 +1625,14 @@ def main(argv: list[str] | None = None) -> int:
     p_show.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
     p_show.add_argument("--json", action="store_true", help="Output JSON")
 
+    # workspace next
+    p_wnext = subparsers.add_parser("next", help="Show ready queue across all projects in workspace")
+    p_wnext.add_argument("workspace", nargs="?", default=None, help="Workspace slug, UUID, or path")
+    p_wnext.add_argument("--root", dest="root", default=None, help="Workspace root path")
+    p_wnext.add_argument("--limit", type=int, default=None, help="Maximum number of tasks to return")
+    p_wnext.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
+    p_wnext.add_argument("--json", action="store_true", help="Output JSON")
+
     # projects discover
     p_disc = subparsers.add_parser("discover", help="Discover projects in a workspace")
     p_disc.add_argument("workspace", nargs="?", default=None, help="Workspace slug, UUID, or path")
@@ -1635,6 +1665,8 @@ def main(argv: list[str] | None = None) -> int:
         return cli_workspace_list(args)
     elif args.command == "show":
         return cli_workspace_show(args)
+    elif args.command == "next":
+        return cli_workspace_next(args)
     elif args.command == "discover":
         return cli_projects_discover(args)
     elif args.command == "projects-list":

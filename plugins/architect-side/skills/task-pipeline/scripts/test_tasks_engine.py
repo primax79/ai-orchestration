@@ -10423,3 +10423,251 @@ def test_upgrade_detects_legacy_plans(tmp_path: pathlib.Path) -> None:
     mig_data = json.loads(res_mig.stdout)
     assert mig_data["ok"] is True
     assert (tasks_dir / "specs" / "legacy-spec.md").is_file()
+
+
+def test_workspace_wide_next_across_projects(tmp_path: pathlib.Path) -> None:
+    ws_root = tmp_path / "workspace"
+    ws_root.mkdir()
+
+    # 1. Root tasks/ (_workspace)
+    root_tasks = ws_root / "tasks"
+    root_tasks.mkdir()
+    (root_tasks / "00-INDEX.md").write_text("# Workspace Index\n\n## Next up\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n", encoding="utf-8")
+    _write_sample_task(
+        root_tasks / "features" / "T001-ws-coordination.md",
+        task_id="T001",
+        title="Workspace coordination task",
+        category="features",
+        priority="P2",
+        next_up="no",
+        state="open",
+    )
+
+    # 2. Subproject proj-a/tasks/
+    proj_a = ws_root / "proj-a"
+    proj_a_tasks = proj_a / "tasks"
+    proj_a_tasks.mkdir(parents=True)
+    (proj_a_tasks / "00-INDEX.md").write_text("# Proj A Index\n\n## Next up\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n", encoding="utf-8")
+    _write_sample_task(
+        proj_a_tasks / "features" / "T010-auth-critical.md",
+        task_id="T010",
+        title="Auth critical fix",
+        category="features",
+        priority="P0",
+        next_up="no",
+        state="open",
+    )
+
+    # 3. Subproject proj-b/tasks/
+    proj_b = ws_root / "proj-b"
+    proj_b_tasks = proj_b / "tasks"
+    proj_b_tasks.mkdir(parents=True)
+    (proj_b_tasks / "00-INDEX.md").write_text("# Proj B Index\n\n## Next up\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n", encoding="utf-8")
+    _write_sample_task(
+        proj_b_tasks / "features" / "T020-data-migration.md",
+        task_id="T020",
+        title="Data migration",
+        category="features",
+        priority="P1",
+        next_up="yes",
+        state="open",
+    )
+    _write_sample_task(
+        proj_b_tasks / "features" / "T021-already-done.md",
+        task_id="T021",
+        title="Already done task",
+        category="features",
+        priority="P1",
+        next_up="no",
+        state="done",
+    )
+
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+
+    # Call via bin/ai-orch tasks next --workspace <ws_root> --json
+    res = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "next", "--workspace", str(ws_root), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    assert "tasks" in data
+    tasks = data["tasks"]
+    assert len(tasks) == 3
+
+    # Sorted by priority (P0..P3), next_up == "yes" first, then qualified_id:
+    # 1. proj-a/T010: P0, next_up=no
+    assert tasks[0]["id"] == "T010"
+    assert tasks[0]["project"] == "proj-a"
+    assert tasks[0]["qualified_id"] == "proj-a/T010"
+    assert tasks[0]["scope"] == "project"
+    assert tasks[0]["priority"] == "P0"
+
+    # 2. proj-b/T020: P1, next_up=yes
+    assert tasks[1]["id"] == "T020"
+    assert tasks[1]["project"] == "proj-b"
+    assert tasks[1]["qualified_id"] == "proj-b/T020"
+    assert tasks[1]["scope"] == "project"
+    assert tasks[1]["priority"] == "P1"
+    assert tasks[1]["next_up"] == "yes"
+
+    # 3. _workspace/T001: P2, next_up=no
+    assert tasks[2]["id"] == "T001"
+    assert tasks[2]["project"] == "_workspace"
+    assert tasks[2]["qualified_id"] == "_workspace/T001"
+    assert tasks[2]["scope"] == "workspace"
+    assert tasks[2]["priority"] == "P2"
+
+    assert data["ready_queue"] == ["proj-a/T010", "proj-b/T020", "_workspace/T001"]
+
+    # Also test bin/ai-orch workspace next --root <ws_root> --json
+    res_ws_cmd = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "workspace", "next", "--root", str(ws_root), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_ws_cmd.returncode == 0
+    ws_data = json.loads(res_ws_cmd.stdout)
+    assert ws_data["ok"] is True
+    assert [t["qualified_id"] for t in ws_data["tasks"]] == ["proj-a/T010", "proj-b/T020", "_workspace/T001"]
+
+    # Also test --all-projects with cwd=ws_root
+    res_all = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "next", "--all-projects", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(ws_root),
+    )
+    assert res_all.returncode == 0
+    all_data = json.loads(res_all.stdout)
+    assert len(all_data["tasks"]) == 3
+
+    # Human-readable output check
+    res_human = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "next", "--workspace", str(ws_root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_human.returncode == 0
+    assert "proj-a/T010" in res_human.stdout
+    assert "proj-b/T020" in res_human.stdout
+    assert "_workspace/T001" in res_human.stdout
+
+
+def test_workspace_wide_list_across_projects(tmp_path: pathlib.Path) -> None:
+    ws_root = tmp_path / "workspace_list"
+    ws_root.mkdir()
+
+    # 1. Root tasks/ (_workspace)
+    root_tasks = ws_root / "tasks"
+    root_tasks.mkdir()
+    (root_tasks / "00-INDEX.md").write_text("# Workspace Index\n\n## Next up\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n", encoding="utf-8")
+    _write_sample_task(
+        root_tasks / "features" / "T001-ws-coordination.md",
+        task_id="T001",
+        title="Workspace coordination task",
+        category="features",
+        priority="P2",
+        next_up="no",
+        state="open",
+    )
+
+    # 2. Subproject proj-a/tasks/
+    proj_a = ws_root / "proj-a"
+    proj_a_tasks = proj_a / "tasks"
+    proj_a_tasks.mkdir(parents=True)
+    (proj_a_tasks / "00-INDEX.md").write_text("# Proj A Index\n\n## Next up\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n", encoding="utf-8")
+    _write_sample_task(
+        proj_a_tasks / "features" / "T010-auth-critical.md",
+        task_id="T010",
+        title="Auth critical fix",
+        category="features",
+        priority="P0",
+        next_up="no",
+        state="open",
+    )
+
+    # 3. Subproject proj-b/tasks/
+    proj_b = ws_root / "proj-b"
+    proj_b_tasks = proj_b / "tasks"
+    proj_b_tasks.mkdir(parents=True)
+    (proj_b_tasks / "00-INDEX.md").write_text("# Proj B Index\n\n## Next up\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n", encoding="utf-8")
+    _write_sample_task(
+        proj_b_tasks / "features" / "T020-data-migration.md",
+        task_id="T020",
+        title="Data migration",
+        category="features",
+        priority="P1",
+        next_up="yes",
+        state="open",
+    )
+    _write_sample_task(
+        proj_b_tasks / "features" / "T021-already-done.md",
+        task_id="T021",
+        title="Already done task",
+        category="features",
+        priority="P1",
+        next_up="no",
+        state="done",
+    )
+
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+
+    # Call via bin/ai-orch tasks list --workspace <ws_root> --state open --json
+    res = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "list", "--workspace", str(ws_root), "--state", "open", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    assert "all_tasks" in data
+    assert "tasks" in data
+    tasks = data["tasks"]
+    # Only open tasks (T010, T020, T001) should be returned; T021 is done!
+    assert len(tasks) == 3
+    qids = [t["qualified_id"] for t in tasks]
+    assert "proj-a/T010" in qids
+    assert "proj-b/T020" in qids
+    assert "_workspace/T001" in qids
+    assert not any("T021" in q for q in qids)
+
+    # Check project and scope fields
+    for t in tasks:
+        assert "project" in t
+        assert "qualified_id" in t
+        assert "scope" in t
+        if t["project"] == "_workspace":
+            assert t["scope"] == "workspace"
+        else:
+            assert t["scope"] == "project"
+
+    # Also test without --state open to see all tasks including done
+    res_all = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "list", "--workspace", str(ws_root), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_all.returncode == 0
+    data_all = json.loads(res_all.stdout)
+    assert len(data_all["tasks"]) == 4
+
+    # Also test --active-only
+    res_act = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "list", "--workspace", str(ws_root), "--active-only", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_act.returncode == 0
+    data_act = json.loads(res_act.stdout)
+    assert len(data_act["tasks"]) == 3
