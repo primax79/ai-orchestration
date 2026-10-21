@@ -470,16 +470,24 @@ assuming.
   - choice: -
   - answered-by: -
   - answered: -
+
+  ## Notes
+  Optional free-form notes, discussion, background links, or analysis.
   ```
 - **Task linkage:** Asking moves the blocked task to `waiting` with `decider: Q###`
-  (recording prior state). When answered or withdrawn, the task is restored to its
-  prior state and `decider: -`. (Legacy free-text `decider: owner: <question>` remains
-  valid; convert with `ai-orch questions ask --from-task T###`).
+  (recording prior state). When answered, withdrawn, or moved, the task is restored to its
+  prior state and `decider: -`.
+  - **Non-blocking questions:** Pass `--blocks -` (or omit `--blocks`) to file a question without
+    blocking any task (e.g. general architecture decisions or decisions gating an initiative).
+  - Legacy free-text `decider: owner: <question>` remains valid; convert with `ai-orch questions ask --from-task T###`.
 - **Engine commands (`ai-orch questions`):**
-  - `ai-orch questions ask --question "..." --context "..." --option "A=..." --blocks T###`
-  - `ai-orch questions answer Q### --choice A [--text "..."]`
+  - `ai-orch questions ask --question "..." --context "..." --option "A=..." [--blocks T###|-] [--notes "..."]`
+  - `ai-orch questions answer Q### --choice A [--text "..."] [--apply-ref <ref>] [--note "..."]`
+  - `ai-orch questions apply Q### --note "..."` (records application in ledger and marks `applied: yes`)
+  - `ai-orch questions move Q### --to <url-or-ref> [--reason "..."]` (status `moved`, unblocks tasks, archives under `questions/answered/`)
   - `ai-orch questions withdraw Q### --reason "..."`
-  - `ai-orch questions list` / `ai-orch questions show Q###`
+  - `ai-orch questions list [--status open|answered|withdrawn|moved|unapplied|all]` (notices unapplied answers)
+  - `ai-orch questions show Q###`
 
 ## Task packaging: one file, or one file per task (by size)
 
@@ -616,9 +624,11 @@ ai-orch tasks transition <task_id> <new_state> [--actor <actor>] [--verifier <ve
 ai-orch tasks set <task_id> <field> <value...> [--expect-hash <hash>] [--json]
 
 # Manage blocking questions and inbox notes
-ai-orch questions list [--status open|answered|withdrawn|all] [--json]
-ai-orch questions ask --question "..." --short "..." --context "..." --option "A=..." --blocks T### [--json]
-ai-orch questions answer Q### --choice A [--text "..."] [--json]
+ai-orch questions list [--status open|answered|withdrawn|moved|unapplied|all] [--json]
+ai-orch questions ask --question "..." --short "..." --context "..." --option "A=..." [--blocks T###|-] [--notes "..."] [--json]
+ai-orch questions answer Q### --choice A [--text "..."] [--apply-ref <ref>] [--note "..."] [--json]
+ai-orch questions apply Q### --note "..." [--ref "..."] [--json]
+ai-orch questions move Q### --to <tracker-url-or-ref> [--reason "..."] [--json]
 ai-orch inbox add --title "..." --kind idea --body "..." [--json]
 
 # Ship, archive, reopen, or upgrade a tasks/ tree
