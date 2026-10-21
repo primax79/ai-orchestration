@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Top change of two sessions; ~40 hand rewrites; placeholder tasks pass validate
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -26,3 +26,7 @@
 ## Verification
 
 - [ ] Verify task implementation.
+
+## Log (newest first)
+
+- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T036 (Steps by command, --step/--verification on tasks new, placeholder rejection in validate) to Kilo
