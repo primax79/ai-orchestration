@@ -772,7 +772,10 @@ def _try_forward_to_live_broker(b_status: Any, is_json: bool) -> int | None:
 
     # 2. Try POST http://127.0.0.1:<port>/cli
     cli_url = f"http://127.0.0.1:{port}/cli"
-    req_body = json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}).encode("utf-8")
+    fwd_argv = list(sys.argv[1:])
+    if fwd_argv and fwd_argv[0] not in ("tasks", "questions", "use-cases", "inbox", "feedback"):
+        fwd_argv = ["tasks", *fwd_argv]
+    req_body = json.dumps({"argv": fwd_argv, "cwd": os.getcwd()}).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
     }
