@@ -80,6 +80,7 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T045 (Broker validation follow-ups) | P1 | [Broker follow-ups from validation: mcp --local, stable error codes, project field](server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md) | delivered | kilo | - |
 | T046 (Compact common queue) | P3 | [Common view Queue: compact next-up list and kind on rows](server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md) | delivered | kilo | - |
 | T047 (Architect verification without users) | P2 | [Architect verification of delivered items that have no user session](server-and-bindings/T047-architect-verification-of-delivered-items-that-hav.md) | open | ai-coding-tools | - |
+| T048 (Project selector active counts) | P1 | [Project selector shows non-closed ticket counts (waiting, open, progress)](server-and-bindings/T048-project-selector-shows-non-closed-ticket-counts-wa.md) | delivered | kilo | - |
 
 ### micro
 
@@ -120,7 +121,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | open | kilo | - |
+| T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | delivered | kilo | - |
 | T036 (Steps by command) | P1 | [Steps and verification authored by command; placeholders rejected](engine/T036-steps-and-verification-authored-by-command-placeho.md) | open | kilo | - |
 | T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | open | kilo | - |
 | T041 (Question workflow gaps) | P1 | [Questions: unapplied answers surfaced, moved-to-tracker status, Notes section](engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | open | kilo | - |

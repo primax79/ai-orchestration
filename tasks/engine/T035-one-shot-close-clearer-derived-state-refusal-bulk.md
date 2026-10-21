@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Asked by three sessions (two as top change); closing takes four calls today
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Read tasks/tasks/T035-one-shot-close-clearer-derived-state-refusal-bulk.md, do the open steps, run the Verification, update the task and the registry.
 - short: One-shot close
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
@@ -26,3 +28,7 @@
 ## Verification
 
 - [ ] Verify task implementation.
+
+## Log (newest first)
+
+- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged 76391c4 + N041 single-file ## Log recording; 12 new unit tests pass
