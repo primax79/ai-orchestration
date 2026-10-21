@@ -6,16 +6,15 @@
 - priority: P1
 - priority-reason: Owner 2026-10-21: every session using the tooling must report needs and improvements; the rule must live in the product, not in messages
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: owner request 2026-10-21; inbox N001-N024 (first feedback round)
 - paths: bin/ai-orch, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, plugins/*/skills/*/SKILL.template.md, bindings
 - handoff: Read tasks/server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: gcube-atlas-83
 - short: Built-in feedback channel
-
-verification pending: run Verification checks (independent verifier)
 
 ## Goal
 

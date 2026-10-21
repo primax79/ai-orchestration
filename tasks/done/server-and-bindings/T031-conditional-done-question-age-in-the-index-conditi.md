@@ -6,16 +6,15 @@
 - priority: P3
 - priority-reason: Follow-up of T030 reported by the Evolution Assurance central session (docs/08 §7.15)
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: -
 - paths: -
 - handoff: Read tasks/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: d4science-evolution-assurance-37
 - short: Conditional done follow-ups
-
-verification pending: run Verification checks (independent verifier)
 
 ## Goal
 

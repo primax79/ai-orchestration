@@ -73,10 +73,8 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T028 (Unattended turn hardening) | P1 | [Unattended turns: enforce reduced capability on every tool and harden the untrusted-data delimiters](server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md) | delivered | kilo | - |
 | T029 (Letter-suffix plan ids) | P2 | [Plan task ids with a letter suffix drop out of the index](server-and-bindings/T029-plan-task-ids-with-a-letter-suffix-drop-out-of-the.md) | delivered | kilo | - |
 | T030 (Conditional done) | P2 | [conditions: header for tasks done with open questions that may change the result](server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md) | delivered | kilo | - |
-| T031 (Conditional done follow-ups) | P3 | [Conditional done: question age in the index; conditions: header position](server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md) | delivered | kilo | - |
 | T032 (CLI writes through broker) | P1 | [CLI writes reach a live broker; guard ignores a stale manifest](server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md) | open | kilo | - |
 | T033 (Test config isolation) | P1 | [Test sessions isolated from the user's global config](server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md) | delivered | self | - |
-| T034 (Built-in feedback channel) | P1 | [Tooling feedback built into the product: ai-orch feedback, skill rule, upgrade AGENTS.md](server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md) | delivered | kilo | - |
 | T040 (Workspace next) | P2 | [Workspace-wide next-up and open tasks across projects](server-and-bindings/T040-workspace-wide-next-up-and-open-tasks-across-proje.md) | open | kilo | - |
 
 ### micro
@@ -155,6 +153,8 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T020 (Flaky run tests) | [Flaky run-engine tests under load](done/micro/T020-flaky-run-engine-tests-under-load.md) | done | 2026-10-17 |
 | T015 (Navbar label wrapping) | [Navbar labels wrap on narrow widths](done/micro/T015-navbar-narrow-width.md) | done | 2026-10-18 |
 | T012 (Hung kilo runs) | [kilo-mcp: detect kilo run processes that hang after finishing](done/server-and-bindings/T012-kilo-run-hangs-after-completion.md) | done | 2026-10-18 |
+| T031 (Conditional done follow-ups) | [Conditional done: question age in the index; conditions: header position](done/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md) | done | 2026-10-21 |
+| T034 (Built-in feedback channel) | [Tooling feedback built into the product: ai-orch feedback, skill rule, upgrade AGENTS.md](done/server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md) | done | 2026-10-21 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph
