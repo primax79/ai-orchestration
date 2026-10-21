@@ -119,6 +119,19 @@ def acquire_broker_lock(
     return BrokerLockHandle(fd, lock_file)
 
 
+def is_pid_alive(pid: int | None) -> bool:
+    """Check if process with given PID is alive without sending a signal."""
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (ProcessLookupError, ValueError, OSError):
+        return False
+
+
 class BrokerStatus(dict):
     """Dictionary representing broker status with attribute access."""
 
@@ -132,6 +145,14 @@ class BrokerStatus(dict):
         return int(v) if v is not None else None
 
     @property
+    def pid_alive(self) -> bool:
+        return bool(self.get("pid_alive", False))
+
+    @property
+    def live_pid(self) -> int | None:
+        return self.pid if self.pid_alive else None
+
+    @property
     def port(self) -> int | None:
         v = self.get("port")
         return int(v) if v is not None else None
@@ -139,6 +160,11 @@ class BrokerStatus(dict):
     @property
     def started_at(self) -> str | None:
         v = self.get("started_at")
+        return str(v) if v is not None else None
+
+    @property
+    def token_file(self) -> str | None:
+        v = self.get("token_file")
         return str(v) if v is not None else None
 
 
@@ -176,8 +202,10 @@ def broker_status(
     pid: int | None = None
     port: int | None = None
     started_at: str | None = None
+    token_file: str | None = None
 
-    if json_file.is_file():
+    manifest_exists = json_file.is_file()
+    if manifest_exists:
         try:
             data = json.loads(json_file.read_text(encoding="utf-8"))
             if isinstance(data, dict):
@@ -186,14 +214,22 @@ def broker_status(
                 pid = int(raw_pid) if raw_pid is not None else None
                 port = int(raw_port) if raw_port is not None else None
                 started_at = str(data.get("started_at")) if data.get("started_at") else None
+                token_file = str(data.get("token_file")) if data.get("token_file") else None
         except Exception:
             pass
+
+    pid_alive = is_pid_alive(pid)
+
+    if manifest_exists and pid is not None and not pid_alive:
+        held = False
 
     return BrokerStatus({
         "held": held,
         "pid": pid,
+        "pid_alive": pid_alive,
         "port": port,
         "started_at": started_at,
+        "token_file": token_file,
     })
 
 
@@ -202,6 +238,7 @@ def write_broker_manifest(
     pid: int | None = None,
     port: int | None = None,
     started_at: str | None = None,
+    token_file: str | None = None,
 ) -> pathlib.Path:
     """Write broker.json readiness record atomically."""
     cdir = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
@@ -209,11 +246,13 @@ def write_broker_manifest(
     json_file = cdir / "broker.json"
     tmp_file = cdir / f"broker.json.tmp.{os.getpid()}"
 
-    data = {
+    data: dict[str, Any] = {
         "pid": pid if pid is not None else os.getpid(),
         "port": port,
         "started_at": started_at,
     }
+    if token_file is not None:
+        data["token_file"] = str(token_file)
     tmp_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(str(tmp_file), str(json_file))
     return json_file

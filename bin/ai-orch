@@ -600,8 +600,8 @@ CLI_DESCRIPTION: dict[str, Any] = {
         },
         "mcp": {
             "script": "ai-orchestration-ui/backend/broker/shim.py",
-            "usage": "ai-orch mcp",
-            "description": "Run the stdio MCP shim that proxies to the per-user orchestration broker daemon.",
+            "usage": "ai-orch mcp [--local] [--help]",
+            "description": "Run the stdio MCP shim to the singleton broker, or serve broker MCP tools in-process over stdio when --local is passed.",
         },
         "install-launcher": {
             "script": str(ORCH_ENV_SCRIPT.relative_to(REPO_ROOT)),
@@ -719,6 +719,17 @@ def main() -> int:
         return proc.returncode
 
     if group == "mcp":
+        if any(h in rest for h in ("-h", "--help", "help")):
+            print("Usage: ai-orch mcp [--local] [--help]")
+            print()
+            print("Run the stdio MCP shim to the singleton broker, or serve broker MCP tools in-process over stdio when --local is passed.")
+            print()
+            print("Options:")
+            print("  --local    Serve broker MCP tools in-process over stdio without starting a background broker process.")
+            print("  -h, --help Show this help message and exit.")
+            return 0
+        if "--local" in rest:
+            return _run_ui_broker("local", [r for r in rest if r != "--local"])
         return _run_ui_broker("shim", rest)
 
     if group == "setup":

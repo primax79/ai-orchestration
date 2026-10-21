@@ -22,11 +22,14 @@ import os
 import pathlib
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
@@ -684,6 +687,171 @@ def _get_broker_status() -> Any:
         return orchestration_broker_lock.broker_status()
     except Exception:
         return None
+
+
+def _is_pid_alive(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (ProcessLookupError, ValueError, OSError):
+        return False
+
+
+def _read_ui_token(b_status: Any = None) -> tuple[str, bool]:
+    token_file_path = getattr(b_status, "token_file", None) if b_status is not None else None
+    if token_file_path:
+        tf = pathlib.Path(token_file_path)
+        if tf.is_file():
+            try:
+                val = tf.read_text(encoding="utf-8").strip()
+                return val, True
+            except OSError:
+                pass
+
+    gtf = _resolve_global_config_dir() / "ui-token"
+    if gtf.is_file():
+        try:
+            val = gtf.read_text(encoding="utf-8").strip()
+            return val, True
+        except OSError:
+            pass
+
+    return "", False
+
+
+def _check_broker_health(port: int) -> bool:
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            if resp.status == 200:
+                body = resp.read().decode("utf-8")
+                data = json.loads(body)
+                return isinstance(data, dict) and data.get("status") == "ok"
+    except Exception:
+        pass
+    return False
+
+
+def _try_forward_to_live_broker(b_status: Any, is_json: bool) -> int | None:
+    port = getattr(b_status, "port", None)
+    if not port:
+        return None
+    port = int(port)
+
+    live_pid = getattr(b_status, "live_pid", None)
+    if live_pid is None:
+        raw_pid = getattr(b_status, "pid", None)
+        if raw_pid is not None and _is_pid_alive(raw_pid):
+            live_pid = raw_pid
+
+    pid_str = str(live_pid) if live_pid is not None else "unknown"
+    token, has_token_file = _read_ui_token(b_status)
+
+    # Fast TCP connect probe with 0.5s timeout
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.5)
+        sock.connect(("127.0.0.1", port))
+        sock.close()
+    except (ConnectionRefusedError, socket.timeout, OSError):
+        err_msg = f"route through the broker (MCP) \u2014 it is running as pid {pid_str}"
+        payload = {
+            "ok": False,
+            "error": "broker-owns-writes",
+            "message": err_msg,
+        }
+        if is_json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"[FAIL] broker-owns-writes: {err_msg}", file=sys.stderr)
+        return 75
+
+    # 2. Try POST http://127.0.0.1:<port>/cli
+    cli_url = f"http://127.0.0.1:{port}/cli"
+    fwd_argv = list(sys.argv[1:])
+    if fwd_argv and fwd_argv[0] not in ("tasks", "questions", "use-cases", "inbox", "feedback"):
+        fwd_argv = ["tasks", *fwd_argv]
+    req_body = json.dumps({"argv": fwd_argv, "cwd": os.getcwd()}).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if token:
+        headers["x-ai-orch-token"] = token
+
+    req = urllib.request.Request(cli_url, data=req_body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status == 200:
+                resp_bytes = resp.read()
+                resp_data = json.loads(resp_bytes.decode("utf-8"))
+                if isinstance(resp_data, dict) and "returncode" in resp_data:
+                    out_s = resp_data.get("stdout", "")
+                    if out_s:
+                        if out_s.endswith("\n"):
+                            sys.stdout.write(out_s)
+                        else:
+                            print(out_s, file=sys.stdout)
+                        sys.stdout.flush()
+                    err_s = resp_data.get("stderr", "")
+                    if err_s:
+                        if err_s.endswith("\n"):
+                            sys.stderr.write(err_s)
+                        else:
+                            print(err_s, file=sys.stderr)
+                        sys.stderr.flush()
+                    return int(resp_data["returncode"])
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 405):
+            if has_token_file or _check_broker_health(port):
+                os.environ["AI_ORCH_BROKER_CHILD"] = "1"
+                return None
+        if has_token_file and _check_broker_health(port):
+            os.environ["AI_ORCH_BROKER_CHILD"] = "1"
+            return None
+
+        err_msg = f"route through the broker (MCP) \u2014 it is running as pid {pid_str}"
+        payload = {
+            "ok": False,
+            "error": "broker-owns-writes",
+            "message": err_msg,
+        }
+        if is_json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"[FAIL] broker-owns-writes: {err_msg}", file=sys.stderr)
+        return 75
+    except (urllib.error.URLError, OSError):
+        err_msg = f"route through the broker (MCP) \u2014 it is running as pid {pid_str}"
+        payload = {
+            "ok": False,
+            "error": "broker-owns-writes",
+            "message": err_msg,
+        }
+        if is_json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"[FAIL] broker-owns-writes: {err_msg}", file=sys.stderr)
+        return 75
+
+    if has_token_file and _check_broker_health(port):
+        os.environ["AI_ORCH_BROKER_CHILD"] = "1"
+        return None
+
+    err_msg = f"route through the broker (MCP) \u2014 it is running as pid {pid_str}"
+    payload = {
+        "ok": False,
+        "error": "broker-owns-writes",
+        "message": err_msg,
+    }
+    if is_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"[FAIL] broker-owns-writes: {err_msg}", file=sys.stderr)
+    return 75
 
 
 def _resolve_workspace_from_tasks_dir(tasks_dir: pathlib.Path) -> pathlib.Path:
@@ -13568,10 +13736,20 @@ def cmd_feedback(args: argparse.Namespace) -> int:
     orig_target = target_path
     if source in ("env", "config", "repo"):
         b_status = _get_broker_status()
-        if b_status is not None and getattr(b_status, "held", False):
-            broker_held = True
-            source = "outbox"
-            target_path = (_resolve_global_config_dir() / "feedback-outbox").resolve()
+        if b_status is not None and getattr(b_status, "held", False) and not os.environ.get("AI_ORCH_BROKER_CHILD"):
+            pid = getattr(b_status, "pid", None)
+            pid_alive = bool(getattr(b_status, "pid_alive", False))
+            if pid is not None and not pid_alive:
+                broker_held = False
+            elif pid_alive and getattr(b_status, "port", None):
+                ret = _try_forward_to_live_broker(b_status, is_json)
+                if ret is not None:
+                    return ret
+                broker_held = False
+            else:
+                broker_held = True
+                source = "outbox"
+                target_path = (_resolve_global_config_dir() / "feedback-outbox").resolve()
 
     if is_dry_run:
         if is_json:
@@ -13695,13 +13873,22 @@ def cmd_feedback_flush(args: argparse.Namespace) -> int:
         return 1
 
     b_status = _get_broker_status()
-    if b_status is not None and getattr(b_status, "held", False):
-        msg = "Cannot flush: broker lock is held on target tasks tree (broker-owns-writes)."
-        if is_json:
-            print(json.dumps({"ok": False, "error": "broker-owns-writes", "message": msg}, indent=2))
+    if b_status is not None and getattr(b_status, "held", False) and not os.environ.get("AI_ORCH_BROKER_CHILD"):
+        pid = getattr(b_status, "pid", None)
+        pid_alive = bool(getattr(b_status, "pid_alive", False))
+        if pid is not None and not pid_alive:
+            pass
+        elif pid_alive and getattr(b_status, "port", None):
+            ret = _try_forward_to_live_broker(b_status, is_json)
+            if ret is not None:
+                return ret
         else:
-            print(f"[FAIL] {msg}", file=sys.stderr)
-        return 1
+            msg = "Cannot flush: broker lock is held on target tasks tree (broker-owns-writes)."
+            if is_json:
+                print(json.dumps({"ok": False, "error": "broker-owns-writes", "message": msg}, indent=2))
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 1
 
     outbox_dir = _resolve_global_config_dir() / "feedback-outbox"
     if not outbox_dir.is_dir():
@@ -14798,18 +14985,29 @@ def dispatch_command(args: argparse.Namespace) -> int:
         b_status = _get_broker_status()
         if b_status is not None and getattr(b_status, "held", False) and not os.environ.get("AI_ORCH_BROKER_CHILD"):
             pid = getattr(b_status, "pid", None)
-            pid_str = str(pid) if pid is not None else "unknown"
-            err_msg = f"route through the broker (MCP) \u2014 it is running as pid {pid_str}"
-            payload = {
-                "ok": False,
-                "error": "broker-owns-writes",
-                "message": err_msg,
-            }
-            if is_json:
-                print(json.dumps(payload, indent=2))
+            pid_alive = bool(getattr(b_status, "pid_alive", False))
+            if pid is not None and not pid_alive:
+                pass
+            elif pid_alive and getattr(b_status, "port", None):
+                ret = _try_forward_to_live_broker(b_status, is_json)
+                if ret is not None:
+                    return ret
             else:
-                print(f"[FAIL] broker-owns-writes: {err_msg}", file=sys.stderr)
-            return 75
+                live_pid = getattr(b_status, "live_pid", None)
+                if live_pid is None and pid is not None and _is_pid_alive(pid):
+                    live_pid = pid
+                pid_str = str(live_pid) if live_pid is not None else "unknown"
+                err_msg = f"route through the broker (MCP) \u2014 it is running as pid {pid_str}"
+                payload = {
+                    "ok": False,
+                    "error": "broker-owns-writes",
+                    "message": err_msg,
+                }
+                if is_json:
+                    print(json.dumps(payload, indent=2))
+                else:
+                    print(f"[FAIL] broker-owns-writes: {err_msg}", file=sys.stderr)
+                return 75
 
         # 2. Idempotency key handling
         idemp_key = getattr(args, "idempotency_key", None)
