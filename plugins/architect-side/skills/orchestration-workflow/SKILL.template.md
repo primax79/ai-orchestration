@@ -85,7 +85,8 @@ If a bound skill for your executor, e.g. `kilo-mcp-orchestrator`, is also loaded
   semantic search capability (if it has one) before designing solutions.
   Do not guess filenames. Confirm the Executor's engine, role profile
   mapping, and credentials are ready **once per session or after a dispatch
-  failure** (do not re-run health/config checks before every single task).{{/BLOCK}}
+  failure** (do not re-run health/config checks before every single task).
+  Drain your verification queue at session start (`ai-orch tasks verification-queue --for <workspace-slug>`).{{/BLOCK}}
 - **Phase 2 - Isolation:** {{BLOCK:phase2_body}}delegation typically has **no isolation and no
   locking by default** - it runs directly in the target working directory,
   and nothing stops a second concurrent writer (another delegated task, or
@@ -200,6 +201,27 @@ If a bound skill for your executor, e.g. `kilo-mcp-orchestrator`, is also loaded
     - `self`: when no independent verifier or owner approval is used, close
       directly as `done with a caveat: self-verified only` rather than
       claiming `verified`.
+  - **Durable Verification Requests (`verify-by` & verification queue):**
+    When a delivered task requires verification by a different workspace or session:
+    - Deliver with `--verify-by <workspace-or-session>`:
+      ```sh
+      ai-orch tasks transition <id> delivered --verify-by <workspace-slug> [--verify-check "what to check"]
+      # or set via:
+      ai-orch tasks set-verify-by <id> <target> [--check "what to check"]
+      # alias:
+      ai-orch tasks request-verification <id> --by <target> [--check "what to check"]
+      ```
+    - This records `- verify-by: <target>` in the task header, `verification pending: <check> (verify-by: <target>)` after the header, and displays `delivered (verify-by: <target>)` in `00-INDEX.md`.
+    - **Session start verification queue draining:** Sessions must drain their verification queue at session start:
+      ```sh
+      ai-orch tasks verification-queue --for <workspace-slug>
+      ```
+      For each delivered task addressed to your workspace, re-run its `Verification` checks from the task file and reply:
+      - If checks pass:
+        `ai-orch tasks transition <id> verified --verifier <workspace-slug> --reason "OK: ..."`
+      - If verification fails:
+        `ai-orch tasks transition <id> bounced --reason "NOT OK: ..."`
+    - Transitioning out of `delivered` clears the pending verification request.
 
   ### Post-Verification Decision Table
 

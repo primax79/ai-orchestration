@@ -78,6 +78,8 @@ OPTIONAL_EXTENSION_FIELDS: tuple[str, ...] = (
     "profile",
     "verification-mode",
     "verifier",
+    "verify-by",
+    "verify_by",
     "size",
     "kind",
     "labels",
@@ -263,7 +265,7 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
 - **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
 - **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
-- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
+- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
 - **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
 - **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
@@ -330,6 +332,17 @@ def extract_waiting_on(raw_state: str | None) -> str | None:
         if re.match(r"^\d{4}-\d{2}-\d{2}", inner):
             return None
         return normalize_waiting_on(inner)
+    return None
+
+
+def extract_verify_by(raw_state: str | None) -> str | None:
+    """Extract verify_by target from state strings like 'delivered (verify-by: <target>)'."""
+    if not raw_state or not isinstance(raw_state, str):
+        return None
+    m = re.search(r"\(verify-by:\s*([^)]+)\)", raw_state, re.IGNORECASE)
+    if m:
+        val = m.group(1).strip()
+        return val if val and val != "-" else None
     return None
 
 
@@ -1925,6 +1938,7 @@ class TaskNode:
     conditional: bool = False
     own_conditions: list[str] = field(default_factory=list)
     waiting_on: str | None = None
+    verify_by: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         res = {
@@ -1938,6 +1952,8 @@ class TaskNode:
             "conditions": list(self.conditions),
             "conditional": self.conditional,
             "waiting_on": self.waiting_on,
+            "verify_by": self.verify_by,
+            "verify-by": self.verify_by,
             "parent": self.parent,
             "depth": self.depth,
             "node_type": self.node_type,
@@ -2003,6 +2019,8 @@ def rewrite_block_in_file(
     new_conditions: str | None = None,
     new_waiting_on: str | None = None,
     clear_waiting_on: bool = False,
+    new_verify_by: str | None = None,
+    clear_verify_by: bool = False,
 ) -> tuple[str, str] | tuple[str, str, str]:
     """Rewrite one `### id - title` block in place; every other byte of the file is preserved.
 
@@ -2061,6 +2079,7 @@ def rewrite_block_in_file(
     decider_updated = False
     short_updated = False
     waiting_on_updated = False
+    verify_by_updated = False
     status_line_idx: int | None = None
 
     parsed_lines: list[tuple[str, list[BulletSegment], str, bool, str]] = []
@@ -2174,12 +2193,33 @@ def rewrite_block_in_file(
                 for s_idx in reversed(to_remove):
                     segments.pop(s_idx)
 
+            if new_verify_by is not None or clear_verify_by:
+                to_remove = []
+                for s_idx, seg in enumerate(segments):
+                    if seg.key in ("verify_by", "verify-by"):
+                        if clear_verify_by or (new_verify_by is not None and (new_verify_by == "-" or not new_verify_by.strip())):
+                            to_remove.append(s_idx)
+                        else:
+                            seg.raw_value = new_verify_by
+                            seg.clean_value = new_verify_by
+                            verify_by_updated = True
+                for s_idx in reversed(to_remove):
+                    segments.pop(s_idx)
+
             if re.match(r"^\s*[-*]\s+waiting[-_]on:\s*", line_clean, re.IGNORECASE):
                 if clear_waiting_on or (new_waiting_on is not None and (new_waiting_on == "-" or not new_waiting_on.strip())):
                     continue
                 elif new_waiting_on is not None:
                     parsed_lines.append(("", [], line_ending, False, f"{prefix}waiting-on: {new_waiting_on}" + line_ending))
                     waiting_on_updated = True
+                    continue
+
+            if re.match(r"^\s*[-*]\s+verify[-_]by:\s*", line_clean, re.IGNORECASE):
+                if clear_verify_by or (new_verify_by is not None and (new_verify_by == "-" or not new_verify_by.strip())):
+                    continue
+                elif new_verify_by is not None:
+                    parsed_lines.append(("", [], line_ending, False, f"{prefix}verify-by: {new_verify_by}" + line_ending))
+                    verify_by_updated = True
                     continue
 
             parsed_lines.append((prefix, segments, line_ending, True, line))
@@ -2257,6 +2297,12 @@ def rewrite_block_in_file(
             insert_idx += 1
             waiting_on_updated = True
 
+        if new_verify_by is not None and not verify_by_updated and not clear_verify_by and new_verify_by != "-" and new_verify_by.strip():
+            new_seg = BulletSegment(raw_key="Verify-by", key="verify-by", raw_value=new_verify_by, clean_value=new_verify_by)
+            segments.insert(insert_idx, new_seg)
+            insert_idx += 1
+            verify_by_updated = True
+
         parsed_lines[status_line_idx] = (prefix, segments, line_ending, is_b, orig)
 
     new_lines: list[str] = []
@@ -2294,6 +2340,8 @@ def move_block_to_closed(
     expect_task_hash: str | None = None,
     new_waiting_on: str | None = None,
     clear_waiting_on: bool = False,
+    new_verify_by: str | None = None,
+    clear_verify_by: bool = False,
 ) -> tuple[str, str]:
     """Move a block ### task_id to the ## Closed section of file_path.
     If new_status is given, the status line is updated first.
@@ -2308,6 +2356,8 @@ def move_block_to_closed(
             expect_task_hash=expect_task_hash,
             new_waiting_on=new_waiting_on,
             clear_waiting_on=clear_waiting_on,
+            new_verify_by=new_verify_by,
+            clear_verify_by=clear_verify_by,
         )
 
     text = file_path.read_text(encoding="utf-8")
@@ -2844,6 +2894,9 @@ def parse_child_blocks(
                     if raw_sub_c and raw_sub_c != "-":
                         sub_c_refs = [c.strip() for c in raw_sub_c.split(",") if c.strip() and c.strip() != "-"]
                         c_node.coordinates = resolve_coordinates(sub_c_refs, tasks_dir)
+                sub_vb = sub_own_fields.get("verify_by") or sub_own_fields.get("verify-by")
+                if sub_vb and str(sub_vb).strip() and str(sub_vb).strip() != "-":
+                    c_node.verify_by = str(sub_vb).strip()
 
                 sub_children = parse_child_blocks(
                     target_readme,
@@ -2863,6 +2916,8 @@ def parse_child_blocks(
                 m_hdr = HEADER_LINE_RE.match(bl.strip())
                 if m_hdr and m_hdr.group(1) in ("waiting-on", "waiting_on"):
                     own_fields["waiting_on"] = m_hdr.group(2).strip()
+                elif m_hdr and m_hdr.group(1) in ("verify-by", "verify_by"):
+                    own_fields["verify_by"] = m_hdr.group(2).strip()
                 _, segs = parse_bullet_line(bl)
                 for seg in segs:
                     if seg.key:
@@ -2912,6 +2967,10 @@ def parse_child_blocks(
             cond_ids = parse_conditions_field(own_fields.get("conditions"))
             cond_list, is_cond = resolve_task_conditions(tasks_dir, cond_ids, raw_status)
 
+            leaf_vb = own_fields.get("verify_by") or own_fields.get("verify-by") or extract_verify_by(raw_status)
+            if leaf_vb and (not str(leaf_vb).strip() or str(leaf_vb).strip() == "-"):
+                leaf_vb = None
+
             leaf_node = TaskNode(
                 id=cid,
                 title=ctitle,
@@ -2959,6 +3018,7 @@ def parse_child_blocks(
                 conditional=is_cond,
                 own_conditions=cond_ids,
                 waiting_on=leaf_wo,
+                verify_by=str(leaf_vb).strip() if leaf_vb else None,
             )
             nodes.append(leaf_node)
 
@@ -3022,10 +3082,14 @@ def propagate_inheritance(tree: dict[str, TaskNode], node_id: str) -> None:
         "source": "own" if own_deps else (f"inherited:{parent.id}" if parent and inherited_deps else "own"),
     }
 
-    # 4. Non-inherited fields: kind, decider, status, verifier, verification_mode, goal, handoff
-    for f in ("kind", "decider", "status", "verifier", "verification_mode", "goal", "handoff"):
+    # 4. Non-inherited fields: kind, decider, status, verifier, verification_mode, verify_by, goal, handoff
+    for f in ("kind", "decider", "status", "verifier", "verification_mode", "verify_by", "verify-by", "goal", "handoff"):
         if f in node.own_fields:
             node.fields[f] = {"value": node.own_fields[f], "source": "own"}
+    if "verify_by" in node.own_fields or "verify-by" in node.own_fields:
+        vb_val = node.own_fields.get("verify_by") or node.own_fields.get("verify-by")
+        if vb_val and str(vb_val).strip() and str(vb_val).strip() != "-":
+            node.verify_by = str(vb_val).strip()
 
     # Size (non-inherited; defaults to XS for microtask, M for others)
     if "size" in node.own_fields and node.own_fields["size"]:
@@ -3356,6 +3420,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             conditional=et.get("conditional", False),
             own_conditions=et.get("conditions_ids", []),
             waiting_on=et.get("waiting_on"),
+            verify_by=et.get("verify_by") or et.get("headers", {}).get("verify-by") or et.get("headers", {}).get("verify_by") or et.get("verifier"),
         )
         tree[tid] = node
         for sn in sub_nodes:
@@ -5544,6 +5609,121 @@ def set_waiting_on(
             }
 
 
+def set_verify_by(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    verify_by: str,
+    check: str | None = None,
+    dry_run: bool = False,
+    expect_task_hash: str | None = None,
+) -> dict[str, Any]:
+    norm_vb = verify_by.strip() if verify_by else ""
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "error": f"Task '{node_id}' not found."}
+        node = tree[node_id]
+
+        if expect_task_hash and expect_task_hash.strip().lower() != node.task_hash.strip().lower():
+            return {
+                "ok": False,
+                "error": f"Task hash mismatch: expected {expect_task_hash}, actual {node.task_hash}",
+            }
+
+        file_path = pathlib.Path(node.file_path)
+        if node.block_text is not None:
+            _, new_block_hash, diff_str = rewrite_block_in_file(
+                file_path,
+                node_id,
+                new_verify_by=norm_vb or "-",
+                expect_task_hash=expect_task_hash,
+                dry_run=dry_run,
+                return_diff=True,
+            )
+            if not dry_run:
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "verify_by",
+                        "value": norm_vb,
+                        "verify_by": norm_vb,
+                    },
+                    subject=node_id,
+                )
+                idx_path = tasks_dir / "00-INDEX.md"
+                if idx_path.is_file():
+                    try:
+                        existing_idx = idx_path.read_text(encoding="utf-8")
+                        rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
+                        _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
+                    except Exception:
+                        pass
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "verify_by": norm_vb,
+                "check": check,
+                "task_hash": new_block_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+        else:
+            old_text = file_path.read_text(encoding="utf-8")
+            if dry_run:
+                _update_task_file_headers_and_state(file_path, new_state=None, verify_by=norm_vb or "-", verify_check=check)
+                new_text = file_path.read_text(encoding="utf-8")
+                _atomic_write_text(file_path, old_text, encoding="utf-8")
+                diff_lines = list(difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    new_text.splitlines(keepends=True),
+                    fromfile=str(file_path),
+                    tofile=f"{file_path} (dry-run)",
+                ))
+                diff_str = "".join(diff_lines)
+                new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+            else:
+                _update_task_file_headers_and_state(file_path, new_state=None, verify_by=norm_vb or "-", verify_check=check)
+                new_text = file_path.read_text(encoding="utf-8")
+                diff_lines = list(difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    new_text.splitlines(keepends=True),
+                    fromfile=str(file_path),
+                    tofile=str(file_path),
+                ))
+                diff_str = "".join(diff_lines)
+                new_hash = _file_sha256(file_path)
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "verify_by",
+                        "value": norm_vb,
+                        "verify_by": norm_vb,
+                    },
+                    subject=node_id,
+                )
+                idx_path = tasks_dir / "00-INDEX.md"
+                if idx_path.is_file():
+                    try:
+                        existing_idx = idx_path.read_text(encoding="utf-8")
+                        rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
+                        _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
+                    except Exception:
+                        pass
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "verify_by": norm_vb,
+                "check": check,
+                "bundle_sha256": new_hash,
+                "task_hash": node.task_hash if dry_run else new_hash,
+                "new_task_hash": new_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+
+
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
@@ -5716,6 +5896,8 @@ def parse_emergent_task_file(
         "profile": headers.get("profile"),
         "verification_mode": headers.get("verification-mode"),
         "verifier": headers.get("verifier"),
+        "verify_by": headers.get("verify-by") or headers.get("verify_by") or extract_verify_by(raw_state),
+        "verify-by": headers.get("verify-by") or headers.get("verify_by") or extract_verify_by(raw_state),
         "verification_pending": verification_pending,
         "header_keys": header_keys,
         "headers": headers,
@@ -7775,6 +7957,9 @@ def _update_task_file_headers_and_state(
     file_path: pathlib.Path,
     new_state: str | None,
     verifier: str | None = None,
+    verify_by: str | None = None,
+    clear_verify_by: bool = False,
+    verify_check: str | None = None,
     decider: str | None = None,
     clear_next_up: bool = False,
     conditions: str | None = None,
@@ -7798,6 +7983,7 @@ def _update_task_file_headers_and_state(
 
     header_end = idx
     verifier_line_idx: int | None = None
+    verify_by_line_idx: int | None = None
     conditions_line_idx: int | None = None
     waiting_on_line_idx: int | None = None
     handoff_line_idx: int | None = None
@@ -7823,6 +8009,13 @@ def _update_task_file_headers_and_state(
                 waiting_on_line_idx = header_end
             else:
                 waiting_on_line_idx = header_end
+        elif key in ("verify-by", "verify_by"):
+            verify_by_line_idx = header_end
+            if clear_verify_by or (verify_by is not None and verify_by.strip() in ("", "-")):
+                del lines[header_end]
+                continue
+            elif verify_by is not None:
+                lines[header_end] = f"- verify-by: {verify_by}"
         elif key == "next-up" and clear_next_up:
             lines[header_end] = "- next-up: no"
         elif key == "verifier":
@@ -7835,13 +8028,26 @@ def _update_task_file_headers_and_state(
 
     if verifier is not None and verifier_line_idx is None and handoff_line_idx is not None:
         insert_pos = header_end
-        fields_after_verifier = {"size", "kind", "labels", "branch", "worktree", "run-id", "use-cases", "use_cases", "coordinates", "moved-to", "conditions", "waiting-on", "waiting_on", "short"}
+        fields_after_verifier = {"verify-by", "verify_by", "size", "kind", "labels", "branch", "worktree", "run-id", "use-cases", "use_cases", "coordinates", "moved-to", "conditions", "waiting-on", "waiting_on", "short"}
         for i in range(handoff_line_idx + 1, header_end):
             m_key = HEADER_LINE_RE.match(lines[i])
             if m_key and m_key.group(1) in fields_after_verifier:
                 insert_pos = i
                 break
         lines.insert(insert_pos, f"- verifier: {verifier}")
+        header_end += 1
+        if verify_by_line_idx is not None and insert_pos <= verify_by_line_idx:
+            verify_by_line_idx += 1
+
+    if verify_by is not None and not clear_verify_by and verify_by.strip() not in ("", "-") and verify_by_line_idx is None and handoff_line_idx is not None:
+        insert_pos = header_end
+        fields_after_verify_by = {"size", "kind", "labels", "branch", "worktree", "run-id", "use-cases", "use_cases", "coordinates", "moved-to", "conditions", "waiting-on", "waiting_on", "short"}
+        for i in range(handoff_line_idx + 1, header_end):
+            m_key = HEADER_LINE_RE.match(lines[i])
+            if m_key and m_key.group(1) in fields_after_verify_by:
+                insert_pos = i
+                break
+        lines.insert(insert_pos, f"- verify-by: {verify_by}")
         header_end += 1
 
     if conditions is not None and conditions_line_idx is None and handoff_line_idx is not None:
@@ -7867,29 +8073,52 @@ def _update_task_file_headers_and_state(
         header_end += 1
 
     # Manage `verification pending:` line right after header
-    if new_state is not None:
-        cstate = normalize_state(new_state)
-        scan_idx = header_end
-        while scan_idx < len(lines) and not lines[scan_idx].strip():
-            scan_idx += 1
+    eff_state = new_state
+    if eff_state is None:
+        for ln in lines:
+            m_st = HEADER_LINE_RE.match(ln)
+            if m_st and m_st.group(1) == "state":
+                eff_state = m_st.group(2).strip()
+                break
+    cstate = normalize_state(eff_state) if eff_state else ""
+    scan_idx = header_end
+    while scan_idx < len(lines) and not lines[scan_idx].strip():
+        scan_idx += 1
 
-        has_vp_line = (
-            scan_idx < len(lines)
-            and lines[scan_idx].strip().lower().startswith("verification pending:")
-        )
-        if cstate == "delivered":
+    has_vp_line = (
+        scan_idx < len(lines)
+        and lines[scan_idx].strip().lower().startswith("verification pending:")
+    )
+    if cstate == "delivered" or (verify_by is not None and verify_by.strip() not in ("", "-") and new_state is None):
+        eff_vb = verify_by
+        if not eff_vb:
+            for ln in lines:
+                m_vb = HEADER_LINE_RE.match(ln)
+                if m_vb and m_vb.group(1) in ("verify-by", "verify_by"):
+                    eff_vb = m_vb.group(2).strip()
+                    break
+        if eff_vb and eff_vb != "-":
+            curr_check = None
+            if has_vp_line:
+                curr_vp_text = lines[scan_idx].strip().split(":", 1)[1].strip()
+                m_vpre = re.sub(r"\s*\([^)]*\)", "", curr_vp_text).strip()
+                if m_vpre and m_vpre != "run Verification checks":
+                    curr_check = m_vpre
+            check_str = verify_check or curr_check or "run Verification checks"
+            vp_line = f"verification pending: {check_str} (verify-by: {eff_vb})"
+        else:
             vp_target = verifier or "independent verifier"
             vp_line = f"verification pending: run Verification checks ({vp_target})"
-            if has_vp_line:
-                lines[scan_idx] = vp_line
-            else:
-                lines.insert(header_end, "")
-                lines.insert(header_end + 1, vp_line)
-        elif has_vp_line:
-            # Remove `verification pending:` line once no longer in `delivered`
+        if has_vp_line:
+            lines[scan_idx] = vp_line
+        else:
+            lines.insert(header_end, "")
+            lines.insert(header_end + 1, vp_line)
+    elif has_vp_line and (new_state is not None and cstate != "delivered"):
+        # Remove `verification pending:` line once no longer in `delivered`
+        del lines[scan_idx]
+        if scan_idx < len(lines) and not lines[scan_idx].strip() and scan_idx > 0 and not lines[scan_idx - 1].strip():
             del lines[scan_idx]
-            if scan_idx < len(lines) and not lines[scan_idx].strip() and scan_idx > 0 and not lines[scan_idx - 1].strip():
-                del lines[scan_idx]
 
     _atomic_write_text(file_path, "\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
@@ -8005,6 +8234,8 @@ def transition_task(
     expect_task_hash: str | None = None,
     force_unblock: bool = False,
     waiting_on: str | None = None,
+    verify_by: str | None = None,
+    verify_check: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -8228,6 +8459,7 @@ def transition_task(
                         expect_task_hash=expect_task_hash,
                         new_waiting_on=waiting_on,
                         clear_waiting_on=clear_wo,
+                        new_verify_by=verify_by,
                     )
                 _emit_event(
                     tasks_dir,
@@ -8238,6 +8470,7 @@ def transition_task(
                         "actor": actor or "owner",
                         "reason": reason,
                         "verifier": verifier,
+                        "verify_by": verify_by,
                     },
                     subject=task_id,
                     actor=actor or "owner",
@@ -8249,6 +8482,7 @@ def transition_task(
                     "old_state": old_state,
                     "new_state": effective_state,
                     "waiting_on": waiting_on if (new_canon == "waiting" and waiting_on) else None,
+                    "verify_by": verify_by or (getattr(node, "verify_by", None)),
                     "file_path": str(file_path),
                     "rel_path": node.rel_path,
                     "task_hash": new_h,
@@ -8412,6 +8646,8 @@ def transition_task(
                 file_path,
                 effective_state,
                 verifier=verifier,
+                verify_by=verify_by,
+                verify_check=verify_check,
                 decider=decider_to_set,
                 clear_next_up=is_terminal,
                 waiting_on=waiting_on,
@@ -8424,6 +8660,7 @@ def transition_task(
                 final_path = _move_task_to_done(target, tasks_dir)
 
             new_bundle_hash = task_bundle_sha256(final_path)
+            eff_verify_by = verify_by or target.get("verify_by") or target.get("verify-by")
             _emit_event(
                 tasks_dir,
                 "task.transitioned",
@@ -8433,6 +8670,7 @@ def transition_task(
                     "actor": actor or "owner",
                     "reason": reason,
                     "verifier": verifier or target.get("verifier"),
+                    "verify_by": eff_verify_by,
                 },
                 subject=task_id,
                 actor=actor or "owner",
@@ -8444,6 +8682,7 @@ def transition_task(
                 "new_state": effective_state,
                 "waiting_on": waiting_on if (new_canon == "waiting" and waiting_on) else None,
                 "verifier": verifier or target.get("verifier"),
+                "verify_by": eff_verify_by,
                 "reason": reason,
                 "file_path": str(final_path),
                 "rel_path": final_path.relative_to(tasks_dir).as_posix(),
@@ -9342,6 +9581,10 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 st_val = t['state']
                 if t.get("canonical_state") == "waiting" and t.get("waiting_on"):
                     st_val = f"waiting ({t['waiting_on']})"
+                elif t.get("canonical_state") == "delivered":
+                    vb = t.get("verify_by") or t.get("verify-by") or t.get("headers", {}).get("verify-by") or t.get("headers", {}).get("verify_by")
+                    if vb and str(vb).strip() and str(vb).strip() != "-":
+                        st_val = f"delivered (verify-by: {str(vb).strip()})"
                 cat_rows.append(
                     (
                         base_id,
@@ -9367,6 +9610,10 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             st_val = t['state']
             if t.get("canonical_state") == "waiting" and t.get("waiting_on"):
                 st_val = f"waiting ({t['waiting_on']})"
+            elif t.get("canonical_state") == "delivered":
+                vb = t.get("verify_by") or t.get("verify-by") or t.get("headers", {}).get("verify-by") or t.get("headers", {}).get("verify_by")
+                if vb and str(vb).strip() and str(vb).strip() != "-":
+                    st_val = f"delivered (verify-by: {str(vb).strip()})"
             cat_rows.append(
                 (
                     t["id"],
@@ -10608,6 +10855,8 @@ def cmd_transition(args: argparse.Namespace) -> int:
         expect_task_hash=expect_task_hash,
         force_unblock=force_unblock,
         waiting_on=getattr(args, "waiting_on", None),
+        verify_by=getattr(args, "verify_by", None),
+        verify_check=getattr(args, "verify_check", None),
     )
     args._last_result = payload
     if getattr(args, "json", False):
@@ -11157,6 +11406,341 @@ def cmd_set_executor(args: argparse.Namespace) -> int:
         else:
             print(f"[FAIL] {res.get('error', 'set-executor failed')}", file=sys.stderr)
     return 0 if res.get("ok") else 1
+
+
+def cmd_set_verify_by(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    expect_task_hash = getattr(args, "expect_task_hash", None)
+    is_json = getattr(args, "json", False)
+    target = getattr(args, "target", None) or getattr(args, "by_target", None)
+    check = getattr(args, "check", None)
+
+    if not target:
+        err_msg = "Missing target: provide <target> (or --by <target>)."
+        if is_json:
+            print(json.dumps({"ok": False, "error": "missing-target", "message": err_msg}, indent=2))
+        else:
+            print(f"[FAIL] {err_msg}", file=sys.stderr)
+        return 2
+
+    res = set_verify_by(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        verify_by=target,
+        check=check,
+        dry_run=dry_run,
+        expect_task_hash=expect_task_hash,
+    )
+    if res.get("task_hash") and "plan_hash" not in res:
+        res["plan_hash"] = res["task_hash"]
+    args._last_result = res
+    if is_json:
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            if res.get("dry_run"):
+                print(f"[ok] dry-run: verify-by for {args.id} would become: {res.get('verify_by')}")
+                if res.get("diff"):
+                    print(res.get("diff"), end="")
+            else:
+                print(f"[ok] updated verify-by for {args.id}: {res.get('verify_by')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'set-verify-by failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def match_verify_by(task_verify_by: str | None, target: str | None) -> bool:
+    if not task_verify_by or not str(task_verify_by).strip() or str(task_verify_by).strip() == "-":
+        return False
+    if not target or not str(target).strip() or str(target).strip() == "-":
+        return True
+    tv = str(task_verify_by).strip()
+    tgt = str(target).strip()
+    if tv.lower() == tgt.lower():
+        return True
+
+    tv_bare = tv[len("workspace:"):].strip() if tv.lower().startswith("workspace:") else tv
+    tgt_bare = tgt[len("workspace:"):].strip() if tgt.lower().startswith("workspace:") else tgt
+    if tv_bare.lower() == tgt_bare.lower():
+        return True
+
+    if tgt.lower().startswith("session:"):
+        tgt_prefix = tgt[len("session:"):].rstrip("*").lower()
+        if tv.lower().startswith("session:"):
+            cand_sess = tv[len("session:"):].lower()
+            if cand_sess.startswith(tgt_prefix):
+                return True
+        elif tv.lower().startswith(tgt_prefix):
+            return True
+    elif tv.lower().startswith("session:"):
+        cand_sess = tv[len("session:"):].lower()
+        if cand_sess.startswith(tgt_bare.lower()):
+            return True
+
+    return False
+
+
+def collect_task_dirs_to_scan(
+    tasks_dir: pathlib.Path,
+    workspace_arg: str | None = None,
+    all_workspaces: bool = False,
+    for_target: str | None = None,
+) -> list[tuple[str, str, pathlib.Path]]:
+    """Collect (workspace_slug, project_slug, tasks_dir_path) to scan."""
+    tasks_dir = tasks_dir.resolve()
+    seen_dirs: set[pathlib.Path] = set()
+    results: list[tuple[str, str, pathlib.Path]] = []
+
+    ws_root: pathlib.Path | None = None
+    ws_slug: str | None = None
+    try:
+        ws_root, ws_slug, projects = resolve_workspace_and_projects(
+            workspace_arg=workspace_arg, tasks_dir=tasks_dir
+        )
+        for p in projects:
+            td = p["tasks_dir"].resolve()
+            if td.is_dir() and td not in seen_dirs:
+                seen_dirs.add(td)
+                results.append((ws_slug, p["slug"], td))
+    except Exception:
+        td = tasks_dir.resolve()
+        if td.is_dir() and td not in seen_dirs:
+            seen_dirs.add(td)
+            ws_name = td.parent.name if td.name == "tasks" else td.name
+            results.append((ws_name, "_workspace", td))
+
+    if for_target is not None or all_workspaces:
+        if orchestration_registry is not None and hasattr(orchestration_registry, "list_workspaces"):
+            try:
+                ws_list = orchestration_registry.list_workspaces()
+                for w in ws_list:
+                    w_path = pathlib.Path(w["canonical_path"]).resolve()
+                    if w_path.is_dir():
+                        try:
+                            _, w_slug_reg, w_projects = resolve_workspace_and_projects(
+                                workspace_arg=str(w_path)
+                            )
+                            eff_ws_slug = w.get("slug") or w_slug_reg or w_path.name
+                            for p in w_projects:
+                                td = p["tasks_dir"].resolve()
+                                if td.is_dir() and td not in seen_dirs:
+                                    seen_dirs.add(td)
+                                    results.append((eff_ws_slug, p["slug"], td))
+                        except Exception:
+                            cand_td = (w_path / "tasks").resolve()
+                            if cand_td.is_dir() and cand_td not in seen_dirs:
+                                seen_dirs.add(cand_td)
+                                results.append((w.get("slug") or w_path.name, "_workspace", cand_td))
+            except Exception:
+                pass
+
+        parent_dirs: list[pathlib.Path] = []
+        if ws_root is not None:
+            parent_dirs.append(ws_root.parent)
+        cand_parent = tasks_dir.parent
+        if cand_parent.name == "tasks":
+            cand_parent = cand_parent.parent
+        if cand_parent.parent not in parent_dirs:
+            parent_dirs.append(cand_parent.parent)
+
+        for pdir in parent_dirs:
+            if not pdir.is_dir():
+                continue
+            try:
+                for child in sorted(pdir.iterdir()):
+                    if (
+                        child.is_dir()
+                        and not child.name.startswith(".")
+                        and child != ws_root
+                        and child.name not in ("node_modules", "target", "build", "dist", "venv", ".venv", "__pycache__")
+                    ):
+                        cand_tasks = child / "tasks"
+                        if (cand_tasks / "00-INDEX.md").is_file() or cand_tasks.is_dir():
+                            try:
+                                _, sib_slug, sib_projects = resolve_workspace_and_projects(
+                                    workspace_arg=str(child)
+                                )
+                                for sp in sib_projects:
+                                    td = sp["tasks_dir"].resolve()
+                                    if td.is_dir() and td not in seen_dirs:
+                                        seen_dirs.add(td)
+                                        results.append((sib_slug or child.name, sp["slug"], td))
+                            except Exception:
+                                td = cand_tasks.resolve()
+                                if td.is_dir() and td not in seen_dirs:
+                                    seen_dirs.add(td)
+                                    results.append((child.name, "_workspace", td))
+            except Exception:
+                pass
+
+    return results
+
+
+def get_verification_queue(
+    tasks_dir: pathlib.Path,
+    target: str | None = None,
+    workspace_arg: str | None = None,
+    all_workspaces: bool = False,
+) -> dict[str, Any]:
+    task_dirs = collect_task_dirs_to_scan(
+        tasks_dir=tasks_dir,
+        workspace_arg=workspace_arg,
+        all_workspaces=all_workspaces,
+        for_target=target,
+    )
+    items: list[dict[str, Any]] = []
+    seen_tasks: set[tuple[str, str, str]] = set()
+
+    for ws_slug, p_slug, td in task_dirs:
+        if not td.is_dir():
+            continue
+
+        emergent = discover_emergent_tasks(td)
+        for t in emergent:
+            t_id = t["id"]
+            if (ws_slug, p_slug, t_id) in seen_tasks:
+                continue
+            cstate = t.get("canonical_state") or normalize_state(t.get("state", ""))
+            if cstate == "delivered":
+                vb = (
+                    t.get("verify_by")
+                    or t.get("verify-by")
+                    or t.get("headers", {}).get("verify-by")
+                    or t.get("headers", {}).get("verify_by")
+                    or t.get("verifier")
+                )
+                if vb and str(vb).strip() and str(vb).strip() != "-":
+                    vb_str = str(vb).strip()
+                    if match_verify_by(vb_str, target):
+                        seen_tasks.add((ws_slug, p_slug, t_id))
+                        t_title = t.get("title", "")
+                        t_short = t.get("short_title") or derive_short_title(t_title)
+                        t_exec = t.get("executor") or "unassigned"
+                        if p_slug in ("_workspace", ws_slug):
+                            qid = f"workspace:{ws_slug}/{t_id}"
+                        else:
+                            qid = f"workspace:{ws_slug}/{p_slug}/{t_id}"
+                        items.append({
+                            "id": t_id,
+                            "qualified_id": qid,
+                            "workspace": ws_slug,
+                            "project": p_slug,
+                            "title": t_title,
+                            "short_title": t_short,
+                            "state": "delivered",
+                            "verify_by": vb_str,
+                            "executor": t_exec,
+                            "tasks_dir": str(td),
+                            "priority": t.get("priority", "P2"),
+                        })
+
+        try:
+            tree = discover_task_tree(td)
+            for nid, node in tree.items():
+                if not node.is_leaf:
+                    continue
+                if (ws_slug, p_slug, nid) in seen_tasks:
+                    continue
+                cstate = node.canonical_state or normalize_state(node.state)
+                if cstate == "delivered":
+                    vb = (
+                        getattr(node, "verify_by", None)
+                        or node.own_fields.get("verify_by")
+                        or node.own_fields.get("verify-by")
+                        or node.fields.get("verify_by", {}).get("value")
+                        or node.fields.get("verify-by", {}).get("value")
+                        or node.fields.get("verifier", {}).get("value")
+                        or node.own_fields.get("verifier")
+                    )
+                    if vb and str(vb).strip() and str(vb).strip() != "-":
+                        vb_str = str(vb).strip()
+                        if match_verify_by(vb_str, target):
+                            seen_tasks.add((ws_slug, p_slug, nid))
+                            t_title = node.title
+                            t_short = node.short_title or derive_short_title(t_title)
+                            t_exec = node.executor or "unassigned"
+                            if p_slug in ("_workspace", ws_slug):
+                                qid = f"workspace:{ws_slug}/{nid}"
+                            else:
+                                qid = f"workspace:{ws_slug}/{p_slug}/{nid}"
+                            items.append({
+                                "id": nid,
+                                "qualified_id": qid,
+                                "workspace": ws_slug,
+                                "project": p_slug,
+                                "title": t_title,
+                                "short_title": t_short,
+                                "state": "delivered",
+                                "verify_by": vb_str,
+                                "executor": t_exec,
+                                "tasks_dir": str(td),
+                                "priority": node.priority or "P2",
+                            })
+        except Exception:
+            pass
+
+    def _sort_key(item: dict[str, Any]):
+        pri_rank = PRIORITY_SORT_KEY.get(item.get("priority", "P2"), 99)
+        return (pri_rank, item.get("workspace", ""), item.get("project", ""), _natural_sort_key(item.get("id", "")))
+
+    items.sort(key=_sort_key)
+    clean_items = []
+    for it in items:
+        clean_items.append({
+            "id": it["id"],
+            "qualified_id": it["qualified_id"],
+            "workspace": it["workspace"],
+            "project": it["project"],
+            "title": it["title"],
+            "short_title": it["short_title"],
+            "state": "delivered",
+            "verify_by": it["verify_by"],
+            "executor": it["executor"],
+            "tasks_dir": it["tasks_dir"],
+        })
+
+    return {
+        "ok": True,
+        "for": target,
+        "count": len(clean_items),
+        "items": clean_items,
+    }
+
+
+def cmd_verification_queue(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    target = getattr(args, "for_target", None)
+    workspace_arg = getattr(args, "workspace", None)
+    all_workspaces = getattr(args, "all_workspaces", False)
+    is_json = getattr(args, "json", False)
+
+    payload = get_verification_queue(
+        tasks_dir=tasks_dir,
+        target=target,
+        workspace_arg=workspace_arg,
+        all_workspaces=all_workspaces,
+    )
+    args._last_result = payload
+    if is_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        items = payload.get("items", [])
+        if not items:
+            if target:
+                print(f"[ok] verification queue for '{target}' is empty.")
+            else:
+                print("[ok] verification queue is empty.")
+        else:
+            hdr = f"Verification queue for '{target}' ({len(items)} items):" if target else f"Verification queue ({len(items)} items):"
+            print(hdr)
+            for it in items:
+                qid = it.get("qualified_id", it.get("id"))
+                st = it.get("short_title") or derive_short_title(it.get("title", ""))
+                vb = it.get("verify_by", "-")
+                exc = it.get("executor", "-")
+                print(f"- {qid} ({st}): verify-by: {vb} (executor: {exc})")
+    return 0
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -17549,6 +18133,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("--waiting-on", default=None, help="Waiting-on qualifier when transitioning to waiting (e.g. question:Q###, owner:..., external:..., session:...)")
     p_tr.add_argument("--actor", default=None, help="Actor performing the transition (e.g. kilo, claude, owner)")
     p_tr.add_argument("--verifier", default=None, help="Independent verifier identifier (e.g. claude:deep-reasoning, blind-subagent:deep-reasoning, owner)")
+    p_tr.add_argument("--verify-by", default=None, help="Durable verification request target (e.g. gcube_atlas, workspace:gcube_atlas, session:...)")
+    p_tr.add_argument("--verify-check", default=None, help="What to check during verification")
     p_tr.add_argument("--reason", default=None, help="Bounce findings (B1..Bn), caveat reason, or transition note")
     p_tr.add_argument("--expect-task-hash", default=None, help="Refuse to transition if task bundle SHA256 does not match this hash")
     p_tr.add_argument("--force-unblock", action="store_true", help="Force move task out of waiting, withdrawing open questions with --reason")
@@ -17994,6 +18580,39 @@ def build_parser() -> argparse.ArgumentParser:
     p_se.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_se.set_defaults(func=cmd_set_executor)
 
+    # tasks set-verify-by
+    p_svb = sub.add_parser("set-verify-by", help="Set durable verification request target and optional check for a task")
+    p_svb.add_argument("id", help="Task ID (e.g. T001, 01.1)")
+    p_svb.add_argument("target", nargs="?", default=None, help="Target workspace or session (e.g. gcube_atlas, workspace:gcube_atlas, session:...)")
+    p_svb.add_argument("--by", dest="by_target", default=None, help="Target workspace or session (alternative to positional target)")
+    p_svb.add_argument("--check", default=None, help="What to check during verification")
+    p_svb.add_argument("--dry-run", action="store_true", help="Print diff without writing")
+    p_svb.add_argument("--expect-task-hash", "--expect-plan-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task block/file/plan hash")
+    p_svb.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_svb.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_svb.set_defaults(func=cmd_set_verify_by)
+
+    # tasks request-verification (alias for set-verify-by)
+    p_req = sub.add_parser("request-verification", help="Request verification from a workspace or session (alias for set-verify-by)")
+    p_req.add_argument("id", help="Task ID (e.g. T001, 01.1)")
+    p_req.add_argument("target", nargs="?", default=None, help="Target workspace or session")
+    p_req.add_argument("--by", dest="by_target", default=None, help="Target workspace or session")
+    p_req.add_argument("--check", default=None, help="What to check during verification")
+    p_req.add_argument("--dry-run", action="store_true", help="Print diff without writing")
+    p_req.add_argument("--expect-task-hash", "--expect-plan-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task block/file/plan hash")
+    p_req.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_req.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_req.set_defaults(func=cmd_set_verify_by)
+
+    # tasks verification-queue
+    p_vq = sub.add_parser("verification-queue", help="List delivered tasks pending verification across workspaces or filtered by target")
+    p_vq.add_argument("--for", dest="for_target", default=None, help="Filter to items whose verify_by matches target (e.g. gcube_atlas, workspace:gcube_atlas, session:...)")
+    p_vq.add_argument("--workspace", default=None, help="Workspace slug, UUID, or path")
+    p_vq.add_argument("--all-workspaces", action="store_true", default=False, help="Scan all registered workspaces")
+    p_vq.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_vq.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_vq.set_defaults(func=cmd_verification_queue)
+
     # tasks labels
     p_lbls = sub.add_parser("labels", help="List all labels in use with their counts")
     p_lbls.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
@@ -18160,7 +18779,7 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
         return False
     if cmd == "sync-index":
         return bool(getattr(args, "apply", False))
-    if cmd in ("list", "validate", "graph", "next", "labels", "next-id"):
+    if cmd in ("list", "validate", "graph", "next", "labels", "next-id", "verification-queue"):
         return False
     if cmd == "questions":
         q_cmd = getattr(args, "q_cmd", None)
@@ -18194,6 +18813,10 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
         "set-kind",
         "set-labels",
         "set-short",
+        "set-waiting-on",
+        "set-executor",
+        "set-verify-by",
+        "request-verification",
         "micro",
         "promote",
         "upgrade",
