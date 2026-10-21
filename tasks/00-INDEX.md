@@ -17,12 +17,12 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 7 | 07 | [Agent runs from the control plane (choose who does the work)](07-agent-runs-from-ui/plan.md) | in progress (done: 07.1–07.4, 07.6–07.8, 07.10, 07.12; to verify: 07.5, 07.9, 07.11) | 05, 06 | L |
 | 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](08-blocking-questions/plan.md) | in progress (done: 08.1–08.4; to verify: 08.5–08.7) | 06 | M |
 | 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](09-inbox-notes/plan.md) | in progress (done: 09.1–09.3, 09.7; to verify: 09.4–09.6, 09.8–09.11) | 06 (07 for agent triage) | M |
-| 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | in progress (done: 10.1, 10.4; to verify: 10.2–10.3, 10.5–10.6) | 06, 09.1 | S |
-| 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | in progress (done: 11.1–11.2, 11.5–11.6; to verify: 11.3–11.4) | 06, 09.1 | M |
+| 10 | 10 | [Abstract timeline: dependencies and priorities](10-timeline-gantt/plan.md) | in progress (done: 10.1, 10.4, 10.6; to verify: 10.2–10.3, 10.5) | 06, 09.1 | S |
+| 11 | 11 | [First-class task hierarchy (N levels)](11-subtasks/plan.md) | in progress (done: 11.1–11.3, 11.5–11.6; to verify: 11.4) | 06, 09.1 | M |
 | 12 | 12 | [Events, orchestration sessions and triggers](12-events-and-triggers/plan.md) | in progress (done: 12.3–12.4, 12.11–12.14; to verify: 12.1, 12.5–12.10, 12.15–12.17) | 07, 08, 11 | L |
-| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (done: 13.1, 13.4; to verify: 13.2–13.3, 13.5–13.7) | 06 | M |
+| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (done: 13.1, 13.4, 13.6; to verify: 13.2–13.3, 13.5, 13.7) | 06 | M |
 | 15 | 15 | [Use-Case Driven Specification, Task Definition & Product Validation](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
-| 16 | 16 | [Orchestration broker: one MCP server per user, workspaces, projects, mail](16-orchestration-broker/plan.md) | in progress (running: 16.6; to verify: 16.1–16.5, 16.9) | T026, T027, T028 | L |
+| 16 | 16 | [Orchestration broker: one MCP server per user, workspaces, projects, mail](16-orchestration-broker/plan.md) | in progress (done: 16.1, 16.3, 16.9; running: 16.6; to verify: 16.2, 16.4–16.5) | T026, T027, T028 | L |
 
 ## Specs
 
@@ -77,6 +77,8 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T033 (Test config isolation) | P1 | [Test sessions isolated from the user's global config](server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md) | delivered | self | - |
 | T040 (Workspace next) | P2 | [Workspace-wide next-up and open tasks across projects](server-and-bindings/T040-workspace-wide-next-up-and-open-tasks-across-proje.md) | open | kilo | - |
 | T043 (Cross-workspace task links) | P2 | [Cross-workspace executor and depends-on links with live state](server-and-bindings/T043-cross-workspace-executor-and-depends-on-links-with.md) | open | kilo | - |
+| T045 (Broker validation follow-ups) | P1 | [Broker follow-ups from validation: mcp --local, stable error codes, project field](server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md) | open | kilo | - |
+| T046 (Compact common queue) | P3 | [Common view Queue: compact next-up list and kind on rows](server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md) | open | kilo | - |
 
 ### micro
 
@@ -95,7 +97,6 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 | T016 (Doctor findings study) | P1 | [Study: are the Doctor's persistent findings real, and do we handle them right?](env-doctor/T016-doctor-findings-study.md) | delivered | claude | - |
 | T017 (Remove project skill copies) | P2 | [Apply Q002: remove the untracked project-scope skill copies in ai-orchestration](env-doctor/T017-apply-q002-remove-the-untracked-project-scope-skil.md) | delivered | claude | - |
 | T018 (Orchestration skill precedence) | P2 | [Q003 follow-up: precedence when orchestration-workflow and the generic orchestration skill coexist](env-doctor/T018-q003-follow-up-precedence-when-orchestration-workf.md) | delivered | claude | - |
-| T019 (Duplicate skills alignment) | P3 | [Apply Q005: per-skill diff of the gcube-jenkins, gcube-security-audit and frontend-design copies](env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md) | delivered | claude | - |
 
 ### tasks
 
@@ -158,6 +159,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T012 (Hung kilo runs) | [kilo-mcp: detect kilo run processes that hang after finishing](done/server-and-bindings/T012-kilo-run-hangs-after-completion.md) | done | 2026-10-18 |
 | T031 (Conditional done follow-ups) | [Conditional done: question age in the index; conditions: header position](done/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md) | done | 2026-10-21 |
 | T034 (Built-in feedback channel) | [Tooling feedback built into the product: ai-orch feedback, skill rule, upgrade AGENTS.md](done/server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md) | done | 2026-10-21 |
+| T019 (Duplicate skills alignment) | [Apply Q005: per-skill diff of the gcube-jenkins, gcube-security-audit and frontend-design copies](done/env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md) | done | 2026-10-21 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

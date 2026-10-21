@@ -6,13 +6,6 @@
 
 ## Tasks (One Task = One Commit)
 
-### 11.3 - UI: collapsible tree at any depth, node detail with inheritance, add child, expand, move, breadcrumbs
-
-- **Status:** `delivered` (2026-10-18; claude; merged; 51 backend tests; Kilo Playwright on a scratch copy (tree, progress bars, add subtask T050.1); prior TaskDetailModal features preserved (Structured/Raw, attachments, runs, questions); owner live check pending) · **Short:** Collapsible tree UI · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 11.1, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
-- **Focus files:** `backend/server.py`, `frontend/src/**`
-- **Goal:** Spec §4.
-- **Verification:** Live with Playwright on a scratch copy of this repo's `tasks/`: the tree shows 06–11 with progress bars; transitioning a child updates its block and the roll-up; "Add subtask" on a folder task creates `T###.1`.
-
 ### 11.4 - Engine: closed-apart placement at every level (`tasks ship`, `## Closed` section for blocks, link rewriting, `tasks archive`; questions stay in place per S3)
 
 - **Status:** `delivered` (2026-10-18; claude; merged; 229 tests; archive dry-run on the real tree plans 47 closed blocks into Closed sections (not applied: touches plan 15 of another session; owner decision)) · **Short:** Closed-apart placement · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (same file) · **Repo:** `ai-orchestration/`
@@ -84,3 +77,10 @@
   - `tasks/specs/blocking-questions.md`: `blocks` accepts child ids;
   - CLI-level tests for `child add`, `expand`, `collapse`, `reopen`, `set-deps`, `set-labels`, `expand`/`collapse` at depth > 2, and the generated Initiative status cells in `sync-index`.
 - **Verification:** the tests above; `validate` clean on this repo and on `ricerca_auto` (read-only).
+
+### 11.3 - UI: collapsible tree at any depth, node detail with inheritance, add child, expand, move, breadcrumbs
+
+- **Status:** `done` (2026-10-21; Verified by d4science-python-library-2e) · **Short:** Collapsible tree UI · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 11.1, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
+- **Focus files:** `backend/server.py`, `frontend/src/**`
+- **Goal:** Spec §4.
+- **Verification:** Live with Playwright on a scratch copy of this repo's `tasks/`: the tree shows 06–11 with progress bars; transitioning a child updates its block and the roll-up; "Add subtask" on a folder task creates `T###.1`.

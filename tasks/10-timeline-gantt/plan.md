@@ -34,21 +34,6 @@
 - **Goal:** Spec §5 "Creation" (UI) and the timeline pill, plus spec §6 UI: kind icons, label chips, the shared filter bar, the label editor with autocomplete, group by label. Also: in the inbox tab (09.3), "Convert to microtask" for `bug` notes, when 09.3 has landed.
 - **Verification:** Live with Playwright: quick-add a bug microtask → it appears as an XS pill in the ready queue → Promote → it becomes a full card.
 
-### 10.6 - Backlog views: compact "Next up", separate view switcher (Queue, Kanban, Tree, Timeline)
-
-- **Status:** `delivered` (2026-10-17; merged and checked live with Playwright: Queue/Kanban/Tree views, Done hidden, Delivered+Verified column, Tree state filter, Waiting-first Kanban) · **Short:** Backlog view switcher · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 06.8 (frontend lane; can run before 10.1 and enhance once 10.1 and 11.3 land) · **Repo:** `ai-orchestration-ui/`
-- **Origin:** owner feedback (2026-10-17). "Next Up Focus" was unclear and huge: it listed every `NN.T`, because initiative tasks inherited the initiative state, and it sat on the same page as the Kanban.
-- **Goal:**
-  - The Backlog tab gets a view switcher: **Queue**, **Kanban**, **Tree** (11.3), **Timeline** (10.2). The last chosen view is remembered (localStorage).
-  - **Queue** = "what to start next": at most 5 compact rows with id, title, priority, size and kind, plus a one-line explanation ("tasks marked next-up, or the first ready tasks by priority once the timeline engine lands"). There are no cards.
-  - The KPI counters become a single compact strip.
-  - **Kanban (owner feedback, 2026-10-17):**
-    - the Done column is hidden by default, with a toggle button ("Show done") whose state is remembered;
-    - Delivered and Verified share one column: Delivered cards on top, Verified cards below, with a thin divider and a sub-heading for each;
-    - same for the column-toggle of Dropped, if present.
-  - Until 10.1 lands, Queue uses `next-up: yes` emergent tasks only, never `NN.T`; after 10.1 it uses the `ready_queue`.
-- **Verification:** Live with Playwright on this repo's `tasks/`: the Queue view shows at most 5 rows; switching views keeps the filters; at 1000 px every view fits without horizontal scroll.
-
 ## Closed
 
 ### 10.1 - Engine: `tasks graph` (columns, ready queue, heaviest chain, Mermaid), `size` field, `tasks set-priority`, `tasks set-size`, `tasks set-deps`, cycle check
@@ -80,3 +65,18 @@
   - validation.
 - **Verification:**
   - Tests: label format and kind set are validated; `set-labels --add/--remove` round-trips; filters combine with AND across fields and OR within one field; a microtask validates with the reduced header and `## What` only; it appears in `tasks graph` with size `XS`; `promote` produces a full task that validates and keeps its id and the dependencies that point to it; `tasks micro` allocates ids concurrently without clashes.
+
+### 10.6 - Backlog views: compact "Next up", separate view switcher (Queue, Kanban, Tree, Timeline)
+
+- **Status:** `done` (2026-10-21; Verified by d4science-python-library-2e) · **Short:** Backlog view switcher · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 06.8 (frontend lane; can run before 10.1 and enhance once 10.1 and 11.3 land) · **Repo:** `ai-orchestration-ui/`
+- **Origin:** owner feedback (2026-10-17). "Next Up Focus" was unclear and huge: it listed every `NN.T`, because initiative tasks inherited the initiative state, and it sat on the same page as the Kanban.
+- **Goal:**
+  - The Backlog tab gets a view switcher: **Queue**, **Kanban**, **Tree** (11.3), **Timeline** (10.2). The last chosen view is remembered (localStorage).
+  - **Queue** = "what to start next": at most 5 compact rows with id, title, priority, size and kind, plus a one-line explanation ("tasks marked next-up, or the first ready tasks by priority once the timeline engine lands"). There are no cards.
+  - The KPI counters become a single compact strip.
+  - **Kanban (owner feedback, 2026-10-17):**
+    - the Done column is hidden by default, with a toggle button ("Show done") whose state is remembered;
+    - Delivered and Verified share one column: Delivered cards on top, Verified cards below, with a thin divider and a sub-heading for each;
+    - same for the column-toggle of Dropped, if present.
+  - Until 10.1 lands, Queue uses `next-up: yes` emergent tasks only, never `NN.T`; after 10.1 it uses the `ready_queue`.
+- **Verification:** Live with Playwright on this repo's `tasks/`: the Queue view shows at most 5 rows; switching views keeps the filters; at 1000 px every view fits without horizontal scroll.

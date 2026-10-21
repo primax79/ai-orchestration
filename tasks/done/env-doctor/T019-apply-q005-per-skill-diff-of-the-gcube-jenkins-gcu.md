@@ -6,16 +6,15 @@
 - priority: P3
 - priority-reason: Owner answered Q005 with C; the duplicates keep showing in the Doctor until decided
 - next-up: no
-- state: delivered
+- state: done
 - executor: claude
 - depends-on: -
 - decider: -
 - sources: -
 - paths: -
 - handoff: Read tasks/env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: d4science-python-library-2e
 - short: Duplicate skills alignment
-
-verification pending: run Verification checks (independent verifier)
 
 ## Goal
 

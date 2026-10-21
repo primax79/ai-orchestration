@@ -6,21 +6,10 @@
 
 ## Tasks (One Task = One Commit)
 
-### 16.1 - MCP client spike: minimal broker and stdio shim used from Claude Code, Kilo and Codex
-
-- **Status:** `delivered` (2026-10-18) · **Short:** MCP client spike · **Size:** M · **Kind:** investigation · **Depends on:** - · **Repo:** `ai-orchestration/`
-- **Goal:** the spec §8 step 2 gate. A throwaway-quality broker (`ai-orch broker serve`, streamable HTTP on localhost with the UI token) and stdio shim (`ai-orch mcp`, immediate `initialize`, `broker.launch.lock`, readiness file) exposing two read tools (`whoami`, `tasks.list` for an explicit project path) and one slow tool (`debug.sleep`, for long-call behaviour).
-- **Verification:** with ISOLATED client configs only (never the real `~/.claude`, `~/.kilo`, `~/.codex`, `~/.config/kilo`): each of Claude Code, Kilo and Codex lists and calls the tools; two shims started at once launch one broker; broker killed and restarted mid-session → the client recovers or the failure mode is recorded; a notice appended to text content is visible to the model. Report in `tasks/16-orchestration-broker/notes/16.1-client-spike.md` with a go / amend verdict per client.
-
 ### 16.2 - Shared on-disk locks, CAS and idempotency keys in the engine
 
 - **Status:** `delivered` (2026-10-18) · **Short:** Shared locks and idempotency · **Size:** M · **Depends on:** T026 · **Repo:** `ai-orchestration/`
 - **Goal:** spec §2 "Locks are on disk": every task mutation (CLI or broker) under `tasks/.ai-orch.lock` with file-hash CAS; idempotency keys with stored terminal results for mutating calls; broker singleton (`broker.lock`) and the CLI's routing rule (lock held → through the broker or "busy"; never an HTTP-timeout guess); `config_lock` CAS for setup/ensure (C7).
-
-### 16.3 - Registry: workspace uuid/slug, explicit projects, nesting, discover
-
-- **Status:** `delivered` (2026-10-18) · **Short:** Workspace and project registry · **Size:** M · **Depends on:** 16.2 · **Repo:** `ai-orchestration/`
-- **Goal:** spec §1–§2: `[workspace] uuid, id`, `[[workspace.projects]]`, the nesting rule (nearest registered workspace owns the trees; sub-workspaces listed read-only), registry in SQLite under the global config dir (respects `AI_ORCHESTRATION_CONFIG`), path move with confirmation, symlink/inode checks, `projects discover` proposing entries only.
 
 ### 16.4 - QualifiedTaskRef, coordinates: links and the placement rule
 
@@ -48,8 +37,21 @@
 - **Status:** `open` · **Short:** Workspace mail · **Size:** L · **Depends on:** 16.7 · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/` + `vscode-ai-orchestration/`
 - **Goal:** spec §5–§6: mail to workspace orchestrators with metadata-only quarantine and owner acceptance, policy and limits, automatic replies on decline/expiry, `mail.fetch_ref`; then console mailboxes (lease, uuid+secret, unique names, `console_gone`); UI mail view; VS Code parity.
 
+## Closed
+
+### 16.1 - MCP client spike: minimal broker and stdio shim used from Claude Code, Kilo and Codex
+
+- **Status:** `done` (2026-10-21; Verified by d4science-python-library-2e) · **Short:** MCP client spike · **Size:** M · **Kind:** investigation · **Depends on:** - · **Repo:** `ai-orchestration/`
+- **Goal:** the spec §8 step 2 gate. A throwaway-quality broker (`ai-orch broker serve`, streamable HTTP on localhost with the UI token) and stdio shim (`ai-orch mcp`, immediate `initialize`, `broker.launch.lock`, readiness file) exposing two read tools (`whoami`, `tasks.list` for an explicit project path) and one slow tool (`debug.sleep`, for long-call behaviour).
+- **Verification:** with ISOLATED client configs only (never the real `~/.claude`, `~/.kilo`, `~/.codex`, `~/.config/kilo`): each of Claude Code, Kilo and Codex lists and calls the tools; two shims started at once launch one broker; broker killed and restarted mid-session → the client recovers or the failure mode is recorded; a notice appended to text content is visible to the model. Report in `tasks/16-orchestration-broker/notes/16.1-client-spike.md` with a go / amend verdict per client.
+
+### 16.3 - Registry: workspace uuid/slug, explicit projects, nesting, discover
+
+- **Status:** `done` (2026-10-21; Verified by d4science-python-library-2e) · **Short:** Workspace and project registry · **Size:** M · **Depends on:** 16.2 · **Repo:** `ai-orchestration/`
+- **Goal:** spec §1–§2: `[workspace] uuid, id`, `[[workspace.projects]]`, the nesting rule (nearest registered workspace owns the trees; sub-workspaces listed read-only), registry in SQLite under the global config dir (respects `AI_ORCHESTRATION_CONFIG`), path move with confirmation, symlink/inode checks, `projects discover` proposing entries only.
+
 ### 16.9 - Interface: project view and common workspace view
 
-- **Status:** `delivered` (2026-10-20) · **Short:** Project and workspace views · **Size:** L · **Depends on:** 16.4 · **Repo:** `ai-orchestration-ui/` + `vscode-ai-orchestration/`
+- **Status:** `done` (2026-10-21; Verified by d4science-python-library-2e) · **Short:** Project and workspace views · **Size:** L · **Depends on:** 16.4 · **Repo:** `ai-orchestration-ui/` + `vscode-ai-orchestration/`
 - **Goal:** spec §7b: project selector and project view (today's views, bare ids); common workspace view with qualified ids, project column/filters/grouping, coordination tasks expanding into the project tasks they coordinate, workspace-wide questions/inbox/runs/mail with a project column, writes routed to the item's project; remembered view per window; deep links `workspace:project/ID`; then the read-only all-workspaces overview. VS Code: the same views through the bridge and a project picker in the tree views.
 - **Detail spec (2026-10-20):** [`../specs/ui-multi-project.md`](../specs/ui-multi-project.md); no longer waits for 16.5 (the UI calls the engine CLI directly). Parts: 16.9a backend (delivered 2026-10-20, ai-orchestration-ui b4efea0), 16.9b web UI (delivered 2026-10-20, ai-orchestration-ui 2fe1c72; common view loads active tasks, closed on request, every page), 16.9c VS Code (delivered 2026-10-20, vscode-ai-orchestration 0.6.0).

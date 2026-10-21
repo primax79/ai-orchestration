@@ -27,13 +27,6 @@
 - **Status:** `delivered` (2026-10-18; claude; merged; 47 env tests; live env status: 13 up-to-date-legacy (adopt), 14 outdated-legacy (update), 1 foreign; owner check of the UI actions pending) · **Short:** Legacy install classification · **Size:** M
 - **Goal:** Pre-receipt copies that match an earlier source commit are `outdated-legacy`, not `foreign`, and the UI offers "Update". Standalone-only duplicates are handled too.
 
-### 13.6 - P2-b + P2-c: Kilo effective view; install respects plugins and policy
-
-- **Status:** `delivered` (2026-10-18; claude; merged; 62 env tests; live: kilo_effective 47 skills with shadowing; install-skills dry-run skips 6 plugin-provided skills with reasons) · **Short:** Kilo effective view · **Size:** M
-- **Goal:**
-  - a Kilo view covering every folder Kilo reads (including `~/.claude/skills` and `~/.config/kilo/skills`);
-  - `install-skills` skips skills that a plugin provides or that the conflict policy would remove, so install and resolve no longer undo each other.
-
 ### 13.7 - P3-a..d: stray-file and redundant-MCP actions, `register-mcp` idempotency, agents in the Doctor, trigger-conflict generalization
 
 - **Status:** `delivered` (2026-10-18) · **Short:** Stray files and MCP · **Size:** M
@@ -54,3 +47,10 @@
 
 - **Status:** `done` (2026-10-17; claude; merged into main) · **Short:** Stale plugin detection · **Size:** S/M
 - **Goal:** Report Claude plugin copies that are behind their source, with the commit distance and the unchanged version string.
+
+### 13.6 - P2-b + P2-c: Kilo effective view; install respects plugins and policy
+
+- **Status:** `done` (2026-10-21; Verified by d4science-python-library-2e) · **Short:** Kilo effective view · **Size:** M
+- **Goal:**
+  - a Kilo view covering every folder Kilo reads (including `~/.claude/skills` and `~/.config/kilo/skills`);
+  - `install-skills` skips skills that a plugin provides or that the conflict policy would remove, so install and resolve no longer undo each other.
