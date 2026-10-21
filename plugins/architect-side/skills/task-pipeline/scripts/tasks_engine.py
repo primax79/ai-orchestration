@@ -89,8 +89,11 @@ OPTIONAL_EXTENSION_FIELDS: tuple[str, ...] = (
     "coordinates",
     "moved-to",
     "conditions",
+    "waiting-on",
+    "waiting_on",
     "short",
 )
+OPTIONAL_HEADER_FIELDS: tuple[str, ...] = OPTIONAL_EXTENSION_FIELDS
 
 VALID_KINDS: set[str] = {"feature", "bug", "fix", "chore", "docs", "investigation"}
 LABEL_RE: re.Pattern = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
@@ -107,6 +110,8 @@ MICRO_HEADER_FIELDS: tuple[str, ...] = (
     "size",
     "labels",
     "conditions",
+    "waiting-on",
+    "waiting_on",
     "short",
 )
 
@@ -284,6 +289,42 @@ NODE_TYPES: set[str] = {"initiative", "container", "leaf", "microtask"}
 INHERITED_FIELDS: tuple[str, ...] = ("executor", "priority", "profile", "repo", "paths")
 
 
+def normalize_waiting_on(qualifier: str | None) -> str | None:
+    if not qualifier or not isinstance(qualifier, str):
+        return None
+    val = qualifier.strip().strip("`").strip()
+    if not val or val == "-":
+        return None
+    if re.match(r"^Q\d{3,}$", val):
+        return f"question:{val}"
+    return val
+
+
+def extract_waiting_on(raw_state: str | None) -> str | None:
+    """Extract waiting_on qualifier from state strings like 'waiting on <qualifier>',
+    'waiting: <qualifier>', or 'waiting (<qualifier>)'."""
+    if not raw_state or not isinstance(raw_state, str):
+        return None
+    s = raw_state.strip()
+    m_tick = re.match(r"^`([^`]+)`(?:\s*\(.*\))?\s*$", s)
+    if m_tick:
+        s = m_tick.group(1).strip()
+    s = s.strip("`").strip()
+    m_on = re.match(r"^waiting\s+on(?::|\s+)(.+)$", s, re.IGNORECASE)
+    if m_on:
+        return normalize_waiting_on(m_on.group(1))
+    m_colon = re.match(r"^waiting:\s*(.+)$", s, re.IGNORECASE)
+    if m_colon:
+        return normalize_waiting_on(m_colon.group(1))
+    m_paren = re.match(r"^waiting\s*\((.+)\)$", s, re.IGNORECASE)
+    if m_paren:
+        inner = m_paren.group(1).strip()
+        if re.match(r"^\d{4}-\d{2}-\d{2}", inner):
+            return None
+        return normalize_waiting_on(inner)
+    return None
+
+
 def normalize_state(raw_state: str) -> str:
     """Map parameterized state strings like 'done with a caveat: self-verified only',
     'dropped: reason', '`done` (2026-10-16)', or '`in progress`' to their canonical base state."""
@@ -296,6 +337,15 @@ def normalize_state(raw_state: str) -> str:
     m_date = re.match(r"^(.+?)\s*\(\d{4}-\d{2}-\d{2}\)$", s)
     if m_date:
         s = m_date.group(1).strip().strip("`").strip()
+    s_lower = s.lower()
+    if (
+        s_lower == "waiting"
+        or s_lower.startswith("waiting:")
+        or s_lower.startswith("waiting (")
+        or s_lower.startswith("waiting on ")
+        or s_lower.startswith("waiting on:")
+    ):
+        return "waiting"
     for base in (
         "done with a caveat",
         "waiting",
@@ -1659,6 +1709,7 @@ class TaskNode:
     conditions: list[dict[str, Any]] = field(default_factory=list)
     conditional: bool = False
     own_conditions: list[str] = field(default_factory=list)
+    waiting_on: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1671,6 +1722,7 @@ class TaskNode:
             "coordinates": list(self.coordinates),
             "conditions": list(self.conditions),
             "conditional": self.conditional,
+            "waiting_on": self.waiting_on,
             "parent": self.parent,
             "depth": self.depth,
             "node_type": self.node_type,
@@ -1722,12 +1774,25 @@ def rewrite_block_in_file(
     dry_run: bool = False,
     return_diff: bool = False,
     new_conditions: str | None = None,
+    new_waiting_on: str | None = None,
+    clear_waiting_on: bool = False,
 ) -> tuple[str, str] | tuple[str, str, str]:
     """Rewrite one `### id - title` block in place; every other byte of the file is preserved.
 
     A new status replaces the Status value (code span kept) and its parenthesised note, which
     becomes `status_note` when given: `- **Status:** `in progress` (2026-10-17; claude; reason)`.
     """
+    if new_waiting_on is not None:
+        new_waiting_on = normalize_waiting_on(new_waiting_on)
+    if new_status is not None:
+        c_st = normalize_state(new_status)
+        if c_st == "waiting":
+            extracted = extract_waiting_on(new_status)
+            if new_waiting_on is None and extracted:
+                new_waiting_on = extracted
+        elif new_waiting_on is None:
+            clear_waiting_on = True
+
     text = file_path.read_text(encoding="utf-8")
     heading_re = re.compile(
         rf"^###\s+{re.escape(task_id)}\s+[—–-]\s+.*$",
@@ -1767,6 +1832,7 @@ def rewrite_block_in_file(
     deps_updated = False
     decider_updated = False
     short_updated = False
+    waiting_on_updated = False
     status_line_idx: int | None = None
 
     parsed_lines: list[tuple[str, list[BulletSegment], str, bool, str]] = []
@@ -1860,6 +1926,27 @@ def rewrite_block_in_file(
                 for s_idx in reversed(to_remove):
                     segments.pop(s_idx)
 
+            if new_waiting_on is not None or clear_waiting_on:
+                to_remove = []
+                for s_idx, seg in enumerate(segments):
+                    if seg.key in ("waiting_on", "waiting-on"):
+                        if clear_waiting_on or (new_waiting_on is not None and (new_waiting_on == "-" or not new_waiting_on.strip())):
+                            to_remove.append(s_idx)
+                        else:
+                            seg.raw_value = new_waiting_on
+                            seg.clean_value = new_waiting_on
+                            waiting_on_updated = True
+                for s_idx in reversed(to_remove):
+                    segments.pop(s_idx)
+
+            if re.match(r"^\s*[-*]\s+waiting[-_]on:\s*", line_clean, re.IGNORECASE):
+                if clear_waiting_on or (new_waiting_on is not None and (new_waiting_on == "-" or not new_waiting_on.strip())):
+                    continue
+                elif new_waiting_on is not None:
+                    parsed_lines.append(("", [], line_ending, False, f"{prefix}waiting-on: {new_waiting_on}" + line_ending))
+                    waiting_on_updated = True
+                    continue
+
             parsed_lines.append((prefix, segments, line_ending, True, line))
         else:
             parsed_lines.append(("", [], line, False, line))
@@ -1923,6 +2010,12 @@ def rewrite_block_in_file(
             insert_idx += 1
             decider_updated = True
 
+        if new_waiting_on is not None and not waiting_on_updated and not clear_waiting_on and new_waiting_on != "-" and new_waiting_on.strip():
+            new_seg = BulletSegment(raw_key="Waiting-on", key="waiting-on", raw_value=new_waiting_on, clean_value=new_waiting_on)
+            segments.insert(insert_idx, new_seg)
+            insert_idx += 1
+            waiting_on_updated = True
+
         parsed_lines[status_line_idx] = (prefix, segments, line_ending, is_b, orig)
 
     new_lines: list[str] = []
@@ -1958,6 +2051,8 @@ def move_block_to_closed(
     new_status: str | None = None,
     status_note: str | None = None,
     expect_task_hash: str | None = None,
+    new_waiting_on: str | None = None,
+    clear_waiting_on: bool = False,
 ) -> tuple[str, str]:
     """Move a block ### task_id to the ## Closed section of file_path.
     If new_status is given, the status line is updated first.
@@ -1965,7 +2060,13 @@ def move_block_to_closed(
     """
     if new_status is not None:
         rewrite_block_in_file(
-            file_path, task_id, new_status=new_status, status_note=status_note, expect_task_hash=expect_task_hash
+            file_path,
+            task_id,
+            new_status=new_status,
+            status_note=status_note,
+            expect_task_hash=expect_task_hash,
+            new_waiting_on=new_waiting_on,
+            clear_waiting_on=clear_waiting_on,
         )
 
     text = file_path.read_text(encoding="utf-8")
@@ -2518,6 +2619,9 @@ def parse_child_blocks(
             for bl in block_lines[1:]:
                 if not bl.strip().startswith("- ") and not bl.strip().startswith("* "):
                     continue
+                m_hdr = HEADER_LINE_RE.match(bl.strip())
+                if m_hdr and m_hdr.group(1) in ("waiting-on", "waiting_on"):
+                    own_fields["waiting_on"] = m_hdr.group(2).strip()
                 _, segs = parse_bullet_line(bl)
                 for seg in segs:
                     if seg.key:
@@ -2530,6 +2634,12 @@ def parse_child_blocks(
             canon_st = normalize_state(raw_status)
             deps_val = own_fields.get("depends_on") or own_fields.get("depends") or ""
             parsed_deps, free_txt = parse_depends_on_field(deps_val)
+
+            raw_wo = own_fields.get("waiting_on") or own_fields.get("waiting-on")
+            if raw_wo and str(raw_wo).strip() and str(raw_wo).strip() != "-":
+                leaf_wo = normalize_waiting_on(str(raw_wo).strip())
+            else:
+                leaf_wo = extract_waiting_on(raw_status)
 
             size_val = own_fields.get("size")
             if size_val and size_val.strip().upper() in VALID_SIZES:
@@ -2607,6 +2717,7 @@ def parse_child_blocks(
                 conditions=cond_list,
                 conditional=is_cond,
                 own_conditions=cond_ids,
+                waiting_on=leaf_wo,
             )
             nodes.append(leaf_node)
 
@@ -3003,6 +3114,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             conditions=et.get("conditions", []),
             conditional=et.get("conditional", False),
             own_conditions=et.get("conditions_ids", []),
+            waiting_on=et.get("waiting_on"),
         )
         tree[tid] = node
         for sn in sub_nodes:
@@ -3080,6 +3192,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                             conditions=et_parsed.get("conditions", []),
                             conditional=et_parsed.get("conditional", False),
                             own_conditions=et_parsed.get("conditions_ids", []),
+                            waiting_on=et_parsed.get("waiting_on"),
                         )
 
     # 4. Connect children
@@ -4988,6 +5101,102 @@ def set_short(
             }
 
 
+def set_waiting_on(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    waiting_on: str,
+    dry_run: bool = False,
+    expect_task_hash: str | None = None,
+) -> dict[str, Any]:
+    norm_wo = normalize_waiting_on(waiting_on)
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "error": f"Task '{node_id}' not found."}
+        node = tree[node_id]
+
+        if expect_task_hash and expect_task_hash.strip().lower() != node.task_hash.strip().lower():
+            return {
+                "ok": False,
+                "error": f"Task hash mismatch: expected {expect_task_hash}, actual {node.task_hash}",
+            }
+
+        file_path = pathlib.Path(node.file_path)
+        if node.block_text is not None:
+            _, new_block_hash, diff_str = rewrite_block_in_file(
+                file_path,
+                node_id,
+                new_waiting_on=norm_wo or "-",
+                expect_task_hash=expect_task_hash,
+                dry_run=dry_run,
+                return_diff=True,
+            )
+            if not dry_run:
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "waiting_on",
+                        "value": norm_wo,
+                        "waiting_on": norm_wo,
+                    },
+                    subject=node_id,
+                )
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "waiting_on": norm_wo,
+                "task_hash": new_block_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+        else:
+            old_text = file_path.read_text(encoding="utf-8")
+            if dry_run:
+                _update_task_file_headers_and_state(file_path, new_state=None, waiting_on=norm_wo or "-")
+                new_text = file_path.read_text(encoding="utf-8")
+                _atomic_write_text(file_path, old_text, encoding="utf-8")
+                diff_lines = list(difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    new_text.splitlines(keepends=True),
+                    fromfile=str(file_path),
+                    tofile=f"{file_path} (dry-run)",
+                ))
+                diff_str = "".join(diff_lines)
+                new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+            else:
+                _update_task_file_headers_and_state(file_path, new_state=None, waiting_on=norm_wo or "-")
+                new_text = file_path.read_text(encoding="utf-8")
+                diff_lines = list(difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    new_text.splitlines(keepends=True),
+                    fromfile=str(file_path),
+                    tofile=str(file_path),
+                ))
+                diff_str = "".join(diff_lines)
+                new_hash = _file_sha256(file_path)
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "waiting_on",
+                        "value": norm_wo,
+                        "waiting_on": norm_wo,
+                    },
+                    subject=node_id,
+                )
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "waiting_on": norm_wo,
+                "bundle_sha256": new_hash,
+                "task_hash": node.task_hash if dry_run else new_hash,
+                "new_task_hash": new_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+
+
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
@@ -5120,6 +5329,12 @@ def parse_emergent_task_file(
     cond_ids = parse_conditions_field(raw_cond)
     cond_list, is_cond = resolve_task_conditions(tasks_dir, cond_ids, raw_state or ("open" if is_micro else ""))
 
+    raw_wo = headers.get("waiting-on") or headers.get("waiting_on")
+    if raw_wo and str(raw_wo).strip() and str(raw_wo).strip() != "-":
+        wo_val = normalize_waiting_on(str(raw_wo).strip())
+    else:
+        wo_val = extract_waiting_on(raw_state)
+
     task_dict = {
         "kind": headers.get("kind") or "emergent",
         "id": headers.get("id", ""),
@@ -5135,6 +5350,7 @@ def parse_emergent_task_file(
         "next_up": headers.get("next-up", "no" if is_micro else ""),
         "state": raw_state or ("open" if is_micro else ""),
         "canonical_state": normalize_state(raw_state or ("open" if is_micro else "")),
+        "waiting_on": wo_val,
         "executor": headers.get("executor", "kilo" if is_micro else ""),
         "depends_on": depends_list,
         "depends_on_raw": raw_depends,
@@ -6081,6 +6297,7 @@ def _node_task_dict(cn: "TaskNode") -> dict[str, Any]:
         "in_closed_section": cn.in_closed_section,
         "conditions": list(cn.conditions),
         "conditional": cn.conditional,
+        "waiting_on": cn.waiting_on,
     }
 
 
@@ -6292,6 +6509,20 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 s_val = str(node.own_fields["short"]).strip()
                 for v in validate_short_title(s_val):
                     warnings.append(f"{rel}: short title {s_val!r} on node {nid} violates conventions ({v}).")
+
+        if node.is_leaf and node.canonical_state == "waiting":
+            raw_wo = node.own_fields.get("waiting_on") or node.own_fields.get("waiting-on") or getattr(node, "waiting_on", None)
+            has_wo = bool(raw_wo and str(raw_wo).strip() and str(raw_wo).strip() != "-")
+            raw_dec = str(node.own_fields.get("decider") or node.fields.get("decider", {}).get("value") or "").strip()
+            has_dec = bool(raw_dec and raw_dec != "-")
+            raw_cond = str(node.own_fields.get("conditions") or "").strip()
+            has_cond = bool(node.conditions or (raw_cond and raw_cond != "-"))
+            if not (has_wo or has_dec or has_cond):
+                if not any(f"task {nid} in waiting state has no waiting-on" in w for w in warnings):
+                    warnings.append(
+                        f"{rel}: task {nid} in waiting state has no waiting-on, decider, or conditions; "
+                        f"set --waiting-on <question:Q###|owner:...|external:...|session:...>."
+                    )
 
         # Check conditions on plan task node
         if "conditions" in node.own_fields and node.own_fields["conditions"]:
@@ -6664,6 +6895,20 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                     warnings.append(
                         f"{rel}: legacy free-text decider {raw_dec!r}; "
                         f"consider converting with 'questions ask --from-task {tid}'."
+                    )
+
+            # Check waiting tasks have qualifier, decider, or conditions
+            cstate = task.get("canonical_state") or normalize_state(task.get("state", "open"))
+            if cstate == "waiting":
+                raw_wo = task.get("headers", {}).get("waiting-on") or task.get("headers", {}).get("waiting_on") or task.get("waiting_on")
+                has_wo = bool(raw_wo and str(raw_wo).strip() and str(raw_wo).strip() != "-")
+                has_dec = bool(raw_dec and raw_dec != "-")
+                raw_cond = task.get("conditions_raw", "") or task.get("headers", {}).get("conditions", "")
+                has_cond = bool(task.get("conditions") or (raw_cond and str(raw_cond).strip() != "-"))
+                if not (has_wo or has_dec or has_cond):
+                    warnings.append(
+                        f"{rel}: task {tid} in waiting state has no waiting-on, decider, or conditions; "
+                        f"set --waiting-on <question:Q###|owner:...|external:...|session:...>."
                     )
 
             # Required sections
@@ -7190,7 +7435,16 @@ def _update_task_file_headers_and_state(
     decider: str | None = None,
     clear_next_up: bool = False,
     conditions: str | None = None,
+    waiting_on: str | None = None,
+    clear_waiting_on: bool = False,
 ) -> None:
+    if waiting_on is not None:
+        waiting_on = normalize_waiting_on(waiting_on)
+    if new_state is not None:
+        cstate_check = normalize_state(new_state)
+        if cstate_check != "waiting" and waiting_on is None:
+            clear_waiting_on = True
+
     text = file_path.read_text(encoding="utf-8")
     lines = text.splitlines()
 
@@ -7202,6 +7456,7 @@ def _update_task_file_headers_and_state(
     header_end = idx
     verifier_line_idx: int | None = None
     conditions_line_idx: int | None = None
+    waiting_on_line_idx: int | None = None
     handoff_line_idx: int | None = None
 
     while header_end < len(lines):
@@ -7216,6 +7471,15 @@ def _update_task_file_headers_and_state(
         elif key == "conditions" and conditions is not None:
             conditions_line_idx = header_end
             lines[header_end] = f"- conditions: {conditions}"
+        elif key in ("waiting-on", "waiting_on"):
+            if clear_waiting_on or (waiting_on is not None and waiting_on.strip() in ("", "-")):
+                del lines[header_end]
+                continue
+            elif waiting_on is not None:
+                lines[header_end] = f"- waiting-on: {waiting_on}"
+                waiting_on_line_idx = header_end
+            else:
+                waiting_on_line_idx = header_end
         elif key == "next-up" and clear_next_up:
             lines[header_end] = "- next-up: no"
         elif key == "verifier":
@@ -7228,7 +7492,7 @@ def _update_task_file_headers_and_state(
 
     if verifier is not None and verifier_line_idx is None and handoff_line_idx is not None:
         insert_pos = header_end
-        fields_after_verifier = {"size", "kind", "labels", "branch", "worktree", "run-id", "use-cases", "use_cases", "coordinates", "moved-to", "short"}
+        fields_after_verifier = {"size", "kind", "labels", "branch", "worktree", "run-id", "use-cases", "use_cases", "coordinates", "moved-to", "conditions", "waiting-on", "waiting_on", "short"}
         for i in range(handoff_line_idx + 1, header_end):
             m_key = HEADER_LINE_RE.match(lines[i])
             if m_key and m_key.group(1) in fields_after_verifier:
@@ -7239,7 +7503,7 @@ def _update_task_file_headers_and_state(
 
     if conditions is not None and conditions_line_idx is None and handoff_line_idx is not None:
         insert_pos = header_end
-        fields_after_conditions = {"short"}
+        fields_after_conditions = {"waiting-on", "waiting_on", "short"}
         for i in range(handoff_line_idx + 1, header_end):
             m_key = HEADER_LINE_RE.match(lines[i])
             if m_key and m_key.group(1) in fields_after_conditions:
@@ -7248,29 +7512,41 @@ def _update_task_file_headers_and_state(
         lines.insert(insert_pos, f"- conditions: {conditions}")
         header_end += 1
 
-    # Manage `verification pending:` line right after header
-    cstate = normalize_state(new_state)
-    scan_idx = header_end
-    while scan_idx < len(lines) and not lines[scan_idx].strip():
-        scan_idx += 1
+    if waiting_on is not None and not clear_waiting_on and waiting_on_line_idx is None and handoff_line_idx is not None and waiting_on.strip() not in ("", "-"):
+        insert_pos = header_end
+        fields_after_waiting_on = {"short"}
+        for i in range(handoff_line_idx + 1, header_end):
+            m_key = HEADER_LINE_RE.match(lines[i])
+            if m_key and m_key.group(1) in fields_after_waiting_on:
+                insert_pos = i
+                break
+        lines.insert(insert_pos, f"- waiting-on: {waiting_on}")
+        header_end += 1
 
-    has_vp_line = (
-        scan_idx < len(lines)
-        and lines[scan_idx].strip().lower().startswith("verification pending:")
-    )
-    if cstate == "delivered":
-        vp_target = verifier or "independent verifier"
-        vp_line = f"verification pending: run Verification checks ({vp_target})"
-        if has_vp_line:
-            lines[scan_idx] = vp_line
-        else:
-            lines.insert(header_end, "")
-            lines.insert(header_end + 1, vp_line)
-    elif has_vp_line:
-        # Remove `verification pending:` line once no longer in `delivered`
-        del lines[scan_idx]
-        if scan_idx < len(lines) and not lines[scan_idx].strip() and scan_idx > 0 and not lines[scan_idx - 1].strip():
+    # Manage `verification pending:` line right after header
+    if new_state is not None:
+        cstate = normalize_state(new_state)
+        scan_idx = header_end
+        while scan_idx < len(lines) and not lines[scan_idx].strip():
+            scan_idx += 1
+
+        has_vp_line = (
+            scan_idx < len(lines)
+            and lines[scan_idx].strip().lower().startswith("verification pending:")
+        )
+        if cstate == "delivered":
+            vp_target = verifier or "independent verifier"
+            vp_line = f"verification pending: run Verification checks ({vp_target})"
+            if has_vp_line:
+                lines[scan_idx] = vp_line
+            else:
+                lines.insert(header_end, "")
+                lines.insert(header_end + 1, vp_line)
+        elif has_vp_line:
+            # Remove `verification pending:` line once no longer in `delivered`
             del lines[scan_idx]
+            if scan_idx < len(lines) and not lines[scan_idx].strip() and scan_idx > 0 and not lines[scan_idx - 1].strip():
+                del lines[scan_idx]
 
     _atomic_write_text(file_path, "\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
@@ -7385,6 +7661,7 @@ def transition_task(
     reason: str | None = None,
     expect_task_hash: str | None = None,
     force_unblock: bool = False,
+    waiting_on: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -7474,6 +7751,15 @@ def transition_task(
                 old_state = node.state
                 old_canon = node.canonical_state
                 new_canon = normalize_state(new_state)
+                extracted_wo = extract_waiting_on(new_state)
+                if new_canon == "waiting":
+                    if waiting_on is None:
+                        waiting_on = extracted_wo
+                    if waiting_on:
+                        waiting_on = normalize_waiting_on(waiting_on)
+                    clear_wo = False
+                else:
+                    clear_wo = (waiting_on is None)
 
                 if old_canon in ("open", "in progress") and new_canon in ("done", "done with a caveat", "verified"):
                     return False, {
@@ -7547,7 +7833,7 @@ def transition_task(
                         "error": "Transitioning to 'bounced' requires --reason with the failing criterion / B1..Bn findings.",
                     }
 
-                effective_state = new_state
+                effective_state = "waiting" if new_canon == "waiting" else new_state
                 if new_canon == "done with a caveat" and ":" not in new_state and reason:
                     effective_state = f"done with a caveat: {reason.strip()}"
                 elif new_canon == "done with a caveat" and ":" not in new_state and vmode == "self":
@@ -7561,7 +7847,13 @@ def transition_task(
                 file_path = pathlib.Path(node.file_path)
                 if new_canon in TERMINAL_STATES:
                     _, new_h = move_block_to_closed(
-                        file_path, task_id, new_status=effective_state, status_note="; ".join(note_parts), expect_task_hash=expect_task_hash
+                        file_path,
+                        task_id,
+                        new_status=effective_state,
+                        status_note="; ".join(note_parts),
+                        expect_task_hash=expect_task_hash,
+                        new_waiting_on=waiting_on,
+                        clear_waiting_on=clear_wo,
                     )
                     if node.parent and node.parent in tree:
                         parent_node = tree[node.parent]
@@ -7576,17 +7868,23 @@ def transition_task(
                                         tasks_dir,
                                         "task.transitioned",
                                         {
-                                            "from": parent_node.state,
-                                            "to": p_derived,
-                                            "actor": actor or "owner",
-                                            "reason": f"All children closed on child {task_id} closing",
+                                             "from": parent_node.state,
+                                             "to": p_derived,
+                                             "actor": actor or "owner",
+                                             "reason": f"All children closed on child {task_id} closing",
                                         },
                                         subject=node.parent,
                                         actor=actor or "owner",
                                     )
                 else:
                     _, new_h = rewrite_block_in_file(
-                        file_path, task_id, new_status=effective_state, status_note="; ".join(note_parts), expect_task_hash=expect_task_hash
+                        file_path,
+                        task_id,
+                        new_status=effective_state,
+                        status_note="; ".join(note_parts),
+                        expect_task_hash=expect_task_hash,
+                        new_waiting_on=waiting_on,
+                        clear_waiting_on=clear_wo,
                     )
                 _emit_event(
                     tasks_dir,
@@ -7607,6 +7905,7 @@ def transition_task(
                     "kind": "initiative_task" if not task_id.startswith("T") else "emergent_child",
                     "old_state": old_state,
                     "new_state": effective_state,
+                    "waiting_on": waiting_on if (new_canon == "waiting" and waiting_on) else None,
                     "file_path": str(file_path),
                     "rel_path": node.rel_path,
                     "task_hash": new_h,
@@ -7636,6 +7935,15 @@ def transition_task(
             old_state = target["state"]
             old_canon = target["canonical_state"]
             new_canon = normalize_state(new_state)
+            extracted_wo = extract_waiting_on(new_state)
+            if new_canon == "waiting":
+                if waiting_on is None:
+                    waiting_on = extracted_wo
+                if waiting_on:
+                    waiting_on = normalize_waiting_on(waiting_on)
+                clear_wo = False
+            else:
+                clear_wo = (waiting_on is None)
 
             decider_to_set: str | None = None
             if old_canon == "waiting":
@@ -7749,7 +8057,7 @@ def transition_task(
                 }
 
             # Format state string when self-verified caveat is used
-            effective_state = new_state
+            effective_state = "waiting" if new_canon == "waiting" else new_state
             if new_canon == "done with a caveat" and ":" not in new_state and reason:
                 effective_state = f"done with a caveat: {reason.strip()}"
             elif new_canon == "done with a caveat" and ":" not in new_state and vmode == "self":
@@ -7763,6 +8071,8 @@ def transition_task(
                 verifier=verifier,
                 decider=decider_to_set,
                 clear_next_up=is_terminal,
+                waiting_on=waiting_on,
+                clear_waiting_on=clear_wo,
             )
             _append_progress_log(target, old_state, effective_state, actor, verifier, reason)
 
@@ -7789,6 +8099,7 @@ def transition_task(
                 "task_id": task_id,
                 "old_state": old_state,
                 "new_state": effective_state,
+                "waiting_on": waiting_on if (new_canon == "waiting" and waiting_on) else None,
                 "verifier": verifier or target.get("verifier"),
                 "reason": reason,
                 "file_path": str(final_path),
@@ -8407,6 +8718,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                             new_status = "done"
                         elif derived_st == "open":
                             new_status = "open"
+                        elif derived_st == "waiting" and getattr(init_node, "waiting_on", None):
+                            new_status = f"waiting ({init_node.waiting_on})"
                         else:
                             leaf_nodes = []
                             def _collect_leaves_rec(nid: str):
@@ -8441,7 +8754,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                             elif blocked_leaves:
                                 summary_parts.append(f"blocked: {format_id_ranges([l.id for l in blocked_leaves])}")
                             elif waiting_leaves:
-                                summary_parts.append(f"waiting: {format_id_ranges([l.id for l in waiting_leaves])}")
+                                w_parts = [f"{l.id} ({l.waiting_on})" if l.waiting_on else l.id for l in waiting_leaves]
+                                summary_parts.append(f"waiting: {', '.join(w_parts) if any(l.waiting_on for l in waiting_leaves) else format_id_ranges([l.id for l in waiting_leaves])}")
 
                             if summary_parts:
                                 new_status = f"{derived_st} ({'; '.join(summary_parts)})"
@@ -8682,11 +8996,14 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 t = cat_tasks[base_id]
                 seen_cat_ids.add(base_id)
                 st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
+                st_val = t['state']
+                if t.get("canonical_state") == "waiting" and t.get("waiting_on"):
+                    st_val = f"waiting ({t['waiting_on']})"
                 cat_rows.append(
                     (
                         base_id,
                         f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
-                        f"{t['state']} | {t['executor']} | {t['depends_on_raw']} |",
+                        f"{st_val} | {t['executor']} | {t['depends_on_raw']} |",
                     )
                 )
             elif base_id not in resolved_ids:
@@ -8704,11 +9021,14 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         for t in new_cat_tasks:
             seen_cat_ids.add(t["id"])
             st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
+            st_val = t['state']
+            if t.get("canonical_state") == "waiting" and t.get("waiting_on"):
+                st_val = f"waiting ({t['waiting_on']})"
             cat_rows.append(
                 (
                     t["id"],
                     f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
-                    f"{t['state']} | {t['executor']} | {t['depends_on_raw']} |",
+                    f"{st_val} | {t['executor']} | {t['depends_on_raw']} |",
                 )
             )
 
@@ -9353,7 +9673,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
     tree_dicts = {nid: node.to_dict() for nid, node in tree.items()}
     tree_keys = ("parent", "depth", "node_type", "is_leaf", "is_container", "derived_state", "leaves_done",
-                 "leaves_total", "labels", "fields", "expanded_depends_on", "children", "size", "size_source", "priority_source", "coordinates", "conditions", "conditional")
+                 "leaves_total", "labels", "fields", "expanded_depends_on", "children", "size", "size_source", "priority_source", "coordinates", "conditions", "conditional", "waiting_on")
 
     # Emergent roots keep their full header dict (the UI reads sources/paths/next-up...), plus tree info.
     all_tasks: list[dict[str, Any]] = []
@@ -9378,6 +9698,7 @@ def cmd_list(args: argparse.Namespace) -> int:
             "depends_on": _format_depends_on(node.depends_on),
             "depends_on_ids": list(node.depends_on),
             "handoff": td.get("handoff") or fallback_handoff,
+            "waiting_on": td.get("waiting_on") or node.waiting_on,
         })
         return item
 
@@ -9402,6 +9723,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                     "priority_reason": f"Subtask of Initiative #{init['id']}",
                     "next_up": "yes" if init_st == "in progress" and sub_t.get("state") != "done" else "no",
                     "state": sub_t.get("state", init_st),
+                    "waiting_on": sub_t.get("waiting_on"),
                     "executor": "kilo",
                     "depends_on": "-",
                     "handoff": f"Work on task {sub_id} in {init.get('rel_path')}",
@@ -9587,6 +9909,7 @@ def cmd_transition(args: argparse.Namespace) -> int:
         reason=args.reason,
         expect_task_hash=expect_task_hash,
         force_unblock=force_unblock,
+        waiting_on=getattr(args, "waiting_on", None),
     )
     args._last_result = payload
     if getattr(args, "json", False):
@@ -10074,6 +10397,69 @@ def cmd_set_short(args: argparse.Namespace) -> int:
         else:
             print(f"[FAIL] {res.get('error', 'set-short failed')}", file=sys.stderr)
     return 0 if res.get("ok") else 1
+
+
+def cmd_set_waiting_on(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    expect_task_hash = getattr(args, "expect_task_hash", None)
+    is_json = getattr(args, "json", False)
+
+    res = set_waiting_on(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        waiting_on=args.waiting_on,
+        dry_run=dry_run,
+        expect_task_hash=expect_task_hash,
+    )
+    if res.get("task_hash") and "plan_hash" not in res:
+        res["plan_hash"] = res["task_hash"]
+    args._last_result = res
+    if is_json:
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            if res.get("dry_run"):
+                print(f"[ok] dry-run: waiting-on for {args.id} would become: {res.get('waiting_on')}")
+                if res.get("diff"):
+                    print(res.get("diff"), end="")
+            else:
+                print(f"[ok] updated waiting-on for {args.id}: {res.get('waiting_on')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'set-waiting-on failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    task_id = args.task_id
+    tree = discover_task_tree(tasks_dir)
+    emergent = discover_emergent_tasks(tasks_dir)
+    task_data: dict[str, Any] | None = None
+    if task_id in tree:
+        task_data = tree[task_id].to_dict()
+    else:
+        target = next((t for t in emergent if t["id"] == task_id), None)
+        if target:
+            task_data = dict(target)
+
+    if task_data is None:
+        err_msg = f"Task '{task_id}' not found."
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": err_msg}, indent=2))
+        else:
+            print(f"[FAIL] {err_msg}", file=sys.stderr)
+        return 1
+
+    args._last_result = {"ok": True, "task": task_data}
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, "task": task_data}, indent=2))
+    else:
+        print(f"Task: {task_data.get('id')} - {task_data.get('title')}")
+        print(f"State: {task_data.get('state')} (canonical: {task_data.get('canonical_state')})")
+        if task_data.get("waiting_on"):
+            print(f"Waiting on: {task_data.get('waiting_on')}")
+    return 0
 
 
 def cmd_tasks_next(args: argparse.Namespace) -> int:
@@ -10907,7 +11293,7 @@ def ask_question(
                             new_dec = q_id
                         else:
                             new_dec = f"{curr_dec}, {q_id}" if curr_dec and curr_dec != "-" else q_id
-                        rewrite_block_in_file(pathlib.Path(t.file_path), t.id, new_status=new_st, new_decider=new_dec)
+                        rewrite_block_in_file(pathlib.Path(t.file_path), t.id, new_status=new_st, new_decider=new_dec, new_waiting_on=f"question:{q_id}")
                     else:
                         tp = pathlib.Path(t.file_path if hasattr(t, "file_path") else t["file_path"])
                         curr_dec = (t.fields.get("decider", {}).get("value", "") or t.own_fields.get("decider", "")) if hasattr(t, "own_fields") else t.get("decider", "")
@@ -10917,7 +11303,7 @@ def ask_question(
                             new_dec = q_id
                         else:
                             new_dec = f"{curr_dec}, {q_id}" if curr_dec and curr_dec != "-" else q_id
-                        _update_task_file_headers_and_state(tp, new_st, decider=new_dec)
+                        _update_task_file_headers_and_state(tp, new_st, decider=new_dec, waiting_on=f"question:{q_id}")
                         _append_progress_log(
                             t_dict,
                             old_st,
@@ -16075,6 +16461,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_list.set_defaults(func=cmd_list)
 
+    p_show = sub.add_parser("show", help="Show task details")
+    p_show.add_argument("task_id", help="Task ID (e.g. T001, 01.1)")
+    p_show.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_show.set_defaults(func=cmd_show)
+
     p_val = sub.add_parser("validate", help="Validate task headers, IDs, sections, and dependency DAG")
     p_val.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_val.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
@@ -16084,6 +16476,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("task_id", help="Task ID (e.g. T001)")
     p_tr.add_argument("new_state", nargs="?", default=None, help="New state (e.g. 'in progress', 'delivered', 'verified', 'bounced', 'done')")
     p_tr.add_argument("--to", dest="to_state", default=None, help="Target state (alternative to positional new_state)")
+    p_tr.add_argument("--waiting-on", default=None, help="Waiting-on qualifier when transitioning to waiting (e.g. question:Q###, owner:..., external:..., session:...)")
     p_tr.add_argument("--actor", default=None, help="Actor performing the transition (e.g. kilo, claude, owner)")
     p_tr.add_argument("--verifier", default=None, help="Independent verifier identifier (e.g. claude:deep-reasoning, blind-subagent:deep-reasoning, owner)")
     p_tr.add_argument("--reason", default=None, help="Bounce findings (B1..Bn), caveat reason, or transition note")
@@ -16500,6 +16893,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_sshort.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_sshort.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_sshort.set_defaults(func=cmd_set_short)
+
+    # tasks set-waiting-on
+    p_swo = sub.add_parser("set-waiting-on", help="Set waiting-on qualifier for a task")
+    p_swo.add_argument("id", help="Task ID (e.g. T001, 01.1)")
+    p_swo.add_argument("waiting_on", help="Waiting-on qualifier (e.g. question:Q###, owner:..., external:..., session:...)")
+    p_swo.add_argument("--dry-run", action="store_true", help="Print diff without writing")
+    p_swo.add_argument("--expect-task-hash", "--expect-plan-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task block/file/plan hash")
+    p_swo.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_swo.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_swo.set_defaults(func=cmd_set_waiting_on)
 
     # tasks labels
     p_lbls = sub.add_parser("labels", help="List all labels in use with their counts")
