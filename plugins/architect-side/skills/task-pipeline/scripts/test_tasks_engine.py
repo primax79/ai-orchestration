@@ -2,6 +2,7 @@
 """Unit tests for tasks_engine.py."""
 from __future__ import annotations
 
+import argparse
 import datetime
 import hashlib
 import json
@@ -48,6 +49,7 @@ def _write_sample_task(
     profile: str | None = "bulk-execution",
     verification_mode: str | None = "cross-agent",
     verifier: str | None = "-",
+    short: str | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     ext_lines = []
@@ -57,6 +59,8 @@ def _write_sample_task(
         ext_lines.append(f"- verification-mode: {verification_mode}")
     if verifier is not None:
         ext_lines.append(f"- verifier: {verifier}")
+    if short is not None:
+        ext_lines.append(f"- short: {short}")
     ext_block = ("\n" + "\n".join(ext_lines)) if ext_lines else ""
 
     content = f"""# {task_id} {title}
@@ -7999,14 +8003,14 @@ def test_parse_and_format_qualified_ref():
         te.parse_qualified_ref("T025 junk")
 
 
-def test_depends_on_rejects_cross_project_qualified_ref(tmp_path: pathlib.Path):
+def test_depends_on_accepts_cross_project_qualified_ref(tmp_path: pathlib.Path):
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir(parents=True)
     task_file = tasks_dir / "features" / "T001-scraper.md"
     _write_sample_task(task_file, task_id="T001", depends_on="other-proj/T002")
 
     errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
-    assert any("cross-project dependencies are v2; use coordinates: from the workspace tree" in e for e in errors)
+    assert errors == []
 
 
 def test_coordinates_header_parsing_and_resolution(tmp_path: pathlib.Path):
@@ -8246,7 +8250,7 @@ def test_plan_task_coordinates_and_depends_on_validation(tmp_path: pathlib.Path)
     )
 
     errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
-    assert any("cross-project dependencies are v2; use coordinates: from the workspace tree" in e for e in errors)
+    assert errors == []
     assert any("cannot resolve project 'proj-a' for coordinates reference 'proj-a/T001'" in w for w in warnings)
 
 
@@ -10671,3 +10675,212 @@ def test_workspace_wide_list_across_projects(tmp_path: pathlib.Path) -> None:
     assert res_act.returncode == 0
     data_act = json.loads(res_act.stdout)
     assert len(data_act["tasks"]) == 3
+
+
+def test_cross_workspace_and_cross_project_depends_on_setting_and_validate(tmp_path: pathlib.Path):
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # 1. Create task via tasks_new_from_note with cross-workspace and cross-project depends-on
+    ok, res = te.tasks_new_from_note(
+        tasks_dir=tasks_dir,
+        from_note=None,
+        category="features",
+        title="Dependent task",
+        depends_on="workspace:other-ws/T001, sibling-proj/T002",
+        goal="Coordinate with other workspace and sibling project",
+        priority_reason="Core cross-workspace feature",
+    )
+    assert ok is True
+    t_id = res["id"]
+
+    # Verify tasks validate passes with 0 errors
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+
+    # 2. Test updating dependencies via set_deps
+    res_set = te.set_deps(
+        tasks_dir=tasks_dir,
+        node_id=t_id,
+        to_ids=["workspace:other-ws/T001", "sibling-proj/T002"],
+    )
+    assert res_set["ok"] is True
+    assert "workspace:other-ws/T001" in res_set["depends_on"]
+    assert "sibling-proj/T002" in res_set["depends_on"]
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+
+
+def test_cross_workspace_external_dep_live_resolution_and_next_readiness(tmp_path: pathlib.Path):
+    # Setup workspace topologies:
+    # tmp_path/
+    #   main-ws/
+    #     tasks/
+    #     sibling-proj/
+    #       tasks/
+    #   other-ws/
+    #     tasks/
+    main_ws = tmp_path / "main-ws"
+    main_tasks = main_ws / "tasks"
+    main_tasks.mkdir(parents=True)
+
+    sibling_proj = main_ws / "sibling-proj"
+    sibling_tasks = sibling_proj / "tasks"
+    sibling_tasks.mkdir(parents=True)
+
+    other_ws = tmp_path / "other-ws"
+    other_tasks = other_ws / "tasks"
+    other_tasks.mkdir(parents=True)
+
+    # Create target task in other-ws: T001
+    _write_sample_task(
+        other_tasks / "features" / "T001-other.md",
+        task_id="T001",
+        title="External other task",
+        category="features",
+        state="open",
+        short="Other task",
+    )
+
+    # Create target task in sibling-proj: T002
+    _write_sample_task(
+        sibling_tasks / "core" / "T002-sibling.md",
+        task_id="T002",
+        title="Sibling core task",
+        category="core",
+        state="open",
+        short="Sibling task",
+    )
+
+    # Create dependent task in main-ws: T010
+    _write_sample_task(
+        main_tasks / "features" / "T010-dependent.md",
+        task_id="T010",
+        title="Main dependent task",
+        category="features",
+        state="open",
+        depends_on="workspace:other-ws/T001, sibling-proj/T002",
+    )
+
+    # 1. Test resolve_external_task_ref for workspace:other-ws/T001
+    res_other = te.resolve_external_task_ref("workspace:other-ws/T001", main_tasks)
+    assert res_other["resolved"] is True
+    assert res_other["ref"] == "workspace:other-ws/T001"
+    assert res_other["state"] == "open"
+    assert res_other["canonical_state"] == "open"
+    assert res_other["is_done"] is False
+    assert res_other["short_title"] == "Other task"
+
+    # 2. Test resolve_external_task_ref for sibling-proj/T002
+    res_sib = te.resolve_external_task_ref("sibling-proj/T002", main_tasks)
+    assert res_sib["resolved"] is True
+    assert res_sib["ref"] == "sibling-proj/T002"
+    assert res_sib["state"] == "open"
+    assert res_sib["canonical_state"] == "open"
+    assert res_sib["is_done"] is False
+    assert res_sib["short_title"] == "Sibling task"
+
+    # 3. Test non-existent external workspace
+    res_missing = te.resolve_external_task_ref("workspace:nonexistent-ws/T999", main_tasks)
+    assert res_missing["resolved"] is False
+    assert res_missing["is_done"] is False
+
+    # 4. Check tasks show --json outputs external_dependencies
+    args_show = argparse.Namespace(tasks_dir=str(main_tasks), task_id="T010", json=True)
+    code = te.cmd_show(args_show)
+    assert code == 0
+    show_task = args_show._last_result["task"]
+    assert "external_dependencies" in show_task
+    ext_deps = show_task["external_dependencies"]
+    assert len(ext_deps) == 2
+    refs = [d["ref"] for d in ext_deps]
+    assert "workspace:other-ws/T001" in refs
+    assert "sibling-proj/T002" in refs
+
+    # 5. Check tasks next readiness: both targets are open, so T010 must NOT be in ready_queue
+    graph = te.compute_tasks_graph(main_tasks)
+    assert "T010" not in graph["ready_queue"]
+
+    # Transition other-ws/T001 to 'delivered'
+    t001_file = other_tasks / "features" / "T001-other.md"
+    content_001 = t001_file.read_text(encoding="utf-8")
+    content_001 = re.sub(r"-\s+state:\s*open", "- state: delivered", content_001)
+    t001_file.write_text(content_001, encoding="utf-8")
+
+    # T010 should still be blocked because sibling-proj/T002 is still open
+    graph2 = te.compute_tasks_graph(main_tasks)
+    assert "T010" not in graph2["ready_queue"]
+
+    # Transition sibling-proj/T002 to 'verified'
+    t002_file = sibling_tasks / "core" / "T002-sibling.md"
+    content_002 = t002_file.read_text(encoding="utf-8")
+    content_002 = re.sub(r"-\s+state:\s*open", "- state: verified", content_002)
+    t002_file.write_text(content_002, encoding="utf-8")
+
+    # Now both targets are in delivered/verified -> T010 must be in ready_queue!
+    graph3 = te.compute_tasks_graph(main_tasks)
+    assert "T010" in graph3["ready_queue"]
+
+    # Transition other-ws/T001 to 'done' -> T010 remains in ready_queue, is_done becomes True
+    content_001 = re.sub(r"-\s+state:\s*delivered", "- state: done", content_001)
+    t001_file.write_text(content_001, encoding="utf-8")
+
+    res_other_done = te.resolve_external_task_ref("workspace:other-ws/T001", main_tasks)
+    assert res_other_done["resolved"] is True
+    assert res_other_done["canonical_state"] == "done"
+    assert res_other_done["is_done"] is True
+
+    graph4 = te.compute_tasks_graph(main_tasks)
+    assert "T010" in graph4["ready_queue"]
+
+
+def test_cross_workspace_executor_validate_and_show(tmp_path: pathlib.Path):
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # Create task with executor: workspace:ai-coding-tools
+    ok, res = te.tasks_new_from_note(
+        tasks_dir=tasks_dir,
+        from_note=None,
+        category="features",
+        title="Workspace delegated task",
+        executor="workspace:ai-coding-tools",
+        goal="Run in ai-coding-tools workspace",
+        priority_reason="Delegated to external workspace",
+    )
+    assert ok is True
+    tid = res["id"]
+
+    # tasks validate passes with 0 errors
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+
+    # tasks show --json outputs external_executor
+    args_show = argparse.Namespace(tasks_dir=str(tasks_dir), task_id=tid, json=True)
+    code = te.cmd_show(args_show)
+    assert code == 0
+    task_data = args_show._last_result["task"]
+    assert task_data["executor"] == "workspace:ai-coding-tools"
+    assert "external_executor" in task_data
+    assert task_data["external_executor"] == {
+        "kind": "workspace",
+        "workspace": "ai-coding-tools",
+    }
+
+    # Test set-executor with session:<name>
+    res_set = te.set_executor(tasks_dir, tid, "session:lead-session")
+    assert res_set["ok"] is True
+    assert res_set["executor"] == "session:lead-session"
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+
+    args_show2 = argparse.Namespace(tasks_dir=str(tasks_dir), task_id=tid, json=True)
+    assert te.cmd_show(args_show2) == 0
+    task_data2 = args_show2._last_result["task"]
+    assert task_data2["executor"] == "session:lead-session"
+    assert task_data2["external_executor"] == {
+        "kind": "session",
+        "session": "lead-session",
+    }
