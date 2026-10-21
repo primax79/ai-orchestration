@@ -197,8 +197,8 @@ CLI_DESCRIPTION: dict[str, Any] = {
             "usage": "ai-orch tasks <subcommand> [options] [--json]",
             "subcommands": {
                 "list": {
-                    "usage": "ai-orch tasks list [--kind <kind>...] [--label <label>...] [--tasks-dir <dir>] [--json]",
-                    "description": "Parse all emergent tasks (active + done/) and initiatives into structured JSON.",
+                    "usage": "ai-orch tasks list [--workspace <path-or-slug>] [--all-projects] [--state <state>] [--active-only] [--kind <kind>...] [--label <label>...] [--limit <N>] [--tasks-dir <dir>] [--json]",
+                    "description": "Parse all emergent tasks (active + done/) and initiatives into structured JSON across a project or workspace.",
                 },
                 "validate": {
                     "usage": "ai-orch tasks validate [--tasks-dir <dir>] [--json]",
@@ -304,8 +304,8 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "Set waiting-on qualifier for a task (rewrites header on T###, updates/creates bullet on NN.T).",
                 },
                 "next": {
-                    "usage": "ai-orch tasks next [--kind <kind>...] [--label <label>...] [--tasks-dir <dir>] [--json]",
-                    "description": "Show ready queue / next actionable tasks from the dependency graph.",
+                    "usage": "ai-orch tasks next [--workspace <path-or-slug>] [--all-projects] [--kind <kind>...] [--label <label>...] [--limit <N>] [--tasks-dir <dir>] [--json]",
+                    "description": "Show ready queue / next actionable tasks from the dependency graph (across a project or workspace).",
                 },
                 "labels": {
                     "usage": "ai-orch tasks labels [--tasks-dir <dir>] [--json]",
@@ -645,6 +645,10 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch workspace show <id> [--json]",
                     "description": "Show details of a workspace, its projects, and nested sub-workspaces.",
                 },
+                "next": {
+                    "usage": "ai-orch workspace next [--root <dir>] [--limit <N>] [--json]",
+                    "description": "Show ready queue / next actionable tasks across all projects in the workspace.",
+                },
             },
         },
         "projects": {
@@ -807,6 +811,18 @@ def main() -> int:
         return proc.returncode
 
     if group in ("workspace", "workspaces"):
+        if rest and rest[0] == "next":
+            next_args = ["next", "--all-projects"]
+            i = 1
+            while i < len(rest):
+                if rest[i] == "--root" and i + 1 < len(rest):
+                    next_args.extend(["--workspace", rest[i + 1]])
+                    i += 2
+                else:
+                    next_args.append(rest[i])
+                    i += 1
+            proc = subprocess.run([sys.executable, str(TASKS_ENGINE_SCRIPT), *next_args], check=False)
+            return proc.returncode
         proc = subprocess.run([sys.executable, str(ORCH_REGISTRY_SCRIPT), "workspace", *rest], check=False)
         return proc.returncode
 

@@ -9577,6 +9577,7 @@ def compute_tasks_graph(
             "blocked_by": blocked_by_map.get(n.id, []),
             "next_up": n.own_fields.get("next_up") or n.own_fields.get("next-up") or "no",
             "executor": n.executor,
+            "coordinates": list(n.coordinates) if hasattr(n, "coordinates") else [],
         })
 
     return {
@@ -9661,21 +9662,34 @@ def render_mermaid_graph(
     return "\n".join(lines) + "\n"
 
 
-# ---------------------------------------------------------------------------
-# CLI Subcommands
-# ---------------------------------------------------------------------------
+def _clean_filter_set(raw: Any) -> set[str] | None:
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        raw = [raw]
+    res = set()
+    for item in raw:
+        for piece in str(item).split(","):
+            p = piece.strip().lower()
+            if p and p != "-":
+                res.add(p)
+    return res if res else None
 
-def cmd_list(args: argparse.Namespace) -> int:
-    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
-    tree = discover_task_tree(tasks_dir)
-    emergent = discover_emergent_tasks(tasks_dir)
-    initiatives = discover_initiatives(tasks_dir, tree)
 
-    tree_dicts = {nid: node.to_dict() for nid, node in tree.items()}
-    tree_keys = ("parent", "depth", "node_type", "is_leaf", "is_container", "derived_state", "leaves_done",
-                 "leaves_total", "labels", "fields", "expanded_depends_on", "children", "size", "size_source", "priority_source", "coordinates", "conditions", "conditional", "waiting_on")
+def _build_tasks_list(
+    tasks_dir: pathlib.Path,
+    tree: dict[str, TaskNode],
+    emergent: list[dict[str, Any]],
+    initiatives: list[dict[str, Any]],
+    tree_dicts: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    tree_keys = (
+        "parent", "depth", "node_type", "is_leaf", "is_container", "derived_state",
+        "leaves_done", "leaves_total", "labels", "fields", "expanded_depends_on",
+        "children", "size", "size_source", "priority_source", "coordinates",
+        "conditions", "conditional", "waiting_on"
+    )
 
-    # Emergent roots keep their full header dict (the UI reads sources/paths/next-up...), plus tree info.
     all_tasks: list[dict[str, Any]] = []
     for et in emergent:
         item = dict(et)
@@ -9757,7 +9771,6 @@ def cmd_list(args: argparse.Namespace) -> int:
                 "bundle_sha256": init.get("bundle_sha256"),
             })
 
-    # Children of emergent roots (T014.1, ...) and microtasks not already listed.
     listed = {t["id"] for t in all_tasks}
     for nid, td in tree_dicts.items():
         if nid in listed or td["node_type"] == "initiative":
@@ -9768,33 +9781,194 @@ def cmd_list(args: argparse.Namespace) -> int:
         cat = tree[root].category if root in tree else ""
         all_tasks.append(_child_item(td, cat, "no", f"Work on task {nid} in {td['rel_path']}"))
 
-    # Apply --kind and --label filters
-    kind_arg = getattr(args, "kind", None)
-    label_arg = getattr(args, "label", None)
-    kind_set: set[str] | None = None
-    if kind_arg:
-        kind_set = set()
-        for k in kind_arg:
-            for piece in str(k).split(","):
-                p = piece.strip().lower()
-                if p and p != "-":
-                    kind_set.add(p)
-        if not kind_set:
-            kind_set = None
+    return all_tasks
 
-    label_set: set[str] | None = None
-    if label_arg:
-        label_set = set()
-        for l in label_arg:
-            for piece in str(l).split(","):
-                p = piece.strip().lower()
-                if p and p != "-":
-                    label_set.add(p)
-        if not label_set:
-            label_set = None
 
-    def _task_matches(t: dict[str, Any]) -> bool:
-        node = tree.get(t.get("id", ""))
+def resolve_workspace_and_projects(
+    workspace_arg: str | None = None,
+    tasks_dir: pathlib.Path | None = None,
+) -> tuple[pathlib.Path, str, list[dict[str, Any]]]:
+    """Resolve workspace root, workspace slug, and all constituent projects."""
+    ws_reg = None
+    ws_root: pathlib.Path | None = None
+    ws_slug: str | None = None
+
+    if workspace_arg:
+        if orchestration_registry is not None and hasattr(orchestration_registry, "find_workspace_for_arg"):
+            try:
+                ws_reg = orchestration_registry.find_workspace_for_arg(workspace_arg)
+                if ws_reg:
+                    ws_root = pathlib.Path(ws_reg["canonical_path"]).resolve()
+                    ws_slug = ws_reg.get("slug") or ws_reg.get("id") or ws_root.name
+            except Exception:
+                ws_reg = None
+        if ws_root is None:
+            cand_p = pathlib.Path(workspace_arg).expanduser().resolve()
+            if cand_p.is_dir():
+                ws_root = cand_p
+                ws_slug = cand_p.name
+                if orchestration_registry is not None and hasattr(orchestration_registry, "resolve_workspace_for_path"):
+                    try:
+                        near_ws, _ = orchestration_registry.resolve_workspace_for_path(cand_p)
+                        if near_ws and pathlib.Path(near_ws["canonical_path"]).resolve() == ws_root:
+                            ws_slug = near_ws["slug"]
+                    except Exception:
+                        pass
+            else:
+                raise ValueError(f"Workspace not found for argument {workspace_arg!r}")
+    else:
+        start_p = tasks_dir.resolve() if tasks_dir else pathlib.Path.cwd().resolve()
+        if start_p.name == "tasks" and start_p.is_dir():
+            start_p = start_p.parent
+        if orchestration_registry is not None and hasattr(orchestration_registry, "resolve_workspace_for_path"):
+            try:
+                ws_reg, _ = orchestration_registry.resolve_workspace_for_path(start_p)
+                if ws_reg:
+                    ws_root = pathlib.Path(ws_reg["canonical_path"]).resolve()
+                    ws_slug = ws_reg["slug"]
+            except Exception:
+                ws_reg = None
+        if ws_root is None:
+            curr: pathlib.Path | None = start_p
+            ws_root = start_p
+            ws_slug = start_p.name
+            while curr and curr != curr.parent:
+                for cfg in (".ai-orchestration.local.toml", "orchestration.toml"):
+                    if (curr / cfg).is_file():
+                        ws_root = curr
+                        ws_slug = curr.name
+                        break
+                if ws_root != start_p:
+                    break
+                curr = curr.parent
+
+    projects: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    used_slugs: set[str] = set()
+
+    # 1. Registered projects in SQLite if available
+    if ws_slug and orchestration_registry is not None and hasattr(orchestration_registry, "list_projects"):
+        try:
+            proj_data = orchestration_registry.list_projects(ws_slug)
+            for item in proj_data.get("items", []):
+                if item.get("kind") == "sub_workspace":
+                    continue
+                p_slug = item.get("slug")
+                rel_p = item.get("path", "")
+                norm_rel = os.path.normpath(rel_p)
+                t_dir = (ws_root / rel_p / "tasks").resolve() if rel_p not in (".", "") else (ws_root / "tasks").resolve()
+                if t_dir.is_dir():
+                    is_ws = (p_slug == "_workspace" or norm_rel == ".")
+                    eff_slug = "_workspace" if is_ws else p_slug
+                    seen_paths.add(norm_rel)
+                    used_slugs.add(eff_slug)
+                    projects.append({
+                        "slug": eff_slug,
+                        "path": rel_p,
+                        "tasks_dir": t_dir,
+                        "kind": "_workspace" if is_ws else "project",
+                        "scope": "workspace" if is_ws else "project",
+                    })
+        except Exception:
+            pass
+
+    # 2. Check orchestration.toml or .ai-orchestration.local.toml at ws_root
+    for cfg_name in (".ai-orchestration.local.toml", "orchestration.toml"):
+        cfg_file = ws_root / cfg_name
+        if cfg_file.is_file() and tomllib is not None:
+            try:
+                cfg_dict = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+                toml_projs = cfg_dict.get("workspace", {}).get("projects", [])
+                for p in toml_projs:
+                    rel_p = p.get("path", "")
+                    norm_rel = os.path.normpath(rel_p)
+                    if norm_rel in seen_paths:
+                        continue
+                    p_slug = p.get("id") or p.get("slug") or (pathlib.Path(rel_p).name if rel_p != "." else "_workspace")
+                    t_dir = (ws_root / rel_p / "tasks").resolve() if rel_p not in (".", "") else (ws_root / "tasks").resolve()
+                    if t_dir.is_dir():
+                        is_ws = (p_slug == "_workspace" or norm_rel == ".")
+                        eff_slug = "_workspace" if is_ws else p_slug
+                        seen_paths.add(norm_rel)
+                        used_slugs.add(eff_slug)
+                        projects.append({
+                            "slug": eff_slug,
+                            "path": rel_p,
+                            "tasks_dir": t_dir,
+                            "kind": "_workspace" if is_ws else "project",
+                            "scope": "workspace" if is_ws else "project",
+                        })
+            except Exception:
+                pass
+
+    # 3. Check root tasks/ (_workspace)
+    if "." not in seen_paths:
+        root_tasks = ws_root / "tasks"
+        if (root_tasks / "00-INDEX.md").is_file() or root_tasks.is_dir():
+            seen_paths.add(".")
+            used_slugs.add("_workspace")
+            projects.append({
+                "slug": "_workspace",
+                "path": ".",
+                "tasks_dir": root_tasks.resolve(),
+                "kind": "_workspace",
+                "scope": "workspace",
+            })
+
+    # 4. Scan child directories for tasks/
+    exclude_dirs = {
+        "node_modules", "build", "dist", "target", "venv", ".venv",
+        "scratch", "fixtures", "references", "__pycache__"
+    }
+    for root, dirs, _ in os.walk(str(ws_root)):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in exclude_dirs]
+        for d in list(dirs):
+            folder_p = (pathlib.Path(root) / d).resolve()
+            if folder_p == ws_root:
+                continue
+            index_file = folder_p / "tasks" / "00-INDEX.md"
+            cand_tasks = folder_p / "tasks"
+            if index_file.is_file() or cand_tasks.is_dir():
+                dirs.remove(d)
+                rel_path = str(folder_p.relative_to(ws_root))
+                norm_rel = os.path.normpath(rel_path)
+                if norm_rel not in seen_paths:
+                    seen_paths.add(norm_rel)
+                    raw_slug = folder_p.name
+                    p_slug = raw_slug
+                    suffix = 2
+                    while p_slug in used_slugs:
+                        p_slug = f"{raw_slug}-{suffix}"
+                        suffix += 1
+                    used_slugs.add(p_slug)
+                    projects.append({
+                        "slug": p_slug,
+                        "path": rel_path,
+                        "tasks_dir": cand_tasks.resolve(),
+                        "kind": "project",
+                        "scope": "project",
+                    })
+
+    projects.sort(key=lambda p: (0 if p["slug"] == "_workspace" else 1, p["path"]))
+    return ws_root, ws_slug or "workspace", projects
+
+
+# ---------------------------------------------------------------------------
+# CLI Subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_list(args: argparse.Namespace) -> int:
+    workspace_arg = getattr(args, "workspace", None)
+    all_projects = getattr(args, "all_projects", False)
+
+    kind_set = _clean_filter_set(getattr(args, "kind", None))
+    label_set = _clean_filter_set(getattr(args, "label", None))
+    state_filter = getattr(args, "state", None)
+    active_only = getattr(args, "active_only", False)
+    limit = getattr(args, "limit", None)
+
+    def _matches_filters(t: dict[str, Any], node_tree: dict[str, TaskNode]) -> bool:
+        node = node_tree.get(t.get("id", ""))
         tk = (node.kind if node and node.kind else (t.get("headers", {}).get("kind") or t.get("kind") or "")).strip().lower()
         if tk in ("emergent", "initiative", "initiative_task", "emergent_child"):
             tk = (t.get("headers", {}).get("kind") or "").strip().lower()
@@ -9809,28 +9983,158 @@ def cmd_list(args: argparse.Namespace) -> int:
                 t_labels = [str(x).strip().lower() for x in t_labels if str(x).strip()]
             if not any(x in label_set for x in t_labels):
                 return False
+        if active_only:
+            if t.get("in_done"):
+                return False
+            cst = (t.get("canonical_state") or t.get("state") or "").strip().lower()
+            if cst in TERMINAL_STATES:
+                return False
+        if state_filter is not None:
+            st = (t.get("state") or "").strip().lower()
+            cst = (t.get("canonical_state") or "").strip().lower()
+            tgt = state_filter.strip().lower()
+            if st != tgt and cst != tgt:
+                return False
         return True
 
-    if kind_set is not None or label_set is not None:
-        all_tasks = [t for t in all_tasks if _task_matches(t)]
-        emergent = [t for t in emergent if _task_matches(t)]
-        filtered_inits = []
-        for init in initiatives:
-            init_copy = dict(init)
-            matching_subtasks = [st for st in init.get("tasks", []) if _task_matches(st)]
-            if matching_subtasks or _task_matches(init):
-                init_copy["tasks"] = matching_subtasks
-                filtered_inits.append(init_copy)
-        initiatives = filtered_inits
+    if workspace_arg is not None or all_projects:
+        td_val = getattr(args, "tasks_dir", None)
+        td_path = pathlib.Path(td_val) if td_val and td_val != "tasks" else None
+        try:
+            ws_root, ws_slug, projects = resolve_workspace_and_projects(
+                workspace_arg=workspace_arg,
+                tasks_dir=td_path,
+            )
+        except Exception as e:
+            if getattr(args, "json", False):
+                print(json.dumps({"ok": False, "error": str(e)}, indent=2))
+            else:
+                print(f"[FAIL] {e}", file=sys.stderr)
+            return 2
+
+        all_tasks_combined: list[dict[str, Any]] = []
+        all_emergent_combined: list[dict[str, Any]] = []
+        all_initiatives_combined: list[dict[str, Any]] = []
+        trees_combined: dict[str, Any] = {}
+
+        for proj in projects:
+            p_tasks_dir = proj["tasks_dir"]
+            if not p_tasks_dir.is_dir():
+                continue
+            p_slug = proj["slug"]
+            p_scope = proj["scope"]
+
+            p_tree = discover_task_tree(p_tasks_dir)
+            p_emergent = discover_emergent_tasks(p_tasks_dir)
+            p_initiatives = discover_initiatives(p_tasks_dir, p_tree)
+            p_tree_dicts = {nid: node.to_dict() for nid, node in p_tree.items()}
+            trees_combined[p_slug] = p_tree_dicts
+
+            p_tasks = _build_tasks_list(p_tasks_dir, p_tree, p_emergent, p_initiatives, p_tree_dicts)
+
+            for t in p_tasks:
+                if _matches_filters(t, p_tree):
+                    t_copy = dict(t)
+                    t_copy["project"] = p_slug
+                    t_copy["qualified_id"] = f"{p_slug}/{t_copy['id']}"
+                    t_copy["scope"] = p_scope
+                    all_tasks_combined.append(t_copy)
+
+            for et in p_emergent:
+                if _matches_filters(et, p_tree):
+                    et_copy = dict(et)
+                    et_copy["project"] = p_slug
+                    et_copy["qualified_id"] = f"{p_slug}/{et_copy['id']}"
+                    et_copy["scope"] = p_scope
+                    all_emergent_combined.append(et_copy)
+
+            for init in p_initiatives:
+                init_copy = dict(init)
+                matching_subs = [st for st in init.get("tasks", []) if _matches_filters(st, p_tree)]
+                if matching_subs or _matches_filters(init, p_tree):
+                    init_copy["tasks"] = matching_subs
+                    init_copy["project"] = p_slug
+                    init_copy["qualified_id"] = f"{p_slug}/INIT-{init_copy['id']}"
+                    init_copy["scope"] = p_scope
+                    all_initiatives_combined.append(init_copy)
+
+        def _task_sort_key(t: dict[str, Any]):
+            p_rank = PRIORITY_SORT_KEY.get(t.get("priority", "P2"), 99)
+            nu_rank = 0 if t.get("next_up") == "yes" else 1
+            qid = t.get("qualified_id", t.get("id", ""))
+            return (p_rank, nu_rank, qid)
+
+        all_tasks_combined.sort(key=_task_sort_key)
+
+        if limit is not None and limit > 0:
+            all_tasks_combined = all_tasks_combined[:limit]
+
+        payload = {
+            "ok": True,
+            "workspace": ws_slug,
+            "workspace_root": str(ws_root),
+            "projects": [p["slug"] for p in projects],
+            "all_tasks": all_tasks_combined,
+            "tasks": all_tasks_combined,
+            "emergent_tasks": all_emergent_combined,
+            "initiatives": all_initiatives_combined,
+            "trees": trees_combined,
+            "tree": trees_combined.get("_workspace", {}),
+        }
+        if (ws_root / "tasks").is_dir():
+            payload["tasks_dir"] = str(ws_root / "tasks")
+        else:
+            payload["tasks_dir"] = str(ws_root)
+
+        args._last_result = payload
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"Workspace  : {ws_slug} ({ws_root})")
+            print(f"Projects   : {len(projects)} ({', '.join(p['slug'] for p in projects)})")
+            print(f"Initiatives: {len(all_initiatives_combined)}")
+            print(f"Emergent   : {len(all_emergent_combined)}")
+            print(f"Total tasks: {len(all_tasks_combined)}")
+            for t in all_tasks_combined:
+                qid = t.get("qualified_id", t["id"])
+                pri = t.get("priority", "P2")
+                st = t.get("state", "open")
+                print(f"  [{pri}] {qid} ({st}) - {t.get('title', '')}")
+        return 0
+
+    # Single-project path
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    tree = discover_task_tree(tasks_dir)
+    emergent = discover_emergent_tasks(tasks_dir)
+    initiatives = discover_initiatives(tasks_dir, tree)
+    tree_dicts = {nid: node.to_dict() for nid, node in tree.items()}
+
+    all_tasks = _build_tasks_list(tasks_dir, tree, emergent, initiatives, tree_dicts)
+
+    all_tasks = [t for t in all_tasks if _matches_filters(t, tree)]
+    emergent = [t for t in emergent if _matches_filters(t, tree)]
+    filtered_inits = []
+    for init in initiatives:
+        init_copy = dict(init)
+        matching_subtasks = [st for st in init.get("tasks", []) if _matches_filters(st, tree)]
+        if matching_subtasks or _matches_filters(init, tree):
+            init_copy["tasks"] = matching_subtasks
+            filtered_inits.append(init_copy)
+    initiatives = filtered_inits
+
+    if limit is not None and limit > 0:
+        all_tasks = all_tasks[:limit]
 
     payload = {
         "ok": True,
         "tasks_dir": str(tasks_dir),
         "tree": tree_dicts,
         "all_tasks": all_tasks,
+        "tasks": all_tasks,
         "emergent_tasks": emergent,
         "initiatives": initiatives,
     }
+    args._last_result = payload
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
     else:
@@ -10463,6 +10767,98 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def cmd_tasks_next(args: argparse.Namespace) -> int:
+    workspace_arg = getattr(args, "workspace", None)
+    all_projects = getattr(args, "all_projects", False)
+    limit = getattr(args, "limit", None)
+
+    if workspace_arg is not None or all_projects:
+        td_val = getattr(args, "tasks_dir", None)
+        td_path = pathlib.Path(td_val) if td_val and td_val != "tasks" else None
+        try:
+            ws_root, ws_slug, projects = resolve_workspace_and_projects(
+                workspace_arg=workspace_arg,
+                tasks_dir=td_path,
+            )
+        except Exception as e:
+            if getattr(args, "json", False):
+                print(json.dumps({"ok": False, "error": str(e)}, indent=2))
+            else:
+                print(f"[FAIL] {e}", file=sys.stderr)
+            return 2
+
+        kind_filter = getattr(args, "kind", None)
+        label_filter = getattr(args, "label", None)
+
+        all_ready_tasks: list[dict[str, Any]] = []
+        coords_cache: dict[str, Any] = {}
+        for proj in projects:
+            p_tasks_dir = proj["tasks_dir"]
+            if not p_tasks_dir.is_dir():
+                continue
+            try:
+                graph_data = compute_tasks_graph(
+                    p_tasks_dir,
+                    kind_filter=kind_filter,
+                    label_filter=label_filter,
+                )
+                ready_ids = graph_data["ready_queue"]
+                nodes_by_id = graph_data["nodes_by_id"]
+                for qid in ready_ids:
+                    if qid not in nodes_by_id:
+                        continue
+                    t = dict(nodes_by_id[qid])
+                    t["project"] = proj["slug"]
+                    t["qualified_id"] = f"{proj['slug']}/{t['id']}"
+                    t["scope"] = proj["scope"]
+                    if t.get("coordinates") and (ws_root / "tasks").is_dir():
+                        t["expanded_coordinates"] = resolve_coordinates(
+                            t["coordinates"],
+                            context_tasks_dir=ws_root / "tasks",
+                            project_tree_cache=coords_cache,
+                        )
+                    all_ready_tasks.append(t)
+            except Exception:
+                pass
+
+        # Sort results by priority (P0..P3), next_up == "yes" first, then qualified_id
+        def _task_sort_key(t: dict[str, Any]):
+            p_rank = PRIORITY_SORT_KEY.get(t.get("priority", "P2"), 99)
+            nu_rank = 0 if t.get("next_up") == "yes" else 1
+            qid = t.get("qualified_id", t.get("id", ""))
+            return (p_rank, nu_rank, qid)
+
+        all_ready_tasks.sort(key=_task_sort_key)
+
+        if limit is not None and limit > 0:
+            all_ready_tasks = all_ready_tasks[:limit]
+
+        ready_queue = [t["qualified_id"] for t in all_ready_tasks]
+
+        payload = {
+            "ok": True,
+            "workspace": ws_slug,
+            "workspace_root": str(ws_root),
+            "projects": [p["slug"] for p in projects],
+            "ready_queue": ready_queue,
+            "tasks": all_ready_tasks,
+        }
+        if (ws_root / "tasks").is_dir():
+            payload["tasks_dir"] = str(ws_root / "tasks")
+        else:
+            payload["tasks_dir"] = str(ws_root)
+
+        args._last_result = payload
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"Ready Queue ({len(all_ready_tasks)}):")
+            for idx, t in enumerate(all_ready_tasks, 1):
+                st = t.get("short_title", "")
+                st_disp = f" ({st})" if st else ""
+                qid = t.get("qualified_id", t["id"])
+                print(f"  {idx}. [{t.get('priority', 'P2')}] {qid}{st_disp} - {t.get('title', '')} (size: {t.get('size', 'M')})")
+        return 0
+
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     graph_data = compute_tasks_graph(
         tasks_dir,
@@ -10472,12 +10868,17 @@ def cmd_tasks_next(args: argparse.Namespace) -> int:
     ready_ids = graph_data["ready_queue"]
     nodes_by_id = graph_data["nodes_by_id"]
     ready_tasks = [nodes_by_id[qid] for qid in ready_ids if qid in nodes_by_id]
+    if limit is not None and limit > 0:
+        ready_tasks = ready_tasks[:limit]
+        ready_ids = [t["id"] for t in ready_tasks]
+
     payload = {
         "ok": True,
         "tasks_dir": str(tasks_dir),
         "ready_queue": ready_ids,
         "tasks": ready_tasks,
     }
+    args._last_result = payload
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
     else:
@@ -16667,6 +17068,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_list = sub.add_parser("list", help="List all emergent tasks and initiatives in tasks/")
     p_list.add_argument("--kind", action="append", default=None, help="Filter by kind (repeatable, OR within field)")
     p_list.add_argument("--label", action="append", default=None, help="Filter by label (repeatable, OR within field)")
+    p_list.add_argument("--workspace", default=None, help="Workspace slug, UUID, or path")
+    p_list.add_argument("--all-projects", action="store_true", help="List tasks across all projects in workspace")
+    p_list.add_argument("--state", default=None, help="Filter by state (e.g. open)")
+    p_list.add_argument("--active-only", action="store_true", help="Filter active (non-terminal) tasks")
+    p_list.add_argument("--limit", type=int, default=None, help="Maximum number of tasks to return")
     p_list.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_list.set_defaults(func=cmd_list)
@@ -17034,6 +17440,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_next = sub.add_parser("next", help="Show ready queue / next actionable tasks")
     p_next.add_argument("--kind", action="append", default=None, help="Filter by kind (repeatable, OR within field)")
     p_next.add_argument("--label", action="append", default=None, help="Filter by label (repeatable, OR within field)")
+    p_next.add_argument("--workspace", default=None, help="Workspace slug, UUID, or path")
+    p_next.add_argument("--all-projects", action="store_true", help="Show ready queue across all projects in workspace")
+    p_next.add_argument("--limit", type=int, default=None, help="Maximum number of tasks to return")
     p_next.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_next.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_next.set_defaults(func=cmd_tasks_next)
