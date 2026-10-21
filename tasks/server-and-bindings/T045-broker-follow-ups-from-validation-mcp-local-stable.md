@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: 16.5 failed validation on its promised in-process mode; error contract deviates from spec 3b
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -

@@ -10,7 +10,7 @@
 - executor: kilo
 - depends-on: -
 - decider: -
-- sources: owner 2026-10-21 (validation by requester; 'use something like questions'); method 0.17 (verification queue drained at session start)
+- sources: owner 2026-10-21 (validation by requester; 'use something like questions'); method 0.17 (verification queue drained at session start); inbox N046 (gcube_atlas handover: Kilo/Gemini sessions cannot receive cross-session messages)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, skills
 - handoff: Read tasks/engine/T044-durable-verification-requests-addressed-to-a-works.md, do the open steps, run the Verification, update the task and the registry.
 - short: Durable verification requests

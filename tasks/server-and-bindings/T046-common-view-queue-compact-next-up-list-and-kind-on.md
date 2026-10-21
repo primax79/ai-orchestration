@@ -6,7 +6,7 @@
 - priority: P3
 - priority-reason: Usability: 41 cards in the All-projects queue
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
