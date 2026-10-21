@@ -520,3 +520,65 @@ def test_discover_finds_nested_repos_under_an_allowlist_gitignore(isolated_env: 
 
     assert reg.is_git_ignored(sub, ws) is False
     assert reg.is_git_ignored(ignored, ws) is True
+
+
+def test_projects_discover_unregistered_workspace(isolated_env: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    ws_dir = tmp_path / "unregistered_ws"
+    ws_dir.mkdir(parents=True)
+
+    # 1. Root tasks/00-INDEX.md and subproject tasks/00-INDEX.md
+    (ws_dir / "tasks").mkdir(parents=True)
+    (ws_dir / "tasks" / "00-INDEX.md").write_text("# Root\n", encoding="utf-8")
+
+    (ws_dir / "service-a" / "tasks").mkdir(parents=True)
+    (ws_dir / "service-a" / "tasks" / "00-INDEX.md").write_text("# Service A\n", encoding="utf-8")
+
+    # Workspace is NOT registered in SQLite
+    # 2. Run projects discover in preview mode via python API
+    plan = reg.plan_projects_discover(str(ws_dir), config_dir=isolated_env)
+    assert plan["ok"] is True
+    assert plan["workspace_registered"] is False
+    assert plan["workspace_path"] == str(ws_dir.resolve())
+    disc = plan["discovered"]
+    assert any(p["id"] == "_workspace" and p["path"] == "." for p in disc)
+    assert any(p["id"] == "service-a" and p["path"] == "service-a" for p in disc)
+
+    # 3. Run projects discover via CLI (bin/ai-orch)
+    res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "projects", "discover", str(ws_dir), "--config-dir", str(isolated_env), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    cli_data = json.loads(res.stdout)
+    assert cli_data["ok"] is True
+    assert cli_data["workspace_registered"] is False
+    assert cli_data["workspace_path"] == str(ws_dir.resolve())
+    assert any(p["id"] == "_workspace" for p in cli_data["discovered"])
+    assert any(p["id"] == "service-a" for p in cli_data["discovered"])
+
+    # 4. Apply discovery on unregistered workspace (automatically registers workspace and projects)
+    res_apply = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "projects", "discover", str(ws_dir), "--apply", "--config-dir", str(isolated_env), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_apply.returncode == 0
+    apply_data = json.loads(res_apply.stdout)
+    assert apply_data["ok"] is True
+    assert apply_data["workspace_registered"] is True
+    assert apply_data["applied"] is True
+
+    # 5. Verify workspace is now registered in SQLite and projects discover reports registered=True
+    res_again = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "projects", "discover", str(ws_dir), "--config-dir", str(isolated_env), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_again.returncode == 0
+    again_data = json.loads(res_again.stdout)
+    assert again_data["ok"] is True
+    assert again_data["workspace_registered"] is True
