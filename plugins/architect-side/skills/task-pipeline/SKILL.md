@@ -650,6 +650,19 @@ When working on a project created with older conventions (e.g. legacy `macroplan
 4. **Index and check.** `ai-orch tasks sync-index --check`, review the diff, `--apply`; then `validate` must show no errors and `tasks list` must show every plan task with an `NN.T` id and no `INIT-NN` card for a plan that has tasks.
 5. **One commit per project** (`docs(tasks): normalize plans to the NN.T convention`), touching only `tasks/`. If another session is working in the same repository, do it in a worktree and fast-forward, so concurrent task edits surface as conflicts instead of being overwritten.
 
+## Tooling feedback
+
+When you hit friction, a defect, a missing feature or a wrong default in `ai-orch`, its UI, the VS Code extension or the delegation tooling, or when a new need appears, report it at once with `ai-orch feedback`:
+
+```bash
+ai-orch feedback --kind bug|feature|idea|request --title "<short>" --body "<what, where, expected vs actual>"
+```
+
+- **Report immediately:** do not work around tooling issues silently.
+- **One note per item:** capture what you ran, what you expected, and what happened.
+- **No sensitive data:** never include secrets, private hostnames, or audit findings in notes.
+- **Triage:** maintainers triage notes into tasks and reply with the task ID and short title.
+
 ## Reference
 
 See [`references/template.md`](references/template.md) for copy-paste skeletons

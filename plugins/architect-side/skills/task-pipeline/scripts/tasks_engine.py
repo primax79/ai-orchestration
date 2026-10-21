@@ -36,6 +36,14 @@ except ImportError:
     fcntl = None  # type: ignore
 
 try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib  # type: ignore
+    except ImportError:
+        tomllib = None  # type: ignore
+
+try:
     import orchestration_registry
 except ImportError:
     _repo_root = pathlib.Path(__file__).resolve().parents[5]
@@ -241,6 +249,7 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
 - **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
 - **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+- **Tooling feedback:** report friction, defects, or improvements in `ai-orch` and its tooling at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."`. Do not work around tooling issues silently; maintainers triage notes into tasks.
 """
 
 TASK_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.\d+[a-z]?)*)$")
@@ -13217,6 +13226,568 @@ def cmd_inbox_reopen(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------------------
+# Feedback Channel (T034)
+# ---------------------------------------------------------------------------
+
+def _resolve_global_config_dir() -> pathlib.Path:
+    try:
+        import orchestration_broker_lock
+        return orchestration_broker_lock.get_global_config_dir()
+    except ImportError:
+        pass
+    try:
+        repo_root = _find_repo_root()
+        if repo_root is not None:
+            sdir = repo_root / "scripts"
+            if sdir.is_dir() and str(sdir) not in sys.path:
+                sys.path.insert(0, str(sdir))
+        import orchestration_broker_lock
+        return orchestration_broker_lock.get_global_config_dir()
+    except Exception:
+        pass
+    env_val = os.environ.get("AI_ORCHESTRATION_CONFIG")
+    if env_val:
+        p = pathlib.Path(env_val).expanduser().resolve()
+        if p.is_file() or p.suffix == ".toml" or p.name.endswith(".toml"):
+            return p.parent
+        return p
+    return pathlib.Path.home() / ".config" / "ai-orchestration"
+
+
+def _resolve_feedback_author(explicit_author: str | None = None) -> tuple[str, str]:
+    cwd = pathlib.Path.cwd().resolve()
+    ws_slug = None
+    ws_canonical = None
+    try:
+        reg = orchestration_registry
+        if reg is None:
+            repo_root = _find_repo_root()
+            if repo_root is not None:
+                sdir = repo_root / "scripts"
+                if sdir.is_dir() and str(sdir) not in sys.path:
+                    sys.path.insert(0, str(sdir))
+            import orchestration_registry as reg
+        if reg is not None and hasattr(reg, "resolve_workspace_for_path"):
+            nearest_ws, _ = reg.resolve_workspace_for_path(cwd)
+            if nearest_ws and nearest_ws.get("slug"):
+                ws_slug = nearest_ws["slug"]
+                ws_canonical = nearest_ws.get("canonical_path")
+    except Exception:
+        pass
+
+    git_top = None
+    try:
+        cur = cwd
+        for p in [cur, *cur.parents]:
+            if (p / ".git").exists():
+                git_top = p
+                break
+    except Exception:
+        pass
+
+    if explicit_author and explicit_author.strip():
+        author = explicit_author.strip()
+    elif ws_slug:
+        author = ws_slug
+    elif git_top:
+        author = git_top.name
+    else:
+        author = cwd.name or "unknown"
+
+    workspace_path = ws_canonical or (str(git_top) if git_top else str(cwd))
+    return author, workspace_path
+
+
+def _get_ai_orch_version_or_commit() -> str:
+    repo_root = _find_repo_root()
+    if repo_root is not None:
+        try:
+            res = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return f"1.1.0 ({res.stdout.strip()})"
+        except Exception:
+            pass
+    return "1.1.0"
+
+
+def resolve_feedback_target(
+    config_dir: pathlib.Path | None = None,
+    for_flush: bool = False,
+) -> tuple[str, pathlib.Path | None]:
+    """Resolve the target tasks directory for feedback.
+
+    Order of resolution:
+      1. $AI_ORCH_FEEDBACK_TASKS_DIR
+      2. [feedback] tasks_dir in global config (orchestration.toml)
+      3. The tasks/ dir of the repository that contains the running bin/ai-orch,
+         if that repository is ai-orchestration (it has tasks/00-INDEX.md and
+         plugins/architect-side/skills/task-pipeline).
+      4. Otherwise a local outbox <global config dir>/feedback-outbox/
+         (or None if for_flush=True).
+
+    Returns:
+      (source, path) where source is 'env', 'config', 'repo', or 'outbox'.
+    """
+    # 1. Environment variable
+    env_dir = os.environ.get("AI_ORCH_FEEDBACK_TASKS_DIR")
+    if env_dir and env_dir.strip():
+        return "env", pathlib.Path(env_dir.strip()).expanduser().resolve()
+
+    # 2. Global config [feedback] tasks_dir
+    gdir = config_dir if config_dir is not None else _resolve_global_config_dir()
+    cfg_file = gdir / "orchestration.toml"
+    if cfg_file.is_file():
+        try:
+            cfg_text = cfg_file.read_text(encoding="utf-8")
+            if tomllib is not None:
+                parsed = tomllib.loads(cfg_text)
+                fb_td = parsed.get("feedback", {}).get("tasks_dir")
+                if fb_td and str(fb_td).strip():
+                    return "config", pathlib.Path(str(fb_td).strip()).expanduser().resolve()
+        except Exception:
+            pass
+
+    # 3. Running bin/ai-orch repository if it is ai-orchestration
+    repo_root = _find_repo_root()
+    running_bin = None
+    for cand in [
+        os.environ.get("AI_ORCH_BIN"),
+        sys.argv[0] if (sys.argv and sys.argv[0] and sys.argv[0].endswith("ai-orch")) else None,
+        shutil.which("ai-orch"),
+        str(repo_root / "bin" / "ai-orch") if repo_root is not None else None,
+    ]:
+        if cand:
+            p = pathlib.Path(cand).resolve()
+            if p.is_file():
+                running_bin = p
+                break
+
+    if running_bin is not None:
+        cand_repo = running_bin.parent.parent
+        if (
+            (cand_repo / "tasks" / "00-INDEX.md").is_file()
+            and (cand_repo / "plugins" / "architect-side" / "skills" / "task-pipeline").is_dir()
+        ):
+            return "repo", (cand_repo / "tasks").resolve()
+
+    # 4. Outbox
+    if for_flush:
+        return "outbox", None
+    return "outbox", (gdir / "feedback-outbox").resolve()
+
+
+def _queue_feedback_outbox(
+    outbox_dir: pathlib.Path,
+    title: str,
+    kind: str,
+    full_body: str,
+    author: str,
+    about: str = "-",
+    short: str | None = None,
+) -> tuple[pathlib.Path, str]:
+    outbox_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ts = now.strftime("%Y%m%d-%H%M%S")
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "note"
+
+    existing_notes = [
+        d for d in outbox_dir.iterdir()
+        if (d.is_dir() and (d / "note.md").is_file()) or (d.is_file() and d.suffix == ".md")
+    ]
+    next_num = len(existing_notes) + 1
+    note_id = f"N{next_num:03d}"
+
+    folder_name = f"{ts}-{slug}"
+    candidate_folder = outbox_dir / folder_name
+    if candidate_folder.exists():
+        folder_name = f"{ts}-{slug}-{next_num}"
+        candidate_folder = outbox_dir / folder_name
+    candidate_folder.mkdir(parents=True, exist_ok=False)
+    (candidate_folder / "attachments").mkdir(parents=True, exist_ok=True)
+
+    short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(title.strip())
+    content = format_note_content(
+        id=note_id,
+        title=title,
+        kind=kind,
+        status="ready",
+        created=now.isoformat(),
+        author=author,
+        about=about,
+        produced="-",
+        processed_by="-",
+        body=full_body,
+        short=short_val,
+    )
+    note_file = candidate_folder / "note.md"
+    note_file.write_text(content, encoding="utf-8")
+    return candidate_folder, note_id
+
+
+def _parse_outbox_note_file(nfile: pathlib.Path) -> dict[str, Any]:
+    text = nfile.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    title = ""
+    kind = "note"
+    author = "owner"
+    about = "-"
+    short = None
+    body_lines = []
+    in_header = False
+    in_body = False
+
+    for line in lines:
+        if not in_header and not in_body and line.startswith("# "):
+            raw_title = line[2:].strip()
+            m_id = re.match(r"^N\d+\s+(.*)$", raw_title)
+            title = m_id.group(1).strip() if m_id else raw_title
+            in_header = True
+            continue
+        if in_header:
+            if not line.strip():
+                in_header = False
+                in_body = True
+                continue
+            m = HEADER_LINE_RE.match(line)
+            if m:
+                k, v = m.group(1), m.group(2).strip()
+                if k == "title" and v:
+                    title = v
+                elif k == "kind" and v:
+                    kind = v
+                elif k == "author" and v:
+                    author = v
+                elif k == "about" and v:
+                    about = v
+                elif k == "short" and v and v != "-":
+                    short = v
+            else:
+                in_header = False
+                in_body = True
+                body_lines.append(line)
+        elif in_body:
+            body_lines.append(line)
+
+    body = "\n".join(body_lines).strip()
+    return {
+        "title": title or "Feedback note",
+        "kind": kind,
+        "author": author,
+        "about": about,
+        "short": short,
+        "body": body,
+    }
+
+
+def cmd_feedback(args: argparse.Namespace) -> int:
+    is_json = bool(getattr(args, "json", False) or "--json" in sys.argv)
+    if getattr(args, "feedback_cmd", None) == "flush":
+        return cmd_feedback_flush(args)
+
+    kind = getattr(args, "kind", None)
+    if not kind or kind not in ("bug", "feature", "idea", "request"):
+        msg = f"Missing or invalid required --kind (got {kind!r}, expected one of: bug, feature, idea, request)."
+        if is_json:
+            print(json.dumps({"ok": False, "error": "invalid-kind", "message": msg}, indent=2))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
+        return 2
+
+    title = getattr(args, "title", None)
+    if not title or not title.strip():
+        msg = "Missing required --title."
+        if is_json:
+            print(json.dumps({"ok": False, "error": "missing-title", "message": msg}, indent=2))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
+        return 2
+    title = title.strip()
+
+    body_file = getattr(args, "body_file", None)
+    body_val = getattr(args, "body", None)
+    if body_file:
+        bf = pathlib.Path(body_file)
+        if not bf.is_file():
+            msg = f"Body file not found: {body_file}"
+            if is_json:
+                print(json.dumps({"ok": False, "error": "body-file-not-found", "message": msg}, indent=2))
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
+        body_text = bf.read_text(encoding="utf-8")
+    elif body_val is not None:
+        body_text = body_val
+    else:
+        msg = "Missing required --body or --body-file."
+        if is_json:
+            print(json.dumps({"ok": False, "error": "missing-body", "message": msg}, indent=2))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
+        return 2
+
+    author, ws_path = _resolve_feedback_author(getattr(args, "author", None))
+    about = getattr(args, "about", "-") or "-"
+    short = getattr(args, "short", None)
+    if short and short.strip() and short.strip() != "-":
+        issues = validate_short_title(short.strip())
+        if issues:
+            msg = f"Invalid short title {short!r}: {'; '.join(issues)}."
+            if is_json:
+                print(json.dumps({"ok": False, "error": "invalid-short-title", "message": msg}, indent=2))
+            else:
+                print(f"[FAIL] {msg}", file=sys.stderr)
+            return 2
+        short = short.strip()
+    else:
+        short = derive_short_title(title)
+
+    footer = (
+        f"---\n"
+        f"- Author: {author}\n"
+        f"- Workspace: {ws_path}\n"
+        f"- ai-orch: {_get_ai_orch_version_or_commit()}\n"
+        f"- Date: {datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+    )
+    full_body = f"{body_text.strip()}\n\n{footer}" if body_text.strip() else footer
+
+    source, target_path = resolve_feedback_target()
+    is_dry_run = bool(getattr(args, "dry_run", False))
+
+    broker_held = False
+    orig_target = target_path
+    if source in ("env", "config", "repo"):
+        b_status = _get_broker_status()
+        if b_status is not None and getattr(b_status, "held", False):
+            broker_held = True
+            source = "outbox"
+            target_path = (_resolve_global_config_dir() / "feedback-outbox").resolve()
+
+    if is_dry_run:
+        if is_json:
+            print(json.dumps({
+                "ok": True,
+                "dry_run": True,
+                "target": str(target_path),
+                "target_source": source,
+                "broker_lock_held": broker_held,
+                "note": {
+                    "title": title,
+                    "kind": kind,
+                    "status": "ready",
+                    "author": author,
+                    "about": about,
+                    "short": short,
+                    "body": full_body,
+                },
+            }, indent=2))
+        else:
+            if broker_held:
+                print(f"[notice] Broker lock is held on {orig_target} (broker-owns-writes); note would be queued in outbox.")
+            print(f"[dry-run] Target: {target_path} (source: {source})")
+            print("--- Note ---")
+            print(f"# {title}\n")
+            print(f"- title: {title}")
+            print(f"- kind: {kind}")
+            print(f"- status: ready")
+            print(f"- author: {author}")
+            print(f"- about: {about}")
+            print(f"- short: {short}\n")
+            print(full_body)
+        return 0
+
+    if source in ("env", "config", "repo"):
+        ok, res = inbox_add(
+            tasks_dir=target_path,
+            title=title,
+            kind=kind,
+            body=full_body,
+            about=about,
+            author=author,
+            status="ready",
+            short=short,
+        )
+        if ok:
+            if is_json:
+                print(json.dumps({
+                    "ok": True,
+                    "id": res["id"],
+                    "target": str(target_path),
+                    "target_source": source,
+                    "folder": res.get("folder"),
+                    "rel_path": res.get("rel_path"),
+                    "bundle_sha256": res.get("bundle_sha256"),
+                }, indent=2))
+            else:
+                print(f"[ok] Created feedback note {res['id']}: {res['rel_path']}")
+            return 0
+        else:
+            err = res.get("error", "inbox add failed")
+            if "broker-owns-writes" in str(err) or "lock-timeout" in str(err):
+                source = "outbox"
+                target_path = (_resolve_global_config_dir() / "feedback-outbox").resolve()
+                broker_held = True
+            else:
+                if is_json:
+                    print(json.dumps({"ok": False, "error": err, "target": str(target_path)}, indent=2))
+                else:
+                    print(f"[FAIL] {err}", file=sys.stderr)
+                return 1
+
+    outbox_folder, note_id = _queue_feedback_outbox(
+        outbox_dir=target_path,
+        title=title,
+        kind=kind,
+        full_body=full_body,
+        author=author,
+        about=about,
+        short=short,
+    )
+    gdir = _resolve_global_config_dir()
+    if is_json:
+        print(json.dumps({
+            "ok": True,
+            "queued": True,
+            "broker_lock_held": broker_held,
+            "target": str(target_path),
+            "target_source": "outbox",
+            "folder": outbox_folder.name,
+            "rel_path": str((outbox_folder / "note.md").relative_to(target_path)),
+            "id": note_id,
+            "message": (
+                "Feedback note queued in outbox. Configure [feedback] tasks_dir in "
+                "orchestration.toml or run 'ai-orch feedback flush'."
+            ),
+        }, indent=2))
+    else:
+        if broker_held:
+            print(f"[notice] Broker lock is held on {orig_target} (broker-owns-writes); queued note in outbox.")
+        print(f"[ok] Feedback note queued in {outbox_folder / 'note.md'}")
+        print(f"To deliver feedback directly to a tasks tree, configure [feedback] tasks_dir in your global orchestration.toml (under {gdir}) or set AI_ORCH_FEEDBACK_TASKS_DIR.")
+        print("Run 'ai-orch feedback flush' to move queued notes once configured.")
+    return 0
+
+
+def cmd_feedback_flush(args: argparse.Namespace) -> int:
+    is_json = bool(getattr(args, "json", False) or "--json" in sys.argv)
+    is_dry_run = bool(getattr(args, "dry_run", False))
+
+    source, target_path = resolve_feedback_target(for_flush=True)
+    if target_path is None or source == "outbox":
+        msg = (
+            "Cannot flush: target tasks directory is not configured. "
+            "Set [feedback] tasks_dir in orchestration.toml or set AI_ORCH_FEEDBACK_TASKS_DIR."
+        )
+        if is_json:
+            print(json.dumps({"ok": False, "error": "target-not-configured", "message": msg}, indent=2))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
+        return 1
+
+    b_status = _get_broker_status()
+    if b_status is not None and getattr(b_status, "held", False):
+        msg = "Cannot flush: broker lock is held on target tasks tree (broker-owns-writes)."
+        if is_json:
+            print(json.dumps({"ok": False, "error": "broker-owns-writes", "message": msg}, indent=2))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
+        return 1
+
+    outbox_dir = _resolve_global_config_dir() / "feedback-outbox"
+    if not outbox_dir.is_dir():
+        if is_json:
+            print(json.dumps({"ok": True, "flushed_count": 0, "notes": [], "message": "Outbox is empty (0 notes to flush)."}, indent=2))
+        else:
+            print("[ok] Outbox is empty (0 notes to flush).")
+        return 0
+
+    note_items: list[tuple[pathlib.Path, pathlib.Path]] = []
+    for item in sorted(outbox_dir.iterdir()):
+        if item.name.startswith("."):
+            continue
+        if item.is_dir() and (item / "note.md").is_file():
+            note_items.append((item, item / "note.md"))
+        elif item.is_file() and item.suffix == ".md":
+            note_items.append((item, item))
+
+    if not note_items:
+        if is_json:
+            print(json.dumps({"ok": True, "flushed_count": 0, "notes": [], "message": "Outbox is empty (0 notes to flush)."}, indent=2))
+        else:
+            print("[ok] Outbox is empty (0 notes to flush).")
+        return 0
+
+    if is_dry_run:
+        notes_info = [{"folder": item.name, "file": str(nfile)} for item, nfile in note_items]
+        if is_json:
+            print(json.dumps({
+                "ok": True,
+                "dry_run": True,
+                "would_flush_count": len(note_items),
+                "target": str(target_path),
+                "notes": notes_info,
+            }, indent=2))
+        else:
+            print(f"[dry-run] Would flush {len(note_items)} note(s) from {outbox_dir} to {target_path}:")
+            for item, nfile in note_items:
+                print(f"  - {item.name}")
+        return 0
+
+    flushed: list[dict[str, Any]] = []
+    for item, nfile in note_items:
+        parsed = _parse_outbox_note_file(nfile)
+        ok, res = inbox_add(
+            tasks_dir=target_path,
+            title=parsed["title"],
+            kind=parsed["kind"],
+            body=parsed["body"],
+            about=parsed["about"],
+            author=parsed["author"],
+            status="ready",
+            short=parsed.get("short"),
+        )
+        if not ok:
+            err_msg = res.get("error", "inbox add failed during flush")
+            if is_json:
+                print(json.dumps({
+                    "ok": False,
+                    "error": err_msg,
+                    "flushed_count": len(flushed),
+                    "notes": flushed,
+                }, indent=2))
+            else:
+                print(f"[FAIL] Flush failed on {item.name}: {err_msg}", file=sys.stderr)
+            return 1
+
+        if item.is_dir():
+            shutil.rmtree(item, ignore_errors=True)
+        else:
+            try:
+                item.unlink()
+            except OSError:
+                pass
+        flushed.append({"id": res["id"], "title": parsed["title"], "rel_path": res["rel_path"]})
+
+    if is_json:
+        print(json.dumps({
+            "ok": True,
+            "flushed_count": len(flushed),
+            "target": str(target_path),
+            "notes": flushed,
+        }, indent=2))
+    else:
+        print(f"[ok] Flushed {len(flushed)} note(s) to {target_path}:")
+        for f in flushed:
+            print(f"  - {f['id']}: {f['title']}")
+    return 0
+
+
 def cmd_tasks_new(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     ok, res = tasks_new_from_note(
@@ -14129,6 +14700,26 @@ def build_parser() -> argparse.ArgumentParser:
     uc_camp.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     uc_camp.set_defaults(func=cmd_use_cases_campaign)
 
+    # feedback (T034)
+    p_fb = sub.add_parser("feedback", help="Report tooling needs, defects, or improvements")
+    p_fb.add_argument("--kind", choices=["bug", "feature", "idea", "request"], default=None, help="Kind of feedback")
+    p_fb.add_argument("--title", default=None, help="Short title of the feedback")
+    p_fb.add_argument("--body", default=None, help="Body text (what, where, expected vs actual)")
+    p_fb.add_argument("--body-file", default=None, help="Path to file containing body Markdown")
+    p_fb.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
+    p_fb.add_argument("--author", default=None, help="Author name")
+    p_fb.add_argument("--about", default="-", help="About paths, repos or task IDs")
+    p_fb.add_argument("--dry-run", action="store_true", default=False, help="Print target and note without writing")
+    p_fb.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+
+    fb_sub = _instrument_subparsers(p_fb.add_subparsers(dest="feedback_cmd"))
+    p_flush = fb_sub.add_parser("flush", help="Move queued feedback notes into configured tasks tree")
+    p_flush.add_argument("--dry-run", action="store_true", default=False, help="Print notes that would be flushed")
+    p_flush.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_flush.set_defaults(func=cmd_feedback_flush)
+
+    p_fb.set_defaults(func=cmd_feedback)
+
     return ap
 
 
@@ -14138,6 +14729,8 @@ IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{8,128}$")
 def is_mutating_command(args: argparse.Namespace) -> bool:
     cmd = getattr(args, "cmd", None)
     if not cmd:
+        return False
+    if cmd == "feedback":
         return False
     if cmd == "sync-index":
         return bool(getattr(args, "apply", False))
