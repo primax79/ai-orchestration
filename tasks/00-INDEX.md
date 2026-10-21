@@ -87,6 +87,7 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T046 (Compact common queue) | P3 | [Common view Queue: compact next-up list and kind on rows](server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md) | delivered | kilo | - |
 | T047 (Architect verification without users) | P2 | [Architect verification of delivered items that have no user session](server-and-bindings/T047-architect-verification-of-delivered-items-that-hav.md) | open | ai-coding-tools | - |
 | T048 (Project selector active counts) | P1 | [Project selector shows non-closed ticket counts (waiting, open, progress)](server-and-bindings/T048-project-selector-shows-non-closed-ticket-counts-wa.md) | delivered | kilo | - |
+| T049 (Project discovery hygiene) | P1 | [Project discovery: only task trees, no ignored folders or symlinks; ignore config; hide empty projects](server-and-bindings/T049-project-discovery-only-task-trees-no-ignored-folde.md) | open | kilo | - |
 
 ### micro
 
