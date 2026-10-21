@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: New trees start next to legacy layouts; ids announced before creation collide
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -26,3 +26,7 @@
 ## Verification
 
 - [ ] Verify task implementation.
+
+## Log (newest first)
+
+- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T039 (Adopting existing trees: legacy plans/, next-id preview, discover before registering) to Kilo
