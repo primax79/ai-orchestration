@@ -206,7 +206,7 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
                 "transition": {
                     "usage": (
-                        "ai-orch tasks transition <task_id> <new_state> [--actor <actor>] "
+                        "ai-orch tasks transition <task_id> <new_state> [--waiting-on <qualifier>] [--actor <actor>] "
                         "[--verifier <verifier>] [--reason <text>] [--tasks-dir <dir>] [--json]"
                     ),
                     "description": "Transition task state enforcing state-machine guards and moving closed tasks to tasks/done/.",
@@ -294,6 +294,10 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "set-short": {
                     "usage": "ai-orch tasks set-short <id> <words> [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
                     "description": "Set short title (1-5 words, <=40 chars) for an item.",
+                },
+                "set-waiting-on": {
+                    "usage": "ai-orch tasks set-waiting-on <id> <qualifier> [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Set waiting-on qualifier for a task (rewrites header on T###, updates/creates bullet on NN.T).",
                 },
                 "next": {
                     "usage": "ai-orch tasks next [--kind <kind>...] [--label <label>...] [--tasks-dir <dir>] [--json]",

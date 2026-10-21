@@ -8858,9 +8858,9 @@ def test_t031_header_field_order_error(tmp_path: pathlib.Path) -> None:
     # Checks expected order
     assert "got ['conditions', 'verifier'], expected ['verifier', 'conditions']" in err
     # Checks canonical sequence is listed
-    assert "Canonical sequence: ['profile', 'verification-mode', 'verifier', 'size', 'kind', 'labels', 'branch', 'worktree', 'run-id', 'use-cases', 'use_cases', 'coordinates', 'moved-to', 'conditions', 'short']" in err
+    assert f"Canonical sequence: {list(te.OPTIONAL_EXTENSION_FIELDS)}" in err
     # Checks where misplaced fields belong
-    assert "field 'conditions' belongs after 'moved-to' and before 'short'" in err
+    assert "field 'conditions' belongs after 'moved-to' and before 'waiting-on'" in err
     assert "field 'verifier' belongs after 'verification-mode' and before 'size'" in err
 
     # Now fix the order: verifier before conditions
@@ -10106,3 +10106,217 @@ def test_upgrade_creates_and_updates_tasks_gitattributes(tmp_path: pathlib.Path)
     assert res_rerun["ok"] is True
     assert str(custom_ga) not in res_rerun["created"]
     assert str(custom_ga) not in res_rerun["updated"]
+
+
+def test_t042_waiting_on_emergent_task_transition_and_index(tmp_path: pathlib.Path) -> None:
+    """T042: tasks transition T001 waiting --waiting-on sets header, updates 00-INDEX.md, and clears on transition out."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n"
+        "## Next up\n\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+    t1_path = tasks_dir / "features" / "T001-deploy-pipeline.md"
+    t1_path.write_text(
+        "# T001 Deploy pipeline\n\n"
+        "- id: T001\n"
+        "- title: Deploy pipeline\n"
+        "- category: features\n"
+        "- priority: P2\n"
+        "- priority-reason: core feature\n"
+        "- next-up: no\n"
+        "- state: in progress\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: Read this file\n\n"
+        "## Goal\nDeploy pipeline.\n\n"
+        "## Steps\n- [ ] Deploy step.\n\n"
+        "## Verification\n- [ ] Verification step.\n",
+        encoding="utf-8",
+    )
+
+    # 1. Transition to waiting with --waiting-on
+    res = run_cli("transition", "T001", "waiting", "--waiting-on", "external:jenkins-build-42", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"transition failed: {res.stdout}\n{res.stderr}"
+
+    content = t1_path.read_text(encoding="utf-8")
+    assert "- state: waiting" in content
+    assert "- waiting-on: external:jenkins-build-42" in content
+
+    # 2. Sync index renders `waiting (external:jenkins-build-42)` in 00-INDEX.md
+    res = run_cli("sync-index", "--apply", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"sync-index failed: {res.stdout}\n{res.stderr}"
+    idx_content = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "waiting (external:jenkins-build-42)" in idx_content
+
+    # 3. tasks list --json includes waiting_on
+    res = run_cli("list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0, f"list failed: {res.stdout}\n{res.stderr}"
+    payload = json.loads(res.stdout)
+    assert payload["tree"]["T001"]["waiting_on"] == "external:jenkins-build-42"
+
+    # 4. tasks show --json includes waiting_on
+    res = run_cli("show", "T001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0, f"show failed: {res.stdout}\n{res.stderr}"
+    show_payload = json.loads(res.stdout)
+    assert show_payload["task"]["waiting_on"] == "external:jenkins-build-42"
+
+    # 5. Transition back to in progress clears waiting-on
+    res = run_cli("transition", "T001", "in progress", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"transition to in progress failed: {res.stdout}\n{res.stderr}"
+
+    content2 = t1_path.read_text(encoding="utf-8")
+    assert "- state: in progress" in content2
+    assert "waiting-on" not in content2
+
+    # 6. Index after sync no longer has waiting-on
+    res = run_cli("sync-index", "--apply", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"sync-index failed: {res.stdout}\n{res.stderr}"
+    idx_content2 = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "waiting (external:jenkins-build-42)" not in idx_content2
+    assert "in progress" in idx_content2
+
+
+def test_t042_waiting_on_inline_plan_task_transition(tmp_path: pathlib.Path) -> None:
+    """T042: tasks transition 01.1 'waiting on owner:release-signoff' on inline plan task normalizes to waiting and sets waiting_on."""
+    tasks_dir = tmp_path / "tasks"
+    init_dir = tasks_dir / "01-core-pipeline"
+    init_dir.mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n\n## Initiatives\n\n| Priority | # | Initiative | Status | Depends on | Size |\n| --- | --- | --- | --- | --- | --- |\n", encoding="utf-8")
+
+    plan_path = init_dir / "plan.md"
+    plan_path.write_text(
+        "# 01 Core Pipeline\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Release signoff\n\n"
+        "- **Status:** `open`\n"
+        "- **Goal:** Obtain owner signoff for release.\n"
+        "- **Verification:** Owner confirmation.\n",
+        encoding="utf-8",
+    )
+
+    # Transition with "waiting on owner:release-signoff"
+    res = run_cli("transition", "01.1", "waiting on owner:release-signoff", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"transition failed: {res.stdout}\n{res.stderr}"
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["01.1"].canonical_state == "waiting"
+    assert tree["01.1"].waiting_on == "owner:release-signoff"
+
+    plan_text = plan_path.read_text(encoding="utf-8")
+    assert "`waiting`" in plan_text
+    assert "**Waiting-on:** owner:release-signoff" in plan_text
+
+    # Update with set-waiting-on
+    res = run_cli("set-waiting-on", "01.1", "session:worker-1", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"set-waiting-on failed: {res.stdout}\n{res.stderr}"
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["01.1"].waiting_on == "session:worker-1"
+
+    # Transition back to in progress clears waiting-on
+    res = run_cli("transition", "01.1", "in progress", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"transition back failed: {res.stdout}\n{res.stderr}"
+
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["01.1"].canonical_state == "in progress"
+    assert tree["01.1"].waiting_on is None
+
+    plan_text2 = plan_path.read_text(encoding="utf-8")
+    assert "**Waiting-on:**" not in plan_text2
+
+
+def test_t042_validate_warns_on_unqualified_waiting_task(tmp_path: pathlib.Path) -> None:
+    """T042: tasks validate warns when waiting task has no waiting-on, decider, or conditions, and zero warnings once set."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    t1_path = tasks_dir / "features" / "T001-unqualified-waiting.md"
+    t1_path.write_text(
+        "# T001 Unqualified Waiting\n\n"
+        "- id: T001\n"
+        "- title: Unqualified Waiting\n"
+        "- category: features\n"
+        "- priority: P2\n"
+        "- priority-reason: testing validation\n"
+        "- next-up: no\n"
+        "- state: waiting\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: Read this file\n\n"
+        "## Goal\nTest waiting task warning.\n\n"
+        "## Steps\n- [ ] Deploy the application.\n\n"
+        "## Verification\n- [ ] Confirm curl localhost:8080 works.\n",
+        encoding="utf-8",
+    )
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+    assert any("in waiting state has no waiting-on, decider, or conditions" in w for w in warnings)
+
+    # Set waiting-on
+    res = run_cli("set-waiting-on", "T001", "owner:release-signoff", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"set-waiting-on failed: {res.stdout}\n{res.stderr}"
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+    assert warnings == []
+
+
+def test_t042_questions_ask_blocks_sets_waiting_on(tmp_path: pathlib.Path) -> None:
+    """T042: questions ask --blocks T001 sets waiting-on to question:Q### alongside decider."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    t1_path = tasks_dir / "features" / "T001-gated-task.md"
+    t1_path.write_text(
+        "# T001 Gated Task\n\n"
+        "- id: T001\n"
+        "- title: Gated Task\n"
+        "- category: features\n"
+        "- priority: P2\n"
+        "- priority-reason: core feature\n"
+        "- next-up: no\n"
+        "- state: in progress\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: Read this file\n\n"
+        "## Goal\nGated task.\n\n"
+        "## Steps\n- [ ] Step 1.\n\n"
+        "## Verification\n- [ ] Verify 1.\n",
+        encoding="utf-8",
+    )
+
+    ok, q = te.ask_question(
+        tasks_dir=tasks_dir,
+        question="Should we gate T001?",
+        context="Context for question",
+        options=[("a", "Option A", None), ("b", "Option B", None)],
+        blocks="T001",
+    )
+    assert ok is True
+    qid = q["id"]
+
+    emergent = te.discover_emergent_tasks(tasks_dir)
+    t1 = next(t for t in emergent if t["id"] == "T001")
+    assert t1["canonical_state"] == "waiting"
+    assert t1["decider"] == qid
+    assert t1["waiting_on"] == f"question:{qid}"
+
+    content = t1_path.read_text(encoding="utf-8")
+    assert f"- waiting-on: question:{qid}" in content
