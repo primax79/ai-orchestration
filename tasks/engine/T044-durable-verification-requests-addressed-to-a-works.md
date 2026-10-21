@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Validation by requesters is the owner's rule, but requests sent as session messages are lost when a session closes (two of four lost on 2026-10-21)
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -26,3 +26,7 @@ A delivered task can carry a 'verify-by: <workspace or session>' request with wh
 ## Verification
 
 - [ ] Verify task implementation.
+
+## Log (newest first)
+
+- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T044 (Durable verification requests addressed to a workspace or session) to Kilo

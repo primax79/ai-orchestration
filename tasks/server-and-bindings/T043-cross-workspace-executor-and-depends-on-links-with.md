@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Work done in another workspace is tracked by hand; sessions value it above custom states
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: scripts/orchestration_registry.py, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Read tasks/server-and-bindings/T043-cross-workspace-executor-and-depends-on-links-with.md, do the open steps, run the Verification, update the task and the registry.
 - short: Cross-workspace task links
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
@@ -29,4 +31,5 @@
 
 ## Log (newest first)
 
+- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged eddaeb5; cross-workspace executor and depends-on links with live target status verified (180 passed)
 - 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T043 (Cross-workspace executor and depends-on links with live target status) to Kilo
