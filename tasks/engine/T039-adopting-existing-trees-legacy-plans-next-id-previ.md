@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: New trees start next to legacy layouts; ids announced before creation collide
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, scripts/orchestration_registry.py
 - handoff: Read tasks/tasks/T039-adopting-existing-trees-legacy-plans-next-id-previ.md, do the open steps, run the Verification, update the task and the registry.
 - short: Adoption helpers
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
@@ -29,4 +31,5 @@
 
 ## Log (newest first)
 
+- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged aeaced7; tasks next-id, legacy plans/ detection in upgrade, and pre-registration projects discover verified
 - 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T039 (Adopting existing trees: legacy plans/, next-id preview, discover before registering) to Kilo

@@ -130,7 +130,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | delivered | kilo | - |
 | T036 (Steps by command) | P1 | [Steps and verification authored by command; placeholders rejected](engine/T036-steps-and-verification-authored-by-command-placeho.md) | delivered | kilo | - |
 | T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | delivered | kilo | - |
-| T039 (Adoption helpers) | P2 | [Adopting existing trees: legacy plans/, next-id preview, discover before registering](engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md) | in progress | kilo | - |
+| T039 (Adoption helpers) | P2 | [Adopting existing trees: legacy plans/, next-id preview, discover before registering](engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md) | delivered | kilo | - |
 | T041 (Question workflow gaps) | P1 | [Questions: unapplied answers surfaced, moved-to-tracker status, Notes section](engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | delivered | kilo | - |
 | T042 (Waiting-on qualifier) | P2 | [Waiting-on qualifier for waiting tasks](engine/T042-waiting-on-qualifier-for-waiting-tasks.md) | delivered | kilo | - |
 | T044 (Durable verification requests) | P1 | [Durable verification requests addressed to a workspace or session](engine/T044-durable-verification-requests-addressed-to-a-works.md) | open | kilo | - |
