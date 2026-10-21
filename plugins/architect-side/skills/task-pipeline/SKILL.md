@@ -56,6 +56,7 @@ Through the broker or the CLI, the engine writes the format for you; when neithe
 - **Plan tasks** are blocks `### NN.T - <title>` (number, space, hyphen or dash, space, title), each followed by `- **Status:** \`<state>\` · ...`. Optional status line segment or bullet `**Short:** <3-4 words>`. Never bullets (`- **T1 — ...**`), never table rows, never `T<n>` ids inside a plan (`T###` belongs to emergent tasks). Prefer children (`12.2.1`) over letter suffixes (`12.2a`), which are accepted but harder to extend.
 - **Emergent tasks** are created with the broker tool `tasks.new`, `ai-orch tasks new --category C --title T [--short S] --priority P --priority-reason R --goal G [--paths ...] [--executor ...]` (or `--from-note N###` from an inbox note), or — when no tool is installed — by copying the exact header order (`id`, `title`, `category`, `priority`, `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`, plus optional `short`) and required sections (`## Goal`, `## Steps`, `## Verification`) from "Where and how" below and [`references/template.md`](references/template.md).
 - **After every change under `tasks/`:** when `ai-orch` or `scripts/tasks_engine.py` is available, run `ai-orch tasks validate` (zero errors and no "non-canonical task items" warning for the files you touched) and `ai-orch tasks sync-index --check` (or `--apply`). When no CLI is installed, update the matching row in `tasks/00-INDEX.md` inside the `<!-- ai-orch:generated ... -->` markers in the same commit.
+  - **Worktrees and parallel branches:** Executor worktrees should NOT commit `tasks/00-INDEX.md` when working on an isolated feature branch (the orchestrator runs `sync-index --apply` on the integration branch after merging). If `00-INDEX.md` ever conflicts on merge, `ai-orch tasks sync-index --apply` (or `ai-orch tasks merge-index`) resolves it deterministically in one command from the task files on disk.
 - **State follows the work:** assigning a task moves it to `in progress` before the executor starts, the executor's commit + Final Report moves it to `delivered`, and so on — through the engine (`tasks.transition` or `ai-orch tasks transition <id> <state>`) when available, or by updating `- state:` (and `- **Status:** \`<state>\`` in `plan.md`) plus `tasks/00-INDEX.md` directly when working in plain Markdown. See `orchestration-workflow`, "Track task state as a path".
 - **Found a project in an older format?** Follow "Normalizing existing tasks" below before adding to it.
 
@@ -617,6 +618,7 @@ When a session has no broker MCP tools, use the version-free launcher (`~/.local
 ai-orch tasks list [--tasks-dir tasks] [--json]
 ai-orch tasks validate [--tasks-dir tasks] [--json]
 ai-orch tasks sync-index [--tasks-dir tasks] [--apply | --check] [--json]
+ai-orch tasks merge-index [<base> <ours> <theirs>] [--tasks-dir tasks] [--json]
 
 # Create, transition, or update tasks
 ai-orch tasks new --category C --title T --short S --priority P --priority-reason R --goal G [--json]

@@ -215,6 +215,10 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks sync-index [--tasks-dir <dir>] [--apply] [--check] [--json]",
                     "description": "Deterministically synchronize 00-INDEX.md with task headers on disk.",
                 },
+                "merge-index": {
+                    "usage": "ai-orch tasks merge-index [<base> <ours> <theirs>] [--tasks-dir <dir>] [--json]",
+                    "description": "Conflict-free merge driver and resolver for tasks/00-INDEX.md.",
+                },
                 "upgrade": {
                     "usage": "ai-orch tasks upgrade [--tasks-dir <dir>] [--json]",
                     "description": "Upgrade an existing tasks/ directory to the latest task-pipeline v0.3.0 convention.",
