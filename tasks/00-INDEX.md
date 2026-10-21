@@ -132,8 +132,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 <!-- ai-orch:generated decisions -->
 | Key | Question | Blocks | Decider | Recommended |
 | --- | --- | --- | --- | --- |
-| [Q009](questions/Q009-how-do-we-close-delivered-features-that-no-user-se.md) | How do we close delivered features that no user session uses, so nobody can validate them by use? | - | owner | C |
-| [Q010](questions/Q010-should-ai-coding-tools-be-registered-as-a-workspac.md) | Should ai-coding-tools be registered as a workspace with its three projects (ai-orchestration, ai-swissknife, claude-mcp)? | - | owner | A |
+| - | None. | - | - | - |
 <!-- /ai-orch:generated decisions -->
 
 ## Done
