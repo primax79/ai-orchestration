@@ -10884,3 +10884,196 @@ def test_cross_workspace_executor_validate_and_show(tmp_path: pathlib.Path):
         "kind": "session",
         "session": "lead-session",
     }
+
+
+def test_t044_verify_by_transition_and_set(tmp_path: pathlib.Path) -> None:
+    """T044: setting verify-by via tasks transition delivered --verify-by and tasks set-verify-by."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n"
+        "## Next up\n\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+    t1_path = tasks_dir / "features" / "T001-deploy-pipeline.md"
+    t1_path.write_text(
+        "# T001 Deploy pipeline\n\n"
+        "- id: T001\n"
+        "- title: Deploy pipeline\n"
+        "- category: features\n"
+        "- priority: P2\n"
+        "- priority-reason: core feature\n"
+        "- next-up: no\n"
+        "- state: in progress\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: Read this file\n\n"
+        "## Goal\nDeploy pipeline.\n\n"
+        "## Steps\n- [ ] Deploy step.\n\n"
+        "## Verification\n- [ ] Verification step.\n",
+        encoding="utf-8",
+    )
+
+    # 1. Transition to delivered with --verify-by
+    res = run_cli("transition", "T001", "delivered", "--verify-by", "gcube_atlas", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"transition failed: {res.stdout}\n{res.stderr}"
+
+    content = t1_path.read_text(encoding="utf-8")
+    assert "- state: delivered" in content
+    assert "- verify-by: gcube_atlas" in content
+    assert "verification pending: run Verification checks (verify-by: gcube_atlas)" in content
+
+    # 2. Sync index renders `delivered (verify-by: gcube_atlas)` in 00-INDEX.md
+    res = run_cli("sync-index", "--apply", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"sync-index failed: {res.stdout}\n{res.stderr}"
+    idx_content = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "delivered (verify-by: gcube_atlas)" in idx_content
+
+    # 3. Update verify-by via set-verify-by with custom check
+    res = run_cli("set-verify-by", "T001", "d4science-python-library", "--check", "run pytest -k lib", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"set-verify-by failed: {res.stdout}\n{res.stderr}"
+
+    content2 = t1_path.read_text(encoding="utf-8")
+    assert "- verify-by: d4science-python-library" in content2
+    assert "verification pending: run pytest -k lib (verify-by: d4science-python-library)" in content2
+
+    res = run_cli("sync-index", "--apply", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0
+    idx_content2 = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "delivered (verify-by: d4science-python-library)" in idx_content2
+
+    # 4. Update via request-verification alias
+    res = run_cli("request-verification", "T001", "--by", "gcube_atlas", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"request-verification failed: {res.stdout}\n{res.stderr}"
+    content3 = t1_path.read_text(encoding="utf-8")
+    assert "- verify-by: gcube_atlas" in content3
+
+    # Validate passes with 0 errors
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+
+
+def test_t044_verification_queue_across_workspaces(tmp_path: pathlib.Path) -> None:
+    """T044: verification-queue discovering delivered tasks across workspaces and clearing on verification."""
+    ws1 = tmp_path / "ws1"
+    ws1_tasks = ws1 / "tasks"
+    (ws1_tasks / "features").mkdir(parents=True)
+    (ws1_tasks / "00-INDEX.md").write_text(
+        "# Task Index\n\n"
+        "## Next up\n\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+    (ws1_tasks / "features" / "T001-sample.md").write_text(
+        "# T001 Sample task\n\n"
+        "- id: T001\n"
+        "- title: Sample task\n"
+        "- category: features\n"
+        "- priority: P1\n"
+        "- priority-reason: high priority\n"
+        "- next-up: no\n"
+        "- state: delivered\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: Read this\n"
+        "- verify-by: gcube_atlas\n\n"
+        "verification pending: run Verification checks (verify-by: gcube_atlas)\n\n"
+        "## Goal\nSample.\n\n"
+        "## Steps\n- [ ] Step.\n\n"
+        "## Verification\n- [ ] Check.\n",
+        encoding="utf-8",
+    )
+
+    ws2 = tmp_path / "ws2"
+    ws2_tasks = ws2 / "tasks"
+    (ws2_tasks / "features").mkdir(parents=True)
+    (ws2_tasks / "00-INDEX.md").write_text(
+        "# Task Index\n\n"
+        "## Next up\n\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+    (ws2_tasks / "features" / "T002-other.md").write_text(
+        "# T002 Other task\n\n"
+        "- id: T002\n"
+        "- title: Other task\n"
+        "- category: features\n"
+        "- priority: P2\n"
+        "- priority-reason: normal priority\n"
+        "- next-up: no\n"
+        "- state: delivered\n"
+        "- executor: claude\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: Read this\n"
+        "- verify-by: other_workspace\n\n"
+        "verification pending: run checks (verify-by: other_workspace)\n\n"
+        "## Goal\nOther.\n\n"
+        "## Steps\n- [ ] Step.\n\n"
+        "## Verification\n- [ ] Check.\n",
+        encoding="utf-8",
+    )
+
+    # 1. Run verification-queue from ws2 looking for gcube_atlas (discovers sibling ws1)
+    res = run_cli("verification-queue", "--for", "gcube_atlas", "--tasks-dir", str(ws2_tasks), "--json")
+    assert res.returncode == 0, f"verification-queue failed: {res.stdout}\n{res.stderr}"
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is True
+    assert payload["for"] == "gcube_atlas"
+    assert payload["count"] == 1
+    assert len(payload["items"]) == 1
+    item = payload["items"][0]
+    assert item["id"] == "T001"
+    assert item["workspace"] == "ws1"
+    assert item["state"] == "delivered"
+    assert item["verify_by"] == "gcube_atlas"
+
+    # Also test with workspace:gcube_atlas target filter
+    res_ws = run_cli("verification-queue", "--for", "workspace:gcube_atlas", "--tasks-dir", str(ws2_tasks), "--json")
+    assert res_ws.returncode == 0
+    payload_ws = json.loads(res_ws.stdout)
+    assert payload_ws["count"] == 1
+    assert payload_ws["items"][0]["id"] == "T001"
+
+    # Also test via bin/ai-orch CLI
+    res_bin = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "bin" / "ai-orch"), "tasks", "verification-queue", "--for", "gcube_atlas", "--tasks-dir", str(ws2_tasks), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_bin.returncode == 0, f"ai-orch failed: {res_bin.stderr}"
+    payload_bin = json.loads(res_bin.stdout)
+    assert payload_bin["count"] == 1
+    assert payload_bin["items"][0]["id"] == "T001"
+
+    # 2. Transition T001 to verified
+    res_tr = run_cli("transition", "T001", "verified", "--verifier", "gcube_atlas", "--reason", "OK: verified in atlas", "--tasks-dir", str(ws1_tasks))
+    assert res_tr.returncode == 0, f"transition to verified failed: {res_tr.stdout}\n{res_tr.stderr}"
+
+    t1_content = (ws1_tasks / "features" / "T001-sample.md").read_text(encoding="utf-8")
+    assert "- state: verified" in t1_content
+    assert "verification pending:" not in t1_content
+
+    # 3. verification-queue --for gcube_atlas is now empty (count == 0)
+    res_empty = run_cli("verification-queue", "--for", "gcube_atlas", "--tasks-dir", str(ws2_tasks), "--json")
+    assert res_empty.returncode == 0
+    payload_empty = json.loads(res_empty.stdout)
+    assert payload_empty["ok"] is True
+    assert payload_empty["count"] == 0
+    assert payload_empty["items"] == []

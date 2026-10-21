@@ -245,6 +245,9 @@ path. A "next steps" paragraph in the chat is not a substitute.
     multiple reviewers; `owner` requires human approval);
   - `verifier`: `-` | `<tool>:<profile>` | `blind-subagent:<profile>` | `owner` | `panel(...)`
     (records who is assigned or performed the independent verification);
+  - `verify-by`: `<workspace-or-session>`
+    (records a durable verification request addressed to another workspace or session,
+    e.g. `gcube_atlas`, `workspace:gcube_atlas`, `session:kilo-...`);
   - `size`: `XS` | `S` | `M` | `L` | `XL` (relative weight; defaults to M for full tasks, XS for microtasks);
   - `kind`: `feature` | `bug` | `fix` | `chore` | `docs` | `investigation` (classification kind; required for microtasks, optional for full tasks);
   - `labels`: free tags matching `[a-z0-9][a-z0-9-]*` (max 24 chars each, comma-separated, e.g. `ui, security`);
@@ -261,7 +264,8 @@ path. A "next steps" paragraph in the chat is not a substitute.
   Other extra fields are not allowed in the header: put the information in the
   body. Then the required sections `## Goal`, `## Steps` and `## Verification`.
   While the state is `delivered`, a line `verification pending: <what is left to
-  check, and by whom>` goes right after the header.
+  check, and by whom>` goes right after the header (when `verify-by` is set:
+  `verification pending: <what-to-check or 'run Verification checks'> (verify-by: <target>)`).
 
 ### States
 
@@ -291,6 +295,40 @@ a caveat`: name the caveat), `dropped` (say why).
   as `done with a caveat: self-verified only` (and `PROGRESS.md` records the
   self-check); it does not set `verified` on its own authority. A task that
   waits for someone else's check or for the user's approval stays `delivered`.
+
+### Durable verification requests and the verification queue
+
+When an executor completes a task whose verification must be performed by a different workspace or session:
+- **Set `verify-by` on delivery:**
+  ```sh
+  ai-orch tasks transition <id> delivered --verify-by <workspace-or-session> [--verify-check "what to check"]
+  ```
+  or set/update it explicitly:
+  ```sh
+  ai-orch tasks set-verify-by <id> <target> [--check "what to check"]
+  # or alias:
+  ai-orch tasks request-verification <id> --by <target> [--check "what to check"]
+  ```
+- **Task file & 00-INDEX.md updates:**
+  - Header: `- verify-by: <target>` (or `**Verify-by:** <target>` in inline plan task metadata).
+  - Body: `verification pending: <check> (verify-by: <target>)`.
+  - In `00-INDEX.md`: the State column displays `delivered (verify-by: <target>)`.
+- **Draining verification queue at session start:**
+  Every session must check and drain its verification queue at session start:
+  ```sh
+  ai-orch tasks verification-queue --for <workspace-slug> [--json]
+  ```
+  For each delivered task addressed to the workspace:
+  1. Re-run the task's `Verification` checks from its task file.
+  2. If all checks pass, transition the task to `verified`:
+     ```sh
+     ai-orch tasks transition <id> verified --verifier <workspace-slug> --reason "OK: <details>"
+     ```
+  3. If verification fails, bounce it back to the executor:
+     ```sh
+     ai-orch tasks transition <id> bounced --reason "NOT OK: <details>"
+     ```
+- Transitioning the task to `verified`, `done`, `done with a caveat`, `bounced`, or `dropped` automatically clears the pending verification request so the task is no longer pending in the verification queue.
 
 ### Executor-agnostic
 
@@ -622,7 +660,10 @@ ai-orch tasks merge-index [<base> <ours> <theirs>] [--tasks-dir tasks] [--json]
 
 # Create, transition, or update tasks
 ai-orch tasks new --category C --title T --short S --priority P --priority-reason R --goal G [--json]
-ai-orch tasks transition <task_id> <new_state> [--actor <actor>] [--verifier <verifier>] [--reason "<text>"] [--json]
+ai-orch tasks transition <task_id> <new_state> [--actor <actor>] [--verifier <verifier>] [--verify-by <target>] [--verify-check <check>] [--reason "<text>"] [--json]
+ai-orch tasks set-verify-by <id> <target> [--check <what-to-check>] [--json]
+ai-orch tasks request-verification <id> --by <target> [--check <what-to-check>] [--json]
+ai-orch tasks verification-queue [--for <workspace-slug>] [--all-workspaces] [--json]
 ai-orch tasks set <task_id> <field> <value...> [--expect-hash <hash>] [--json]
 
 # Manage blocking questions and inbox notes
