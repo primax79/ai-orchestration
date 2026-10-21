@@ -29,6 +29,12 @@ need merging back together during Phase 6 integration){{/BLOCK}}.
     route/plugin registration lists, configuration keys where both tasks
     followed a disjoint spec): **combine both sides** cleanly, preserving
     ordering and formatting conventions.
+  - **Task registry conflicts (`tasks/00-INDEX.md`):**
+    Executor worktrees should NOT commit `tasks/00-INDEX.md` when working on an
+    isolated feature branch (the orchestrator runs `sync-index --apply` on the
+    integration branch after merging). If `00-INDEX.md` ever conflicts on merge,
+    `ai-orch tasks sync-index --apply` (or `ai-orch tasks merge-index`) resolves it
+    deterministically in one command from the task files on disk.
   - **Incompatible Design or Signature Conflicts** (two tasks changed the
     same function signature differently, introduced competing abstractions
     or duplicate type names for the same concept, or mutated the same

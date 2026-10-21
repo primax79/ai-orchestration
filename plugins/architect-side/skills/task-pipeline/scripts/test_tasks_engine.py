@@ -9790,3 +9790,319 @@ def test_tasks_validate_flagging_placeholders(tmp_path: pathlib.Path) -> None:
     errors_clean, warnings_clean, _, _ = te.validate_tasks_tree(tasks_dir)
     assert errors_clean == []
     assert not any("placeholder" in w for w in warnings_clean)
+
+
+# ===========================================================================
+# T037 Task Index Without Merge Conflicts Across Parallel Worktrees
+# ===========================================================================
+
+
+def test_sync_index_heals_git_conflict_markers_and_merge_index(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    _write_sample_task(
+        tasks_dir / "features" / "T001-feature-a.md",
+        task_id="T001",
+        title="Feature A",
+        category="features",
+        priority="P1",
+        next_up="yes",
+    )
+    _write_sample_task(
+        tasks_dir / "features" / "T002-feature-b.md",
+        task_id="T002",
+        title="Feature B",
+        category="features",
+        priority="P1",
+        next_up="yes",
+    )
+
+    index_path = tasks_dir / "00-INDEX.md"
+    conflicted_content = """<<<<<<< HEAD
+# Task Index — Our Project
+Preamble from HEAD.
+=======
+# Task Index — Their Project
+Preamble from branch.
+>>>>>>> branch-b
+
+## Next up
+
+<!-- ai-orch:generated next-up -->
+| Id | Priority | Task | Executor | Handoff |
+| --- | --- | --- | --- | --- |
+<<<<<<< HEAD
+| T001 | P1 | [Feature A](features/T001-feature-a.md) | kilo | `do A` |
+=======
+| T002 | P1 | [Feature B](features/T002-feature-b.md) | kilo | `do B` |
+>>>>>>> branch-b
+<!-- /ai-orch:generated next-up -->
+
+## Tasks by category
+
+<!-- ai-orch:generated tasks-by-category -->
+### features
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+<<<<<<< HEAD
+| T001 | P1 | [Feature A](features/T001-feature-a.md) | open | kilo | - |
+=======
+| T002 | P1 | [Feature B](features/T002-feature-b.md) | open | kilo | - |
+>>>>>>> branch-b
+<!-- /ai-orch:generated tasks-by-category -->
+
+## Decisions waiting
+
+<!-- ai-orch:generated decisions -->
+| - | None. | - | - |
+<!-- /ai-orch:generated decisions -->
+
+## Done
+
+<!-- ai-orch:generated done -->
+| Id | Task | Result | Closed |
+| --- | --- | --- | --- |
+<!-- /ai-orch:generated done -->
+"""
+    index_path.write_text(conflicted_content, encoding="utf-8")
+
+    # validate_tasks_tree reports clear conflict marker error
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("00-INDEX.md contains unresolved git conflict markers" in e for e in errors)
+    assert any("ai-orch tasks sync-index --apply" in e for e in errors)
+
+    # 1. sync-index --apply cleanly heals the conflicted index
+    res_sync = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--json")
+    assert res_sync.returncode == 0
+    payload = json.loads(res_sync.stdout)
+    assert payload["ok"] is True
+    assert payload["applied"] is True
+
+    healed_text = index_path.read_text(encoding="utf-8")
+    assert "<<<<<<<" not in healed_text
+    assert "=======" not in healed_text
+    assert ">>>>>>>" not in healed_text
+    assert "Preamble from HEAD." in healed_text
+    assert "Preamble from branch." not in healed_text
+
+    # Both tasks are present in Next up and Tasks by category
+    assert "| T001 (Feature A) | P1 | [Feature A](features/T001-feature-a.md) |" in healed_text
+    assert "| T002 (Feature B) | P1 | [Feature B](features/T002-feature-b.md) |" in healed_text
+
+    # Validate passes cleanly with zero errors
+    errors_after, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors_after == []
+
+    # 2. Re-introduce conflict markers and test merge-index command (standalone mode)
+    index_path.write_text(conflicted_content, encoding="utf-8")
+    res_merge_standalone = run_cli("merge-index", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_merge_standalone.returncode == 0
+    merge_payload = json.loads(res_merge_standalone.stdout)
+    assert merge_payload["ok"] is True
+    assert merge_payload["merged"] is True
+
+    healed_merge_text = index_path.read_text(encoding="utf-8")
+    assert "<<<<<<<" not in healed_merge_text
+    assert "| T001 (Feature A) | P1 | [Feature A](features/T001-feature-a.md) |" in healed_merge_text
+    assert "| T002 (Feature B) | P1 | [Feature B](features/T002-feature-b.md) |" in healed_merge_text
+
+    # 3. Test merge-index as git custom merge driver: %O %A %B
+    temp_base = tmp_path / "base_INDEX.md"
+    temp_ours = tmp_path / "ours_INDEX.md"
+    temp_theirs = tmp_path / "theirs_INDEX.md"
+    temp_base.write_text("# Base Index\n", encoding="utf-8")
+    temp_theirs.write_text("# Theirs Index\n", encoding="utf-8")
+    temp_ours.write_text(conflicted_content, encoding="utf-8")
+
+    res_driver = run_cli("merge-index", str(temp_base), str(temp_ours), str(temp_theirs), "--tasks-dir", str(tasks_dir))
+    assert res_driver.returncode == 0
+    ours_merged = temp_ours.read_text(encoding="utf-8")
+    assert "<<<<<<<" not in ours_merged
+    assert "| T001 (Feature A) | P1 | [Feature A](features/T001-feature-a.md) |" in ours_merged
+    assert "| T002 (Feature B) | P1 | [Feature B](features/T002-feature-b.md) |" in ours_merged
+
+
+def test_merge_index_parallel_branches_union_and_deterministic_order(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "engine").mkdir(parents=True)
+    (tasks_dir / "done" / "engine").mkdir(parents=True)
+
+    # Branch A added T035 (closed) and T037 (open, P1)
+    _write_sample_task(
+        tasks_dir / "done" / "engine" / "T035-one-shot.md",
+        task_id="T035",
+        title="One-shot close",
+        category="engine",
+        priority="P1",
+        state="done",
+    )
+    _write_sample_task(
+        tasks_dir / "engine" / "T037-conflict-free.md",
+        task_id="T037",
+        title="Conflict free index",
+        category="engine",
+        priority="P1",
+        next_up="yes",
+    )
+
+    # Branch B added T034 (closed) and T038 (open, P2)
+    _write_sample_task(
+        tasks_dir / "done" / "engine" / "T034-feedback.md",
+        task_id="T034",
+        title="Tooling feedback",
+        category="engine",
+        priority="P2",
+        state="done",
+    )
+    _write_sample_task(
+        tasks_dir / "engine" / "T038-stable-entry.md",
+        task_id="T038",
+        title="Stable entry point",
+        category="engine",
+        priority="P2",
+        next_up="yes",
+    )
+
+    # Simulated git merge conflict in 00-INDEX.md with duplicate rows from partial merge
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        """# Task Index
+
+## Next up
+
+<!-- ai-orch:generated next-up -->
+| Id | Priority | Task | Executor | Handoff |
+| --- | --- | --- | --- | --- |
+<<<<<<< HEAD
+| T037 | P1 | [Conflict free index](engine/T037-conflict-free.md) | kilo | `do it` |
+=======
+| T038 | P2 | [Stable entry point](engine/T038-stable-entry.md) | kilo | `do it` |
+>>>>>>> branch-b
+<!-- /ai-orch:generated next-up -->
+
+## Tasks by category
+
+<!-- ai-orch:generated tasks-by-category -->
+### engine
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T037 | P1 | [Conflict free index](engine/T037-conflict-free.md) | open | kilo | - |
+| T037 | P1 | [Conflict free index](engine/T037-conflict-free.md) | open | kilo | - |
+<<<<<<< HEAD
+| T037 | P1 | [Conflict free index](engine/T037-conflict-free.md) | open | kilo | - |
+=======
+| T038 | P2 | [Stable entry point](engine/T038-stable-entry.md) | open | kilo | - |
+>>>>>>> branch-b
+<!-- /ai-orch:generated tasks-by-category -->
+
+## Decisions waiting
+
+<!-- ai-orch:generated decisions -->
+| - | None. | - | - |
+<!-- /ai-orch:generated decisions -->
+
+## Done
+
+<!-- ai-orch:generated done -->
+| Id | Task | Result | Closed |
+| --- | --- | --- | --- |
+<<<<<<< HEAD
+| T035 | [One-shot close](done/engine/T035-one-shot.md) | done | 2026-10-21 |
+=======
+| T034 | [Tooling feedback](done/engine/T034-feedback.md) | done | 2026-10-21 |
+>>>>>>> branch-b
+<!-- /ai-orch:generated done -->
+""",
+        encoding="utf-8",
+    )
+
+    # Run tasks merge-index
+    res_merge = run_cli("merge-index", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_merge.returncode == 0
+
+    healed_content = index_path.read_text(encoding="utf-8")
+    assert "<<<<<<<" not in healed_content
+    assert "=======" not in healed_content
+    assert ">>>>>>>" not in healed_content
+
+    # No duplicate T037 rows
+    assert healed_content.count("| T037 (Conflict free index) |") == 2  # Once in Next up, once in Tasks by category
+
+    # Deterministic order in Next up: T037 (P1) before T038 (P2)
+    pos_t37_next = healed_content.find("| T037 (Conflict free index) | P1 | [Conflict free index]")
+    pos_t38_next = healed_content.find("| T038 (Stable entry point) | P2 | [Stable entry point]")
+    assert pos_t37_next < pos_t38_next
+
+    # Deterministic order in category table: T037 before T038
+    pos_t37_cat = healed_content.find("| T037 (Conflict free index) | P1 | [Conflict free index](engine/T037-conflict-free.md) | open |")
+    pos_t38_cat = healed_content.find("| T038 (Stable entry point) | P2 | [Stable entry point](engine/T038-stable-entry.md) | open |")
+    assert pos_t37_cat < pos_t38_cat
+
+    # Both Done tasks present
+    assert "| T035 (One-shot close) | [One-shot close](done/engine/T035-one-shot.md) |" in healed_content
+    assert "| T034 (Tooling feedback) | [Tooling feedback](done/engine/T034-feedback.md) |" in healed_content
+
+    # Validates cleanly
+    errs, warns, emergent, _ = te.validate_tasks_tree(tasks_dir)
+    assert errs == []
+    assert len(emergent) == 4
+
+
+def test_upgrade_creates_and_updates_tasks_gitattributes(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n## Initiatives\n\n## Specs\n\n## Next up\n\n## Tasks by category\n\n## Decisions waiting\n\n## Done\n",
+        encoding="utf-8",
+    )
+
+    # 1. Dry run on fresh tasks dir without .gitattributes
+    res_dry = te.upgrade_tasks_tree(tasks_dir, dry_run=True)
+    assert res_dry["ok"] is True
+    ga_path = tasks_dir / ".gitattributes"
+    assert str(ga_path) in res_dry["created"]
+    assert str(ga_path) in res_dry["upgraded_files"]
+    assert not ga_path.exists()
+
+    # 2. Real run creates tasks/.gitattributes with rule
+    res_real = te.upgrade_tasks_tree(tasks_dir)
+    assert res_real["ok"] is True
+    assert str(ga_path) in res_real["created"]
+    assert str(ga_path) in res_real["upgraded_files"]
+    assert ga_path.is_file()
+    assert "00-INDEX.md merge=ai-orch-index" in [line.strip() for line in ga_path.read_text(encoding="utf-8").splitlines()]
+
+    # 3. Existing .gitattributes with custom lines
+    custom_tasks = tmp_path / "tasks_custom"
+    custom_tasks.mkdir()
+    (custom_tasks / "00-INDEX.md").write_text(
+        "# Task Index\n\n## Initiatives\n\n## Specs\n\n## Next up\n\n## Tasks by category\n\n## Decisions waiting\n\n## Done\n",
+        encoding="utf-8",
+    )
+    custom_ga = custom_tasks / ".gitattributes"
+    custom_ga.write_text("*.pdf binary\n*.png binary\n", encoding="utf-8")
+
+    # Dry run shows updated
+    res_dry2 = te.upgrade_tasks_tree(custom_tasks, dry_run=True)
+    assert res_dry2["ok"] is True
+    assert str(custom_ga) in res_dry2["updated"]
+    assert str(custom_ga) in res_dry2["upgraded_files"]
+    assert "00-INDEX.md merge=ai-orch-index" not in custom_ga.read_text(encoding="utf-8")
+
+    # Real run preserves custom lines and appends rule
+    res_real2 = te.upgrade_tasks_tree(custom_tasks)
+    assert res_real2["ok"] is True
+    assert str(custom_ga) in res_real2["updated"]
+    assert str(custom_ga) in res_real2["upgraded_files"]
+    lines = [line.strip() for line in custom_ga.read_text(encoding="utf-8").splitlines()]
+    assert "*.pdf binary" in lines
+    assert "*.png binary" in lines
+    assert "00-INDEX.md merge=ai-orch-index" in lines
+
+    # 4. Re-run upgrade when rule is already present -> not in created or updated
+    res_rerun = te.upgrade_tasks_tree(custom_tasks)
+    assert res_rerun["ok"] is True
+    assert str(custom_ga) not in res_rerun["created"]
+    assert str(custom_ga) not in res_rerun["updated"]

@@ -7145,6 +7145,17 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                                 warnings.append(f"{rel}: belongs in project {p_slug}; use tasks move.")
                                 break
 
+    idx_file = tasks_dir / "00-INDEX.md"
+    if idx_file.is_file():
+        try:
+            idx_text = idx_file.read_text(encoding="utf-8")
+            if "<<<<<<<" in idx_text or re.search(r"^(<{7}|={7}|>{7})\b", idx_text, re.MULTILINE):
+                errors.append(
+                    "00-INDEX.md contains unresolved git conflict markers; run 'ai-orch tasks sync-index --apply' to resolve automatically."
+                )
+        except OSError:
+            pass
+
     return errors, warnings, emergent, initiatives
 
 
@@ -8111,7 +8122,32 @@ def _replace_generated_region(doc: str, section: str, new_content: str) -> str:
     return doc[:m.start()] + replacement + doc[m.end():]
 
 
+def _strip_conflict_markers_ours(text: str) -> str:
+    """Strip git conflict markers (<<<<<<<, =======, >>>>>>>, |||||||), preserving the HEAD/ours side."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    state = "normal"
+    for line in lines:
+        if line.startswith("<<<<<<<"):
+            state = "ours"
+            continue
+        if state == "ours" and line.startswith("|||||||"):
+            state = "base"
+            continue
+        if state in ("ours", "base") and line.startswith("======="):
+            state = "theirs"
+            continue
+        if state in ("ours", "base", "theirs") and line.startswith(">>>>>>>"):
+            state = "normal"
+            continue
+        if state in ("normal", "ours"):
+            out.append(line)
+    return "".join(out)
+
+
 def adopt_markers(existing_index: str) -> str:
+    if "<<<<<<<" in existing_index:
+        existing_index = _strip_conflict_markers_ours(existing_index)
     updated = existing_index
 
     # 0. Initiatives
@@ -8129,6 +8165,22 @@ def adopt_markers(existing_index: str) -> str:
             else:
                 new_sec = sec.rstrip() + "\n\n<!-- ai-orch:generated initiatives -->\n<!-- /ai-orch:generated initiatives -->\n\n"
             updated = updated[:m_init.start()] + new_sec + updated[m_init.end():]
+
+    # 0.5. Specs
+    pat_specs = re.compile(r"^##\s+Specs\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+    m_specs = pat_specs.search(updated)
+    if m_specs:
+        sec = m_specs.group(0)
+        if not _marker_pattern("specs").search(sec):
+            lines = sec.splitlines(keepends=True)
+            start_idx, end_idx = _find_table_range(lines)
+            if start_idx is not None and end_idx is not None:
+                tbl = "".join(lines[start_idx:end_idx + 1]).strip()
+                replacement = f"<!-- ai-orch:generated specs -->\n{tbl}\n<!-- /ai-orch:generated specs -->\n"
+                new_sec = "".join(lines[:start_idx]) + replacement + "".join(lines[end_idx + 1:])
+            else:
+                new_sec = sec.rstrip() + "\n\n<!-- ai-orch:generated specs -->\n<!-- /ai-orch:generated specs -->\n\n"
+            updated = updated[:m_specs.start()] + new_sec + updated[m_specs.end():]
 
     # 1. Next up
     pat_next = re.compile(r"^##\s+Next up\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
@@ -8286,14 +8338,19 @@ def _extract_existing_initiative_next_up_rows(existing_index: str) -> list[str]:
 
 
 def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: bool = False) -> str:
+    has_conflict_markers = bool(re.search(r"^(<{7}|={7}|>{7}|\|{7})\b", existing_index, re.MULTILINE)) or ("<<<<<<<" in existing_index)
+    if has_conflict_markers:
+        existing_index = _strip_conflict_markers_ours(existing_index)
+        adopt = True
+
     emergent = discover_emergent_tasks(tasks_dir)
     initiatives = discover_initiatives(tasks_dir)
     conditional_tasks = [t for t in emergent if t.get("conditional")]
     active_tasks = [t for t in emergent if not t["in_done"] and t["canonical_state"] not in TERMINAL_STATES and not t.get("conditional")]
     done_tasks = [t for t in emergent if (t["in_done"] or t["canonical_state"] in TERMINAL_STATES) and not t.get("conditional")]
 
-    active_tasks.sort(key=lambda t: (PRIORITY_SORT_KEY.get(t["priority"], 99), t["id"]))
-    done_tasks.sort(key=lambda t: t["id"], reverse=True)
+    active_tasks.sort(key=lambda t: (PRIORITY_SORT_KEY.get(t["priority"], 99), _natural_sort_key(t["id"])))
+    done_tasks.sort(key=lambda t: _natural_sort_key(t["id"]), reverse=True)
 
     resolved_ids: set[str] = set(t["id"] for t in emergent)
     for init in initiatives:
@@ -8304,14 +8361,13 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             resolved_ids.add(f"{init['id']}.{sub_t['id']}")
 
     if existing_index.strip():
-        if not has_generated_markers(existing_index):
-            if adopt:
-                existing_index = adopt_markers(existing_index)
-            else:
-                raise ValueError(
-                    "Index has no generated-region markers (<!-- ai-orch:generated <section> -->). "
-                    "Run with --adopt to wrap existing tables in markers."
-                )
+        if adopt:
+            existing_index = adopt_markers(existing_index)
+        elif not has_generated_markers(existing_index):
+            raise ValueError(
+                "Index has no generated-region markers (<!-- ai-orch:generated <section> -->). "
+                "Run with --adopt to wrap existing tables in markers."
+            )
 
     tree = discover_task_tree(tasks_dir)
     pat_init_sec = re.compile(r"^##\s+Initiatives\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
@@ -8322,18 +8378,27 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         has_init_marker = m_init_marker is not None
         region_to_search = m_init_marker.group(1) if has_init_marker else init_sec_text
 
-        init_lines = []
+        hdr_init, sep_init = _extract_existing_table_header(region_to_search, 6) or (
+            "| Priority | # | Initiative | Status | Depends on | Size |",
+            "| --- | --- | --- | --- | --- | --- |",
+        )
+        preamble_lines: list[str] = []
+        init_rows: dict[str, tuple[list[str], str]] = {}
         for line in region_to_search.splitlines():
             line_s = line.strip()
+            if line_s.startswith(("<", "=", ">")):
+                continue
             if not line_s.startswith("|"):
-                init_lines.append(line)
+                if not init_rows and line_s:
+                    preamble_lines.append(line)
                 continue
             cells = [c.strip() for c in line_s.strip("|").split("|")]
             if not cells or cells[0] in ("Priority", "---") or cells[0].startswith("---"):
-                init_lines.append(line)
                 continue
             if len(cells) >= 6:
                 init_num = cells[1]
+                if init_num in init_rows:
+                    continue
                 if init_num in tree:
                     init_node = tree[init_num]
                     if init_node.children:
@@ -8383,17 +8448,31 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                             else:
                                 new_status = derived_st
                         cells[3] = new_status
-                        new_line = "| " + " | ".join(cells) + " |"
-                        init_lines.append(new_line)
-                    else:
-                        init_lines.append(line)
-                else:
-                    init_lines.append(line)
-            else:
-                init_lines.append(line)
+                new_line = "| " + " | ".join(cells) + " |"
+                init_rows[init_num] = (cells, new_line)
+
+        for init in initiatives:
+            inum = str(init["id"])
+            if inum not in init_rows and inum in tree:
+                inode = tree[inum]
+                st = inode.derived_state or inode.state
+                dep = inode.fields.get("depends_on", {}).get("value") or "-"
+                sz = inode.own_fields.get("size", "-")
+                pri = str(len(init_rows) + 1)
+                new_cells = [pri, inum, f"[{inode.title}]({inode.rel_path})", st, dep, sz]
+                init_rows[inum] = (new_cells, "| " + " | ".join(new_cells) + " |")
+
+        def _init_sort_key(item: tuple[list[str], str]) -> tuple:
+            cells = item[0]
+            pri_str = cells[0].strip()
+            pri_num = int(pri_str) if pri_str.isdigit() else 999
+            return (pri_num, _natural_sort_key(cells[1]))
+
+        sorted_init_rows = sorted(init_rows.values(), key=_init_sort_key)
+        init_table_lines = [hdr_init, sep_init] + [r[1] for r in sorted_init_rows]
+        init_lines = preamble_lines + ([""] if preamble_lines else []) + init_table_lines
 
         new_region_content = "\n".join(init_lines)
-        # "\n".join(splitlines()) drops the final newline: keep it (the blank line before the next `##`).
         if region_to_search.endswith("\n"):
             new_region_content += "\n"
         if has_init_marker:
@@ -8401,20 +8480,78 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         else:
             existing_index = existing_index[:m_init.start()] + new_region_content + existing_index[m_init.end():]
 
+    # 0.5. Specs section
+    pat_specs_sec = re.compile(r"^##\s+Specs\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+    m_specs = pat_specs_sec.search(existing_index)
+    if m_specs:
+        specs_sec_text = m_specs.group(0)
+        m_specs_marker = _marker_pattern("specs").search(specs_sec_text)
+        has_specs_marker = m_specs_marker is not None
+        region_to_search = m_specs_marker.group(1) if has_specs_marker else specs_sec_text
+
+        hdr_specs, sep_specs = _extract_existing_table_header(region_to_search, 2) or (
+            "| Spec | Drives |",
+            "| --- | --- |",
+        )
+        preamble_lines = []
+        spec_rows: dict[str, str] = {}
+        for line in region_to_search.splitlines():
+            line_s = line.strip()
+            if line_s.startswith(("<", "=", ">")):
+                continue
+            if not line_s.startswith("|"):
+                if not spec_rows and line_s:
+                    preamble_lines.append(line)
+                continue
+            cells = [c.strip() for c in line_s.strip("|").split("|")]
+            if not cells or cells[0] in ("Spec", "---") or cells[0].startswith("---"):
+                continue
+            slug_match = re.search(r"\[([^\]]+)\]", cells[0])
+            slug = slug_match.group(1) if slug_match else cells[0]
+            if slug not in spec_rows:
+                spec_rows[slug] = line_s
+
+        specs_dir = tasks_dir / "specs"
+        if specs_dir.is_dir():
+            for sf in sorted(specs_dir.glob("*.md")):
+                if sf.name.startswith(".") or not sf.is_file():
+                    continue
+                slug = sf.stem
+                if slug not in spec_rows:
+                    spec_rows[slug] = f"| [{slug}](specs/{sf.name}) | - |"
+
+        sorted_slugs = sorted(spec_rows.keys(), key=_natural_sort_key)
+        specs_table_lines = [hdr_specs, sep_specs] + [spec_rows[s] for s in sorted_slugs]
+        specs_lines = preamble_lines + ([""] if preamble_lines else []) + specs_table_lines
+        new_specs_content = "\n".join(specs_lines)
+        if region_to_search.endswith("\n"):
+            new_specs_content += "\n"
+        if has_specs_marker:
+            existing_index = _replace_generated_region(existing_index, "specs", new_specs_content)
+        else:
+            lines = specs_sec_text.splitlines(keepends=True)
+            start_idx, end_idx = _find_table_range(lines)
+            if start_idx is not None and end_idx is not None:
+                new_sec = "".join(lines[:start_idx]) + new_specs_content.strip() + "\n\n" + "".join(lines[end_idx + 1:])
+                existing_index = existing_index[:m_specs.start()] + new_sec + existing_index[m_specs.end():]
+
     # 1. Next up section
     m_next = _marker_pattern("next-up").search(existing_index) if existing_index.strip() else None
     existing_next_region = m_next.group(1) if m_next else existing_index
+    if existing_next_region:
+        existing_next_region = _strip_conflict_markers_ours(existing_next_region)
 
     hdr_next, sep_next = _extract_existing_table_header(existing_next_region, 5) or (
         "| Id | Priority | Task | Executor | Handoff |",
         "| --- | --- | --- | --- | --- |",
     )
-    next_up_lines = [hdr_next, sep_next]
 
     existing_next_rows: list[tuple[str, list[str], str]] = []
     if existing_next_region:
         for line in existing_next_region.splitlines():
             line_s = line.strip()
+            if line_s.startswith(("<", "=", ">")):
+                continue
             if not line_s.startswith("|"):
                 continue
             cells = [c.strip() for c in line_s.strip("|").split("|")]
@@ -8424,19 +8561,22 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
     emergent_next_map = {t["id"]: t for t in active_tasks if t["next_up"] == "yes"}
     seen_next_ids: set[str] = set()
+    next_up_candidates: list[tuple[str, str, str]] = []
 
     for row_id, cells, raw_line in existing_next_rows:
         base_id = re.sub(r"\s*\(.*?\)", "", row_id).strip()
+        if base_id in seen_next_ids:
+            continue
         if re.match(r"^\d{2,}(?:\.\d+[a-z]?)+$", base_id) or base_id.startswith("INIT-"):
             seen_next_ids.add(base_id)
-            next_up_lines.append(raw_line)
+            pri = cells[1] if len(cells) > 1 else "P2"
+            next_up_candidates.append((base_id, pri, raw_line))
         elif base_id in emergent_next_map:
             t = emergent_next_map[base_id]
             seen_next_ids.add(base_id)
             st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
-            next_up_lines.append(
-                f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |"
-            )
+            line = f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |"
+            next_up_candidates.append((base_id, t.get("priority", "P2"), line))
         elif base_id not in resolved_ids:
             seen_next_ids.add(base_id)
             pri = cells[1] if len(cells) > 1 else "P2"
@@ -8445,21 +8585,25 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 task_cell = f"{task_cell} (missing)"
             exc = cells[3] if len(cells) > 3 else "unassigned"
             hnd = cells[4] if len(cells) > 4 else "-"
-            next_up_lines.append(f"| {row_id} | {pri} | {task_cell} | {exc} | {hnd} |")
+            line = f"| {row_id} | {pri} | {task_cell} | {exc} | {hnd} |"
+            next_up_candidates.append((base_id, pri, line))
 
     for t in active_tasks:
-        if t["next_up"] == "yes" and t["id"] not in seen_next_ids and len(seen_next_ids) < 5:
+        if t["next_up"] == "yes" and t["id"] not in seen_next_ids:
             seen_next_ids.add(t["id"])
             st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
-            next_up_lines.append(
-                f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |"
-            )
+            line = f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |"
+            next_up_candidates.append((t["id"], t.get("priority", "P2"), line))
 
+    next_up_candidates.sort(key=lambda item: (PRIORITY_SORT_KEY.get(item[1], 99), _natural_sort_key(item[0])))
+    next_up_lines = [hdr_next, sep_next] + [item[2] for item in next_up_candidates[:5]]
     next_up_content = "\n".join(next_up_lines)
 
     # 2. Tasks by category section
     m_cat = _marker_pattern("tasks-by-category").search(existing_index) if existing_index.strip() else None
     existing_cat_region = m_cat.group(1) if m_cat else existing_index
+    if existing_cat_region:
+        existing_cat_region = _strip_conflict_markers_ours(existing_cat_region)
 
     existing_cat_order = _extract_existing_category_order(existing_index)
     discovered_cats: list[str] = []
@@ -8493,6 +8637,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             existing_by_cat[cname] = []
             for line in block_text.splitlines():
                 line_s = line.strip()
+                if line_s.startswith(("<", "=", ">")):
+                    continue
                 if not line_s.startswith("|"):
                     continue
                 cells = [c.strip() for c in line_s.strip("|").split("|")]
@@ -8526,16 +8672,22 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         )
         cat_tasks = {t["id"]: t for t in active_tasks if (t["category"] or t["folder_category"]) == cat}
         seen_cat_ids: set[str] = set()
+        cat_rows: list[tuple[str, str]] = []
 
         for row_id, cells in existing_by_cat.get(cat, []):
             base_id = re.sub(r"\s*\(.*?\)", "", row_id).strip()
+            if base_id in seen_cat_ids:
+                continue
             if base_id in cat_tasks:
                 t = cat_tasks[base_id]
                 seen_cat_ids.add(base_id)
                 st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
-                cat_lines.append(
-                    f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
-                    f"{t['state']} | {t['executor']} | {t['depends_on_raw']} |"
+                cat_rows.append(
+                    (
+                        base_id,
+                        f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
+                        f"{t['state']} | {t['executor']} | {t['depends_on_raw']} |",
+                    )
                 )
             elif base_id not in resolved_ids:
                 seen_cat_ids.add(base_id)
@@ -8546,29 +8698,35 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 st = cells[3] if len(cells) > 3 else "open"
                 exc = cells[4] if len(cells) > 4 else "unassigned"
                 dep = cells[5] if len(cells) > 5 else "-"
-                cat_lines.append(f"| {row_id} | {pri} | {task_cell} | {st} | {exc} | {dep} |")
+                cat_rows.append((base_id, f"| {row_id} | {pri} | {task_cell} | {st} | {exc} | {dep} |"))
 
         new_cat_tasks = [t for tid, t in cat_tasks.items() if tid not in seen_cat_ids]
-        new_cat_tasks.sort(key=lambda t: (PRIORITY_SORT_KEY.get(t["priority"], 99), t["id"]))
         for t in new_cat_tasks:
             seen_cat_ids.add(t["id"])
             st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
-            cat_lines.append(
-                f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
-                f"{t['state']} | {t['executor']} | {t['depends_on_raw']} |"
+            cat_rows.append(
+                (
+                    t["id"],
+                    f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
+                    f"{t['state']} | {t['executor']} | {t['depends_on_raw']} |",
+                )
             )
+
+        cat_rows.sort(key=lambda r: _natural_sort_key(r[0]))
+        cat_lines.extend([r[1] for r in cat_rows])
 
     cat_content = "\n".join(cat_lines)
 
     # 3. Decisions waiting section
     m_dec = _marker_pattern("decisions").search(existing_index) if existing_index.strip() else None
     existing_dec_region = m_dec.group(1) if m_dec else existing_index
+    if existing_dec_region:
+        existing_dec_region = _strip_conflict_markers_ours(existing_dec_region)
 
     all_questions = discover_questions(tasks_dir)
     open_questions = [q for q in all_questions if q["status"] == "open"]
-    open_questions.sort(key=lambda q: int(q["id"][1:]) if QUESTION_ID_RE.match(q["id"]) else 0)
+    open_questions.sort(key=lambda q: _natural_sort_key(q["id"]))
 
-    # Determine whether to use 5-column table (open questions or existing 5-col table)
     existing_5_col = _extract_existing_table_header(existing_dec_region, 5) is not None
 
     if open_questions or existing_5_col:
@@ -8586,7 +8744,6 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
     dec_lines = [hdr_dec, sep_dec]
 
-    # Render open question rows first
     if use_5_cols:
         for q in open_questions:
             q_key = f"[{q['id']}](questions/{q['filename']})"
@@ -8600,6 +8757,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     if existing_dec_region:
         for line in existing_dec_region.splitlines():
             line_s = line.strip()
+            if line_s.startswith(("<", "=", ">")):
+                continue
             if not line_s.startswith("|"):
                 continue
             cells = [c.strip() for c in line_s.strip("|").split("|")]
@@ -8608,7 +8767,6 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             if cells[0] != "-":
                 existing_dec_rows.append((cells[0], cells))
 
-    # Only tasks in state waiting or blocked with a non-question decider belong in legacy decisions
     qualifying_tasks: dict[str, dict[str, Any]] = {
         t["id"]: t
         for t in active_tasks
@@ -8637,17 +8795,17 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 if normalize_state(st) in ("waiting", "blocked") and tid not in [r[0] for r in existing_dec_rows]:
                     existing_waiting_ids_without_dec.add(tid)
 
+    legacy_dec_rows: list[tuple[str, str]] = []
     seen_dec_ids: set[str] = set()
 
-    # 1. Existing legacy rows in original order
     for row_id, cells in existing_dec_rows:
         if row_id.startswith("Q") or row_id.startswith("[Q"):
-            # Question rows handled above from live question files
+            continue
+        if row_id in seen_dec_ids:
             continue
         if row_id in qualifying_tasks:
             seen_dec_ids.add(row_id)
             wt = qualifying_tasks[row_id]
-            # PRESERVE question cell (like Done Closed/Result); update only Decider and Blocks
             q_cell = cells[1] if len(cells) > 1 and cells[1] not in ("", "-") else ""
             if not q_cell:
                 raw_dec = wt["decider"]
@@ -8656,9 +8814,10 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             who = raw_dec.split(":", 1)[0].strip() if ":" in raw_dec else raw_dec
             blocks_str = ", ".join(blocks_map.get(row_id, [])) or "-"
             if use_5_cols:
-                dec_lines.append(f"| {row_id} | {q_cell} | {blocks_str} | {who} | - |")
+                line = f"| {row_id} | {q_cell} | {blocks_str} | {who} | - |"
             else:
-                dec_lines.append(f"| {row_id} | {q_cell} | {who} | {blocks_str} |")
+                line = f"| {row_id} | {q_cell} | {who} | {blocks_str} |"
+            legacy_dec_rows.append((row_id, line))
         elif row_id not in resolved_ids:
             seen_dec_ids.add(row_id)
             task_cell = f"{row_id} (missing)" if not row_id.endswith("(missing)") else row_id
@@ -8670,11 +8829,11 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 dec_cell = cells[2] if len(cells) > 2 else "-"
                 blk_cell = cells[3] if len(cells) > 3 else "-"
             if use_5_cols:
-                dec_lines.append(f"| {task_cell} | {q_cell} | {blk_cell} | {dec_cell} | - |")
+                line = f"| {task_cell} | {q_cell} | {blk_cell} | {dec_cell} | - |"
             else:
-                dec_lines.append(f"| {task_cell} | {q_cell} | {dec_cell} | {blk_cell} |")
+                line = f"| {task_cell} | {q_cell} | {dec_cell} | {blk_cell} |"
+            legacy_dec_rows.append((row_id, line))
 
-    # 2. Append new qualifying legacy tasks
     new_dec_tasks = [
         t for tid, t in qualifying_tasks.items()
         if tid not in seen_dec_ids and tid not in existing_waiting_ids_without_dec
@@ -8688,9 +8847,14 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             who, question = raw_dec, raw_dec
         blocks_str = ", ".join(blocks_map.get(wt["id"], [])) or "-"
         if use_5_cols:
-            dec_lines.append(f"| {wt['id']} | {question} | {blocks_str} | {who} | - |")
+            line = f"| {wt['id']} | {question} | {blocks_str} | {who} | - |"
         else:
-            dec_lines.append(f"| {wt['id']} | {question} | {who} | {blocks_str} |")
+            line = f"| {wt['id']} | {question} | {who} | {blocks_str} |"
+        legacy_dec_rows.append((wt["id"], line))
+
+    legacy_dec_rows.sort(key=lambda r: _natural_sort_key(r[0]))
+    for r in legacy_dec_rows:
+        dec_lines.append(r[1])
 
     if len(dec_lines) == 2:
         if use_5_cols:
@@ -8702,6 +8866,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     # 4. Done section
     m_done = _marker_pattern("done").search(existing_index) if existing_index.strip() else None
     existing_done_region = m_done.group(1) if m_done else existing_index
+    if existing_done_region:
+        existing_done_region = _strip_conflict_markers_ours(existing_done_region)
 
     hdr_done, sep_done = _extract_existing_table_header(existing_done_region, 4) or (
         "| Id | Task | Result | Closed |",
@@ -8711,7 +8877,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     sep_cond = "| --- | --- | --- | --- |"
     cond_lines = [hdr_cond, sep_cond]
     stale_entries: list[str] = []
-    for ct in sorted(conditional_tasks, key=lambda t: t["id"], reverse=True):
+    for ct in sorted(conditional_tasks, key=lambda t: _natural_sort_key(t["id"]), reverse=True):
         st_disp = f" ({ct['short_title']})" if ct.get("short_title") else ""
         task_cell = f"[{ct['title']}]({ct['rel_path']})"
         open_conditions = [c for c in ct.get("conditions", []) if c.get("status") != "answered"]
@@ -8736,6 +8902,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     if existing_done_region:
         for line in existing_done_region.splitlines():
             line_s = line.strip()
+            if line_s.startswith(("<", "=", ">")):
+                continue
             if not line_s.startswith("|"):
                 continue
             cells = [c.strip() for c in line_s.strip("|").split("|")]
@@ -8746,9 +8914,12 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
     done_tasks_map = {dt["id"]: dt for dt in done_tasks}
     seen_done_ids: set[str] = set()
+    done_rows: list[tuple[str, str]] = []
 
     for row_id, cells in existing_done_rows:
         base_id = re.sub(r"\s*\(.*?\)", "", row_id).strip()
+        if base_id in seen_done_ids:
+            continue
         if any(ct["id"] == base_id for ct in conditional_tasks):
             continue
         if base_id in done_tasks_map:
@@ -8758,7 +8929,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             res_val = cells[2] if len(cells) > 2 and cells[2] not in ("", "-") else dt["state"]
             closed_val = cells[3] if len(cells) > 3 and cells[3] not in ("", "-") else _git_closed_date(tasks_dir, dt["rel_path"])
             st_disp = f" ({dt['short_title']})" if dt.get("short_title") else ""
-            done_lines.append(f"| {dt['id']}{st_disp} | {task_cell} | {res_val} | {closed_val} |")
+            done_rows.append((base_id, f"| {dt['id']}{st_disp} | {task_cell} | {res_val} | {closed_val} |"))
         elif base_id not in resolved_ids:
             seen_done_ids.add(base_id)
             task_cell = cells[1] if len(cells) > 1 else "-"
@@ -8766,10 +8937,10 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 task_cell = f"{task_cell} (missing)"
             res_val = cells[2] if len(cells) > 2 else "done"
             closed_val = cells[3] if len(cells) > 3 else datetime.date.today().isoformat()
-            done_lines.append(f"| {row_id} | {task_cell} | {res_val} | {closed_val} |")
+            done_rows.append((base_id, f"| {row_id} | {task_cell} | {res_val} | {closed_val} |"))
 
     new_done_tasks = [dt for dt_id, dt in done_tasks_map.items() if dt_id not in seen_done_ids]
-    new_done_tasks.sort(key=lambda t: t["id"], reverse=True)
+    new_done_tasks.sort(key=lambda t: _natural_sort_key(t["id"]), reverse=True)
     for dt in new_done_tasks:
         dt_id = dt["id"]
         seen_done_ids.add(dt_id)
@@ -8777,8 +8948,12 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         res_val = dt["state"]
         closed_val = _git_closed_date(tasks_dir, dt["rel_path"])
         st_disp = f" ({dt['short_title']})" if dt.get("short_title") else ""
-        done_lines.append(f"| {dt_id}{st_disp} | {task_cell} | {res_val} | {closed_val} |")
+        done_rows.append((dt_id, f"| {dt_id}{st_disp} | {task_cell} | {res_val} | {closed_val} |"))
 
+    if has_conflict_markers:
+        done_rows.sort(key=lambda r: _natural_sort_key(r[0]), reverse=True)
+
+    done_lines.extend([r[1] for r in done_rows])
     done_content = "\n".join(done_lines)
 
     if not existing_index.strip() or not has_generated_markers(existing_index):
@@ -9994,6 +10169,12 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                 existing = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
                 current_hash = _file_sha256(index_path)
 
+                has_conflict = ("<<<<<<<" in existing) or bool(
+                    re.search(r"^(<{7}|={7}|>{7}|\|{7})\b", existing, re.MULTILINE)
+                )
+                if has_conflict:
+                    adopt = True
+
                 # 1. Hash verification if expect_hash is given
                 if expect_hash is not None:
                     if current_hash.lower() != expect_hash.lower():
@@ -10011,8 +10192,8 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
 
                 has_markers = has_generated_markers(existing) if existing.strip() else True
 
-                # 2. Check adopt + apply requires --expect-hash
-                if adopt and apply_flag:
+                # 2. Check adopt + apply requires --expect-hash (unless auto-adopted due to conflict markers)
+                if adopt and apply_flag and not has_conflict:
                     if expect_hash is None:
                         err_msg = "Adopting markers with --apply requires --expect-hash <sha256>."
                         if getattr(args, "json", False):
@@ -10027,7 +10208,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         return 1
 
                 # 3. Check plain --apply on an index without markers
-                if existing.strip() and not has_markers and not adopt and apply_flag:
+                if existing.strip() and not has_markers and not adopt and apply_flag and not has_conflict:
                     err_msg = (
                         f"Index {index_path} has no generated-region markers "
                         "(<!-- ai-orch:generated <section> -->). Run with --adopt to preview, then --adopt --apply --expect-hash <hash>."
@@ -10112,10 +10293,16 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                 print(f"[FAIL] {err_msg}", file=sys.stderr)
             return 1
 
+    has_conflict = ("<<<<<<<" in existing) or bool(
+        re.search(r"^(<{7}|={7}|>{7}|\|{7})\b", existing, re.MULTILINE)
+    )
+    if has_conflict:
+        adopt = True
+
     has_markers = has_generated_markers(existing) if existing.strip() else True
 
     # 2. Check adopt + apply requires --expect-hash
-    if adopt and apply_flag:
+    if adopt and apply_flag and not has_conflict:
         if expect_hash is None:
             err_msg = "Adopting markers with --apply requires --expect-hash <sha256>."
             if getattr(args, "json", False):
@@ -10130,7 +10317,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
             return 1
 
     # 3. Check plain --apply on an index without markers
-    if existing.strip() and not has_markers and not adopt and apply_flag:
+    if existing.strip() and not has_markers and not adopt and apply_flag and not has_conflict:
         err_msg = (
             f"Index {index_path} has no generated-region markers "
             "(<!-- ai-orch:generated <section> -->). Run with --adopt to preview, then --adopt --apply --expect-hash <hash>."
@@ -10272,10 +10459,82 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_merge_index(args: argparse.Namespace) -> int:
+    base = getattr(args, "base", None)
+    ours = getattr(args, "ours", None)
+    theirs = getattr(args, "theirs", None)
+    tasks_dir_arg = getattr(args, "tasks_dir", None)
+
+    if tasks_dir_arg:
+        tasks_dir = pathlib.Path(tasks_dir_arg).resolve()
+    elif ours:
+        ours_p = pathlib.Path(ours).resolve()
+        if ours_p.name == "00-INDEX.md":
+            tasks_dir = ours_p.parent
+        elif (ours_p.parent / "00-INDEX.md").is_file():
+            tasks_dir = ours_p.parent
+        elif (ours_p.parent.parent / "tasks" / "00-INDEX.md").is_file():
+            tasks_dir = (ours_p.parent.parent / "tasks").resolve()
+        elif pathlib.Path("tasks").is_dir():
+            tasks_dir = pathlib.Path("tasks").resolve()
+        else:
+            tasks_dir = ours_p.parent
+    else:
+        tasks_dir = pathlib.Path("tasks").resolve()
+
+    if ours:
+        target_path = pathlib.Path(ours).resolve()
+    else:
+        target_path = tasks_dir / "00-INDEX.md"
+
+    if not is_platform_supported():
+        err_msg = "Mutating commands are unsupported on Windows (requires fcntl for flock)."
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": "unsupported-platform", "message": err_msg}))
+        else:
+            print(f"[FAIL] unsupported-platform: {err_msg}", file=sys.stderr)
+        return 1
+
+    try:
+        with task_write_lock(tasks_dir):
+            existing = target_path.read_text(encoding="utf-8") if target_path.is_file() else ""
+            if not existing and (tasks_dir / "00-INDEX.md").is_file():
+                existing = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+
+            rendered = render_synced_index(tasks_dir, existing, adopt=True)
+            _atomic_write_text(target_path, rendered, encoding="utf-8")
+            if target_path.resolve() != (tasks_dir / "00-INDEX.md").resolve() and (tasks_dir / "00-INDEX.md").exists():
+                _atomic_write_text(tasks_dir / "00-INDEX.md", rendered, encoding="utf-8")
+
+            if getattr(args, "json", False):
+                print(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "merged": True,
+                            "path": str(target_path),
+                            "tasks_dir": str(tasks_dir),
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"[ok] merged index {target_path}")
+            return 0
+    except LockTimeoutError as e:
+        err_msg = str(e)
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": "lock-timeout", "message": err_msg}))
+        else:
+            print(f"[FAIL] lock-timeout: {err_msg}", file=sys.stderr)
+        return 1
+
+
 def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False) -> dict[str, Any]:
     """Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention:
       1. Updates tasks/AGENTS.md with canonical task-pipeline rules and skill names.
       2. Ensures tasks/.gitignore exists and ignores .ai-orch.lock.
+      2.5. Ensures tasks/.gitattributes exists and configures 00-INDEX.md merge=ai-orch-index.
       3. Ensures standard directories exist (_inbox/to-analyze, _inbox/analyzed).
       4. Regenerates/updates 00-INDEX.md with standard tables (Initiatives, Specs, Next up, Tasks by category, Decisions waiting, Done).
       5. Validates the upgraded tree.
@@ -10330,6 +10589,24 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False) -> dict[s
                     new_gi = existing_gi + ("\n" if existing_gi and not existing_gi.endswith("\n") else "") + ".ai-orch.lock\n"
                     if not dry_run:
                         _atomic_write_text(gitignore_path, new_gi, encoding="utf-8")
+
+            # 2.5. Ensure tasks/.gitattributes exists and contains 00-INDEX.md merge=ai-orch-index
+            gitattributes_path = tasks_dir / ".gitattributes"
+            rule_line = "00-INDEX.md merge=ai-orch-index"
+            if not gitattributes_path.is_file():
+                created.append(str(gitattributes_path))
+                upgraded_files.append(str(gitattributes_path))
+                if not dry_run:
+                    _atomic_write_text(gitattributes_path, f"{rule_line}\n", encoding="utf-8")
+            else:
+                existing_ga = gitattributes_path.read_text(encoding="utf-8")
+                ga_lines = [line.strip() for line in existing_ga.splitlines()]
+                if not any(line == rule_line or line.startswith("00-INDEX.md merge=") for line in ga_lines):
+                    updated.append(str(gitattributes_path))
+                    upgraded_files.append(str(gitattributes_path))
+                    new_ga = existing_ga + ("\n" if existing_ga and not existing_ga.endswith("\n") else "") + f"{rule_line}\n"
+                    if not dry_run:
+                        _atomic_write_text(gitattributes_path, new_ga, encoding="utf-8")
 
             # 3. Ensure standard directories
             if not dry_run:
@@ -15919,6 +16196,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--expect-hash", default=None, help="Refuse to apply if current index SHA256 does not match this hash")
     p_sync.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_sync.set_defaults(func=cmd_sync_index)
+
+    p_merge = sub.add_parser("merge-index", help="Conflict-free merge driver and resolver for tasks/00-INDEX.md")
+    p_merge.add_argument("base", nargs="?", default=None, help="Base/ancestor file (%%O)")
+    p_merge.add_argument("ours", nargs="?", default=None, help="Ours file to overwrite (%%A)")
+    p_merge.add_argument("theirs", nargs="?", default=None, help="Theirs file (%%B)")
+    p_merge.add_argument("--tasks-dir", default=None, help="Path to tasks/ directory")
+    p_merge.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_merge.set_defaults(func=cmd_merge_index)
 
     p_upg = sub.add_parser("upgrade", help="Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention")
     p_upg.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
