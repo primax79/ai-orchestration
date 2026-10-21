@@ -3799,6 +3799,58 @@ def test_16_6_skills_regeneration_idempotence_and_broker_tools_section() -> None
         assert "`orchestrator.ask`" not in text
 
 
+def test_doctor_detects_vendored_or_stale_tasks_engine(tmp_path: pathlib.Path) -> None:
+    from orchestration_env import inspect_environment, REPO_ROOT
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    # 1. Clean workspace -> zero stale-vendored-engine findings
+    st_clean = inspect_environment(workspace=ws, home=fake_home)
+    assert not any(g["kind"] == "stale-vendored-engine" for g in st_clean["finding_groups"])
+
+    # 2. Add vendored tasks/scripts/tasks_engine.py -> always reported as warning
+    vendored = ws / "tasks" / "scripts" / "tasks_engine.py"
+    vendored.parent.mkdir(parents=True)
+    vendored.write_text("# vendored engine\n", encoding="utf-8")
+
+    st_vendored = inspect_environment(workspace=ws, home=fake_home)
+    fg_v = next(g for g in st_vendored["finding_groups"] if g["group_key"] == "stale-vendored-engine:tasks/scripts/tasks_engine.py")
+    assert fg_v["kind"] == "stale-vendored-engine"
+    assert fg_v["severity"] == "warning"
+    assert fg_v["path"] == str(vendored)
+
+    # 3. Add up-to-date .kilo/skills/task-pipeline/scripts/tasks_engine.py (matching canonical)
+    canonical = REPO_ROOT / "plugins" / "architect-side" / "skills" / "task-pipeline" / "scripts" / "tasks_engine.py"
+    kilo_engine = ws / ".kilo" / "skills" / "task-pipeline" / "scripts" / "tasks_engine.py"
+    kilo_engine.parent.mkdir(parents=True)
+    shutil.copy2(canonical, kilo_engine)
+
+    st_up_to_date = inspect_environment(workspace=ws, home=fake_home)
+    # The up-to-date .kilo engine must NOT be reported as stale!
+    assert not any(g["group_key"] == "stale-vendored-engine:.kilo/skills/task-pipeline/scripts/tasks_engine.py" for g in st_up_to_date["finding_groups"])
+    # tasks/scripts/tasks_engine.py is still reported
+    assert any(g["group_key"] == "stale-vendored-engine:tasks/scripts/tasks_engine.py" for g in st_up_to_date["finding_groups"])
+
+    # 4. Modify .kilo/skills/task-pipeline/scripts/tasks_engine.py -> now outdated/differs -> reported as warning
+    kilo_engine.write_text("# outdated engine copy\n", encoding="utf-8")
+    st_outdated = inspect_environment(workspace=ws, home=fake_home)
+    fg_k = next(g for g in st_outdated["finding_groups"] if g["group_key"] == "stale-vendored-engine:.kilo/skills/task-pipeline/scripts/tasks_engine.py")
+    assert fg_k["kind"] == "stale-vendored-engine"
+    assert fg_k["severity"] == "warning"
+    assert fg_k["path"] == str(kilo_engine)
+
+    # Remove vendored tasks/scripts/tasks_engine.py -> only the .kilo one is reported
+    vendored.unlink()
+    st_kilo_only = inspect_environment(workspace=ws, home=fake_home)
+    engine_findings = [g for g in st_kilo_only["finding_groups"] if g["kind"] == "stale-vendored-engine"]
+    assert len(engine_findings) == 1
+    assert engine_findings[0]["group_key"] == "stale-vendored-engine:.kilo/skills/task-pipeline/scripts/tasks_engine.py"
+
+
+
 
 
 

@@ -5105,6 +5105,74 @@ def inspect_environment(
                 "count": 1,
             })
 
+    # Check for vendored/stale copies of tasks_engine.py inside the workspace
+    if ws is not None and ws.exists():
+        canonical_engine = None
+        if (REPO_ROOT / "plugins" / "architect-side" / "skills" / "task-pipeline" / "scripts" / "tasks_engine.py").is_file():
+            canonical_engine = REPO_ROOT / "plugins" / "architect-side" / "skills" / "task-pipeline" / "scripts" / "tasks_engine.py"
+        else:
+            cand_repo = resolve_source_repo("ai-orchestration", h)
+            if cand_repo and (cand_repo / "plugins" / "architect-side" / "skills" / "task-pipeline" / "scripts" / "tasks_engine.py").is_file():
+                canonical_engine = cand_repo / "plugins" / "architect-side" / "skills" / "task-pipeline" / "scripts" / "tasks_engine.py"
+
+        canonical_sha = compute_target_hash(canonical_engine) if canonical_engine else None
+
+        candidates = [
+            ("tasks/scripts/tasks_engine.py", True, "workspace"),
+            (".kilo/skills/task-pipeline/scripts/tasks_engine.py", False, "kilo"),
+            (".claude/skills/task-pipeline/scripts/tasks_engine.py", False, "claude"),
+        ]
+
+        for rel_path, always_warn, asst in candidates:
+            target = ws / rel_path
+            if target.is_file() or (target.is_symlink() and not target.is_dir()):
+                is_stale = False
+                if always_warn:
+                    is_stale = True
+                else:
+                    target_sha = compute_target_hash(target)
+                    if canonical_sha is not None and target_sha != canonical_sha:
+                        is_stale = True
+
+                if is_stale:
+                    gkey = f"stale-vendored-engine:{rel_path}"
+                    entries = [{
+                        "name": "tasks_engine.py",
+                        "path": str(target),
+                        "rel_path": rel_path,
+                        "origin": "project",
+                        "scope": "project",
+                        "enabled": True,
+                        "state": "stale-vendored",
+                    }]
+                    is_acked, _ = is_finding_acknowledged("stale-vendored-engine", [rel_path], entries, acks, group_key=gkey)
+                    msg = (
+                        f"Vendored tasks_engine.py found at {rel_path}. "
+                        "Remove it and use the canonical task-pipeline skill or ~/.local/bin/ai-orch instead."
+                        if always_warn else
+                        f"Stale copy of tasks_engine.py found at {rel_path} (differs from canonical task-pipeline skill). "
+                        "Update or remove it."
+                    )
+                    finding_groups.append({
+                        "id": gkey,
+                        "group_key": gkey,
+                        "group": "Tasks engine",
+                        "title": f"Stale vendored tasks_engine.py ({rel_path})",
+                        "kind": "stale-vendored-engine",
+                        "names": [rel_path],
+                        "path": str(target),
+                        "severity": "info" if is_acked else "warning",
+                        "acknowledged": is_acked,
+                        "message": msg,
+                        "locations": [{"assistant": asst, "scope": "project"}],
+                        "entries": entries,
+                        "fixable": False,
+                        "actionable": False,
+                        "actions": [],
+                        "advice": [msg],
+                        "count": 1,
+                    })
+
     sev_rank = {"error": 0, "warning": 1, "info": 2, "neutral": 3}
     finding_groups.sort(key=lambda g: (sev_rank.get(g["severity"], 9), g["group_key"]))
 

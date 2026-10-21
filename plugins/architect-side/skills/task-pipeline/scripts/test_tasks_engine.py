@@ -8896,3 +8896,133 @@ def test_ship_keeps_an_existing_summary(tmp_path: pathlib.Path) -> None:
     assert "Hand-written outcome." in summary
     assert "<outcome description" not in summary
     assert "](../../specs/validation.md)" in summary
+
+
+def test_standalone_execution_no_orchestration_events_warning(tmp_path: pathlib.Path) -> None:
+    # 1. Copy tasks_engine.py to an isolated folder in tmp_path (outside ai-orchestration)
+    isolated_dir = tmp_path / "standalone_skill" / "scripts"
+    isolated_dir.mkdir(parents=True)
+    engine_copy = isolated_dir / "tasks_engine.py"
+    shutil.copy2(SCRIPT_PATH, engine_copy)
+
+    # 2. Set up a project directory with tasks/ inside tmp_path
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    tasks_dir = project_dir / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n## Initiatives\n\n## Specs\n\n## Next up\n\n## Tasks by category\n\n## Decisions waiting\n\n## Done\n",
+        encoding="utf-8",
+    )
+
+    def run_isolated(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(engine_copy), *args],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    # 3. Test upgrade
+    res_upg = run_isolated("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_upg.returncode == 0, f"upgrade failed: {res_upg.stdout} {res_upg.stderr}"
+    assert "[warning] could not import orchestration_events" not in res_upg.stderr
+
+    # 4. Test new
+    res_new = run_isolated(
+        "new",
+        "--tasks-dir", str(tasks_dir),
+        "--category", "features",
+        "--title", "Standalone task",
+        "--priority", "P1",
+        "--priority-reason", "Essential",
+        "--goal", "Test standalone operation.",
+        "--json",
+    )
+    assert res_new.returncode == 0, f"new failed: {res_new.stdout} {res_new.stderr}"
+    assert "[warning] could not import orchestration_events" not in res_new.stderr
+    new_data = json.loads(res_new.stdout)
+    task_id = new_data["id"]
+
+    # 5. Test transition
+    res_trans = run_isolated(
+        "transition",
+        "--tasks-dir", str(tasks_dir),
+        task_id,
+        "in progress",
+        "--reason", "Starting work",
+        "--json",
+    )
+    assert res_trans.returncode == 0, f"transition failed: {res_trans.stdout} {res_trans.stderr}"
+    assert "[warning] could not import orchestration_events" not in res_trans.stderr
+
+    # 6. Test validate
+    res_val = run_isolated("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0, f"validate failed: {res_val.stdout} {res_val.stderr}"
+    assert "[warning] could not import orchestration_events" not in res_val.stderr
+
+    # 7. Test sync-index --apply
+    res_sync = run_isolated("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--json")
+    assert res_sync.returncode == 0, f"sync-index failed: {res_sync.stdout} {res_sync.stderr}"
+    assert "[warning] could not import orchestration_events" not in res_sync.stderr
+
+
+def test_upgrade_creates_and_updates_tasks_gitignore(tmp_path: pathlib.Path) -> None:
+    # 1. Fresh tasks dir without .gitignore
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n## Initiatives\n\n## Specs\n\n## Next up\n\n## Tasks by category\n\n## Decisions waiting\n\n## Done\n",
+        encoding="utf-8",
+    )
+
+    # Dry-run first
+    res_dry = te.upgrade_tasks_tree(tasks_dir, dry_run=True)
+    assert res_dry["ok"] is True
+    assert str(tasks_dir / ".gitignore") in res_dry["created"]
+    assert str(tasks_dir / ".gitignore") in res_dry["upgraded_files"]
+    assert not (tasks_dir / ".gitignore").exists()
+
+    # Actual upgrade: creates tasks/.gitignore
+    res = te.upgrade_tasks_tree(tasks_dir)
+    assert res["ok"] is True
+    assert str(tasks_dir / ".gitignore") in res["created"]
+    assert str(tasks_dir / ".gitignore") in res["upgraded_files"]
+    gi_path = tasks_dir / ".gitignore"
+    assert gi_path.is_file()
+    assert ".ai-orch.lock" in [line.strip() for line in gi_path.read_text(encoding="utf-8").splitlines()]
+
+    # 2. Existing tasks/.gitignore with custom lines
+    custom_tasks = tmp_path / "tasks_custom"
+    custom_tasks.mkdir()
+    (custom_tasks / "00-INDEX.md").write_text(
+        "# Task Index\n\n## Initiatives\n\n## Specs\n\n## Next up\n\n## Tasks by category\n\n## Decisions waiting\n\n## Done\n",
+        encoding="utf-8",
+    )
+    custom_gi = custom_tasks / ".gitignore"
+    custom_gi.write_text("*.tmp\ncustom-entry\n", encoding="utf-8")
+
+    # Dry run on existing
+    res_dry2 = te.upgrade_tasks_tree(custom_tasks, dry_run=True)
+    assert res_dry2["ok"] is True
+    assert str(custom_gi) in res_dry2["updated"]
+    assert str(custom_gi) in res_dry2["upgraded_files"]
+    assert ".ai-orch.lock" not in custom_gi.read_text(encoding="utf-8")
+
+    # Actual upgrade: preserves custom lines and appends .ai-orch.lock
+    res2 = te.upgrade_tasks_tree(custom_tasks)
+    assert res2["ok"] is True
+    assert str(custom_gi) in res2["updated"]
+    assert str(custom_gi) in res2["upgraded_files"]
+    content = custom_gi.read_text(encoding="utf-8")
+    lines = [line.strip() for line in content.splitlines()]
+    assert "*.tmp" in lines
+    assert "custom-entry" in lines
+    assert ".ai-orch.lock" in lines
+
+    # Re-running upgrade when .ai-orch.lock already present -> not in created or updated
+    res3 = te.upgrade_tasks_tree(custom_tasks)
+    assert res3["ok"] is True
+    assert str(custom_gi) not in res3["created"]
+    assert str(custom_gi) not in res3["updated"]
