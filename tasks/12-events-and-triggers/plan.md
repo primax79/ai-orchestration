@@ -15,37 +15,6 @@
 
   Kilo runs with disposable writable XDG state directories. The fixtures go to `scripts/fixtures/runs/`.
 
-### 12.11 - Core: event store (outbox, counter, chunk manifest, reconciliation, `events tail`)
-
-- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Event store · **Size:** L · **Depends on:** 10.4 (`tasks_engine.py` lane end) · **Repo:** `ai-orchestration/` (new module `scripts/orchestration_events.py`)
-- **Goal:** E1, E13 and §1 reading.
-
-### 12.12 - Emit events from `tasks_engine.py`
-
-- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Task engine events · **Size:** M · **Depends on:** 12.11
-- **Goal:** Events for tasks, questions and the inbox, through the outbox; the E11 application ledger with `questions apply`.
-
-### 12.13 - Emit events from `orchestration_runs.py` and extract the supervised-invocation primitive
-
-- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Run engine events · **Size:** L · **Depends on:** 12.11, 07.11 (runs lane end)
-- **Goal:** E1 and E4.
-- **Also (from the 12.11 review):** `events tail --session S` (spec §1 line 128) was not implemented in 12.11; add it here, where events start carrying the session.
-
-### 12.14 - Emit events from `orchestration_config.py`; config writes under a lock
-
-- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Config events · **Size:** S · **Depends on:** 12.11
-- **Goal:** E1 and E10 `config.changed`.
-
-### 12.3 - Session registry and identifiers
-
-- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Session registry · **Size:** M · **Depends on:** 12.12, 12.13
-- **Goal:** §2 and E10, including the header amendments in specs 08 and 09.
-
-### 12.4 - Trigger engine
-
-- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Trigger engine · **Size:** L · **Depends on:** 12.3
-- **Goal:** §5, E7, and the reduced-capability policy for unattended turns (E3).
-
 ### 12.5 - Headless orchestrator role (sessions, queue, turns, succession, bounds)
 
 - **Status:** `delivered` (2026-10-18; claude; merged; 160 tests, no real CLI; unattended turns run in triage (read-only) mode, 15-min timeout, generation-fenced succession; live run with a real orchestrator session pending) · **Short:** Headless orchestrator role · **Size:** L · **Depends on:** 12.1, 12.3, 12.13
@@ -98,3 +67,36 @@
 - **Origin:** 12.15 merge (2026-10-18): the parity check marks the nine 12.8 chat message types pending (`pending128Types`); 12.10 and 12.16 will add more, and the 12.15 confirm/reject handlers still mirror the old `not-implemented` backend stubs.
 - **Goal:** every message the web frontend sends after 12.8, 12.10 and 12.16 has a VS Code bridge handler building the same `ai-orch` argv as the backend; `pending128Types` is removed.
 - **Verification:** `npm test` green with no pending types; handler tests.
+
+## Closed
+
+### 12.11 - Core: event store (outbox, counter, chunk manifest, reconciliation, `events tail`)
+
+- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Event store · **Size:** L · **Depends on:** 10.4 (`tasks_engine.py` lane end) · **Repo:** `ai-orchestration/` (new module `scripts/orchestration_events.py`)
+- **Goal:** E1, E13 and §1 reading.
+
+### 12.12 - Emit events from `tasks_engine.py`
+
+- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Task engine events · **Size:** M · **Depends on:** 12.11
+- **Goal:** Events for tasks, questions and the inbox, through the outbox; the E11 application ledger with `questions apply`.
+
+### 12.13 - Emit events from `orchestration_runs.py` and extract the supervised-invocation primitive
+
+- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Run engine events · **Size:** L · **Depends on:** 12.11, 07.11 (runs lane end)
+- **Goal:** E1 and E4.
+- **Also (from the 12.11 review):** `events tail --session S` (spec §1 line 128) was not implemented in 12.11; add it here, where events start carrying the session.
+
+### 12.14 - Emit events from `orchestration_config.py`; config writes under a lock
+
+- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Config events · **Size:** S · **Depends on:** 12.11
+- **Goal:** E1 and E10 `config.changed`.
+
+### 12.3 - Session registry and identifiers
+
+- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Session registry · **Size:** M · **Depends on:** 12.12, 12.13
+- **Goal:** §2 and E10, including the header amendments in specs 08 and 09.
+
+### 12.4 - Trigger engine
+
+- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Trigger engine · **Size:** L · **Depends on:** 12.3
+- **Goal:** §5, E7, and the reduced-capability policy for unattended turns (E3).

@@ -6,6 +6,30 @@
 
 ## Tasks (One Task = One Commit)
 
+### 11.3 - UI: collapsible tree at any depth, node detail with inheritance, add child, expand, move, breadcrumbs
+
+- **Status:** `delivered` (2026-10-18; claude; merged; 51 backend tests; Kilo Playwright on a scratch copy (tree, progress bars, add subtask T050.1); prior TaskDetailModal features preserved (Structured/Raw, attachments, runs, questions); owner live check pending) · **Short:** Collapsible tree UI · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 11.1, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
+- **Focus files:** `backend/server.py`, `frontend/src/**`
+- **Goal:** Spec §4.
+- **Verification:** Live with Playwright on a scratch copy of this repo's `tasks/`: the tree shows 06–11 with progress bars; transitioning a child updates its block and the roll-up; "Add subtask" on a folder task creates `T###.1`.
+
+### 11.4 - Engine: closed-apart placement at every level (`tasks ship`, `## Closed` section for blocks, link rewriting, `tasks archive`; questions stay in place per S3)
+
+- **Status:** `delivered` (2026-10-18; claude; merged; 229 tests; archive dry-run on the real tree plans 47 closed blocks into Closed sections (not applied: touches plan 15 of another session; owner decision)) · **Short:** Closed-apart placement · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (same file) · **Repo:** `ai-orchestration/`
+- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `plugins/architect-side/skills/task-pipeline/SKILL.md` ("Ship" step), `tasks/specs/blocking-questions.md` (closed questions location)
+- **Goal:** Spec §6.
+- **Verification:**
+  - Tests:
+    - a leaf block closing moves to `## Closed`, and its reopening moves back;
+    - a folder child closing moves to `done/` under its parent;
+    - an initiative whose last leaf closes is shipped with `tasks ship`, and the links in specs and index are rewritten;
+    - questions never move (S3, spec 12 E11);
+    - `tasks archive --dry-run` on a fixture with misplaced items shows the plan and writes nothing;
+    - every relative Markdown link in `tasks/**` still resolves after each operation (a link checker is part of the test).
+  - Live: `tasks archive --dry-run` on this repo reports nothing to do.
+
+## Closed
+
 ### 11.1 - Engine: recursive node parser, inheritance, leaf-only transitions, derived container state, container dependencies, structure commands (`child add`, `expand`, `collapse`, `reopen`; no `move`, spec S1)
 
 - **Status:** `done` (2026-10-17; claude; merged into main) · **Short:** Recursive node parser · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 09.1 (same file) · **Note:** the biggest engine task so far; review in two passes (parser and state first, structure commands second) · **Repo:** `ai-orchestration/`
@@ -38,28 +62,6 @@
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`, `tasks/specs/agent-runs-from-ui.md` (§1 scope note)
 - **Goal:** Spec §3: lift the `T###`-only restriction of spec 07 §1. Run prompts include the parent context (initiative `plan.md` header or folder `README`/`CONTEXT`) plus the child block.
 - **Verification:** Tests with the stub agent: an execute run on `NN.T` moves the block to `in progress`; mark-delivered and verify on the block. All unit tests pass.
-
-### 11.3 - UI: collapsible tree at any depth, node detail with inheritance, add child, expand, move, breadcrumbs
-
-- **Status:** `delivered` (2026-10-18; claude; merged; 51 backend tests; Kilo Playwright on a scratch copy (tree, progress bars, add subtask T050.1); prior TaskDetailModal features preserved (Structured/Raw, attachments, runs, questions); owner live check pending) · **Short:** Collapsible tree UI · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 11.1, 06.8 (frontend lane) · **Repo:** `ai-orchestration-ui/`
-- **Focus files:** `backend/server.py`, `frontend/src/**`
-- **Goal:** Spec §4.
-- **Verification:** Live with Playwright on a scratch copy of this repo's `tasks/`: the tree shows 06–11 with progress bars; transitioning a child updates its block and the roll-up; "Add subtask" on a folder task creates `T###.1`.
-
-### 11.4 - Engine: closed-apart placement at every level (`tasks ship`, `## Closed` section for blocks, link rewriting, `tasks archive`; questions stay in place per S3)
-
-- **Status:** `delivered` (2026-10-18; claude; merged; 229 tests; archive dry-run on the real tree plans 47 closed blocks into Closed sections (not applied: touches plan 15 of another session; owner decision)) · **Short:** Closed-apart placement · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (same file) · **Repo:** `ai-orchestration/`
-- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `plugins/architect-side/skills/task-pipeline/SKILL.md` ("Ship" step), `tasks/specs/blocking-questions.md` (closed questions location)
-- **Goal:** Spec §6.
-- **Verification:**
-  - Tests:
-    - a leaf block closing moves to `## Closed`, and its reopening moves back;
-    - a folder child closing moves to `done/` under its parent;
-    - an initiative whose last leaf closes is shipped with `tasks ship`, and the links in specs and index are rewritten;
-    - questions never move (S3, spec 12 E11);
-    - `tasks archive --dry-run` on a fixture with misplaced items shows the plan and writes nothing;
-    - every relative Markdown link in `tasks/**` still resolves after each operation (a link checker is part of the test).
-  - Live: `tasks archive --dry-run` on this repo reports nothing to do.
 
 ### 11.5 - Legacy plan normalization: detection, `normalize` run mode, preview/apply
 

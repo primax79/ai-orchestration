@@ -15,6 +15,53 @@
 
 ## Tasks (One Task = One Commit)
 
+### 08.5 - VS Code: "Decisions Waiting" tree from question files
+
+- **Status:** `delivered` (2026-10-17; merged; awaiting live check in an Extension Development Host) · **Short:** VS Code Decisions tree · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 08.4, 06.9 · **Repo:** `vscode-ai-orchestration/`
+- **Focus files:** `src/views/*decision*`, `src/views/dashboard-panel.ts`, `dist-webview/**`
+- **Goal:** Spec §5 "VS Code".
+- **Verification:**
+  - `npm run compile` is clean.
+  - Live: the tree lists open questions, and a click opens the card.
+
+### 08.6 - "Answer and resume run"
+
+- **Status:** `delivered` (2026-10-18; claude; merged; review fix: origin-run validated with RUN_ID_RE before path use; 50 backend tests; live resume with a real agent pending) · **Short:** Answer and resume · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 08.4, 07.7 · **Repo:** `ai-orchestration-ui/` (+ `ai-orchestration/` if the supervisor's question-block filing from 07.3 needs a follow-up)
+- **Focus files:** `frontend/src/**`, `backend/server.py`
+- **Goal:**
+  - spec §5 "Answer and resume run";
+  - spec §4 fallback-block filing by the run supervisor, if 07.3 did not already do it.
+- **Verification:** Live with a real run (one tool is enough) that is instructed to ask: the question appears; "Answer and resume" continues the same session, and the agent acknowledges the answer.
+
+## Amendments after review 2 (2026-10-16)
+
+The spec now opens with §0 "Amendments after review 2" (Q1–Q10). These changes to the tasks follow from it, and the lane order is in `../06-control-plane-safety/plan.md`:
+
+- **08.1** now depends on **06.10** (task-write lock), not only on 06.1. It also covers Q1–Q7 and Q9. Its live verification uses a **disposable fixture** with legacy `decider: owner: <text>` tasks: T007, T009 and T010 carry `decider: -`, so the earlier plan text was wrong.
+- **08.2** documents Q8 for skills: agents in runs emit the block, interactive sessions call `questions ask`.
+- **08.4** adds Q10 and spec 06 A12 (XSS fixtures: a `<script>` / `<img onerror>` payload in a question context renders inert).
+- **08.6** no longer owns supervisor filing; that moved to **07.10**. 08.6 is UI only: "Answer and resume run", after 07.7, 07.10 and 08.4.
+
+> **2026-10-17:** 08.6 "Answer and resume run" is superseded by initiative 12 (trigger rule `resume-origin` on `question.answered`, task 12.4). It is no longer worked on here.
+
+### 08.7 - VS Code: toast for new questions and a status-bar badge
+
+- **Status:** `delivered` (2026-10-17; merged in vscode-ai-orchestration 0.2.0+, installed; awaiting the owner's live check) · **Short:** Question toasts · **Size:** S · **Depends on:** 08.5 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
+- **Origin:** owner request (2026-10-17).
+- **Goal:**
+  - A new open question (an id not seen before) shows a VS Code notification (`showInformationMessage`) with its short text and the actions "Open" (reveals the dashboard on the Decisions tab and that question, or at least the tab) and "Later".
+  - A status-bar item shows the open-question count (`$(question) N`), with warning background when N > 0 and hidden or neutral when N = 0. Clicking it opens Decisions.
+  - No toasts at startup for questions that already exist; only the badge.
+  - Notified ids are remembered in `workspaceState`, so a reload never re-notifies.
+  - Answered or withdrawn questions update the badge immediately.
+  - A setting `aiOrchestration.notifyNewQuestions` (default true).
+- **Verification:**
+  - `npm run compile` is clean.
+  - A test drives the diffing logic (open set before and after, notified-ids store): a new id → one notification; startup with existing ids → none; an answered question → the count decreases.
+  - Live in an Extension Development Host with the owner.
+
+## Closed
+
 ### 08.1 - Engine: question files, validator, `ai-orch questions list|show|ask|answer|withdraw`, Decisions region from open questions
 
 - **Status:** `done` (2026-10-17) · **Short:** Question engine · **Profile:** `deep-reasoning` · **Depends on:** 06.1 · **Repo:** `ai-orchestration/`
@@ -65,48 +112,3 @@
 - **Verification:**
   - `npm run build` is clean.
   - Live with the Playwright MCP on a scratch workspace: ask a question from the task modal → badge count 1 → answer with an option → the task returns to its previous state; an open answer requires text; Withdraw requires a reason.
-
-### 08.5 - VS Code: "Decisions Waiting" tree from question files
-
-- **Status:** `delivered` (2026-10-17; merged; awaiting live check in an Extension Development Host) · **Short:** VS Code Decisions tree · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 08.4, 06.9 · **Repo:** `vscode-ai-orchestration/`
-- **Focus files:** `src/views/*decision*`, `src/views/dashboard-panel.ts`, `dist-webview/**`
-- **Goal:** Spec §5 "VS Code".
-- **Verification:**
-  - `npm run compile` is clean.
-  - Live: the tree lists open questions, and a click opens the card.
-
-### 08.6 - "Answer and resume run"
-
-- **Status:** `delivered` (2026-10-18; claude; merged; review fix: origin-run validated with RUN_ID_RE before path use; 50 backend tests; live resume with a real agent pending) · **Short:** Answer and resume · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 08.4, 07.7 · **Repo:** `ai-orchestration-ui/` (+ `ai-orchestration/` if the supervisor's question-block filing from 07.3 needs a follow-up)
-- **Focus files:** `frontend/src/**`, `backend/server.py`
-- **Goal:**
-  - spec §5 "Answer and resume run";
-  - spec §4 fallback-block filing by the run supervisor, if 07.3 did not already do it.
-- **Verification:** Live with a real run (one tool is enough) that is instructed to ask: the question appears; "Answer and resume" continues the same session, and the agent acknowledges the answer.
-
-## Amendments after review 2 (2026-10-16)
-
-The spec now opens with §0 "Amendments after review 2" (Q1–Q10). These changes to the tasks follow from it, and the lane order is in `../06-control-plane-safety/plan.md`:
-
-- **08.1** now depends on **06.10** (task-write lock), not only on 06.1. It also covers Q1–Q7 and Q9. Its live verification uses a **disposable fixture** with legacy `decider: owner: <text>` tasks: T007, T009 and T010 carry `decider: -`, so the earlier plan text was wrong.
-- **08.2** documents Q8 for skills: agents in runs emit the block, interactive sessions call `questions ask`.
-- **08.4** adds Q10 and spec 06 A12 (XSS fixtures: a `<script>` / `<img onerror>` payload in a question context renders inert).
-- **08.6** no longer owns supervisor filing; that moved to **07.10**. 08.6 is UI only: "Answer and resume run", after 07.7, 07.10 and 08.4.
-
-> **2026-10-17:** 08.6 "Answer and resume run" is superseded by initiative 12 (trigger rule `resume-origin` on `question.answered`, task 12.4). It is no longer worked on here.
-
-### 08.7 - VS Code: toast for new questions and a status-bar badge
-
-- **Status:** `delivered` (2026-10-17; merged in vscode-ai-orchestration 0.2.0+, installed; awaiting the owner's live check) · **Short:** Question toasts · **Size:** S · **Depends on:** 08.5 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
-- **Origin:** owner request (2026-10-17).
-- **Goal:**
-  - A new open question (an id not seen before) shows a VS Code notification (`showInformationMessage`) with its short text and the actions "Open" (reveals the dashboard on the Decisions tab and that question, or at least the tab) and "Later".
-  - A status-bar item shows the open-question count (`$(question) N`), with warning background when N > 0 and hidden or neutral when N = 0. Clicking it opens Decisions.
-  - No toasts at startup for questions that already exist; only the badge.
-  - Notified ids are remembered in `workspaceState`, so a reload never re-notifies.
-  - Answered or withdrawn questions update the badge immediately.
-  - A setting `aiOrchestration.notifyNewQuestions` (default true).
-- **Verification:**
-  - `npm run compile` is clean.
-  - A test drives the diffing logic (open set before and after, notified-ids store): a new id → one notification; startup with existing ids → none; an answered question → the count decreases.
-  - Live in an Extension Development Host with the owner.

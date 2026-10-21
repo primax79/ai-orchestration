@@ -8603,3 +8603,30 @@ def test_t031_header_field_order_error(tmp_path: pathlib.Path) -> None:
     bad_task.write_text(good_task, encoding="utf-8")
     errors_fixed, _, _, _ = te.validate_tasks_tree(tasks_dir)
     assert errors_fixed == [], errors_fixed
+
+
+def test_ship_keeps_an_existing_summary(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    init_dir = tasks_dir / "15-validation"
+    init_dir.mkdir(parents=True)
+    (init_dir / "plan.md").write_text(
+        "# 15 - Validation\n\n> **Status:** `done`\n\n- **Goal:** G.\n\n## Tasks\n\n"
+        "### 15.1 - Leaf task\n- **Status:** `done` (2026-10-17)\n- **Goal:** G1.\n",
+        encoding="utf-8",
+    )
+    (tasks_dir / "specs").mkdir()
+    (tasks_dir / "specs" / "validation.md").write_text("# Spec\n", encoding="utf-8")
+    (init_dir / "summary.md").write_text(
+        "# Summary: 15 - Validation\n\n- **Spec:** [`spec`](../specs/validation.md)\n\n## Outcome\n\nHand-written outcome.\n",
+        encoding="utf-8",
+    )
+
+    dry = te.ship_initiative(tasks_dir, "15", dry_run=True)
+    assert dry["ok"] is True
+    res = te.ship_initiative(tasks_dir, "15", expect_plan_hash=dry["plan_hash"])
+    assert res["ok"] is True
+
+    summary = (tasks_dir / "done" / "15-validation" / "summary.md").read_text(encoding="utf-8")
+    assert "Hand-written outcome." in summary
+    assert "<outcome description" not in summary
+    assert "](../../specs/validation.md)" in summary

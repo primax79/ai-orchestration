@@ -18,6 +18,75 @@
 
 ## Tasks (One Task = One Commit)
 
+### 07.5 - Live capture with the real CLIs: session ids, Final Report, verdict, continue; flag table correction
+
+- **Status:** `delivered` (2026-10-18; claude; merged 2e76ee0 (claude subagent): live execute/continue/verify for kilo, claude, codex; fixtures; parser fixes (session ids, Final Report, verdict, usage E8); spec 5.7 corrected; 90 tests) · **Short:** Live CLI capture · **Size:** M · **Profile:** `deep-reasoning` · **Executor:** `self` (orchestrator: needs the real CLIs and auth) · **Depends on:** 07.4 · **Repo:** `ai-orchestration/`
+- **Focus files:** `scripts/orchestration_runs.py`, `scripts/fixtures/runs/{claude,kilo,codex}-*.jsonl` (new), `scripts/test_orchestration_runs.py`, `tasks/specs/agent-runs-from-ui.md` (§5.7 table)
+- **Goal:** In a scratch git repo with a one-step task, do per tool:
+  - one `execute`, one `--continue` and one `verify`;
+  - save the scrubbed streams as fixtures;
+  - finalize the per-tool session-id / Final Report / verdict parsers;
+  - correct §5.7 where the real flags differ.
+- **Verification:** The fixture tests pass, and a live re-run per tool shows the session captured and the continuation landing in the same session.
+
+### 07.9 - VS Code: run handlers and run watcher
+
+- **Status:** `delivered` (2026-10-17; claude; vscode 0.2.6: run handlers mirror the web backend; live check by the owner pending) · **Short:** VS Code run handlers · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.7, 07.8, 06.9 · **Repo:** `vscode-ai-orchestration/`
+- **Focus files:** `src/views/dashboard-panel.ts`, `src/extension.ts`, `dist-webview/**`
+- **Goal:** Spec §8.
+- **Verification:**
+  - `npm run compile` is clean, and the handler-map test is green.
+  - Live in an Extension Development Host: launch and cancel a stub run from the webview.
+
+## Amendments after review 2 (2026-10-16)
+
+The spec now opens with §0 "Amendments after review 2" (R1–R14). These changes to the tasks follow from it, and the lane order is in `../06-control-plane-safety/plan.md`:
+
+- **07.1** also covers:
+  - the `{effort}` placeholder (R3);
+  - `--diff`/`--expect-hash` on `set-routing` and `set-profile` (spec 06 A10).
+
+  It was dispatched before the review; the delta follows in the same Kilo session.
+- **07.2** also covers:
+  - R1: a binding `plan_hash` in `preview`;
+  - R4: the allowed modes per state;
+  - R8: the task bundle hash, reusing 06.10's hash function, **so 07.2 depends on 06.10**;
+  - R10: the platform refusal;
+  - R13: secret references and redaction.
+- **07.3** also covers:
+  - R2: separate process identities;
+  - R9: log chunks with logical offsets;
+  - R11: Claude refuses to launch without a configured `allowed_tools`.
+- **07.4** also covers:
+  - R5: the verification modes, including the panel;
+  - R6: `run mark-delivered`;
+  - R7: the artifact invariants, adding to the tests a branch that advances, a reset, and `target_run: none` with HEAD drift;
+  - R12: cleanup over continuation chains.
+- **07.5** must prove a real test-and-commit run under the permission policy the owner chooses (R11).
+- **07.8** depends on **07.7** (shared `api.ts`, `types.ts`, `dist`).
+- **07.9** focus files add `src/cli-client.ts` and its tests.
+
+## Decisions waiting
+
+| Key | Question | Blocks | Decider |
+| --- | --- | --- | --- |
+| R11 | **Decided 2026-10-17 (Q001 → A):** per-mode allow-list. `execute` and `verify` get git, the test runners and the file tools; `orchestrate` also gets the kilo-mcp tools. Implemented as built-in adapter defaults in 07.12. | — | owner |
+
+### 07.11 - Batch runs for microtasks
+
+- **Status:** `delivered` (2026-10-18; claude; merged; 103 run tests twice; batch verify is one run for the whole batch against the final commit) · **Short:** Microtask batch runs · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 10.4 · **Repo:** `ai-orchestration/`
+- **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
+- **Goal:** `../specs/timeline-gantt.md` §5 "Batch runs":
+  - `run start --batch IDS` takes microtasks of one target repo only (refused otherwise);
+  - one worktree;
+  - the prompt lists the microtasks, with one commit per microtask required;
+  - the supervisor maps commits to microtasks (by a `T###` prefix in the commit message);
+  - each microtask's state is set separately;
+  - `mark-delivered` and verify work per microtask or for the whole batch.
+- **Verification:** Tests with the stub agent: three microtasks → three commits → each `in progress` → `delivered`; a microtask without a commit stays `in progress`, with the reason recorded.
+
+## Closed
+
 ### 07.1 - `config set-routing`, surgical TOML updater, `[tools.<t>.headless]` schema, correct project-config path text
 
 - **Status:** `done` (2026-10-16) · **Short:** Routing config · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
@@ -72,17 +141,6 @@
   - continue locks fields and refuses verify→execute and a missing worktree;
   - `cleanup` refuses an unmerged branch without `--discard`.
 
-### 07.5 - Live capture with the real CLIs: session ids, Final Report, verdict, continue; flag table correction
-
-- **Status:** `delivered` (2026-10-18; claude; merged 2e76ee0 (claude subagent): live execute/continue/verify for kilo, claude, codex; fixtures; parser fixes (session ids, Final Report, verdict, usage E8); spec 5.7 corrected; 90 tests) · **Short:** Live CLI capture · **Size:** M · **Profile:** `deep-reasoning` · **Executor:** `self` (orchestrator: needs the real CLIs and auth) · **Depends on:** 07.4 · **Repo:** `ai-orchestration/`
-- **Focus files:** `scripts/orchestration_runs.py`, `scripts/fixtures/runs/{claude,kilo,codex}-*.jsonl` (new), `scripts/test_orchestration_runs.py`, `tasks/specs/agent-runs-from-ui.md` (§5.7 table)
-- **Goal:** In a scratch git repo with a one-step task, do per tool:
-  - one `execute`, one `--continue` and one `verify`;
-  - save the scrubbed streams as fixtures;
-  - finalize the per-tool session-id / Final Report / verdict parsers;
-  - correct §5.7 where the real flags differ.
-- **Verification:** The fixture tests pass, and a live re-run per tool shows the session captured and the continuation landing in the same session.
-
 ### 07.6 - UI backend: run and config endpoints
 
 - **Status:** `done` (2026-10-17) · **Short:** Run and config endpoints · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 07.4, 06.7 · **Repo:** `ai-orchestration-ui/`
@@ -113,43 +171,6 @@
 - **Goal:** Spec §7 "Config tab".
 - **Verification:** Live: edit routing and one profile in project scope; the `.ai-orchestration.local.toml` diff shows only those values.
 
-### 07.9 - VS Code: run handlers and run watcher
-
-- **Status:** `delivered` (2026-10-17; claude; vscode 0.2.6: run handlers mirror the web backend; live check by the owner pending) · **Short:** VS Code run handlers · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.7, 07.8, 06.9 · **Repo:** `vscode-ai-orchestration/`
-- **Focus files:** `src/views/dashboard-panel.ts`, `src/extension.ts`, `dist-webview/**`
-- **Goal:** Spec §8.
-- **Verification:**
-  - `npm run compile` is clean, and the handler-map test is green.
-  - Live in an Extension Development Host: launch and cancel a stub run from the webview.
-
-## Amendments after review 2 (2026-10-16)
-
-The spec now opens with §0 "Amendments after review 2" (R1–R14). These changes to the tasks follow from it, and the lane order is in `../06-control-plane-safety/plan.md`:
-
-- **07.1** also covers:
-  - the `{effort}` placeholder (R3);
-  - `--diff`/`--expect-hash` on `set-routing` and `set-profile` (spec 06 A10).
-
-  It was dispatched before the review; the delta follows in the same Kilo session.
-- **07.2** also covers:
-  - R1: a binding `plan_hash` in `preview`;
-  - R4: the allowed modes per state;
-  - R8: the task bundle hash, reusing 06.10's hash function, **so 07.2 depends on 06.10**;
-  - R10: the platform refusal;
-  - R13: secret references and redaction.
-- **07.3** also covers:
-  - R2: separate process identities;
-  - R9: log chunks with logical offsets;
-  - R11: Claude refuses to launch without a configured `allowed_tools`.
-- **07.4** also covers:
-  - R5: the verification modes, including the panel;
-  - R6: `run mark-delivered`;
-  - R7: the artifact invariants, adding to the tests a branch that advances, a reset, and `target_run: none` with HEAD drift;
-  - R12: cleanup over continuation chains.
-- **07.5** must prove a real test-and-commit run under the permission policy the owner chooses (R11).
-- **07.8** depends on **07.7** (shared `api.ts`, `types.ts`, `dist`).
-- **07.9** focus files add `src/cli-client.ts` and its tests.
-
 ### 07.10 - Core: run supervisor files blocking questions (R14, spec 08 Q8)
 
 - **Status:** `done` (2026-10-17) · **Short:** Runs file questions · **Size:** S · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 08.1 · **Repo:** `ai-orchestration/`
@@ -160,25 +181,6 @@ The spec now opens with §0 "Amendments after review 2" (R1–R14). These change
   - Record the ids in `run.json` `questions`.
   - A malformed block → recorded as `question_errors`, never silently dropped.
 - **Verification:** Tests with the stub agent emitting a valid block, a malformed block, and a block that names another task in `blocks` (forced to the run's task).
-
-## Decisions waiting
-
-| Key | Question | Blocks | Decider |
-| --- | --- | --- | --- |
-| R11 | **Decided 2026-10-17 (Q001 → A):** per-mode allow-list. `execute` and `verify` get git, the test runners and the file tools; `orchestrate` also gets the kilo-mcp tools. Implemented as built-in adapter defaults in 07.12. | — | owner |
-
-### 07.11 - Batch runs for microtasks
-
-- **Status:** `delivered` (2026-10-18; claude; merged; 103 run tests twice; batch verify is one run for the whole batch against the final commit) · **Short:** Microtask batch runs · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 10.4 · **Repo:** `ai-orchestration/`
-- **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
-- **Goal:** `../specs/timeline-gantt.md` §5 "Batch runs":
-  - `run start --batch IDS` takes microtasks of one target repo only (refused otherwise);
-  - one worktree;
-  - the prompt lists the microtasks, with one commit per microtask required;
-  - the supervisor maps commits to microtasks (by a `T###` prefix in the commit message);
-  - each microtask's state is set separately;
-  - `mark-delivered` and verify work per microtask or for the whole batch.
-- **Verification:** Tests with the stub agent: three microtasks → three commits → each `in progress` → `delivered`; a microtask without a commit stays `in progress`, with the reason recorded.
 
 ### 07.12 - Built-in per-mode Claude allow-list (Q001 decision A)
 

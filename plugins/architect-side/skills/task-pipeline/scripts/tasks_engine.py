@@ -3806,11 +3806,12 @@ def ship_initiative(
                     "before_hash": _file_sha256(f),
                 })
 
-        operations.append({
-            "action": "create",
-            "path": summary_path.relative_to(tasks_dir).as_posix(),
-            "before_hash": "",
-        })
+        if not (init_dir / "summary.md").is_file():
+            operations.append({
+                "action": "create",
+                "path": summary_path.relative_to(tasks_dir).as_posix(),
+                "before_hash": "",
+            })
 
         index_path = tasks_dir / "00-INDEX.md"
         if index_path.is_file():
@@ -3868,7 +3869,9 @@ def ship_initiative(
             f"## Follow-ups\n<follow-up tasks, unresolved questions or notes>\n"
         )
         init_summary = init_dir / "summary.md"
-        _atomic_write_text(init_summary, summary_text, encoding="utf-8")
+        # An existing summary is the author's: keep it (its links are rebased below)
+        if not init_summary.is_file():
+            _atomic_write_text(init_summary, summary_text, encoding="utf-8")
 
         for f in init_dir.rglob("*.md"):
             old_t = f.read_text(encoding="utf-8")

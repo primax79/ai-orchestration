@@ -8,15 +8,6 @@
 
 ## Tasks (One Task = One Commit)
 
-### 13.1 - P1-a: stop the no-op "Resolve" loop
-
-- **Status:** `done` (2026-10-18; claude; verified and merged; T012 active since the kilo-mcp server restart) · **Short:** Resolve loop fix · **Size:** S · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
-- **Goal:**
-  - each conflict carries `fixable: true|false`;
-  - the UI shows red and "Resolve…" only when the plan contains executable actions;
-  - an advice-only plan disables Apply;
-  - project scope does not repeat global findings.
-
 ### 13.2 - P1-b: severity model, cross-assistant grouping, persistent acknowledge
 
 - **Status:** `delivered` (2026-10-18; claude; merged; 52 env tests; live: 22 groups (3 error fixable duplicates, 15 warning, 4 info, 1 acknowledged = the orchestration pair via Precedence)) · **Short:** Severity and acknowledge · **Size:** M
@@ -30,11 +21,6 @@
 
 - **Status:** `delivered` (2026-10-18; claude; merged; 58 env tests; Q006-Q008 skills held as advice) · **Short:** Duplicate resolution · **Size:** M
 - **Goal:** Before advising, compare against cached plugin versions, normalized frontmatter and git history of the source repos. Duplicates that are only older or re-serialized become auto-resolvable (5 of the 11 on this machine).
-
-### 13.4 - P1-d: detect stale plugin copies
-
-- **Status:** `done` (2026-10-17; claude; merged into main) · **Short:** Stale plugin detection · **Size:** S/M
-- **Goal:** Report Claude plugin copies that are behind their source, with the commit distance and the unchanged version string.
 
 ### 13.5 - P2-a + P2-d: history-aware classification of legacy installs (`outdated-legacy` + "Update")
 
@@ -52,3 +38,19 @@
 
 - **Status:** `delivered` (2026-10-18) · **Short:** Stray files and MCP · **Size:** M
 - **Goal:** Report §P3.
+
+## Closed
+
+### 13.1 - P1-a: stop the no-op "Resolve" loop
+
+- **Status:** `done` (2026-10-18; claude; verified and merged; T012 active since the kilo-mcp server restart) · **Short:** Resolve loop fix · **Size:** S · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
+- **Goal:**
+  - each conflict carries `fixable: true|false`;
+  - the UI shows red and "Resolve…" only when the plan contains executable actions;
+  - an advice-only plan disables Apply;
+  - project scope does not repeat global findings.
+
+### 13.4 - P1-d: detect stale plugin copies
+
+- **Status:** `done` (2026-10-17; claude; merged into main) · **Short:** Stale plugin detection · **Size:** S/M
+- **Goal:** Report Claude plugin copies that are behind their source, with the commit distance and the unchanged version string.

@@ -1,6 +1,6 @@
 # 15 - Use-Case Driven Specification, Task Definition & Product Validation
 
-> **Derived from spec:** [`../specs/use-case-management-and-ai-validation.md`](../specs/use-case-management-and-ai-validation.md)  
+> **Derived from spec:** [`../specs/use-case-management-and-ai-validation.md`](../../specs/use-case-management-and-ai-validation.md)  
 > **Status:** `done` (2026-10-17)  
 > **Owner Requirement:** Integrate Use Cases as the foundational driver for task specifications, acceptance criteria, and autonomous AI product validation campaigns.
 
@@ -20,6 +20,8 @@ Provide end-to-end support for **Use Cases (`tasks/use-cases/UC###-<slug>.md`)**
 ---
 
 ## Tasks (One Task = One Commit)
+
+## Closed
 
 ### 15.1 - Engine & Data Model (`tasks/use-cases/`, Parser, Validator, `- use-cases:` Task Header)
 - **Status:** `done` (2026-10-17)
