@@ -303,6 +303,10 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks set-waiting-on <id> <qualifier> [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
                     "description": "Set waiting-on qualifier for a task (rewrites header on T###, updates/creates bullet on NN.T).",
                 },
+                "set-executor": {
+                    "usage": "ai-orch tasks set-executor <id> <executor> [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
+                    "description": "Set executor for a task (accepts kilo, claude, workspace:<ws-slug>, session:<name>).",
+                },
                 "next": {
                     "usage": "ai-orch tasks next [--workspace <path-or-slug>] [--all-projects] [--kind <kind>...] [--label <label>...] [--limit <N>] [--tasks-dir <dir>] [--json]",
                     "description": "Show ready queue / next actionable tasks from the dependency graph (across a project or workspace).",

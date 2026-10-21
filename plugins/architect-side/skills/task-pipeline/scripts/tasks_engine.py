@@ -285,6 +285,14 @@ EXPANDED_BULLET_RE = re.compile(r"^\s*[-*]\s+\*\*Expanded:\*\*\s*\[([^\]]+)\]\((
 # Node ids in `Depends on` / `blocks` (spec subtasks S7, §3 "any node id"): `NN`, `NN.T[.n...]`,
 # `T###[.n...]`, including plan task ids with one lowercase letter suffix `NN.T<letter>` (e.g. `06.1b`, `12.2a`).
 DEP_ID_RE = re.compile(r"\b((?:T\d{3,}|\d{2,})(?:\.\d+[a-z]?)*)(?![\w.]|\.\w)")
+DEP_ID_PATTERN = r"(?:T\d{3,}|\d{2,})(?:\.\d+[a-z]?)*"
+DEP_ITEM_RE = re.compile(
+    r"\s*`?("
+    r"workspace:[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)?/" + DEP_ID_PATTERN +
+    r"|[a-zA-Z0-9_-]+/" + DEP_ID_PATTERN +
+    r"|\b" + DEP_ID_PATTERN + r"(?![\w.]|\.\w)"
+    r")`?(\s*\([^()]*\))?"
+)
 NODE_TYPES: set[str] = {"initiative", "container", "leaf", "microtask"}
 INHERITED_FIELDS: tuple[str, ...] = ("executor", "priority", "profile", "repo", "paths")
 
@@ -376,6 +384,69 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,47}$")
 QUALIFIED_REF_ID_RE = re.compile(
     r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.(?:T)?\d+[a-z]?)*|Q\d{3,}|UC\d{3,}|N\d{3,})$"
 )
+
+
+def is_external_task_ref(ref: str | None) -> bool:
+    if not ref or not isinstance(ref, str):
+        return False
+    r = ref.strip().strip("`").strip()
+    return r.startswith("workspace:") or ("/" in r and not r.startswith("./") and not r.startswith("../"))
+
+
+def parse_external_task_ref(ref: str) -> dict[str, str] | None:
+    """Parse cross-workspace or cross-project reference:
+    - workspace:<ws-slug>/<task-id>
+    - workspace:<ws-slug>/<project-slug>/<task-id>
+    - <project-slug>/<task-id>
+    """
+    if not is_external_task_ref(ref):
+        return None
+    r = ref.strip().strip("`").strip()
+    workspace = None
+    project = None
+
+    if r.startswith("workspace:"):
+        rest = r[len("workspace:"):].strip()
+        parts = rest.split("/")
+        if len(parts) == 2:
+            workspace, task_id = parts[0], parts[1]
+        elif len(parts) == 3:
+            workspace, project, task_id = parts[0], parts[1], parts[2]
+        else:
+            return None
+    elif ":" in r:
+        ws_part, rest = r.split(":", 1)
+        workspace = ws_part
+        parts = rest.split("/")
+        if len(parts) == 1:
+            task_id = parts[0]
+        elif len(parts) == 2:
+            project, task_id = parts[0], parts[1]
+        else:
+            return None
+    else:
+        parts = r.split("/")
+        if len(parts) == 2:
+            project, task_id = parts[0], parts[1]
+        elif len(parts) == 3:
+            workspace, project, task_id = parts[0], parts[1], parts[2]
+        else:
+            return None
+
+    slug_pat = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+    if workspace is not None and not slug_pat.match(workspace):
+        return None
+    if project is not None and not slug_pat.match(project):
+        return None
+    if not task_id or not (re.match(r"^(?:T\d{3,}|\d{2,})(?:\.\d+[a-z]?)*$", task_id) or TASK_ID_RE.match(task_id)):
+        return None
+
+    res: dict[str, str] = {"id": task_id}
+    if workspace:
+        res["workspace"] = workspace
+    if project:
+        res["project"] = project
+    return res
 
 
 def parse_qualified_ref(text: str) -> dict[str, str]:
@@ -599,6 +670,150 @@ def resolve_coordinates(
 
         results.append(entry)
     return results
+
+
+def resolve_external_task_ref(ref: str, current_tasks_dir: pathlib.Path | str) -> dict[str, Any]:
+    """Resolve cross-workspace or cross-project reference read-only against target task trees.
+
+    Resolves:
+      - <project-slug>/<task-id>: looks up <workspace_root>/<project-slug>/tasks/ (or via orchestration_registry)
+      - workspace:<ws-slug>/<task-id> or workspace:<ws-slug>/<project-slug>/<task-id>: looks up workspace path in
+        orchestration_registry (or sibling directory <current_workspace_parent>/<ws-slug> / ~/works/<ws-slug>)
+        and inspects its tasks/ tree to read live state, canonical_state, title, and short_title.
+    Returns:
+      {"ref": ref, "resolved": True/False, "state": ..., "canonical_state": ..., "is_done": ..., "title": ..., "short_title": ...}
+      (gracefully returning "resolved": False without crashing when the external workspace is not registered or not present on disk).
+    """
+    ref_clean = ref.strip().strip("`").strip() if isinstance(ref, str) else ""
+    unresolved: dict[str, Any] = {
+        "ref": ref_clean,
+        "resolved": False,
+        "state": None,
+        "canonical_state": None,
+        "is_done": False,
+        "title": None,
+        "short_title": None,
+    }
+    if not ref_clean:
+        return unresolved
+
+    try:
+        parsed = parse_external_task_ref(ref_clean)
+        if not parsed:
+            return unresolved
+
+        current_tasks_dir = pathlib.Path(current_tasks_dir).resolve()
+        task_id = parsed["id"]
+        ws_slug = parsed.get("workspace")
+        proj_slug = parsed.get("project")
+
+        target_tasks_dir: pathlib.Path | None = None
+
+        if ws_slug is not None:
+            # 1. Try orchestration_registry
+            ws_root: pathlib.Path | None = None
+            if orchestration_registry is not None and hasattr(orchestration_registry, "find_workspace_for_arg"):
+                try:
+                    ws_info = orchestration_registry.find_workspace_for_arg(ws_slug)
+                    if ws_info and "canonical_path" in ws_info:
+                        p = pathlib.Path(ws_info["canonical_path"]).resolve()
+                        if p.is_dir():
+                            ws_root = p
+                except Exception:
+                    pass
+
+            # 2. Try sibling directory or common parent
+            if ws_root is None:
+                curr_root = current_tasks_dir.parent if current_tasks_dir.name == "tasks" else current_tasks_dir
+                for parent_dir in (curr_root.parent, curr_root.parent.parent):
+                    cand = (parent_dir / ws_slug).resolve()
+                    if cand.is_dir():
+                        ws_root = cand
+                        break
+
+            # 3. Try ~/works/<ws-slug>
+            if ws_root is None:
+                cand = (pathlib.Path.home() / "works" / ws_slug).resolve()
+                if cand.is_dir():
+                    ws_root = cand
+
+            # 4. Try cwd sibling
+            if ws_root is None:
+                cand = (pathlib.Path.cwd().parent / ws_slug).resolve()
+                if cand.is_dir():
+                    ws_root = cand
+
+            if ws_root is None or not ws_root.is_dir():
+                return unresolved
+
+            if proj_slug is not None:
+                for sub in (ws_root / proj_slug / "tasks", ws_root / "projects" / proj_slug / "tasks"):
+                    if sub.is_dir():
+                        target_tasks_dir = sub.resolve()
+                        break
+                if target_tasks_dir is None and (ws_root / "tasks").is_dir():
+                    target_tasks_dir = (ws_root / "tasks").resolve()
+            else:
+                if (ws_root / "tasks").is_dir():
+                    target_tasks_dir = (ws_root / "tasks").resolve()
+                elif (ws_root / "tasks").parent.is_dir():
+                    target_tasks_dir = (ws_root / "tasks").resolve()
+
+        else:
+            # Cross-project reference within current workspace (<project-slug>/<task-id>)
+            if proj_slug is not None:
+                target_tasks_dir = resolve_project_tasks_dir(proj_slug, current_tasks_dir)
+                if target_tasks_dir is None:
+                    curr_root = current_tasks_dir.parent if current_tasks_dir.name == "tasks" else current_tasks_dir
+                    for cand in (
+                        curr_root / proj_slug / "tasks",
+                        curr_root / "projects" / proj_slug / "tasks",
+                        curr_root.parent / proj_slug / "tasks",
+                        curr_root.parent / "projects" / proj_slug / "tasks",
+                    ):
+                        if cand.is_dir():
+                            target_tasks_dir = cand.resolve()
+                            break
+
+        if target_tasks_dir is None or not target_tasks_dir.is_dir():
+            return unresolved
+
+        p_tree = discover_task_tree(target_tasks_dir)
+        target_node = p_tree.get(task_id)
+        if target_node is not None:
+            cstate = target_node.canonical_state
+            is_done = bool(target_node.in_done or cstate in ("done", "done with a caveat"))
+            st = target_node.short_title or derive_short_title(target_node.title)
+            return {
+                "ref": ref_clean,
+                "resolved": True,
+                "state": target_node.state,
+                "canonical_state": cstate,
+                "is_done": is_done,
+                "title": target_node.title,
+                "short_title": st,
+            }
+
+        p_emergent = discover_emergent_tasks(target_tasks_dir)
+        target_em = next((t for t in p_emergent if t.get("id") == task_id), None)
+        if target_em is not None:
+            cstate = target_em.get("canonical_state") or normalize_state(target_em.get("state", "open"))
+            is_done = bool(target_em.get("in_done", False) or cstate in ("done", "done with a caveat"))
+            st = target_em.get("short_title") or derive_short_title(target_em.get("title", ""))
+            return {
+                "ref": ref_clean,
+                "resolved": True,
+                "state": target_em.get("state", "open"),
+                "canonical_state": cstate,
+                "is_done": is_done,
+                "title": target_em.get("title", ""),
+                "short_title": st,
+            }
+
+        return unresolved
+
+    except Exception:
+        return unresolved
 
 
 # ---------------------------------------------------------------------------
@@ -1467,7 +1682,7 @@ def _parse_depends_on_items(raw_val: str) -> tuple[list[tuple[str, str]], str]:
     val = raw_val.strip()
     items: list[tuple[str, str]] = []
     pos = 0
-    item_re = re.compile(r"\s*`?" + DEP_ID_RE.pattern + r"`?(\s*\([^()]*\))?")
+    item_re = DEP_ITEM_RE
     # Multi-letter suffixed legacy ids (`12.2ab`) are kept verbatim in the list but are not ids.
     legacy_re = re.compile(r"\s*`?(\d{2,}(?:\.\d+)+[a-z]{2,})`?(\s*\([^()]*\))?(?![\w.])")
     sep_re = re.compile(r"\s*,")
@@ -1712,7 +1927,7 @@ class TaskNode:
     waiting_on: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        res = {
             "kind": self.kind or ("initiative_task" if "." in self.id and not self.id.startswith("T") else ("emergent" if self.id.startswith("T") else "initiative")),
             "id": self.id,
             "title": self.title,
@@ -1756,6 +1971,17 @@ class TaskNode:
             "category": self.category,
             "slug": self.slug,
         }
+        if self.executor.startswith("workspace:"):
+            res["external_executor"] = {
+                "kind": "workspace",
+                "workspace": self.executor[len("workspace:"):].strip().split("/")[0],
+            }
+        elif self.executor.startswith("session:"):
+            res["external_executor"] = {
+                "kind": "session",
+                "session": self.executor[len("session:"):].strip(),
+            }
+        return res
 
 
 def rewrite_block_in_file(
@@ -1767,6 +1993,7 @@ def rewrite_block_in_file(
     new_priority: str | None = None,
     new_size: str | None = None,
     new_kind: str | None = None,
+    new_executor: str | None = None,
     new_decider: str | None = None,
     new_short: str | None = None,
     expect_task_hash: str | None = None,
@@ -1828,6 +2055,7 @@ def rewrite_block_in_file(
     priority_updated = False
     size_updated = False
     kind_updated = False
+    executor_updated = False
     labels_updated = False
     deps_updated = False
     decider_updated = False
@@ -1893,6 +2121,13 @@ def rewrite_block_in_file(
                         seg.raw_value = new_kind
                         seg.clean_value = new_kind
                         kind_updated = True
+
+            if new_executor is not None:
+                for seg in segments:
+                    if seg.key in ("executor",):
+                        seg.raw_value = new_executor
+                        seg.clean_value = new_executor
+                        executor_updated = True
 
             if new_short is not None:
                 for seg in segments:
@@ -1991,6 +2226,12 @@ def rewrite_block_in_file(
             segments.insert(insert_idx, new_seg)
             insert_idx += 1
             kind_updated = True
+
+        if new_executor is not None and not executor_updated:
+            new_seg = BulletSegment(raw_key="Executor", key="executor", raw_value=new_executor, clean_value=new_executor)
+            segments.insert(insert_idx, new_seg)
+            insert_idx += 1
+            executor_updated = True
 
         if new_deps is not None and not deps_updated:
             deps_val = update_depends_on_field("", new_deps)
@@ -4606,6 +4847,8 @@ def set_deps(
 
         # Unknown ID check
         for d in new_deps:
+            if is_external_task_ref(d):
+                continue
             if d not in tree:
                 return {"ok": False, "error": f"Unknown task id '{d}' in dependencies."}
 
@@ -4795,6 +5038,110 @@ def set_kind(
                 "ok": True,
                 "task_id": node_id,
                 "kind": kind,
+                "task_hash": new_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+
+
+def set_executor(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    executor: str,
+    dry_run: bool = False,
+    expect_task_hash: str | None = None,
+) -> dict[str, Any]:
+    executor = executor.strip()
+    if not executor or executor == "-":
+        return {"ok": False, "error": "Executor cannot be empty or '-'."}
+
+    with task_write_lock(tasks_dir):
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "error": f"Task '{node_id}' not found."}
+        node = tree[node_id]
+
+        if expect_task_hash and expect_task_hash.strip().lower() != node.task_hash.strip().lower():
+            return {
+                "ok": False,
+                "error": f"Task hash mismatch: expected {expect_task_hash}, actual {node.task_hash}",
+            }
+
+        file_path = pathlib.Path(node.file_path)
+        if node.block_text is not None:
+            _, new_block_hash, diff_str = rewrite_block_in_file(
+                file_path,
+                node_id,
+                new_executor=executor,
+                expect_task_hash=expect_task_hash,
+                dry_run=dry_run,
+                return_diff=True,
+            )
+            if not dry_run:
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "executor",
+                        "value": executor,
+                        "executor": executor,
+                    },
+                    subject=node_id,
+                )
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "executor": executor,
+                "task_hash": new_block_hash,
+                "dry_run": dry_run,
+                "diff": diff_str,
+            }
+        else:
+            old_text = file_path.read_text(encoding="utf-8")
+            if re.search(r"^-\s+executor:\s*.*$", old_text, flags=re.MULTILINE):
+                new_text = re.sub(r"^-\s+executor:\s*.*$", f"- executor: {executor}", old_text, flags=re.MULTILINE)
+            else:
+                for anchor in (
+                    r"^-\s+state:\s*.*$",
+                    r"^-\s+next-up:\s*.*$",
+                    r"^-\s+priority-reason:\s*.*$",
+                    r"^-\s+priority:\s*.*$",
+                ):
+                    m = re.search(anchor, old_text, flags=re.MULTILINE)
+                    if m:
+                        ins = m.end()
+                        new_text = old_text[:ins] + f"\n- executor: {executor}" + old_text[ins:]
+                        break
+                else:
+                    new_text = old_text.replace("\n\n", f"\n- executor: {executor}\n\n", 1)
+
+            diff_lines = list(difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=str(file_path),
+                tofile=str(file_path) if not dry_run else f"{file_path} (dry-run)",
+            ))
+            diff_str = "".join(diff_lines)
+            if not dry_run:
+                _atomic_write_text(file_path, new_text, encoding="utf-8")
+                new_hash = _file_sha256(file_path)
+                _emit_event(
+                    tasks_dir,
+                    "task.updated",
+                    {
+                        "field": "executor",
+                        "value": executor,
+                        "executor": executor,
+                    },
+                    subject=node_id,
+                )
+            else:
+                new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+
+            return {
+                "ok": True,
+                "task_id": node_id,
+                "executor": executor,
                 "task_hash": new_hash,
                 "dry_run": dry_run,
                 "diff": diff_str,
@@ -6486,6 +6833,10 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                         errors.append(f"{rel}: leaf node {nid} missing required 'Status'.")
 
         for dep in node.own_depends_on:
+            if is_external_task_ref(dep):
+                if not parse_external_task_ref(dep):
+                    errors.append(f"{rel}: invalid external dependency reference {dep!r}.")
+                continue
             if dep not in tree:
                 warnings.append(f"{rel}: node {nid} depends on unknown id {dep!r}.")
             elif tree[dep].is_container and not tree[dep].children:
@@ -6576,16 +6927,10 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 clean_item = re.sub(r"\s*\(.*?\)", "", item).strip().strip("`").strip()
                 if not clean_item or clean_item == "-":
                     continue
-                if ":" in clean_item or "/" in clean_item:
-                    try:
-                        q = parse_qualified_ref(clean_item)
-                        if q.get("project") or q.get("workspace"):
-                            errors.append(
-                                f"{node.rel_path}: cross-project dependencies are v2; use coordinates: from the workspace tree."
-                            )
-                            break
-                    except ValueError:
-                        pass
+                if is_external_task_ref(clean_item) and not parse_external_task_ref(clean_item):
+                    errors.append(
+                        f"{node.rel_path}: invalid external dependency reference {clean_item!r}."
+                    )
 
         cstate = node.canonical_state
         if node.in_done and cstate not in TERMINAL_STATES:
@@ -6860,23 +7205,17 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                         if not task_exists:
                             warnings.append(f"{rel}: target task '{c_id}' in project '{c_proj}' does not exist.")
 
-            # cross-project depends-on validation (Requirement 5)
+            # cross-project depends-on validation
             raw_deps = task["headers"].get("depends-on")
             if raw_deps and raw_deps != "-":
                 for item in str(raw_deps).split(","):
                     clean_item = re.sub(r"\s*\(.*?\)", "", item).strip().strip("`").strip()
                     if not clean_item or clean_item == "-":
                         continue
-                    if ":" in clean_item or "/" in clean_item:
-                        try:
-                            q = parse_qualified_ref(clean_item)
-                            if q.get("project") or q.get("workspace"):
-                                errors.append(
-                                    f"{rel}: cross-project dependencies are v2; use coordinates: from the workspace tree."
-                                )
-                                break
-                        except ValueError:
-                            pass
+                    if is_external_task_ref(clean_item) and not parse_external_task_ref(clean_item):
+                        errors.append(
+                            f"{rel}: invalid external dependency reference {clean_item!r}."
+                        )
 
             # conditions validation
             if "conditions" in task.get("headers", {}):
@@ -6941,6 +7280,10 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             continue
         deps_for_tid = adj.setdefault(tid, [])
         for dep in task["depends_on"]:
+            if is_external_task_ref(dep):
+                if not parse_external_task_ref(dep):
+                    errors.append(f"{task['rel_path']}: invalid depends-on reference {dep!r}.")
+                continue
             if not TASK_ID_RE.match(dep):
                 errors.append(f"{task['rel_path']}: invalid depends-on reference {dep!r}.")
             elif dep == tid:
@@ -9385,10 +9728,21 @@ def compute_tasks_graph(
     blocked_by_map: dict[str, list[str]] = {}
     for n in all_leaf_nodes:
         if n.id in open_set_all:
-            blocked = [
-                d for d in n.expanded_depends_on
-                if d in tree and tree[d].canonical_state not in TERMINAL_STATES
-            ]
+            blocked = []
+            for d in n.expanded_depends_on:
+                if is_external_task_ref(d):
+                    ext = resolve_external_task_ref(d, tasks_dir)
+                    if (not ext.get("resolved")) or (
+                        ext.get("canonical_state") not in (
+                            "done",
+                            "done with a caveat",
+                            "verified",
+                            "delivered",
+                        )
+                    ):
+                        blocked.append(d)
+                elif d in tree and tree[d].canonical_state not in TERMINAL_STATES:
+                    blocked.append(d)
             blocked_by_map[n.id] = sorted(blocked, key=_natural_sort_key)
         else:
             blocked_by_map[n.id] = []
@@ -9406,7 +9760,11 @@ def compute_tasks_graph(
         if not deps:
             c = 0
         else:
-            c = 1 + max(_col_for(d) for d in deps if d in open_set_all)
+            open_deps = [d for d in deps if d in open_set_all]
+            if not open_deps:
+                c = 1
+            else:
+                c = 1 + max(_col_for(d) for d in open_deps)
         visiting.remove(nid)
         col_memo[nid] = c
         return c
@@ -9700,6 +10058,25 @@ def _build_tasks_list(
             if td["is_container"]:
                 item["state"] = td["state"]
                 item["canonical_state"] = td["canonical_state"]
+        deps = item.get("depends_on") or []
+        if isinstance(deps, str):
+            deps, _ = parse_depends_on_field(deps)
+        ext_deps = [d for d in deps if is_external_task_ref(d)]
+        if ext_deps:
+            item["external_dependencies"] = [
+                resolve_external_task_ref(d, tasks_dir) for d in ext_deps
+            ]
+        exec_val = str(item.get("executor") or "").strip()
+        if exec_val.startswith("workspace:"):
+            item["external_executor"] = {
+                "kind": "workspace",
+                "workspace": exec_val[len("workspace:"):].strip().split("/")[0],
+            }
+        elif exec_val.startswith("session:"):
+            item["external_executor"] = {
+                "kind": "session",
+                "session": exec_val[len("session:"):].strip(),
+            }
         all_tasks.append(item)
 
     def _child_item(td: dict[str, Any], category: str, next_up: str, fallback_handoff: str) -> dict[str, Any]:
@@ -9714,6 +10091,23 @@ def _build_tasks_list(
             "handoff": td.get("handoff") or fallback_handoff,
             "waiting_on": td.get("waiting_on") or node.waiting_on,
         })
+        deps = list(node.depends_on)
+        ext_deps = [d for d in deps if is_external_task_ref(d)]
+        if ext_deps:
+            item["external_dependencies"] = [
+                resolve_external_task_ref(d, tasks_dir) for d in ext_deps
+            ]
+        exec_val = str(node.executor or item.get("executor") or "").strip()
+        if exec_val.startswith("workspace:"):
+            item["external_executor"] = {
+                "kind": "workspace",
+                "workspace": exec_val[len("workspace:"):].strip().split("/")[0],
+            }
+        elif exec_val.startswith("session:"):
+            item["external_executor"] = {
+                "kind": "session",
+                "session": exec_val[len("session:"):].strip(),
+            }
         return item
 
     for init in initiatives:
@@ -10734,6 +11128,37 @@ def cmd_set_waiting_on(args: argparse.Namespace) -> int:
     return 0 if res.get("ok") else 1
 
 
+def cmd_set_executor(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    expect_task_hash = getattr(args, "expect_task_hash", None)
+    is_json = getattr(args, "json", False)
+
+    res = set_executor(
+        tasks_dir=tasks_dir,
+        node_id=args.id,
+        executor=args.executor,
+        dry_run=dry_run,
+        expect_task_hash=expect_task_hash,
+    )
+    if res.get("task_hash") and "plan_hash" not in res:
+        res["plan_hash"] = res["task_hash"]
+    args._last_result = res
+    if is_json:
+        print(json.dumps(res, indent=2))
+    else:
+        if res.get("ok"):
+            if res.get("dry_run"):
+                print(f"[ok] dry-run: executor for {args.id} would become: {res.get('executor')}")
+                if res.get("diff"):
+                    print(res.get("diff"), end="")
+            else:
+                print(f"[ok] updated executor for {args.id}: {res.get('executor')}")
+        else:
+            print(f"[FAIL] {res.get('error', 'set-executor failed')}", file=sys.stderr)
+    return 0 if res.get("ok") else 1
+
+
 def cmd_show(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     task_id = args.task_id
@@ -10755,6 +11180,28 @@ def cmd_show(args: argparse.Namespace) -> int:
             print(f"[FAIL] {err_msg}", file=sys.stderr)
         return 1
 
+    deps = task_data.get("depends_on") or []
+    if isinstance(deps, str):
+        deps, _ = parse_depends_on_field(deps)
+    ext_deps = [d for d in deps if is_external_task_ref(d)]
+    if ext_deps:
+        task_data["external_dependencies"] = [
+            resolve_external_task_ref(d, tasks_dir) for d in ext_deps
+        ]
+
+    executor_val = str(task_data.get("executor") or "").strip()
+    if executor_val.startswith("workspace:"):
+        ws_slug = executor_val[len("workspace:"):].strip().split("/")[0]
+        task_data["external_executor"] = {
+            "kind": "workspace",
+            "workspace": ws_slug,
+        }
+    elif executor_val.startswith("session:"):
+        task_data["external_executor"] = {
+            "kind": "session",
+            "session": executor_val[len("session:"):].strip(),
+        }
+
     args._last_result = {"ok": True, "task": task_data}
     if getattr(args, "json", False):
         print(json.dumps({"ok": True, "task": task_data}, indent=2))
@@ -10763,6 +11210,13 @@ def cmd_show(args: argparse.Namespace) -> int:
         print(f"State: {task_data.get('state')} (canonical: {task_data.get('canonical_state')})")
         if task_data.get("waiting_on"):
             print(f"Waiting on: {task_data.get('waiting_on')}")
+        if task_data.get("external_executor"):
+            print(f"External executor: {task_data['external_executor']}")
+        if task_data.get("external_dependencies"):
+            print("External dependencies:")
+            for ed in task_data["external_dependencies"]:
+                st = f" ({ed.get('short_title')})" if ed.get("short_title") else ""
+                print(f"  - {ed['ref']}: state={ed.get('state')}{st} (resolved={ed['resolved']})")
     return 0
 
 
@@ -17529,6 +17983,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_swo.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_swo.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_swo.set_defaults(func=cmd_set_waiting_on)
+
+    # tasks set-executor
+    p_se = sub.add_parser("set-executor", help="Set executor for a task")
+    p_se.add_argument("id", help="Task ID (e.g. T001, 01.1)")
+    p_se.add_argument("executor", help="Executor (e.g. kilo, claude, workspace:<ws-slug>, session:<name>)")
+    p_se.add_argument("--dry-run", action="store_true", help="Print diff without writing")
+    p_se.add_argument("--expect-task-hash", "--expect-plan-hash", "--expect-hash", dest="expect_task_hash", default=None, help="Expected task block/file/plan hash")
+    p_se.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_se.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_se.set_defaults(func=cmd_set_executor)
 
     # tasks labels
     p_lbls = sub.add_parser("labels", help="List all labels in use with their counts")
