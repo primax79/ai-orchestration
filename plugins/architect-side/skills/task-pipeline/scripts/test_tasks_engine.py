@@ -3072,6 +3072,8 @@ def test_inbox_resolve_updates_task_in_done(tmp_path: pathlib.Path) -> None:
         "--title", "Archived Feature",
         "--priority", "P2",
         "--priority-reason", "Historical task",
+        "--step", "Implement archived feature",
+        "--verification", "pytest tests/test_archived.py",
         "--tasks-dir", str(tasks_dir),
         "--json",
     )
@@ -8938,6 +8940,8 @@ def test_standalone_execution_no_orchestration_events_warning(tmp_path: pathlib.
         "--priority", "P1",
         "--priority-reason", "Essential",
         "--goal", "Test standalone operation.",
+        "--step", "Standalone step",
+        "--verification", "python -c 'assert True'",
         "--json",
     )
     assert res_new.returncode == 0, f"new failed: {res_new.stdout} {res_new.stderr}"
@@ -9544,3 +9548,245 @@ def test_t041_non_blocking_questions_with_notes(tmp_path: pathlib.Path) -> None:
     assert ok_show is True
     assert res_show["question"]["blocks"] == "-"
     assert "Zstd level 3" in res_show["question"]["notes"]
+
+
+def test_tasks_new_with_step_and_verification(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # 1. Create task with repeatable --step and --verification
+    res = run_cli(
+        "new",
+        "--category", "features",
+        "--title", "Auth service redesign",
+        "--priority", "P1",
+        "--priority-reason", "Refactoring",
+        "--goal", "Redesign the auth service module.",
+        "--step", "First step",
+        "--step", "Second step",
+        "--step", "- [x] Third already done step",
+        "--verification", "pytest -q tests/test_auth.py",
+        "--verification", "- check_auth_endpoint",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    t_id = data["id"]
+    t_file = tasks_dir / data["rel_path"]
+    content = t_file.read_text(encoding="utf-8")
+
+    assert "- [ ] First step" in content
+    assert "- [ ] Second step" in content
+    assert "- [x] Third already done step" in content
+    assert "- pytest -q tests/test_auth.py" in content
+    assert "- check_auth_endpoint" in content
+    assert "- [ ] Step 1" not in content
+    assert "- Command or check that proves completion" not in content
+
+    # validate passes with zero errors and zero warnings
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+    val_data = json.loads(res_val.stdout)
+    assert val_data["errors"] == []
+    assert val_data["warnings"] == []
+
+    # 2. Default task without --step or --verification creates default placeholders
+    res_default = run_cli(
+        "new",
+        "--category", "bugfix",
+        "--title", "Fix null pointer",
+        "--priority", "P2",
+        "--priority-reason", "Sentry alert",
+        "--goal", "Fix null pointer in parser.",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_default.returncode == 0
+    t2_file = tasks_dir / json.loads(res_default.stdout)["rel_path"]
+    t2_content = t2_file.read_text(encoding="utf-8")
+    assert "- [ ] Step 1" in t2_content
+    assert "- Command or check that proves completion" in t2_content
+
+    # In open state, validate generates warnings but zero errors
+    res_val2 = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val2.returncode == 0
+    val_data2 = json.loads(res_val2.stdout)
+    assert len(val_data2["errors"]) == 0
+    assert any("placeholder in ## Steps" in w for w in val_data2["warnings"])
+    assert any("placeholder in ## Verification" in w for w in val_data2["warnings"])
+
+
+def test_tasks_step_checklist_commands(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # Create task with default placeholder
+    res_new = run_cli(
+        "new",
+        "--category", "features",
+        "--title", "Step checklist management",
+        "--priority", "P2",
+        "--priority-reason", "Feature request N017",
+        "--goal", "Add step checklist subcommands.",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_new.returncode == 0
+    task_id = json.loads(res_new.stdout)["id"]
+
+    # 1. step list shows the initial Step 1 placeholder
+    res_list1 = run_cli("step", "list", task_id, "--tasks-dir", str(tasks_dir), "--json")
+    assert res_list1.returncode == 0
+    data_list1 = json.loads(res_list1.stdout)
+    assert data_list1["ok"] is True
+    assert data_list1["count"] == 1
+    assert data_list1["steps"] == [{"index": 1, "checked": False, "text": "Step 1"}]
+
+    # 2. step add replaces the solitary placeholder
+    res_add1 = run_cli("step", "add", task_id, "Implement core logic", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_add1.returncode == 0
+    data_add1 = json.loads(res_add1.stdout)
+    assert data_add1["ok"] is True
+    assert data_add1["step"] == {"index": 1, "checked": False, "text": "Implement core logic"}
+    assert len(data_add1["steps"]) == 1
+    assert data_add1["steps"][0]["text"] == "Implement core logic"
+
+    # 3. step add appends subsequent steps
+    res_add2 = run_cli("step", "add", task_id, "Write unit tests", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_add2.returncode == 0
+    data_add2 = json.loads(res_add2.stdout)
+    assert data_add2["ok"] is True
+    assert data_add2["step"] == {"index": 2, "checked": False, "text": "Write unit tests"}
+    assert len(data_add2["steps"]) == 2
+
+    # Verify via step list human-readable output
+    res_list_human = run_cli("step", "list", task_id, "--tasks-dir", str(tasks_dir))
+    assert res_list_human.returncode == 0
+    assert "1. [ ] Implement core logic" in res_list_human.stdout
+    assert "2. [ ] Write unit tests" in res_list_human.stdout
+
+    # 4. step check by index
+    res_chk1 = run_cli("step", "check", task_id, "1", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_chk1.returncode == 0
+    data_chk1 = json.loads(res_chk1.stdout)
+    assert data_chk1["ok"] is True
+    assert data_chk1["step"]["checked"] is True
+    assert data_chk1["steps"][0]["checked"] is True
+    assert data_chk1["steps"][1]["checked"] is False
+
+    # 5. step check by case-insensitive substring
+    res_chk2 = run_cli("step", "check", task_id, "unit tests", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_chk2.returncode == 0
+    data_chk2 = json.loads(res_chk2.stdout)
+    assert data_chk2["ok"] is True
+    assert data_chk2["step"]["checked"] is True
+    assert data_chk2["steps"][1]["checked"] is True
+
+    # 6. step uncheck by index
+    res_unchk1 = run_cli("step", "uncheck", task_id, "1", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_unchk1.returncode == 0
+    data_unchk1 = json.loads(res_unchk1.stdout)
+    assert data_unchk1["ok"] is True
+    assert data_unchk1["step"]["checked"] is False
+    assert data_unchk1["steps"][0]["checked"] is False
+    assert data_unchk1["steps"][1]["checked"] is True
+
+    # 7. step uncheck by substring
+    res_unchk2 = run_cli("step", "uncheck", task_id, "write", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_unchk2.returncode == 0
+    data_unchk2 = json.loads(res_unchk2.stdout)
+    assert data_unchk2["ok"] is True
+    assert data_unchk2["step"]["checked"] is False
+    assert data_unchk2["steps"][1]["checked"] is False
+
+    # 8. Error cases: index out of bounds
+    res_oob = run_cli("step", "check", task_id, "99", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_oob.returncode != 0
+    assert "out of range" in json.loads(res_oob.stdout)["error"]
+
+    # 9. Error cases: substring not found
+    res_notfound = run_cli("step", "check", task_id, "nonexistent-step", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_notfound.returncode != 0
+    assert "No step matching" in json.loads(res_notfound.stdout)["error"]
+
+    # 10. Error cases: ambiguous substring
+    run_cli("step", "add", task_id, "Write integration tests", "--tasks-dir", str(tasks_dir))
+    res_ambig = run_cli("step", "check", task_id, "tests", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_ambig.returncode != 0
+    assert "Multiple steps match" in json.loads(res_ambig.stdout)["error"]
+
+    # 11. Hash checking
+    current_hash = data_unchk2["task_hash"]
+    res_hash_ok = run_cli("step", "add", task_id, "Step with correct hash", "--expect-task-hash", current_hash, "--tasks-dir", str(tasks_dir), "--json")
+    # Since we added "Write integration tests" in between, current_hash is stale
+    assert res_hash_ok.returncode != 0
+    assert "stale-task-hash" in json.loads(res_hash_ok.stdout)["error"]
+
+    # 12. is_mutating_command registration check
+    parser = te.build_parser()
+    args_list = parser.parse_args(["step", "list", task_id])
+    assert te.is_mutating_command(args_list) is False
+    args_add = parser.parse_args(["step", "add", task_id, "New step"])
+    assert te.is_mutating_command(args_add) is True
+    args_check = parser.parse_args(["step", "check", task_id, "1"])
+    assert te.is_mutating_command(args_check) is True
+    args_uncheck = parser.parse_args(["step", "uncheck", task_id, "1"])
+    assert te.is_mutating_command(args_uncheck) is True
+
+
+def test_tasks_validate_flagging_placeholders(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    # 1. Create a task with placeholders
+    res_new = run_cli(
+        "new",
+        "--category", "features",
+        "--title", "Placeholder validation test",
+        "--priority", "P2",
+        "--priority-reason", "Testing validate",
+        "--goal", "Test that validate flags placeholders.",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_new.returncode == 0
+    task_id = json.loads(res_new.stdout)["id"]
+    t_file = tasks_dir / json.loads(res_new.stdout)["rel_path"]
+
+    # In open state: warnings only, zero errors
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+    assert any("placeholder in ## Steps" in w for w in warnings)
+    assert any("placeholder in ## Verification" in w for w in warnings)
+
+    # 2. Transition to in progress: placeholders now trigger errors!
+    res_tr = run_cli("transition", task_id, "in progress", "--actor", "kilo", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tr.returncode == 0
+
+    errors_ip, warnings_ip, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert len(errors_ip) >= 2
+    assert any("in state 'in progress' contains unedited placeholder in ## Steps" in e for e in errors_ip)
+    assert any("in state 'in progress' contains unedited placeholder in ## Verification" in e for e in errors_ip)
+
+    # 3. Test other placeholders like TODO: Step 1 and TODO: Command or check
+    t_content = t_file.read_text(encoding="utf-8")
+    t_content_todo = t_content.replace("- [ ] Step 1", "- [ ] TODO: Step 1").replace(
+        "- Command or check that proves completion", "- [ ] TODO: Command or check"
+    )
+    t_file.write_text(t_content_todo, encoding="utf-8")
+
+    errors_todo, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("contains unedited placeholder in ## Steps" in e for e in errors_todo)
+    assert any("contains unedited placeholder in ## Verification" in e for e in errors_todo)
+
+    # 4. Once edited with real steps and verifications, validate passes cleanly
+    t_content_clean = t_content.replace("- [ ] Step 1", "- [ ] Implement the feature cleanly").replace(
+        "- Command or check that proves completion", "- pytest tests/test_feature.py"
+    )
+    t_file.write_text(t_content_clean, encoding="utf-8")
+
+    errors_clean, warnings_clean, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors_clean == []
+    assert not any("placeholder" in w for w in warnings_clean)
