@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: 16.5 failed validation on its promised in-process mode; error contract deviates from spec 3b
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: bin/ai-orch, ../ai-orchestration-ui/backend/broker/
 - handoff: Read tasks/server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md, do the open steps, run the Verification, update the task and the registry.
 - short: Broker validation follow-ups
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 

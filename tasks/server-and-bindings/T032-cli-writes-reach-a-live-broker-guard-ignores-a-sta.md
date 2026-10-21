@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Once a broker runs, every session without the broker MCP tools (evolution-assurance, gcube-audit) cannot write tasks at all
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: scripts/orchestration_broker_lock.py, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, bin/ai-orch
 - handoff: Read tasks/server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md, do the open steps, run the Verification, update the task and the registry.
 - short: CLI writes through broker
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 

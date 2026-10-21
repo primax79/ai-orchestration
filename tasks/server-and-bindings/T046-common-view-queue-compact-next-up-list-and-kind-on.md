@@ -6,7 +6,7 @@
 - priority: P3
 - priority-reason: Usability: 41 cards in the All-projects queue
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: ../ai-orchestration-ui/frontend/src
 - handoff: Read tasks/server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md, do the open steps, run the Verification, update the task and the registry.
 - short: Compact common queue
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 

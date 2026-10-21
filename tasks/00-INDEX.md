@@ -73,12 +73,12 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T028 (Unattended turn hardening) | P1 | [Unattended turns: enforce reduced capability on every tool and harden the untrusted-data delimiters](server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md) | delivered | kilo | - |
 | T029 (Letter-suffix plan ids) | P2 | [Plan task ids with a letter suffix drop out of the index](server-and-bindings/T029-plan-task-ids-with-a-letter-suffix-drop-out-of-the.md) | delivered | kilo | - |
 | T030 (Conditional done) | P2 | [conditions: header for tasks done with open questions that may change the result](server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md) | delivered | kilo | - |
-| T032 (CLI writes through broker) | P1 | [CLI writes reach a live broker; guard ignores a stale manifest](server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md) | open | kilo | - |
+| T032 (CLI writes through broker) | P1 | [CLI writes reach a live broker; guard ignores a stale manifest](server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md) | delivered | kilo | - |
 | T033 (Test config isolation) | P1 | [Test sessions isolated from the user's global config](server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md) | delivered | self | - |
 | T040 (Workspace next) | P2 | [Workspace-wide next-up and open tasks across projects](server-and-bindings/T040-workspace-wide-next-up-and-open-tasks-across-proje.md) | open | kilo | - |
 | T043 (Cross-workspace task links) | P2 | [Cross-workspace executor and depends-on links with live state](server-and-bindings/T043-cross-workspace-executor-and-depends-on-links-with.md) | open | kilo | - |
-| T045 (Broker validation follow-ups) | P1 | [Broker follow-ups from validation: mcp --local, stable error codes, project field](server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md) | in progress | kilo | - |
-| T046 (Compact common queue) | P3 | [Common view Queue: compact next-up list and kind on rows](server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md) | in progress | kilo | - |
+| T045 (Broker validation follow-ups) | P1 | [Broker follow-ups from validation: mcp --local, stable error codes, project field](server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md) | delivered | kilo | - |
+| T046 (Compact common queue) | P3 | [Common view Queue: compact next-up list and kind on rows](server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md) | delivered | kilo | - |
 | T047 (Architect verification without users) | P2 | [Architect verification of delivered items that have no user session](server-and-bindings/T047-architect-verification-of-delivered-items-that-hav.md) | open | ai-coding-tools | - |
 
 ### micro
