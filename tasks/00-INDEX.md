@@ -76,6 +76,8 @@ Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner sessi
 | T031 (Conditional done follow-ups) | P3 | [Conditional done: question age in the index; conditions: header position](server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md) | delivered | kilo | - |
 | T032 (CLI writes through broker) | P1 | [CLI writes reach a live broker; guard ignores a stale manifest](server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md) | open | kilo | - |
 | T033 (Test config isolation) | P1 | [Test sessions isolated from the user's global config](server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md) | delivered | self | - |
+| T034 (Built-in feedback channel) | P1 | [Tooling feedback built into the product: ai-orch feedback, skill rule, upgrade AGENTS.md](server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md) | open | kilo | - |
+| T040 (Workspace next) | P2 | [Workspace-wide next-up and open tasks across projects](server-and-bindings/T040-workspace-wide-next-up-and-open-tasks-across-proje.md) | open | kilo | - |
 
 ### micro
 
@@ -95,6 +97,33 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 | T017 (Remove project skill copies) | P2 | [Apply Q002: remove the untracked project-scope skill copies in ai-orchestration](env-doctor/T017-apply-q002-remove-the-untracked-project-scope-skil.md) | delivered | claude | - |
 | T018 (Orchestration skill precedence) | P2 | [Q003 follow-up: precedence when orchestration-workflow and the generic orchestration skill coexist](env-doctor/T018-q003-follow-up-precedence-when-orchestration-workf.md) | delivered | claude | - |
 | T019 (Duplicate skills alignment) | P3 | [Apply Q005: per-skill diff of the gcube-jenkins, gcube-security-audit and frontend-design copies](env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md) | delivered | claude | - |
+
+### tasks
+
+Tasks in `tasks`. Owner session: unassigned ([README](tasks/README.md)).
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+
+### tooling
+
+Tasks in `tooling`. Owner session: unassigned ([README](tooling/README.md)).
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T038 (Stable entry point) | P1 | [Stable ai-orch entry point; clean adoption by upgrade](tooling/T038-stable-ai-orch-entry-point-clean-adoption-by-upgra.md) | open | kilo | - |
+
+### engine
+
+Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | open | kilo | - |
+| T036 (Steps by command) | P1 | [Steps and verification authored by command; placeholders rejected](engine/T036-steps-and-verification-authored-by-command-placeho.md) | open | kilo | - |
+| T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | open | kilo | - |
+| T041 (Question workflow gaps) | P1 | [Questions: unapplied answers surfaced, moved-to-tracker status, Notes section](engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | open | kilo | - |
+| T039 (Adoption helpers) | P2 | [Adopting existing trees: legacy plans/, next-id preview, discover before registering](engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
