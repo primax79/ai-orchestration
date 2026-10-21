@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Top change of gcube-audit: every parallel merge conflicts in 00-INDEX.md, with duplicate rows and once a lost answer
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -26,3 +26,7 @@ Merging two branches that each added tasks never needs a hand-resolved 00-INDEX.
 ## Verification
 
 - [ ] Verify task implementation.
+
+## Log (newest first)
+
+- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T037 (Conflict-free index across parallel worktrees) to Kilo
