@@ -4965,6 +4965,79 @@ def inspect_environment(
 
     # Inspect version-free launcher and broker MCP registrations across Claude, Kilo, and Codex
     broker_mcp_report = inspect_broker_mcp_registrations(home=h, workspace=ws, scope="global")
+
+    # 1. Launcher finding (missing -> info, outdated -> warning, foreign -> error, up-to-date -> none)
+    l_info = broker_mcp_report["launcher"]
+    l_state = l_info["state"]
+    l_path = l_info["path"]
+    if l_state in ("missing", "outdated", "foreign"):
+        l_kind = f"{l_state}-launcher"
+        l_gkey = f"{l_kind}:ai-orch"
+        l_entries = [{
+            "name": "ai-orch",
+            "path": l_path,
+            "origin": "launcher",
+            "scope": "global",
+            "enabled": l_state != "missing",
+            "state": l_state,
+        }]
+        l_acked, _ = is_finding_acknowledged(l_kind, ["ai-orch"], l_entries, acks, group_key=l_gkey)
+        l_plan_items = [dict(it) for it in l_info.get("plan", [])]
+        l_fix_cmd = "ai-orch install-launcher"
+        l_apply_cmd = f"ai-orch install-launcher --apply --expect-hash {l_info.get('plan_hash', '<hash>')}"
+        for it in l_plan_items:
+            it["command"] = l_fix_cmd
+            it["fix"] = l_fix_cmd
+            it["fix_command"] = l_fix_cmd
+            it["apply_command"] = l_apply_cmd
+
+        if l_state == "missing":
+            l_sev = "info"
+            l_fixable = True
+            l_msg = (
+                f"Version-free launcher is missing at {l_path}. "
+                f"Fix: `{l_fix_cmd}` (preview, then `{l_apply_cmd}`)."
+            )
+        elif l_state == "outdated":
+            l_sev = "info" if l_acked else "warning"
+            l_fixable = True
+            l_msg = (
+                f"Version-free launcher at {l_path} is outdated. "
+                f"Fix: `{l_fix_cmd}` (preview, then `{l_apply_cmd}`)."
+            )
+        else:
+            l_sev = "info" if l_acked else "error"
+            l_fixable = False
+            l_msg = (
+                f"Launcher path {l_path} is occupied by an unrelated file; "
+                f"`{l_fix_cmd}` refuses to overwrite it."
+            )
+
+        finding_groups.append({
+            "id": l_gkey,
+            "group_key": l_gkey,
+            "group": "Launcher",
+            "title": "Version-free launcher",
+            "kind": l_kind,
+            "names": ["ai-orch"],
+            "path": l_path,
+            "config_path": l_path,
+            "state": l_state,
+            "severity": l_sev,
+            "acknowledged": l_acked,
+            "message": l_msg,
+            "fix": l_fix_cmd,
+            "fix_command": l_fix_cmd,
+            "locations": [{"assistant": "launcher", "scope": "global"}],
+            "entries": l_entries,
+            "fixable": l_fixable,
+            "actionable": l_fixable,
+            "actions": l_plan_items if l_fixable else [],
+            "advice": [l_msg],
+            "count": 1,
+        })
+
+    # 2. Per-client broker MCP registration findings (missing -> warning, stale -> error, registered -> none)
     for asst, b_info in broker_mcp_report["clients"].items():
         if asst in environments and "global" in environments[asst]:
             environments[asst]["global"]["broker_mcp"] = b_info
@@ -4973,39 +5046,62 @@ def inspect_environment(
             b_kind = "missing-broker-mcp" if b_state == "missing" else "stale-broker-mcp"
             b_gkey = f"{b_kind}:{asst}"
             b_sname = b_info["server_name"]
+            b_cfg_path = b_info["config_path"]
             b_entries = [{
-                "name": b_sname,
-                "path": b_info["config_path"],
+                "name": asst,
+                "server": b_sname,
+                "path": b_cfg_path,
                 "origin": "mcp",
                 "scope": "global",
                 "enabled": True,
                 "state": b_state,
             }]
-            b_acked, _ = is_finding_acknowledged(b_kind, [b_sname], b_entries, acks, group_key=b_gkey)
-            b_plan_item = b_info["plan_item"]
+            b_acked, _ = is_finding_acknowledged(b_kind, [asst], b_entries, acks, group_key=b_gkey)
+            b_plan_item = dict(b_info["plan_item"])
             b_fixable = b_plan_item["action"] != "refuse"
+            b_fix_cmd = f"ai-orch env register-broker --assistants {asst}"
+            b_apply_cmd = f"ai-orch env register-broker --assistants {asst} --apply --expect-hash <hash>"
+            b_plan_item["fix"] = b_fix_cmd
+            b_plan_item["fix_command"] = b_fix_cmd
+            b_plan_item["apply_command"] = b_apply_cmd
+
             if b_state == "missing":
-                b_advice = [
-                    f"Broker MCP shim is not registered in {asst} (global). "
-                    f"Register `{b_info['expected_command']} mcp` via `ai-orch env register-mcp ai-orchestration --assistants {asst} --apply --expect-hash <hash>`."
-                ]
+                b_raw_sev = "warning"
+                b_msg = (
+                    f"Broker MCP registration for {asst} is missing in {b_cfg_path}. "
+                    f"Fix: `{b_fix_cmd}` (preview, then `{b_apply_cmd}`)."
+                )
             else:
-                b_advice = [
-                    f"Broker MCP registration '{b_sname}' in {asst} (global) is stale ({'; '.join(b_info['reasons'])}). "
-                    f"Repair to `{b_info['expected_command']} mcp` via `ai-orch env register-mcp ai-orchestration --assistants {asst} --apply --expect-hash <hash>`."
-                ]
+                b_raw_sev = "error"
+                b_msg = (
+                    f"Broker MCP registration '{b_sname}' for {asst} in {b_cfg_path} is stale ({'; '.join(b_info['reasons'])}). "
+                    f"Fix: `{b_fix_cmd}` (preview, then `{b_apply_cmd}`)."
+                )
+
             finding_groups.append({
+                "id": b_gkey,
                 "group_key": b_gkey,
+                "group": "Broker MCP registration",
+                "title": "Broker MCP registration",
                 "kind": b_kind,
-                "names": [b_sname],
-                "severity": "info" if b_acked else "warning",
+                "client": asst,
+                "assistant": asst,
+                "config_path": b_cfg_path,
+                "path": b_cfg_path,
+                "state": b_state,
+                "names": [asst],
+                "server_name": b_sname,
+                "severity": "info" if b_acked else b_raw_sev,
                 "acknowledged": b_acked,
+                "message": b_msg,
+                "fix": b_fix_cmd,
+                "fix_command": b_fix_cmd,
                 "locations": [{"assistant": asst, "scope": "global"}],
                 "entries": b_entries,
                 "fixable": b_fixable,
                 "actionable": b_fixable,
                 "actions": [b_plan_item] if b_fixable else [],
-                "advice": b_advice,
+                "advice": [b_msg],
                 "count": 1,
             })
 

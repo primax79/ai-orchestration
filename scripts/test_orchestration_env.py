@@ -3521,7 +3521,7 @@ def test_16_6_doctor_detects_missing_stale_and_correct_registrations_all_clients
     fake_home.mkdir()
     expected_launcher = str(fake_home / ".local" / "bin" / "ai-orch")
 
-    # 1. Missing registrations across all three clients
+    # 1. Missing registrations across all three clients -> warning finding per client + info finding for missing launcher
     st_missing = run_env(["status"], fake_home)
     bm_missing = st_missing["broker_mcp"]["clients"]
     for asst in ("claude", "kilo", "codex"):
@@ -3529,11 +3529,25 @@ def test_16_6_doctor_detects_missing_stale_and_correct_registrations_all_clients
         assert st_missing["environments"][asst]["global"]["broker_mcp"]["state"] == "missing"
         fg = next(g for g in st_missing["finding_groups"] if g["group_key"] == f"missing-broker-mcp:{asst}")
         assert fg["kind"] == "missing-broker-mcp"
+        assert fg["group"] == "Broker MCP registration"
+        assert fg["severity"] == "warning"
         assert fg["fixable"] is True
         assert fg["actionable"] is True
+        assert asst in fg["message"]
+        assert bm_missing[asst]["config_path"] in fg["message"]
+        assert f"ai-orch env register-broker --assistants {asst}" in fg["fix_command"]
+        assert f"ai-orch env register-broker --assistants {asst}" in fg["message"]
         assert len(fg["actions"]) == 1
+        assert fg["actions"][0]["fix_command"] == f"ai-orch env register-broker --assistants {asst}"
 
-    # 2. Stale registrations (versioned plugin-cache paths & format pitfalls) on fixture files
+    assert st_missing["summary"]["warning"] == 3
+    l_fg_missing = next(g for g in st_missing["finding_groups"] if g["group_key"] == "missing-launcher:ai-orch")
+    assert l_fg_missing["severity"] == "info"
+    assert l_fg_missing["fix_command"] == "ai-orch install-launcher"
+    assert "ai-orch install-launcher" in l_fg_missing["message"]
+    assert st_missing["summary"]["info"] == 1
+
+    # 2. Stale registrations (versioned plugin-cache paths & format pitfalls) on fixture files -> error finding per client
     versioned_bin = str(
         fake_home / ".claude" / "plugins" / "cache" / "ai-orchestration" / "architect-side" / "0.3.0" / "bin" / "ai-orch"
     )
@@ -3582,20 +3596,31 @@ def test_16_6_doctor_detects_missing_stale_and_correct_registrations_all_clients
         assert any("versioned path" in r for r in bm_stale[asst]["reasons"])
         fg = next(g for g in st_stale["finding_groups"] if g["group_key"] == f"stale-broker-mcp:{asst}")
         assert fg["kind"] == "stale-broker-mcp"
+        assert fg["group"] == "Broker MCP registration"
+        assert fg["severity"] == "error"
         assert fg["fixable"] is True
+        assert asst in fg["message"]
+        assert bm_stale[asst]["config_path"] in fg["message"]
+        assert f"ai-orch env register-broker --assistants {asst}" in fg["fix_command"]
+        assert f"ai-orch env register-broker --assistants {asst}" in fg["message"]
         assert fg["actions"][0]["action"] == "replace"
+        assert fg["actions"][0]["fix_command"] == f"ai-orch env register-broker --assistants {asst}"
 
+    assert st_stale["summary"]["error"] == 3
     assert any("null fields" in r for r in bm_stale["claude"]["reasons"])
     assert any("default_tools_approval_mode" in r for r in bm_stale["codex"]["reasons"])
 
-    # 3. Preview and apply repair plan -> transitions all three clients to 'registered'
-    plan_preview = run_env(["register-mcp", "ai-orchestration", "--assistants", "all"], fake_home)
+    # 3. Preview and apply repair plan + install launcher -> zero findings across all clients and launcher
+    l_prev = run_env(["install-launcher"], fake_home)
+    run_env(["install-launcher", "--apply", "--expect-hash", l_prev["expect_hash"]], fake_home)
+
+    plan_preview = run_env(["register-broker", "--assistants", "all"], fake_home)
     assert plan_preview["ok"] is True
     assert plan_preview["dry_run"] is True
     assert plan_preview["applied"] == 0
 
     plan_apply = run_env(
-        ["register-mcp", "ai-orchestration", "--assistants", "all", "--apply", "--expect-hash", plan_preview["expect_hash"]],
+        ["register-broker", "--assistants", "all", "--apply", "--expect-hash", plan_preview["expect_hash"]],
         fake_home,
     )
     assert plan_apply["ok"] is True
@@ -3608,10 +3633,68 @@ def test_16_6_doctor_detects_missing_stale_and_correct_registrations_all_clients
         assert bm_ok[asst]["state"] == "registered"
         assert bm_ok[asst]["reasons"] == []
         assert bm_ok[asst]["expected_command"] == expected_launcher
-        assert not any(
-            g["group_key"].endswith(f":{asst}") and "broker-mcp" in g["kind"]
-            for g in st_ok["finding_groups"]
-        )
+    assert st_ok["launcher"]["state"] == "up-to-date"
+    assert st_ok["finding_groups"] == []
+    assert st_ok["summary"]["total_groups"] == 0
+    assert st_ok["summary"]["error"] == 0
+    assert st_ok["summary"]["warning"] == 0
+    assert st_ok["summary"]["info"] == 0
+
+
+def test_16_6_launcher_findings_and_acknowledge_mechanism(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    launcher_path = fake_home / ".local" / "bin" / "ai-orch"
+
+    # Register all 3 clients first so we isolate launcher findings
+    reg_prev = run_env(["register-broker", "--assistants", "all"], fake_home)
+    run_env(["register-broker", "--assistants", "all", "--apply", "--expect-hash", reg_prev["expect_hash"]], fake_home)
+
+    # 1. Missing launcher -> severity info, fix is `ai-orch install-launcher`
+    st1 = run_env(["status"], fake_home)
+    assert len(st1["finding_groups"]) == 1
+    lf1 = st1["finding_groups"][0]
+    assert lf1["group_key"] == "missing-launcher:ai-orch"
+    assert lf1["kind"] == "missing-launcher"
+    assert lf1["severity"] == "info"
+    assert lf1["fix_command"] == "ai-orch install-launcher"
+    assert str(launcher_path) in lf1["message"]
+
+    # 2. Outdated launcher -> severity warning, fix is `ai-orch install-launcher`
+    launcher_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher_path.write_text("#!/usr/bin/env python3\n# ai-orchestration-launcher-v1\n# outdated\n", encoding="utf-8")
+    launcher_path.chmod(0o755)
+    st2 = run_env(["status"], fake_home)
+    assert len(st2["finding_groups"]) == 1
+    lf2 = st2["finding_groups"][0]
+    assert lf2["group_key"] == "outdated-launcher:ai-orch"
+    assert lf2["kind"] == "outdated-launcher"
+    assert lf2["severity"] == "warning"
+    assert lf2["fix_command"] == "ai-orch install-launcher"
+    assert st2["summary"]["warning"] == 1
+
+    # 3. Acknowledge outdated launcher via 13.2 ack -> severity drops to info and acknowledged == True
+    ack_res = run_env(["ack", "outdated-launcher:ai-orch", "--note", "defer launcher update"], fake_home)
+    assert ack_res["ok"] is True
+    st_acked = run_env(["status"], fake_home)
+    lf_acked = st_acked["finding_groups"][0]
+    assert lf_acked["acknowledged"] is True
+    assert lf_acked["severity"] == "info"
+    assert st_acked["summary"]["acknowledged"] == 1
+    assert st_acked["summary"]["warning"] == 0
+
+    # Unack restores warning
+    unack_res = run_env(["unack", "outdated-launcher:ai-orch"], fake_home)
+    assert unack_res["ok"] is True
+    st_unacked = run_env(["status"], fake_home)
+    assert st_unacked["finding_groups"][0]["severity"] == "warning"
+
+    # 4. Install up-to-date launcher -> zero findings
+    l_prev = run_env(["install-launcher"], fake_home)
+    run_env(["install-launcher", "--apply", "--expect-hash", l_prev["expect_hash"]], fake_home)
+    st3 = run_env(["status"], fake_home)
+    assert st3["finding_groups"] == []
+    assert st3["summary"]["total_groups"] == 0
 
 
 def test_16_6_registration_plan_content_per_client_format(tmp_path: pathlib.Path) -> None:
