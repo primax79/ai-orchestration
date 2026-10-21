@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Work done in another workspace is tracked by hand; sessions value it above custom states
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -26,3 +26,7 @@
 ## Verification
 
 - [ ] Verify task implementation.
+
+## Log (newest first)
+
+- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T043 (Cross-workspace executor and depends-on links with live target status) to Kilo
