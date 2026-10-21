@@ -665,8 +665,7 @@ def _get_orchestration_events() -> Any | None:
                 sys.path.insert(0, str(scripts_dir))
         import orchestration_events
         return orchestration_events
-    except Exception as e:
-        print(f"[warning] could not import orchestration_events: {e}", file=sys.stderr)
+    except Exception:
         return None
 
 
@@ -875,10 +874,6 @@ def _emit_event(
 ) -> dict[str, Any] | None:
     orch_events = _get_orchestration_events()
     if orch_events is None:
-        print(
-            f"[warning] could not import orchestration_events; {event_type} event omitted",
-            file=sys.stderr,
-        )
         return None
 
     workspace = _resolve_workspace_from_tasks_dir(tasks_dir)
@@ -9674,12 +9669,13 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
     return 0
 
 
-def upgrade_tasks_tree(tasks_dir: pathlib.Path) -> dict[str, Any]:
+def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False) -> dict[str, Any]:
     """Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention:
       1. Updates tasks/AGENTS.md with canonical task-pipeline rules and skill names.
-      2. Ensures standard directories exist (_inbox/to-analyze, _inbox/analyzed).
-      3. Regenerates/updates 00-INDEX.md with standard tables (Initiatives, Specs, Next up, Tasks by category, Decisions waiting, Done).
-      4. Validates the upgraded tree.
+      2. Ensures tasks/.gitignore exists and ignores .ai-orch.lock.
+      3. Ensures standard directories exist (_inbox/to-analyze, _inbox/analyzed).
+      4. Regenerates/updates 00-INDEX.md with standard tables (Initiatives, Specs, Next up, Tasks by category, Decisions waiting, Done).
+      5. Validates the upgraded tree.
     """
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     if not is_platform_supported():
@@ -9688,6 +9684,9 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path) -> dict[str, Any]:
             "error": "unsupported-platform",
             "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
             "upgraded_files": [],
+            "created": [],
+            "updated": [],
+            "dry_run": dry_run,
             "emergent_count": 0,
             "initiative_count": 0,
             "errors": ["unsupported-platform: Mutating commands are unsupported on Windows"],
@@ -9697,32 +9696,65 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path) -> dict[str, Any]:
     try:
         with task_write_lock(tasks_dir):
             upgraded_files: list[str] = []
+            created: list[str] = []
+            updated: list[str] = []
 
             # 1. Update tasks/AGENTS.md
             agents_md = tasks_dir / "AGENTS.md"
             existing_agents = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
             if existing_agents.strip() != CANONICAL_TASKS_AGENTS_MD.strip():
-                _atomic_write_text(agents_md, CANONICAL_TASKS_AGENTS_MD, encoding="utf-8")
+                if not agents_md.is_file():
+                    created.append(str(agents_md))
+                else:
+                    updated.append(str(agents_md))
+                if not dry_run:
+                    _atomic_write_text(agents_md, CANONICAL_TASKS_AGENTS_MD, encoding="utf-8")
                 upgraded_files.append(str(agents_md))
 
-            # 2. Ensure standard directories
-            (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
-            (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
+            # 2. Ensure tasks/.gitignore exists and contains .ai-orch.lock
+            gitignore_path = tasks_dir / ".gitignore"
+            if not gitignore_path.is_file():
+                created.append(str(gitignore_path))
+                upgraded_files.append(str(gitignore_path))
+                if not dry_run:
+                    _atomic_write_text(gitignore_path, ".ai-orch.lock\n", encoding="utf-8")
+            else:
+                existing_gi = gitignore_path.read_text(encoding="utf-8")
+                gi_lines = [line.strip() for line in existing_gi.splitlines()]
+                if ".ai-orch.lock" not in gi_lines:
+                    updated.append(str(gitignore_path))
+                    upgraded_files.append(str(gitignore_path))
+                    new_gi = existing_gi + ("\n" if existing_gi and not existing_gi.endswith("\n") else "") + ".ai-orch.lock\n"
+                    if not dry_run:
+                        _atomic_write_text(gitignore_path, new_gi, encoding="utf-8")
 
-            # 3. Re-sync 00-INDEX.md
+            # 3. Ensure standard directories
+            if not dry_run:
+                (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
+                (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
+
+            # 4. Re-sync 00-INDEX.md
             idx_path = tasks_dir / "00-INDEX.md"
             existing_idx = idx_path.read_text(encoding="utf-8") if idx_path.is_file() else ""
             rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
             if existing_idx.strip() != rendered_idx.strip():
-                _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
+                if not idx_path.is_file():
+                    created.append(str(idx_path))
+                else:
+                    updated.append(str(idx_path))
+                if not dry_run:
+                    _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
                 upgraded_files.append(str(idx_path))
 
-            # 4. Validate
+            # 5. Validate
             errors, warnings, emergent, initiatives = validate_tasks_tree(tasks_dir)
 
             return {
                 "ok": len(errors) == 0,
                 "upgraded_files": upgraded_files,
+                "created": created,
+                "updated": updated,
+                "dry_run": dry_run,
                 "emergent_count": len(emergent),
                 "initiative_count": len(initiatives),
                 "errors": errors,
@@ -9734,6 +9766,9 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path) -> dict[str, Any]:
             "error": "lock-timeout",
             "message": str(e),
             "upgraded_files": [],
+            "created": [],
+            "updated": [],
+            "dry_run": dry_run,
             "emergent_count": 0,
             "initiative_count": 0,
             "errors": [f"lock-timeout: {e}"],
@@ -9743,12 +9778,14 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path) -> dict[str, Any]:
 
 def cmd_upgrade(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
-    res = upgrade_tasks_tree(tasks_dir)
+    dry_run = getattr(args, "dry_run", False)
+    res = upgrade_tasks_tree(tasks_dir, dry_run=dry_run)
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
+        prefix = "[dry-run] " if dry_run else ""
         if res["upgraded_files"]:
-            print(f"[ok] Upgraded {len(res['upgraded_files'])} file(s) in {tasks_dir}:")
+            print(f"[ok] {prefix}Upgraded {len(res['upgraded_files'])} file(s) in {tasks_dir}:")
             for f in res["upgraded_files"]:
                 print(f"  - {f}")
         else:
@@ -14509,6 +14546,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_upg = sub.add_parser("upgrade", help="Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention")
     p_upg.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_upg.add_argument("--dry-run", action="store_true", default=False, help="Preview changes without writing to disk")
     p_upg.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_upg.set_defaults(func=cmd_upgrade)
 

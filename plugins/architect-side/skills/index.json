@@ -49,6 +49,7 @@
         "scripts/fixtures/real-plans/07-plan.md",
         "scripts/fixtures/real-plans/11-plan.md",
         "scripts/tasks_engine.py",
+        "scripts/test_feedback.py",
         "scripts/test_tasks_engine.py"
       ]
     },
