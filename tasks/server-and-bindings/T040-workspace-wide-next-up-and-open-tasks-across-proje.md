@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Most-used command for a multi-repo workspace; today one grep per tasks tree
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -26,3 +26,7 @@
 ## Verification
 
 - [ ] Verify task implementation.
+
+## Log (newest first)
+
+- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T040 (Workspace-wide next-up and open tasks across projects in one call) to Kilo
