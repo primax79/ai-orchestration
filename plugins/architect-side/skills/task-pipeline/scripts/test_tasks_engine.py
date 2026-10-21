@@ -9326,3 +9326,221 @@ def test_transition_to_flag_and_positional(tmp_path: pathlib.Path) -> None:
     res_conflict = run_cli("transition", "T001", "verified", "--to", "bounced", "--tasks-dir", str(tasks_dir))
     assert res_conflict.returncode == 2
     assert "Conflicting target states" in res_conflict.stderr
+
+
+def test_t041_unapplied_answers_surfaced_and_applied_lifecycle(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    task_file = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(task_file, task_id="T001", state="in progress")
+
+    # 1. Ask question Q001 blocking T001
+    ok_ask, res_ask = te.ask_question(
+        tasks_dir,
+        question="Which authentication scheme should we use?",
+        context="We need to choose between JWT and Session tokens.",
+        options=[("A", "JWT", "Stateless"), ("B", "Session", "Stateful")],
+        blocks="T001",
+        short="Auth scheme",
+    )
+    assert ok_ask is True
+    qid = res_ask["id"]
+
+    # T001 is waiting on Q001
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["T001"].state == "waiting"
+
+    # 2. Answer question
+    ok_ans, res_ans = te.answer_question(tasks_dir, qid, choice="A", text="Chose JWT")
+    assert ok_ans is True
+
+    # Question file now has applied: no
+    q_file = pathlib.Path(res_ask["file_path"])
+    assert q_file.is_file()
+    assert "- applied: no" in q_file.read_text(encoding="utf-8")
+
+    # Move question to questions/answered/ to test discovery in subfolder
+    ans_dir = tasks_dir / "questions" / "answered"
+    ans_dir.mkdir(parents=True, exist_ok=True)
+    ans_file = ans_dir / q_file.name
+    shutil.move(str(q_file), str(ans_file))
+    assert ans_file.is_file()
+    assert not q_file.exists()
+
+    # 3. questions list --status unapplied surfaces Q001
+    ok_list, res_list = te.list_questions(tasks_dir, status="unapplied")
+    assert ok_list is True
+    assert len(res_list["questions"]) == 1
+    assert res_list["questions"][0]["id"] == qid
+    assert res_list["questions"][0]["applied"] is False
+
+    # Default questions list includes unapplied_answers
+    ok_list_all, res_list_all = te.list_questions(tasks_dir, status="all")
+    assert ok_list_all is True
+    assert len(res_list_all["unapplied_answers"]) == 1
+    assert res_list_all["unapplied_answers"][0]["id"] == qid
+
+    # CLI questions list output includes notice
+    res_cli_list = run_cli("questions", "list", "--tasks-dir", str(tasks_dir))
+    assert res_cli_list.returncode == 0
+    assert "[NOTICE]" in res_cli_list.stdout
+    assert "waiting to be applied" in res_cli_list.stdout
+    assert qid in res_cli_list.stdout
+
+    # validate_tasks_tree emits warning for unapplied answered question
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+    assert any("has not been applied (run 'ai-orch questions apply Q001" in w for w in warnings)
+
+    # 4. Apply question
+    res_apply = run_cli("questions", "apply", qid, "--note", "Implemented in PR #42", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_apply.returncode == 0
+    data_apply = json.loads(res_apply.stdout)
+    assert data_apply["ok"] is True
+    assert data_apply["status"] == "applied"
+
+    # Header in file is now applied: yes
+    assert "- applied: yes" in ans_file.read_text(encoding="utf-8")
+
+    # questions list --status unapplied is now empty
+    ok_list_post, res_list_post = te.list_questions(tasks_dir, status="unapplied")
+    assert ok_list_post is True
+    assert len(res_list_post["questions"]) == 0
+
+    # validate_tasks_tree has no warning for Q001
+    errors_post, warnings_post, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors_post == []
+    assert not any(qid in w for w in warnings_post)
+
+
+def test_t041_questions_move_to_tracker(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    task_file = tasks_dir / "features" / "T010-feature.md"
+    _write_sample_task(task_file, task_id="T010", state="in progress")
+
+    # Ask question Q001 blocking T010
+    ok_ask, res_ask = te.ask_question(
+        tasks_dir,
+        question="Should we support external OAuth providers?",
+        context="OAuth integration requires coordination with central identity.",
+        options=[("A", "Yes", "Add OAuth"), ("B", "No", "Local auth only")],
+        blocks="T010",
+        short="OAuth support",
+    )
+    assert ok_ask is True
+    qid = res_ask["id"]
+
+    # Verify T010 is waiting
+    tree = te.discover_task_tree(tasks_dir)
+    assert tree["T010"].state == "waiting"
+
+    # Move question to external tracker via CLI
+    tracker_url = "https://tracker.example/issue/42"
+    res_move = run_cli(
+        "questions",
+        "move",
+        qid,
+        "--to",
+        tracker_url,
+        "--reason",
+        "Handed off to enterprise security team",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--json",
+    )
+    assert res_move.returncode == 0
+    data_move = json.loads(res_move.stdout)
+    assert data_move["ok"] is True
+    assert data_move["status"] == "moved"
+    assert data_move["moved_to"] == tracker_url
+    assert "T010" in data_move["unblocked_tasks"]
+
+    # Question file moved to questions/answered/
+    moved_path = pathlib.Path(data_move["file_path"])
+    assert moved_path.is_file()
+    assert "questions/answered" in moved_path.as_posix()
+    assert not pathlib.Path(res_ask["file_path"]).exists()
+
+    moved_text = moved_path.read_text(encoding="utf-8")
+    assert "- status: moved" in moved_text
+    assert f"- moved-to: {tracker_url}" in moved_text
+    assert "- reason: Handed off to enterprise security team" in moved_text
+    assert "- choice: moved" in moved_text
+
+    # Blocked task T010 unblocked back to in progress
+    tree_post = te.discover_task_tree(tasks_dir)
+    assert tree_post["T010"].state == "in progress"
+    assert tree_post["T010"].fields.get("decider", {}).get("value") in ("-", "", None)
+
+    # validate_tasks_tree passes with 0 errors
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+
+    # questions list --status moved returns Q001
+    ok_list, res_list = te.list_questions(tasks_dir, status="moved")
+    assert ok_list is True
+    assert len(res_list["questions"]) == 1
+    assert res_list["questions"][0]["id"] == qid
+    assert res_list["questions"][0]["status"] == "moved"
+
+
+def test_t041_non_blocking_questions_with_notes(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # 1. Ask question with --blocks - and --notes via function
+    ok_ask1, res_ask1 = te.ask_question(
+        tasks_dir,
+        question="Which database engine should be used for analytics?",
+        context="Evaluating ClickHouse vs DuckDB for time-series aggregation.",
+        options=[("A", "ClickHouse", "Distributed cluster"), ("B", "DuckDB", "Embedded in-process")],
+        blocks="-",
+        notes="Benchmarks show DuckDB is 3x faster on single node, but ClickHouse scales horizontally.",
+    )
+    assert ok_ask1 is True
+    q1_file = pathlib.Path(res_ask1["file_path"])
+    assert q1_file.is_file()
+    q1_text = q1_file.read_text(encoding="utf-8")
+    assert "- blocks: -" in q1_text
+    assert "## Notes" in q1_text
+    assert "Benchmarks show DuckDB is 3x faster" in q1_text
+
+    # 2. Ask question with omitted --blocks and --notes via CLI
+    res_ask2 = run_cli(
+        "questions",
+        "ask",
+        "--question",
+        "Should we enable compression for event logs?",
+        "--context",
+        "Disk usage is growing at 50GB/day.",
+        "--option",
+        "A=Zstd: Best ratio",
+        "--option",
+        "B=Lz4: Fastest speed",
+        "--notes",
+        "Zstd level 3 offers a good compromise between CPU and compression ratio.",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--json",
+    )
+    assert res_ask2.returncode == 0
+    data_ask2 = json.loads(res_ask2.stdout)
+    assert data_ask2["ok"] is True
+    q2_id = data_ask2["id"]
+    q2_file = pathlib.Path(data_ask2["file_path"])
+    assert q2_file.is_file()
+    q2_text = q2_file.read_text(encoding="utf-8")
+    assert "- blocks: -" in q2_text
+    assert "## Notes" in q2_text
+    assert "Zstd level 3 offers a good compromise" in q2_text
+
+    # 3. validate_tasks_tree validates both non-blocking questions cleanly with 0 errors
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+
+    # 4. show_question parses notes and blocks
+    ok_show, res_show = te.show_question(tasks_dir, q2_id)
+    assert ok_show is True
+    assert res_show["question"]["blocks"] == "-"
+    assert "Zstd level 3" in res_show["question"]["notes"]

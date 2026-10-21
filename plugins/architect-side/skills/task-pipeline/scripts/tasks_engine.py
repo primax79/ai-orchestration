@@ -200,11 +200,14 @@ QUESTION_MANDATORY_HEADER_FIELDS: tuple[str, ...] = (
     "recommended",
 )
 QUESTION_OPTIONAL_HEADER_FIELDS: tuple[str, ...] = (
+    "applied",
+    "moved-to",
+    "reason",
     "short",
 )
 QUESTION_HEADER_FIELDS: tuple[str, ...] = QUESTION_MANDATORY_HEADER_FIELDS + QUESTION_OPTIONAL_HEADER_FIELDS
 
-QUESTION_STATUSES: set[str] = {"open", "answered", "withdrawn"}
+QUESTION_STATUSES: set[str] = {"open", "answered", "withdrawn", "moved"}
 QUESTION_ID_RE = re.compile(r"^Q\d{3,}$")
 QUESTION_FILE_RE = re.compile(r"^(Q\d{3,})-([a-z0-9-]+)\.md$")
 OPTION_LINE_RE = re.compile(r"^-\s+\*\*([A-Za-z0-9]+)\*\*\s+[—–-]\s+(.+?)(?::\s*(.*))?$")
@@ -1714,6 +1717,7 @@ def rewrite_block_in_file(
     status_note: str | None = None,
     dry_run: bool = False,
     return_diff: bool = False,
+    new_conditions: str | None = None,
 ) -> tuple[str, str] | tuple[str, str, str]:
     """Rewrite one `### id - title` block in place; every other byte of the file is preserved.
 
@@ -1837,6 +1841,18 @@ def rewrite_block_in_file(
                             seg.raw_value = new_decider
                             seg.clean_value = new_decider
                         decider_updated = True
+                for s_idx in reversed(to_remove):
+                    segments.pop(s_idx)
+
+            if new_conditions is not None:
+                to_remove = []
+                for s_idx, seg in enumerate(segments):
+                    if seg.key in ("conditions",):
+                        if new_conditions == "-" or not new_conditions.strip():
+                            to_remove.append(s_idx)
+                        else:
+                            seg.raw_value = new_conditions
+                            seg.clean_value = new_conditions
                 for s_idx in reversed(to_remove):
                     segments.pop(s_idx)
 
@@ -5205,6 +5221,10 @@ def format_question_content(
     answered: str = "-",
     text: str | None = None,
     short: str | None = None,
+    applied: str | None = None,
+    moved_to: str | None = None,
+    reason: str | None = None,
+    notes: str | None = None,
 ) -> str:
     norm_context = normalize_fenced_text(context.rstrip("\r\n"))
     lines = [
@@ -5221,6 +5241,12 @@ def format_question_content(
         f"- open-answer: {open_answer}",
         f"- recommended: {recommended}",
     ]
+    if applied is not None and str(applied).strip() and str(applied).strip() != "":
+        lines.append(f"- applied: {str(applied).strip()}")
+    if moved_to is not None and str(moved_to).strip() and str(moved_to).strip() != "":
+        lines.append(f"- moved-to: {str(moved_to).strip()}")
+    if reason is not None and str(reason).strip() and str(reason).strip() != "":
+        lines.append(f"- reason: {str(reason).strip()}")
     if short and short.strip() and short.strip() != "-":
         lines.append(f"- short: {short.strip()}")
     lines.extend([
@@ -5251,6 +5277,13 @@ def format_question_content(
         lines.extend([
             "",
             _format_fenced_text(text),
+        ])
+    if notes is not None and notes.strip():
+        lines.extend([
+            "",
+            "## Notes",
+            "",
+            notes.strip(),
         ])
     lines.append("")
     return "\n".join(lines)
@@ -5307,6 +5340,8 @@ def parse_question_file(
     context_text = sec_map["## Context"].body.strip() if "## Context" in sec_map else ""
     options_text = sec_map["## Options"].body.strip() if "## Options" in sec_map else ""
     answer_text = sec_map["## Answer"].body.strip() if "## Answer" in sec_map else ""
+    notes_heading = next((h for h in ("## Notes", "## Free notes", "## Discussion") if h in sec_map), None)
+    notes_text = sec_map[notes_heading].body.strip() if notes_heading else None
 
     options: list[dict[str, str | None]] = []
     if "## Options" in sec_map:
@@ -5383,6 +5418,10 @@ def parse_question_file(
         "origin_run": headers.get("origin-run", ""),
         "open_answer": headers.get("open-answer", ""),
         "recommended": headers.get("recommended", ""),
+        "applied": headers.get("applied", "-"),
+        "moved_to": headers.get("moved-to"),
+        "reason": headers.get("reason"),
+        "notes": notes_text,
         "title": title,
         "context": context_text,
         "options": options,
@@ -5419,13 +5458,14 @@ def discover_questions(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
             pass
 
     questions: list[dict[str, Any]] = []
-    for entry in sorted(questions_dir.iterdir()):
-        if entry.is_file() and entry.suffix == ".md" and QUESTION_ID_RE.match(entry.name.split("-")[0]):
+    for entry in sorted(questions_dir.rglob("*.md")):
+        if entry.is_file() and not entry.name.startswith(".") and QUESTION_ID_RE.match(entry.name.split("-")[0]):
             try:
                 q = parse_question_file(entry, tasks_dir)
-                if q["id"] in applied_map:
+                header_applied = (q["headers"].get("applied") or "").strip().lower()
+                if header_applied == "yes" or q["id"] in applied_map:
                     q["applied"] = True
-                    q["applied_record"] = applied_map[q["id"]]
+                    q["applied_record"] = applied_map.get(q["id"])
                 else:
                     q["applied"] = False
                     q["applied_record"] = None
@@ -6680,8 +6720,21 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             )
 
     if questions_dir.is_dir():
-        for q_entry in sorted(questions_dir.iterdir()):
-            if q_entry.name.startswith(".") or not q_entry.is_file() or q_entry.suffix != ".md":
+        applied_map: dict[str, dict[str, Any]] = {}
+        ledger_file = questions_dir / "applied.jsonl"
+        if ledger_file.is_file():
+            try:
+                for line in ledger_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line:
+                        rec = json.loads(line)
+                        if isinstance(rec, dict) and "question" in rec:
+                            applied_map[rec["question"]] = rec
+            except Exception:
+                pass
+
+        for q_entry in sorted(questions_dir.rglob("*.md")):
+            if q_entry.name.startswith(".") or not q_entry.is_file():
                 continue
             q_rel = q_entry.relative_to(tasks_dir).as_posix()
 
@@ -6765,10 +6818,24 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 errors.append(f"{q_rel}: invalid open-answer {oa!r} (expected 'yes' or 'no').")
 
             # Required sections and order
-            expected_sections = ["## Context", "## Options", "## Answer"]
-            if q["sections_present"] != expected_sections:
+            core_sections = ["## Context", "## Options", "## Answer"]
+            allowed_sections = {"## Context", "## Options", "## Answer", "## Notes", "## Free notes", "## Discussion"}
+            present_secs = q["sections_present"]
+
+            missing_core = [s for s in core_sections if s not in present_secs]
+            if missing_core:
+                errors.append(f"{q_rel}: missing required section(s): {', '.join(missing_core)}.")
+
+            unknown_secs = [s for s in present_secs if s not in allowed_sections]
+            if unknown_secs:
                 errors.append(
-                    f"{q_rel}: sections must be exactly {expected_sections} in order; got {q['sections_present']}."
+                    f"{q_rel}: unexpected section(s): {', '.join(unknown_secs)} (allowed: Context, Options, Answer, and optional Notes)."
+                )
+
+            core_present = [s for s in present_secs if s in core_sections]
+            if core_present != core_sections:
+                errors.append(
+                    f"{q_rel}: core sections out of order: got {core_present}, expected {core_sections}."
                 )
 
             # Context
@@ -6841,6 +6908,13 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                         datetime.date.fromisoformat(ans_date)
                     except ValueError:
                         errors.append(f"{q_rel}: invalid ISO date for 'answered': {ans_date!r}.")
+                hdr_app = (q["headers"].get("applied") or "-").strip().lower()
+                is_applied = (hdr_app == "yes") or (qid in applied_map)
+                if not is_applied:
+                    st_title = q.get("short_title") or derive_short_title(q.get("title") or q["question"])
+                    warnings.append(
+                        f"{q_rel}: answered question {qid} ({st_title}) has not been applied (run 'ai-orch questions apply {qid} --note \"...\"' to record application)."
+                    )
             elif st == "withdrawn":
                 if choice != "withdrawn":
                     errors.append(f"{q_rel}: status is 'withdrawn' but choice is {choice!r} (expected 'withdrawn').")
@@ -6855,6 +6929,20 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                         errors.append(f"{q_rel}: invalid ISO date for 'answered': {ans_date!r}.")
                 if not ans_text or not ans_text.strip():
                     errors.append(f"{q_rel}: withdrawn question requires reason in text block.")
+            elif st == "moved":
+                if not q["headers"].get("moved-to") or q["headers"]["moved-to"].strip() == "-":
+                    errors.append(f"{q_rel}: status is 'moved' but missing required 'moved-to' header.")
+                if choice != "moved":
+                    errors.append(f"{q_rel}: status is 'moved' but choice is {choice!r} (expected 'moved').")
+                if ans_by in ("", "-"):
+                    errors.append(f"{q_rel}: moved question requires answered-by.")
+                if ans_date in ("", "-"):
+                    errors.append(f"{q_rel}: moved question requires answered date.")
+                else:
+                    try:
+                        datetime.date.fromisoformat(ans_date)
+                    except ValueError:
+                        errors.append(f"{q_rel}: invalid ISO date for 'answered': {ans_date!r}.")
 
             # Blocks & status consistency
             for tid, prior_st in q["blocks_parsed"]:
@@ -7052,10 +7140,11 @@ def _is_independent_verifier(executor: str, actor: str | None, verifier: str | N
 
 def _update_task_file_headers_and_state(
     file_path: pathlib.Path,
-    new_state: str,
+    new_state: str | None,
     verifier: str | None = None,
     decider: str | None = None,
     clear_next_up: bool = False,
+    conditions: str | None = None,
 ) -> None:
     text = file_path.read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -7067,6 +7156,7 @@ def _update_task_file_headers_and_state(
 
     header_end = idx
     verifier_line_idx: int | None = None
+    conditions_line_idx: int | None = None
     handoff_line_idx: int | None = None
 
     while header_end < len(lines):
@@ -7074,10 +7164,13 @@ def _update_task_file_headers_and_state(
         if not m:
             break
         key = m.group(1)
-        if key == "state":
+        if key == "state" and new_state is not None:
             lines[header_end] = f"- state: {new_state}"
         elif key == "decider" and decider is not None:
             lines[header_end] = f"- decider: {decider}"
+        elif key == "conditions" and conditions is not None:
+            conditions_line_idx = header_end
+            lines[header_end] = f"- conditions: {conditions}"
         elif key == "next-up" and clear_next_up:
             lines[header_end] = "- next-up: no"
         elif key == "verifier":
@@ -7097,6 +7190,17 @@ def _update_task_file_headers_and_state(
                 insert_pos = i
                 break
         lines.insert(insert_pos, f"- verifier: {verifier}")
+        header_end += 1
+
+    if conditions is not None and conditions_line_idx is None and handoff_line_idx is not None:
+        insert_pos = header_end
+        fields_after_conditions = {"short"}
+        for i in range(handoff_line_idx + 1, header_end):
+            m_key = HEADER_LINE_RE.match(lines[i])
+            if m_key and m_key.group(1) in fields_after_conditions:
+                insert_pos = i
+                break
+        lines.insert(insert_pos, f"- conditions: {conditions}")
         header_end += 1
 
     # Manage `verification pending:` line right after header
@@ -10282,6 +10386,7 @@ def ask_question(
     origin_run: str = "-",
     from_task: str | None = None,
     short: str | None = None,
+    notes: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -10355,7 +10460,7 @@ def ask_question(
                     return False, {"ok": False, "error": "Missing required context (via --context or --context-file)."}
 
                 if not blocks or not blocks.strip():
-                    return False, {"ok": False, "error": "Missing required --blocks."}
+                    blocks = "-"
 
                 options = options or []
                 opt_labels = [opt[0] for opt in options if opt[0]]
@@ -10478,6 +10583,7 @@ def ask_question(
                     answered="-",
                     text=None,
                     short=short_val,
+                    notes=notes,
                 )
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(content)
@@ -10575,6 +10681,8 @@ def answer_question(
     text: str | None = None,
     by: str = "owner",
     changes_result: bool = False,
+    apply_ref: str | None = None,
+    apply_note: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -10641,6 +10749,9 @@ def answer_question(
                     answered_by=by or "owner",
                     answered=today,
                     text=text if (text is not None and text != "") else None,
+                    short=target_q.get("short"),
+                    applied="no",
+                    notes=target_q.get("notes"),
                 )
                 _atomic_write_text(q_file, new_q_content)
 
@@ -10666,7 +10777,7 @@ def answer_question(
                     t_dec = t.get("decider", "").strip()
                     linked_qids = [qid.strip() for qid in t_dec.split(",") if qid.strip()]
 
-                    all_resolved = all(q_status_map.get(qid) in ("answered", "withdrawn") for qid in linked_qids)
+                    all_resolved = all(q_status_map.get(qid) in ("answered", "withdrawn", "moved") for qid in linked_qids)
                     if all_resolved:
                         restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, linked_qids)
                         _update_task_file_headers_and_state(tp, restored_state, decider="-")
@@ -10767,6 +10878,12 @@ def answer_question(
                     ret_payload["follow_up_tasks"] = follow_up_tasks
                     ret_payload["follow_up_id"] = follow_up_tasks[0] if follow_up_tasks else None
 
+                if apply_ref or apply_note:
+                    ok_app, app_res = apply_question(tasks_dir, question_id, by=by, ref=apply_ref, note=apply_note)
+                    if ok_app:
+                        ret_payload["applied"] = True
+                        ret_payload["applied_record"] = app_res.get("record")
+
                 return True, ret_payload
             except Exception:
                 for mp, orig_text in modified_files.items():
@@ -10809,6 +10926,8 @@ def _withdraw_question_file_only(
         answered_by=by or "owner",
         answered=today,
         text=reason if (reason is not None and reason != "") else None,
+        short=q_dict.get("short"),
+        notes=q_dict.get("notes"),
     )
     _atomic_write_text(q_file, new_q_content)
 
@@ -10881,7 +11000,7 @@ def withdraw_question(
                     t_dec = t.get("decider", "").strip()
                     linked_qids = [qid.strip() for qid in t_dec.split(",") if qid.strip()]
 
-                    all_resolved = all(q_status_map.get(qid) in ("answered", "withdrawn") for qid in linked_qids)
+                    all_resolved = all(q_status_map.get(qid) in ("answered", "withdrawn", "moved") for qid in linked_qids)
                     if all_resolved:
                         restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, linked_qids)
                         _update_task_file_headers_and_state(tp, restored_state, decider="-")
@@ -10960,8 +11079,17 @@ def list_questions(
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     questions = discover_questions(tasks_dir)
 
+    unapplied = [
+        q for q in questions
+        if q["status"] == "answered"
+        and (q.get("headers", {}).get("applied") or "-").strip().lower() != "yes"
+        and not q.get("applied")
+    ]
+
     filtered = questions
-    if status != "all":
+    if status == "unapplied":
+        filtered = unapplied
+    elif status != "all":
         filtered = [q for q in filtered if q["status"] == status]
     if blocks:
         filtered = [q for q in filtered if any(tid == blocks for tid, _ in q["blocks_parsed"])]
@@ -10972,7 +11100,11 @@ def list_questions(
         return (is_open, -num)
 
     filtered.sort(key=_sort_key)
-    return True, {"ok": True, "questions": filtered}
+    return True, {
+        "ok": True,
+        "questions": filtered,
+        "unapplied_answers": unapplied,
+    }
 
 
 def cmd_questions_list(args: argparse.Namespace) -> int:
@@ -10993,6 +11125,14 @@ def cmd_questions_list(args: argparse.Namespace) -> int:
                     [re.sub(r"\s*\([^)]*\)", "", b).strip() for b in q["blocks"].split(",") if b.strip()]
                 ) or "-"
                 print(f"  [{q['id']}] ({q['status']}) {q['question']} (blocks: {blocks_clean}, decider: {q['decider']})")
+        unapplied = res.get("unapplied_answers", [])
+        if unapplied and status != "unapplied":
+            unapplied_desc = ", ".join(
+                f"{q['id']} ({q.get('short_title') or derive_short_title(q.get('title') or q['question'])})"
+                for q in unapplied
+            )
+            print(f"\n[NOTICE] {len(unapplied)} answered question(s) waiting to be applied: {unapplied_desc}")
+            print("Run 'ai-orch questions apply Q### --note \"...\"' to record application.")
     return 0 if ok else 1
 
 
@@ -11010,7 +11150,15 @@ def cmd_questions_show(args: argparse.Namespace) -> int:
             print(f"Decider : {q['decider']}")
             print(f"Asked by: {q['asked_by']} on {q['asked']}")
             print(f"Rec     : {q['recommended']}")
+            if q.get("moved_to"):
+                print(f"Moved to: {q['moved_to']}")
+            if q.get("reason"):
+                print(f"Reason  : {q['reason']}")
+            if q.get("headers", {}).get("applied"):
+                print(f"Applied : {q['headers']['applied']}")
             print(f"\nContext:\n{q['context']}")
+            if q.get("notes"):
+                print(f"\nNotes:\n{q['notes']}")
             if q["options"]:
                 print("\nOptions:")
                 for opt in q["options"]:
@@ -11053,6 +11201,7 @@ def cmd_questions_ask(args: argparse.Namespace) -> int:
         origin_run=args.origin_run,
         from_task=args.from_task,
         short=getattr(args, "short", None),
+        notes=getattr(args, "notes", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -11074,6 +11223,8 @@ def cmd_questions_answer(args: argparse.Namespace) -> int:
         text=args.text,
         by=args.by,
         changes_result=changes_result,
+        apply_ref=getattr(args, "apply_ref", None),
+        apply_note=getattr(args, "apply_note", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -11106,6 +11257,244 @@ def cmd_questions_withdraw(args: argparse.Namespace) -> int:
             print(f"[ok] Withdrew {res['id']} with reason {res['reason']!r} (unblocked tasks: {unb})")
         else:
             print(f"[FAIL] {res.get('error', 'withdraw failed')}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def move_question(
+    tasks_dir: pathlib.Path,
+    question_id: str,
+    to: str,
+    reason: str | None = None,
+    by: str = "owner",
+) -> tuple[bool, dict[str, Any]]:
+    if not is_platform_supported():
+        return False, {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    if not to or not to.strip():
+        return False, {"ok": False, "error": "Moving a question requires non-empty --to."}
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    try:
+        with task_write_lock(tasks_dir):
+            questions = discover_questions(tasks_dir)
+            target_q = next((q for q in questions if q["id"] == question_id), None)
+            if target_q is None:
+                return False, {"ok": False, "error": f"Question {question_id!r} not found in {tasks_dir}."}
+            if target_q["status"] == "moved":
+                return False, {"ok": False, "error": f"Question {question_id!r} is already in status 'moved'."}
+
+            q_file = pathlib.Path(target_q["file_path"])
+            dest_dir = tasks_dir / "questions" / "answered"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_file = dest_dir / q_file.name
+
+            modified_files: dict[pathlib.Path, str] = {q_file: q_file.read_text(encoding="utf-8")}
+            created_files: list[pathlib.Path] = []
+
+            emergent = discover_emergent_tasks(tasks_dir)
+            emergent_map = {t["id"]: t for t in emergent}
+
+            # Backup affected task files for rollback
+            for tid, _ in target_q["blocks_parsed"]:
+                if tid in emergent_map:
+                    t = emergent_map[tid]
+                    tp = pathlib.Path(t["file_path"])
+                    if tp not in modified_files:
+                        modified_files[tp] = tp.read_text(encoding="utf-8")
+                    if t["is_folder"]:
+                        pp = tp.parent / "PROGRESS.md"
+                        if pp.is_file() and pp not in modified_files:
+                            modified_files[pp] = pp.read_text(encoding="utf-8")
+
+            try:
+                today = datetime.date.today().isoformat()
+                ans_text = reason.strip() if (reason and reason.strip()) else f"Moved to {to.strip()}"
+                new_q_content = format_question_content(
+                    id=target_q["id"],
+                    title=target_q["title"],
+                    question=target_q["question"],
+                    status="moved",
+                    blocks=target_q["blocks"],
+                    decider=target_q["decider"],
+                    asked_by=target_q["asked_by"],
+                    asked=target_q["asked"],
+                    origin_run=target_q["origin_run"],
+                    open_answer=target_q["open_answer"],
+                    recommended=target_q["recommended"],
+                    context=target_q["context"],
+                    options=[(opt["label"], opt["title"], opt["consequence"]) for opt in target_q["options"]],
+                    choice="moved",
+                    answered_by=by or "owner",
+                    answered=today,
+                    text=ans_text,
+                    short=target_q.get("short"),
+                    moved_to=to.strip(),
+                    reason=reason.strip() if (reason and reason.strip()) else None,
+                    notes=target_q.get("notes"),
+                )
+
+                if dest_file != q_file:
+                    _atomic_write_text(dest_file, new_q_content)
+                    created_files.append(dest_file)
+                    try:
+                        q_file.unlink()
+                    except OSError:
+                        pass
+                else:
+                    _atomic_write_text(q_file, new_q_content)
+
+                q_status_map = {q["id"]: q["status"] for q in questions}
+                q_status_map[question_id] = "moved"
+
+                unblocked: list[str] = []
+                unblocked_states: dict[str, str] = {}
+                tree = discover_task_tree(tasks_dir)
+
+                for tid, _ in target_q["blocks_parsed"]:
+                    if tid in tree:
+                        t_node = tree[tid]
+                        if t_node.block_text is not None:
+                            restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, [question_id])
+                            rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state, new_decider="-")
+                            unblocked.append(tid)
+                            unblocked_states[tid] = restored_state
+                            continue
+                    if tid not in emergent_map:
+                        continue
+                    t = emergent_map[tid]
+                    tp = pathlib.Path(t["file_path"])
+                    t_dec = t.get("decider", "").strip()
+                    linked_qids = [qid.strip() for qid in t_dec.split(",") if qid.strip()]
+
+                    all_resolved = all(q_status_map.get(qid) in ("answered", "withdrawn", "moved") for qid in linked_qids)
+                    if all_resolved:
+                        restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, linked_qids)
+                        _update_task_file_headers_and_state(tp, restored_state, decider="-")
+                        _append_progress_log(
+                            t,
+                            "waiting",
+                            restored_state,
+                            by or "owner",
+                            verifier=None,
+                            reason=f"Unblocked: question {question_id} moved to tracker ({to.strip()})",
+                        )
+                        unblocked.append(tid)
+                        unblocked_states[tid] = restored_state
+
+                # Clear question_id from conditions of tasks
+                for et_item in emergent:
+                    tp = pathlib.Path(et_item["file_path"])
+                    raw_c = et_item.get("headers", {}).get("conditions", "")
+                    cond_list = parse_conditions_field(raw_c)
+                    if question_id in cond_list:
+                        new_conds = [c for c in cond_list if c != question_id]
+                        new_c_val = ", ".join(new_conds) if new_conds else "-"
+                        if tp not in modified_files:
+                            modified_files[tp] = tp.read_text(encoding="utf-8")
+                        _update_task_file_headers_and_state(tp, None, conditions=new_c_val)
+
+                for n_id, n_node in tree.items():
+                    if n_node.is_leaf and n_node.own_fields.get("conditions"):
+                        raw_c = n_node.own_fields["conditions"]
+                        cond_list = parse_conditions_field(raw_c)
+                        if question_id in cond_list:
+                            new_conds = [c for c in cond_list if c != question_id]
+                            new_c_val = ", ".join(new_conds) if new_conds else "-"
+                            plan_p = pathlib.Path(n_node.file_path)
+                            if plan_p not in modified_files:
+                                modified_files[plan_p] = plan_p.read_text(encoding="utf-8")
+                            rewrite_block_in_file(plan_p, n_id, new_conditions=new_c_val)
+
+                index_path = tasks_dir / "00-INDEX.md"
+                if index_path.is_file():
+                    idx_text = index_path.read_text(encoding="utf-8")
+                    if idx_text.strip():
+                        if index_path not in modified_files:
+                            modified_files[index_path] = idx_text
+                        try:
+                            rendered = render_synced_index(tasks_dir, idx_text)
+                            _atomic_write_text(index_path, rendered)
+                        except Exception:
+                            pass
+
+                _emit_event(
+                    tasks_dir,
+                    "question.moved",
+                    {
+                        "to": to.strip(),
+                        "reason": reason.strip() if reason else None,
+                        "by": by or "owner",
+                        "unblocked_tasks": unblocked,
+                    },
+                    subject=question_id,
+                    actor=by or "owner",
+                )
+                for tid in unblocked:
+                    _emit_event(
+                        tasks_dir,
+                        "task.transitioned",
+                        {
+                            "from": "waiting",
+                            "to": unblocked_states.get(tid, "open"),
+                            "actor": by or "owner",
+                            "reason": f"Unblocked: question {question_id} moved to tracker ({to.strip()})",
+                        },
+                        subject=tid,
+                        actor=by or "owner",
+                    )
+
+                return True, {
+                    "ok": True,
+                    "id": question_id,
+                    "status": "moved",
+                    "moved_to": to.strip(),
+                    "reason": reason.strip() if reason else None,
+                    "unblocked_tasks": unblocked,
+                    "file_path": str(dest_file),
+                    "rel_path": dest_file.relative_to(tasks_dir).as_posix(),
+                }
+            except Exception:
+                for cp in created_files:
+                    try:
+                        if cp.is_file():
+                            cp.unlink()
+                    except OSError:
+                        pass
+                for mp, orig_text in modified_files.items():
+                    try:
+                        _atomic_write_text(mp, orig_text)
+                    except OSError:
+                        pass
+                raise
+    except LockTimeoutError:
+        return False, {
+            "ok": False,
+            "error": "lock-timeout",
+            "message": "Timed out waiting for task-write lock in tasks/.",
+        }
+
+
+def cmd_questions_move(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    ok, res = move_question(
+        tasks_dir=tasks_dir,
+        question_id=args.question_id,
+        to=args.to,
+        reason=getattr(args, "reason", None),
+        by=getattr(args, "by", "owner"),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if ok:
+            unb = ", ".join(res["unblocked_tasks"]) if res["unblocked_tasks"] else "none"
+            print(f"[ok] Moved {res['id']} to {res['moved_to']} (unblocked tasks: {unb})")
+        else:
+            print(f"[FAIL] {res.get('error', 'move failed')}", file=sys.stderr)
     return 0 if ok else 1
 
 
@@ -11204,6 +11593,20 @@ def apply_question(
                     os.fsync(f.fileno())
                 except OSError:
                     pass
+
+            q_file = pathlib.Path(target_q["file_path"])
+            if q_file.is_file():
+                q_text = q_file.read_text(encoding="utf-8")
+                if re.search(r"^-\s+applied:", q_text, re.MULTILINE):
+                    new_q_text = re.sub(r"^-\s+applied:.*$", "- applied: yes", q_text, flags=re.MULTILINE)
+                else:
+                    m = re.search(r"^(-\s+recommended:.*$)", q_text, re.MULTILINE)
+                    if m:
+                        new_q_text = q_text[:m.end()] + "\n- applied: yes" + q_text[m.end():]
+                    else:
+                        m2 = re.search(r"^(-\s+status:.*$)", q_text, re.MULTILINE)
+                        new_q_text = q_text[:m2.end()] + "\n- applied: yes" + q_text[m2.end():]
+                _atomic_write_text(q_file, new_q_text)
 
             _emit_event(
                 tasks_dir,
@@ -14949,7 +15352,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # questions list
     p_ql = q_sub.add_parser("list", help="List blocking questions")
-    p_ql.add_argument("--status", choices=["open", "answered", "withdrawn", "all"], default="all")
+    p_ql.add_argument("--status", choices=["open", "answered", "withdrawn", "moved", "unapplied", "all"], default="all")
     p_ql.add_argument("--blocks", default=None, help="Filter by blocked task id")
     p_ql.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_ql.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
@@ -14970,12 +15373,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_qa.add_argument("--option", action="append", default=[], help="Option formatted as 'A=Title: consequence' or '- **A** — Title: consequence'")
     p_qa.add_argument("--recommended", default="-", help="Recommended option label or -")
     p_qa.add_argument("--open-answer", choices=["yes", "no"], default="no", help="Whether open free-text answers are allowed")
-    p_qa.add_argument("--blocks", default=None, help="Comma-separated blocked task IDs (e.g. T013, T014)")
+    p_qa.add_argument("--blocks", default="-", help="Comma-separated blocked task IDs (e.g. T013, T014) or '-' for non-blocking")
     p_qa.add_argument("--decider", default="owner", help="Decider role or person")
     p_qa.add_argument("--asked-by", default="owner", help="Who asked the question")
     p_qa.add_argument("--origin-run", default="-", help="Origin run ID or -")
     p_qa.add_argument("--from-task", default=None, help="Convert legacy decider header from task T###")
     p_qa.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
+    p_qa.add_argument("--notes", default=None, help="Optional free notes / discussion text")
     p_qa.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_qa.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_qa.set_defaults(func=cmd_questions_ask)
@@ -14987,6 +15391,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_qans.add_argument("--text", default=None, help="Free-text answer")
     p_qans.add_argument("--by", default="owner", help="Who answered the question")
     p_qans.add_argument("--changes-result", action="store_true", default=False, help="Flag that answer changes a finished task's result, creating follow-up task(s)")
+    p_qans.add_argument("--apply-ref", default=None, help="Reference to immediately record application")
+    p_qans.add_argument("--apply-note", default=None, help="Note to immediately record application")
+    p_qans.add_argument("--note", default=None, dest="apply_note", help="Note to immediately record application (alias for --apply-note)")
     p_qans.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_qans.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_qans.set_defaults(func=cmd_questions_answer)
@@ -14999,6 +15406,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_qw.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_qw.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_qw.set_defaults(func=cmd_questions_withdraw)
+
+    # questions move
+    p_qm = q_sub.add_parser("move", help="Move a question to an external tracker (status: moved)")
+    p_qm.add_argument("question_id", help="Question ID (e.g. Q001)")
+    p_qm.add_argument("--to", required=True, help="External tracker URL or reference (e.g. https://tracker.example/issue/42)")
+    p_qm.add_argument("--reason", default=None, help="Optional reason for moving the question")
+    p_qm.add_argument("--by", default="owner", help="Who moved the question")
+    p_qm.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_qm.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_qm.set_defaults(func=cmd_questions_move)
 
     # questions apply
     p_qapp = q_sub.add_parser("apply", help="Record that an answered question's decision was applied into the ledger")
