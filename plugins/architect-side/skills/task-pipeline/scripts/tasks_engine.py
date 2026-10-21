@@ -10489,6 +10489,67 @@ def cmd_tasks_next(args: argparse.Namespace) -> int:
     return 0
 
 
+def get_next_task_id(tasks_dir: pathlib.Path) -> dict[str, Any]:
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    nums: list[int] = []
+
+    if tasks_dir.is_dir():
+        try:
+            emergent = discover_emergent_tasks(tasks_dir)
+            for t in emergent:
+                tid = t.get("id", "")
+                m = re.match(r"^T(\d+)", tid)
+                if m:
+                    nums.append(int(m.group(1)))
+        except Exception:
+            pass
+
+        try:
+            tree = discover_task_tree(tasks_dir)
+            for tid in tree.keys():
+                m = re.match(r"^T(\d+)", tid)
+                if m:
+                    nums.append(int(m.group(1)))
+        except Exception:
+            pass
+
+        for p in tasks_dir.rglob("T[0-9][0-9][0-9]*"):
+            if any(part.startswith(".") for part in p.parts):
+                continue
+            m = re.match(r"^T(\d{3,})", p.name)
+            if m:
+                nums.append(int(m.group(1)))
+
+    if nums:
+        highest_num = max(nums)
+        highest_id = f"T{highest_num:03d}"
+        next_num = highest_num + 1
+        next_id = f"T{next_num:03d}"
+    else:
+        highest_id = None
+        next_id = "T001"
+
+    return {
+        "ok": True,
+        "highest_id": highest_id,
+        "next_id": next_id,
+    }
+
+
+def cmd_tasks_next_id(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    res = get_next_task_id(tasks_dir)
+    args._last_result = res
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if res["highest_id"]:
+            print(f"Next task ID: {res['next_id']} (highest: {res['highest_id']})")
+        else:
+            print(f"Next task ID: {res['next_id']}")
+    return 0
+
+
 def _build_index_sync_data(tasks_dir: pathlib.Path) -> dict[str, Any]:
     emergent = discover_emergent_tasks(tasks_dir)
     active_tasks = [t for t in emergent if not t.get("in_done") and t.get("canonical_state") not in TERMINAL_STATES]
@@ -10916,12 +10977,13 @@ def cmd_merge_index(args: argparse.Namespace) -> int:
         return 1
 
 
-def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False) -> dict[str, Any]:
+def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_plans: bool = False) -> dict[str, Any]:
     """Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention:
       1. Updates tasks/AGENTS.md with canonical task-pipeline rules and skill names.
       2. Ensures tasks/.gitignore exists and ignores .ai-orch.lock.
       2.5. Ensures tasks/.gitattributes exists and configures 00-INDEX.md merge=ai-orch-index.
       3. Ensures standard directories exist (_inbox/to-analyze, _inbox/analyzed).
+      3.5. Discovers and reports/migrates legacy plans/ directories.
       4. Regenerates/updates 00-INDEX.md with standard tables (Initiatives, Specs, Next up, Tasks by category, Decisions waiting, Done).
       5. Validates the upgraded tree.
     """
@@ -10937,6 +10999,7 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False) -> dict[s
             "dry_run": dry_run,
             "emergent_count": 0,
             "initiative_count": 0,
+            "legacy_plans": [],
             "errors": ["unsupported-platform: Mutating commands are unsupported on Windows"],
             "warnings": [],
         }
@@ -10999,6 +11062,144 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False) -> dict[s
                 (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
                 (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
 
+            # 3.5. Legacy plans discovery & migration
+            legacy_plans: list[dict[str, Any]] = []
+            plans_dirs: list[pathlib.Path] = []
+            if tasks_dir.name == "tasks":
+                sibling_plans = tasks_dir.parent / "plans"
+                if sibling_plans.is_dir() and sibling_plans.resolve() != tasks_dir.resolve():
+                    plans_dirs.append(sibling_plans)
+            nested_plans = tasks_dir / "plans"
+            if nested_plans.is_dir() and nested_plans.resolve() not in [p.resolve() for p in plans_dirs]:
+                plans_dirs.append(nested_plans)
+
+            seen_sources: set[pathlib.Path] = set()
+
+            for p_dir in plans_dirs:
+                for child in sorted(p_dir.iterdir()):
+                    if child.name.startswith("."):
+                        continue
+                    if child.resolve() in seen_sources:
+                        continue
+
+                    if child.is_dir():
+                        m_init = INITIATIVE_DIR_RE.match(child.name)
+                        if m_init:
+                            plan_file = child / "plan.md"
+                            src_file = plan_file if plan_file.is_file() else child
+                            seen_sources.add(child.resolve())
+                            if plan_file.is_file():
+                                seen_sources.add(plan_file.resolve())
+
+                            dest_dir = tasks_dir / child.name
+                            dest_file = dest_dir / "plan.md"
+
+                            if dest_file.exists():
+                                action = "conflict"
+                            else:
+                                should_migrate = bool(migrate_plans or True)  # non-conflicting NN-<slug>
+                                if should_migrate:
+                                    if not dry_run:
+                                        dest_dir.mkdir(parents=True, exist_ok=True)
+                                        for subitem in child.iterdir():
+                                            if subitem.is_file():
+                                                target_sub = dest_dir / subitem.name
+                                                if not target_sub.exists():
+                                                    shutil.copy2(subitem, target_sub)
+                                                    created.append(str(target_sub))
+                                                    upgraded_files.append(str(target_sub))
+                                        action = "migrated"
+                                    else:
+                                        action = "would_migrate"
+                                else:
+                                    action = "suggested"
+
+                            legacy_plans.append({
+                                "source": str(src_file.resolve()),
+                                "path": str(src_file.resolve()),
+                                "destination": str(dest_file.resolve()),
+                                "suggested_dest": str(dest_file.resolve()),
+                                "action": action,
+                                "status": action,
+                            })
+                        else:
+                            for subfile in sorted(child.glob("**/*.md")):
+                                if subfile.resolve() in seen_sources:
+                                    continue
+                                seen_sources.add(subfile.resolve())
+                                slug = slugify(subfile.stem)
+                                dest_file = tasks_dir / "specs" / f"{slug}.md"
+                                if dest_file.exists():
+                                    action = "conflict"
+                                else:
+                                    if migrate_plans:
+                                        if not dry_run:
+                                            (tasks_dir / "specs").mkdir(parents=True, exist_ok=True)
+                                            shutil.copy2(subfile, dest_file)
+                                            created.append(str(dest_file))
+                                            upgraded_files.append(str(dest_file))
+                                            action = "migrated"
+                                        else:
+                                            action = "would_migrate"
+                                    else:
+                                        action = "suggested"
+
+                                legacy_plans.append({
+                                    "source": str(subfile.resolve()),
+                                    "path": str(subfile.resolve()),
+                                    "destination": str(dest_file.resolve()),
+                                    "suggested_dest": str(dest_file.resolve()),
+                                    "action": action,
+                                    "status": action,
+                                })
+
+                    elif child.is_file() and child.suffix == ".md":
+                        seen_sources.add(child.resolve())
+                        m_init = INITIATIVE_DIR_RE.match(child.stem)
+                        if m_init:
+                            dest_dir = tasks_dir / child.stem
+                            dest_file = dest_dir / "plan.md"
+                            if dest_file.exists():
+                                action = "conflict"
+                            else:
+                                if migrate_plans:
+                                    if not dry_run:
+                                        dest_dir.mkdir(parents=True, exist_ok=True)
+                                        shutil.copy2(child, dest_file)
+                                        created.append(str(dest_file))
+                                        upgraded_files.append(str(dest_file))
+                                        action = "migrated"
+                                    else:
+                                        action = "would_migrate"
+                                else:
+                                    action = "suggested"
+                        else:
+                            slug = slugify(child.stem)
+                            dest_file = tasks_dir / "specs" / f"{slug}.md"
+                            if dest_file.exists():
+                                action = "conflict"
+                            else:
+                                if migrate_plans:
+                                    if not dry_run:
+                                        (tasks_dir / "specs").mkdir(parents=True, exist_ok=True)
+                                        shutil.copy2(child, dest_file)
+                                        created.append(str(dest_file))
+                                        upgraded_files.append(str(dest_file))
+                                        action = "migrated"
+                                    else:
+                                        action = "would_migrate"
+                                else:
+                                    action = "suggested"
+
+                        legacy_plans.append({
+                            "source": str(child.resolve()),
+                            "path": str(child.resolve()),
+                            "destination": str(dest_file.resolve()),
+                            "suggested_dest": str(dest_file.resolve()),
+                            "action": action,
+                            "status": action,
+                        })
+
             # 4. Re-sync 00-INDEX.md
             idx_path = tasks_dir / "00-INDEX.md"
             existing_idx = idx_path.read_text(encoding="utf-8") if idx_path.is_file() else ""
@@ -11023,6 +11224,7 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False) -> dict[s
                 "dry_run": dry_run,
                 "emergent_count": len(emergent),
                 "initiative_count": len(initiatives),
+                "legacy_plans": legacy_plans,
                 "errors": errors,
                 "warnings": warnings,
             }
@@ -11037,6 +11239,7 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False) -> dict[s
             "dry_run": dry_run,
             "emergent_count": 0,
             "initiative_count": 0,
+            "legacy_plans": [],
             "errors": [f"lock-timeout: {e}"],
             "warnings": [],
         }
@@ -11045,7 +11248,9 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False) -> dict[s
 def cmd_upgrade(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     dry_run = getattr(args, "dry_run", False)
-    res = upgrade_tasks_tree(tasks_dir, dry_run=dry_run)
+    migrate_plans = getattr(args, "migrate_plans", False)
+    res = upgrade_tasks_tree(tasks_dir, dry_run=dry_run, migrate_plans=migrate_plans)
+    args._last_result = res
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
@@ -11056,6 +11261,11 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
                 print(f"  - {f}")
         else:
             print(f"[ok] {tasks_dir} is already up-to-date with latest task-pipeline convention.")
+        if res.get("legacy_plans"):
+            print(f"\n[legacy-plans] {prefix}Discovered {len(res['legacy_plans'])} legacy plan(s):")
+            for lp in res["legacy_plans"]:
+                act = lp.get("action", "suggested")
+                print(f"  - [{act}] {lp['source']} -> {lp['destination']}")
         if res["warnings"]:
             for w in res["warnings"]:
                 print(f"[WARN] {w}")
@@ -16601,6 +16811,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_upg = sub.add_parser("upgrade", help="Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention")
     p_upg.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_upg.add_argument("--dry-run", action="store_true", default=False, help="Preview changes without writing to disk")
+    p_upg.add_argument("--migrate-plans", action="store_true", default=False, help="Migrate discovered legacy plans into tasks/ directory")
     p_upg.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_upg.set_defaults(func=cmd_upgrade)
 
@@ -16826,6 +17037,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_next.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_next.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_next.set_defaults(func=cmd_tasks_next)
+
+    # tasks next-id
+    p_nid = sub.add_parser("next-id", help="Preview next available emergent task ID")
+    p_nid.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_nid.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_nid.set_defaults(func=cmd_tasks_next_id)
 
     # tasks set-priority
     p_sp = sub.add_parser("set-priority", help="Set priority for a task")
@@ -17070,7 +17287,7 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
         return False
     if cmd == "sync-index":
         return bool(getattr(args, "apply", False))
-    if cmd in ("list", "validate", "graph", "next", "labels"):
+    if cmd in ("list", "validate", "graph", "next", "labels", "next-id"):
         return False
     if cmd == "questions":
         q_cmd = getattr(args, "q_cmd", None)

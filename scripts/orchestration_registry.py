@@ -953,16 +953,86 @@ def plan_projects_discover(
     config_dir: pathlib.Path | str | None = None,
 ) -> dict[str, Any]:
     """Scan workspace for candidate projects with tasks/00-INDEX.md and propose entries."""
-    ws = find_workspace_for_arg(workspace_arg, config_dir=config_dir)
-    ws_path = pathlib.Path(ws["canonical_path"]).resolve()
-
     db_path = get_db_path(config_dir)
     conn = get_connection(db_path)
     try:
+        ws: dict[str, Any] | None = None
+        is_registered = False
+        ws_path: pathlib.Path
+
+        if workspace_arg:
+            # 1. Try slug or uuid in SQLite
+            row = conn.execute(
+                "SELECT * FROM workspaces WHERE slug = ? OR uuid = ?",
+                (workspace_arg, workspace_arg),
+            ).fetchone()
+            if row:
+                ws = dict(row)
+                is_registered = True
+                ws_path = pathlib.Path(ws["canonical_path"]).resolve()
+            else:
+                p = pathlib.Path(workspace_arg).expanduser().resolve()
+                row = conn.execute(
+                    "SELECT * FROM workspaces WHERE canonical_path = ?",
+                    (str(p),),
+                ).fetchone()
+                if row:
+                    ws = dict(row)
+                    is_registered = True
+                    ws_path = pathlib.Path(ws["canonical_path"]).resolve()
+                elif p.is_dir():
+                    # Unregistered directory passed as argument
+                    ws = None
+                    is_registered = False
+                    ws_path = p
+                else:
+                    # Try nearest workspace for path
+                    near_ws, _ = resolve_workspace_for_path(p, config_dir=config_dir)
+                    if near_ws:
+                        ws = near_ws
+                        is_registered = True
+                        ws_path = pathlib.Path(ws["canonical_path"]).resolve()
+                    else:
+                        raise KeyError(f"Workspace not found for argument '{workspace_arg}'")
+        else:
+            cwd = pathlib.Path.cwd().resolve()
+            near_ws, _ = resolve_workspace_for_path(cwd, config_dir=config_dir)
+            if near_ws:
+                ws = near_ws
+                is_registered = True
+                ws_path = pathlib.Path(ws["canonical_path"]).resolve()
+            else:
+                all_rows = conn.execute("SELECT * FROM workspaces").fetchall()
+                if len(all_rows) == 1:
+                    ws = dict(all_rows[0])
+                    is_registered = True
+                    ws_path = pathlib.Path(ws["canonical_path"]).resolve()
+                else:
+                    ws = None
+                    is_registered = False
+                    ws_path = cwd
+
+        cfg_path = find_project_config_path(ws_path)
+        existing_cfg = load_toml_file(cfg_path) if cfg_path.exists() else {}
+        ws_cfg = existing_cfg.get("workspace", {})
+
+        if is_registered and ws is not None:
+            ws_uuid = ws["uuid"]
+            ws_slug = ws["slug"]
+            ws_title = ws.get("title")
+        else:
+            ws_uuid = ws_cfg.get("uuid") or deterministic_uuid4(f"workspace:{ws_path}")
+            ws_slug = ws_cfg.get("id") or sanitize_slug(ws_path.name)
+            ws_title = ws_cfg.get("title")
+
         # Load inner registered workspaces under ws_path
-        other_workspaces = conn.execute(
-            "SELECT * FROM workspaces WHERE uuid != ?", (ws["uuid"],)
-        ).fetchall()
+        if is_registered and ws is not None:
+            other_workspaces = conn.execute(
+                "SELECT * FROM workspaces WHERE uuid != ?", (ws["uuid"],)
+            ).fetchall()
+        else:
+            other_workspaces = conn.execute("SELECT * FROM workspaces").fetchall()
+
         inner_workspaces: list[dict[str, Any]] = []
         inner_ws_paths: list[pathlib.Path] = []
         for ow in other_workspaces:
@@ -972,9 +1042,7 @@ def plan_projects_discover(
                 inner_ws_paths.append(ow_path)
 
         # Existing config projects
-        cfg_path = find_project_config_path(ws_path)
-        existing_cfg = load_toml_file(cfg_path) if cfg_path.exists() else {}
-        existing_projects = existing_cfg.get("workspace", {}).get("projects", [])
+        existing_projects = ws_cfg.get("projects", [])
         existing_by_path: dict[str, dict[str, Any]] = {
             os.path.normpath(p.get("path", "")): p for p in existing_projects if isinstance(p, dict)
         }
@@ -1039,10 +1107,10 @@ def plan_projects_discover(
             if norm_rel in existing_by_path:
                 # Preserve existing uuid and id from config
                 ex = existing_by_path[norm_rel]
-                p_uuid = ex.get("uuid") or deterministic_uuid4(f"project:{ws['uuid']}:{norm_rel}")
+                p_uuid = ex.get("uuid") or deterministic_uuid4(f"project:{ws_uuid}:{norm_rel}")
                 p_id = ex.get("id") or p_id
             else:
-                p_uuid = deterministic_uuid4(f"project:{ws['uuid']}:{norm_rel}")
+                p_uuid = deterministic_uuid4(f"project:{ws_uuid}:{norm_rel}")
 
             used_slugs.add(p_id)
             proposed_projects.append({
@@ -1061,13 +1129,19 @@ def plan_projects_discover(
         ]
 
         plan = {
-            "workspace": ws["slug"],
-            "workspace_uuid": ws["uuid"],
+            "ok": True,
+            "workspace_registered": is_registered,
+            "workspace_path": str(ws_path),
+            "discovered": proposed_projects,
+            "workspace": ws_slug,
+            "workspace_uuid": ws_uuid,
             "canonical_path": str(ws_path),
             "config_path": str(cfg_path),
             "proposed_projects": proposed_projects,
             "sub_workspaces": sub_ws_items,
         }
+        if ws_title:
+            plan["title"] = ws_title
         plan["plan_hash"] = compute_plan_hash(plan)
         return plan
     finally:
@@ -1093,10 +1167,12 @@ def apply_projects_discover(
     ws_uuid = plan["workspace_uuid"]
     ws_slug = plan["workspace"]
     cfg_path = pathlib.Path(plan["config_path"])
+    ws_path = pathlib.Path(plan.get("canonical_path", plan.get("workspace_path"))).resolve()
+    ws_title = plan.get("title")
     proposed = plan["proposed_projects"]
 
     # 1. Update config file
-    write_workspace_to_config(cfg_path, ws_uuid, ws_slug, projects=proposed)
+    write_workspace_to_config(cfg_path, ws_uuid, ws_slug, ws_title=ws_title, projects=proposed)
 
     # 2. Update SQLite projects table
     db_path = get_db_path(config_dir)
@@ -1104,6 +1180,29 @@ def apply_projects_discover(
         conn = get_connection(db_path)
         try:
             with conn:
+                # Ensure workspace is registered in workspaces table
+                existing = conn.execute(
+                    "SELECT * FROM workspaces WHERE uuid = ?", (ws_uuid,)
+                ).fetchone()
+                if not existing:
+                    check_symlinked_components(ws_path)
+                    dev, ino = check_device_inode(ws_path)
+                    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    conn.execute(
+                        """
+                        INSERT INTO workspaces (uuid, slug, title, canonical_path, device, inode, registered_at, last_seen)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(uuid) DO UPDATE SET
+                            slug = excluded.slug,
+                            title = excluded.title,
+                            canonical_path = excluded.canonical_path,
+                            device = excluded.device,
+                            inode = excluded.inode,
+                            last_seen = excluded.last_seen;
+                        """,
+                        (ws_uuid, ws_slug, ws_title, str(ws_path), dev, ino, now, now),
+                    )
+
                 # Clear existing projects for this workspace and insert new ones
                 conn.execute("DELETE FROM projects WHERE workspace_uuid = ?", (ws_uuid,))
                 for p in proposed:
@@ -1120,8 +1219,10 @@ def apply_projects_discover(
     return {
         "ok": True,
         "applied": True,
+        "workspace_registered": True,
         "plan_hash": plan_hash,
         "projects": proposed,
+        "discovered": proposed,
     }
 
 
@@ -1400,7 +1501,9 @@ def cli_projects_discover(args: argparse.Namespace) -> int:
             print("=" * 70)
             print("Projects Discovery Plan Preview")
             print("=" * 70)
-            print(f"Workspace : {plan['workspace']} ({plan['workspace_uuid']})")
+            status_str = "" if plan.get("workspace_registered", True) else " [unregistered]"
+            print(f"Workspace : {plan['workspace']} ({plan['workspace_uuid']}){status_str}")
+            print(f"Path      : {plan.get('canonical_path', plan.get('workspace_path'))}")
             print(f"Config    : {plan['config_path']}")
             print(f"\nProposed Projects ({len(plan['proposed_projects'])}):")
             for p in plan["proposed_projects"]:
@@ -1415,7 +1518,8 @@ def cli_projects_discover(args: argparse.Namespace) -> int:
         return 0
 
     try:
-        res = apply_projects_discover(plan, expect_hash=args.expect_hash, config_dir=args.config_dir)
+        expect_h = args.expect_hash or plan.get("plan_hash")
+        res = apply_projects_discover(plan, expect_hash=expect_h, config_dir=args.config_dir)
         if args.json:
             print(json.dumps(res, indent=2))
         else:

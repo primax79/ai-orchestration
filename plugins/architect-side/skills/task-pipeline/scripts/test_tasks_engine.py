@@ -10320,3 +10320,106 @@ def test_t042_questions_ask_blocks_sets_waiting_on(tmp_path: pathlib.Path) -> No
 
     content = t1_path.read_text(encoding="utf-8")
     assert f"- waiting-on: question:{qid}" in content
+
+
+def test_tasks_next_id_empty_and_populated(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+
+    # 1. Empty tasks tree: next_id defaults to T001, highest_id is None
+    tasks_dir.mkdir(parents=True)
+    res_empty = run_cli("next-id", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_empty.returncode == 0
+    empty_data = json.loads(res_empty.stdout)
+    assert empty_data["ok"] is True
+    assert empty_data["highest_id"] is None
+    assert empty_data["next_id"] == "T001"
+
+    # 2. Add an active emergent task T010, microtask T025, and done task T048
+    (tasks_dir / "features").mkdir(parents=True)
+    _write_sample_task(tasks_dir / "features" / "T010-feature.md", task_id="T010")
+
+    (tasks_dir / "micro").mkdir(parents=True)
+    (tasks_dir / "micro" / "T025-small-fix.md").write_text("# T025 Small Fix\n\n- id: T025\n", encoding="utf-8")
+
+    (tasks_dir / "done" / "maintenance").mkdir(parents=True)
+    _write_sample_task(tasks_dir / "done" / "maintenance" / "T048-done-task.md", task_id="T048")
+
+    # Run tasks_engine.py next-id
+    res_pop = run_cli("next-id", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_pop.returncode == 0
+    pop_data = json.loads(res_pop.stdout)
+    assert pop_data["ok"] is True
+    assert pop_data["highest_id"] == "T048"
+    assert pop_data["next_id"] == "T049"
+
+    # Run via bin/ai-orch tasks next-id
+    res_bin = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "next-id", "--tasks-dir", str(tasks_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_bin.returncode == 0
+    bin_data = json.loads(res_bin.stdout)
+    assert bin_data["ok"] is True
+    assert bin_data["highest_id"] == "T048"
+    assert bin_data["next_id"] == "T049"
+
+    # Human-readable output without --json
+    res_human = run_cli("next-id", "--tasks-dir", str(tasks_dir))
+    assert res_human.returncode == 0
+    assert "T049" in res_human.stdout
+    assert "T048" in res_human.stdout
+
+
+def test_upgrade_detects_legacy_plans(tmp_path: pathlib.Path) -> None:
+    repo_dir = tmp_path / "repo"
+    tasks_dir = repo_dir / "tasks"
+    tasks_dir.mkdir(parents=True)
+    (tasks_dir / "AGENTS.md").write_text("# Old\n", encoding="utf-8")
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n\n<!-- ai-orch:generated:initiatives -->\n<!-- ai-orch:generated:initiatives:end -->\n", encoding="utf-8")
+
+    # Sibling plans/ directory
+    plans_dir = repo_dir / "plans"
+    plans_dir.mkdir(parents=True)
+    init1_dir = plans_dir / "01-bootstrap"
+    init1_dir.mkdir(parents=True)
+    (init1_dir / "plan.md").write_text("# 01 Bootstrap\n\n- **Status:** `open`\n", encoding="utf-8")
+    (plans_dir / "02-database.md").write_text("# 02 Database\n", encoding="utf-8")
+    (plans_dir / "legacy-spec.md").write_text("# Legacy Spec\n", encoding="utf-8")
+
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+
+    # 1. Preview mode (dry-run) via bin/ai-orch tasks upgrade
+    res_dry = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "upgrade", "--tasks-dir", str(tasks_dir), "--dry-run", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_dry.returncode == 0
+    dry_data = json.loads(res_dry.stdout)
+    assert dry_data["ok"] is True
+    assert "legacy_plans" in dry_data
+    lp_dry = dry_data["legacy_plans"]
+    assert len(lp_dry) == 3
+    sources_dry = [item["source"] for item in lp_dry]
+    assert any("01-bootstrap" in s for s in sources_dry)
+    assert any("02-database.md" in s for s in sources_dry)
+    assert any("legacy-spec.md" in s for s in sources_dry)
+
+    # 2. Mutating upgrade without dry-run (migrating non-conflicting NN-*/)
+    res_upg = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_upg.returncode == 0
+    upg_data = json.loads(res_upg.stdout)
+    assert upg_data["ok"] is True
+    assert "legacy_plans" in upg_data
+    assert (tasks_dir / "01-bootstrap" / "plan.md").is_file()
+
+    # 3. Upgrade with --migrate-plans migrates specs as well
+    res_mig = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--migrate-plans", "--json")
+    assert res_mig.returncode == 0
+    mig_data = json.loads(res_mig.stdout)
+    assert mig_data["ok"] is True
+    assert (tasks_dir / "specs" / "legacy-spec.md").is_file()
