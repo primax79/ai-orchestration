@@ -135,6 +135,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T041 (Question workflow gaps) | P1 | [Questions: unapplied answers surfaced, moved-to-tracker status, Notes section](engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | delivered | kilo | - |
 | T042 (Waiting-on qualifier) | P2 | [Waiting-on qualifier for waiting tasks](engine/T042-waiting-on-qualifier-for-waiting-tasks.md) | delivered | kilo | - |
 | T044 (Durable verification requests) | P1 | [Durable verification requests addressed to a workspace or session](engine/T044-durable-verification-requests-addressed-to-a-works.md) | delivered (verify-by: gcube_atlas) | kilo | - |
+| T050 (Non-destructive upgrade) | P1 | [upgrade and sync-index preserve project-specific content; per-project extension fields](engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
