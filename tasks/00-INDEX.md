@@ -134,7 +134,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T039 (Adoption helpers) | P2 | [Adopting existing trees: legacy plans/, next-id preview, discover before registering](engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md) | delivered | kilo | - |
 | T041 (Question workflow gaps) | P1 | [Questions: unapplied answers surfaced, moved-to-tracker status, Notes section](engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | delivered | kilo | - |
 | T042 (Waiting-on qualifier) | P2 | [Waiting-on qualifier for waiting tasks](engine/T042-waiting-on-qualifier-for-waiting-tasks.md) | delivered | kilo | - |
-| T044 (Durable verification requests) | P1 | [Durable verification requests addressed to a workspace or session](engine/T044-durable-verification-requests-addressed-to-a-works.md) | in progress | kilo | - |
+| T044 (Durable verification requests) | P1 | [Durable verification requests addressed to a workspace or session](engine/T044-durable-verification-requests-addressed-to-a-works.md) | delivered (verify-by: gcube_atlas) | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
