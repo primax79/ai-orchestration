@@ -3,7 +3,6 @@
 Live registry of planned initiatives and emergent tasks for `ai-orchestration`. Convention: [`AGENTS.md`](AGENTS.md). Shared context: [`CONTEXT.md`](CONTEXT.md).
 
 ## Initiatives
-
 `#` is the stable id (folder/task prefix); `Priority` is execution order. Each task (`NN.T`) is sized for one independently-verifiable commit and ready for delegation.
 
 | Priority | # | Initiative | Status | Depends on | Size |
@@ -23,22 +22,29 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](13-doctor-rework/plan.md) | in progress (done: 13.1, 13.4, 13.6; to verify: 13.2–13.3, 13.5, 13.7) | 06 | M |
 | 15 | 15 | [Use-Case Driven Specification, Task Definition & Product Validation](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Orchestration broker: one MCP server per user, workspaces, projects, mail](16-orchestration-broker/plan.md) | in progress (done: 16.1, 16.3, 16.9; running: 16.5; to verify: 16.2, 16.4, 16.6) | T026, T027, T028 | L |
+## Specs
 
 ## Specs
 
 | Spec | Drives |
 | --- | --- |
-| [orchestration-config-and-agents-md](specs/orchestration-config-and-agents-md.md) | 02, 03 |
-| [task-and-state-model](specs/task-and-state-model.md) | 02, 03, 05 |
-| [orchestration-extension-spec](specs/orchestration-extension-spec.md) | 05 |
-| [control-plane-safety](specs/control-plane-safety.md) | 06 |
 | [agent-runs-from-ui](specs/agent-runs-from-ui.md) | 07 |
 | [blocking-questions](specs/blocking-questions.md) | 08 |
-| [inbox-notes](specs/inbox-notes.md) | 09 |
-| [timeline-gantt](specs/timeline-gantt.md) | 10 |
-| [subtasks](specs/subtasks.md) | 11 (and 10.1 builds on 11.1) |
+| [control-plane-safety](specs/control-plane-safety.md) | 06 |
 | [events-and-triggers](specs/events-and-triggers.md) | 12 (supersedes 08.6) |
+| [executor-housekeeping-and-completion](specs/executor-housekeeping-and-completion.md) | - |
+| [inbox-notes](specs/inbox-notes.md) | 09 |
+| [orchestration-broker-mcp](specs/orchestration-broker-mcp.md) | - |
+| [orchestration-config-and-agents-md](specs/orchestration-config-and-agents-md.md) | 02, 03 |
+| [orchestration-extension-spec](specs/orchestration-extension-spec.md) | 05 |
+| [peer-messaging](specs/peer-messaging.md) | - |
+| [subtasks](specs/subtasks.md) | 11 (and 10.1 builds on 11.1) |
+| [task-and-state-model](specs/task-and-state-model.md) | 02, 03, 05 |
+| [timeline-gantt](specs/timeline-gantt.md) | 10 |
+| [tracker-links](specs/tracker-links.md) | - |
+| [ui-multi-project](specs/ui-multi-project.md) | - |
 | [use-case-management-and-ai-validation](specs/use-case-management-and-ai-validation.md) | 15 |
+
 
 ## Next up
 
@@ -123,9 +129,9 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | --- | --- | --- | --- | --- | --- |
 | T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | delivered | kilo | - |
 | T036 (Steps by command) | P1 | [Steps and verification authored by command; placeholders rejected](engine/T036-steps-and-verification-authored-by-command-placeho.md) | delivered | kilo | - |
-| T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | in progress | kilo | - |
-| T041 (Question workflow gaps) | P1 | [Questions: unapplied answers surfaced, moved-to-tracker status, Notes section](engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | delivered | kilo | - |
+| T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | delivered | kilo | - |
 | T039 (Adoption helpers) | P2 | [Adopting existing trees: legacy plans/, next-id preview, discover before registering](engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md) | open | kilo | - |
+| T041 (Question workflow gaps) | P1 | [Questions: unapplied answers surfaced, moved-to-tracker status, Notes section](engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | delivered | kilo | - |
 | T042 (Waiting-on qualifier) | P2 | [Waiting-on qualifier for waiting tasks](engine/T042-waiting-on-qualifier-for-waiting-tasks.md) | open | kilo | - |
 | T044 (Durable verification requests) | P1 | [Durable verification requests addressed to a workspace or session](engine/T044-durable-verification-requests-addressed-to-a-works.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->

@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Top change of gcube-audit: every parallel merge conflicts in 00-INDEX.md, with duplicate rows and once a lost answer
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Read tasks/tasks/T037-task-index-without-merge-conflicts-across-parallel.md, do the open steps, run the Verification, update the task and the registry.
 - short: Conflict-free task index
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
@@ -29,4 +31,5 @@ Merging two branches that each added tasks never needs a hand-resolved 00-INDEX.
 
 ## Log (newest first)
 
+- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged d70d453; conflict-free 00-INDEX.md, merge-index driver, and tasks/.gitattributes on upgrade verified (169 passed)
 - 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T037 (Conflict-free index across parallel worktrees) to Kilo
