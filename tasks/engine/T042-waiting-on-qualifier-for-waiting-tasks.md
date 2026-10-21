@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Coordinators cannot tell waiting-on-owner from waiting-on-third-party in the index
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -26,3 +26,7 @@ A task in 'waiting' can carry a 'waiting-on' header (owner, team, external, or a
 ## Verification
 
 - [ ] Verify task implementation.
+
+## Log (newest first)
+
+- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T042 (Waiting-on qualifier for waiting tasks) to Kilo
