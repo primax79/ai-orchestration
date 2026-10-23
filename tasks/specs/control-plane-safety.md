@@ -1,7 +1,7 @@
 # Spec: Control-plane safety (Doctor, index, UI backend)
 
 - **Status:** ready (2026-10-16). Reviewed by Codex in the first draft of [`agent-runs-from-ui`](agent-runs-from-ui.md), where these items were first collected.
-- **Drives:** initiative [06](../06-control-plane-safety/plan.md). It is a prerequisite of 07 (agent runs) and 08 (blocking questions).
+- **Drives:** initiative [06](../done/06-control-plane-safety/plan.md). It is a prerequisite of 07 (agent runs) and 08 (blocking questions).
 - **Repos:** `ai-orchestration` (core), `ai-orchestration-ui`, `vscode-ai-orchestration`
 
 ## 0. Amendments after review 2 (normative; each overrides the section it names)

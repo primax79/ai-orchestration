@@ -1,7 +1,7 @@
 # Spec: Inbox — draft notes, reports and screenshots, processed into tasks
 
 - **Status:** draft for review (2026-10-16)
-- **Drives:** initiative [09](../09-inbox-notes/plan.md)
+- **Drives:** initiative [09](../done/09-inbox-notes/plan.md)
 - **Builds on:**
   - the `task-pipeline` convention `_inbox/to-analyze/` → `_inbox/analyzed/` (`plugins/architect-side/skills/task-pipeline/SKILL.md`, "The pipeline", step 1–2);
   - [`control-plane-safety`](control-plane-safety.md) (auth, CSP, task-write lock, preview/confirm);

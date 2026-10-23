@@ -1,7 +1,7 @@
 # Spec: Events, orchestration sessions and triggers
 
 - **Status:** draft for review (2026-10-17)
-- **Drives:** initiative [12](../12-events-and-triggers/plan.md)
+- **Drives:** initiative [12](../done/12-events-and-triggers/plan.md)
 - **Origin:** owner request (2026-10-17). Interactions in the UI (answering a question, marking a note ready, a run finishing) change files, but nothing reacts to them until an orchestrator happens to look. The system needs explicit events and a reference to the orchestration session that must react.
 - **Supersedes:** spec 08 §5 "Answer and resume run" (task 08.6 becomes a trigger rule here). It also closes the gap "answered but not yet applied".
 

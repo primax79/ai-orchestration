@@ -1,7 +1,7 @@
 # Spec: Agent runs from the control plane (choose who does the work)
 
 - **Status:** v2 (2026-10-16), revised after a Codex review of v1 (3 blockers, 21 major, 4 minor; all addressed below or explicitly scoped out).
-- **Drives:** initiative [07](../07-agent-runs-from-ui/plan.md)
+- **Drives:** initiative [07](../done/07-agent-runs-from-ui/plan.md)
 - **Requires:** [`control-plane-safety`](control-plane-safety.md) (initiative 06) is done first: auth, non-blocking backend, watcher, confirmation modal, VS Code bridge. The safety defects found in v1 (D1–D9) moved there.
 - **Related:** [`blocking-questions`](blocking-questions.md) (initiative 08): runs that ask questions, and answer-and-resume.
 - **Repos:** `ai-orchestration` (core engine + CLI), `ai-orchestration-ui`, `vscode-ai-orchestration`

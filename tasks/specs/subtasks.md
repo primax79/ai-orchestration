@@ -1,7 +1,7 @@
 # Spec: First-class task hierarchy (N levels, parent → children)
 
 - **Status:** ready (2026-10-17). Revised the same day: N levels instead of two, on owner request.
-- **Drives:** initiative [11](../11-subtasks/plan.md)
+- **Drives:** initiative [11](../done/11-subtasks/plan.md)
 - **Restores and generalizes:** the original `macroplan-authoring` model (agentic-coding-kit, 2026-08-05): initiative → tasks `NN.T` ("one task = one commit") → sub-steps inline. That model is also in [`task-and-state-model`](task-and-state-model.md) §1, where `NN.T` carry "the exact same metadata fields and state transitions as `T###`", and in the "Initiative → NN.T subtasks" tree of [`orchestration-extension-spec`](orchestration-extension-spec.md). The engine never implemented it: `NN.T` inherit the initiative state and carry no metadata, and agent runs (spec 07 §1) are restricted to `T###` because of this.
 
 ## 0. Amendments after the Codex review (2026-10-17; normative, each overrides the section it names)

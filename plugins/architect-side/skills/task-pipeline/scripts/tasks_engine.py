@@ -182,7 +182,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "paused": {"in progress", "open", "waiting", "blocked", "dropped"},
     "waiting": {"in progress", "blocked", "paused", "open", "dropped"},
     "blocked": {"in progress", "waiting", "paused", "open", "dropped"},
-    "delivered": {"verified", "bounced", "done with a caveat", "dropped"},
+    "delivered": {"verified", "bounced", "paused", "done with a caveat", "dropped"},
     "bounced": {"in progress", "waiting", "blocked", "paused", "dropped"},
     "verified": {"done", "done with a caveat", "bounced", "dropped"},
     "done": set(),
@@ -9455,7 +9455,11 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 continue
             existing_next_rows.append((cells[0], cells, line_s))
 
-    emergent_next_map = {t["id"]: t for t in active_tasks if t["next_up"] == "yes"}
+    emergent_next_map = {
+        t["id"]: t
+        for t in active_tasks
+        if t["next_up"] == "yes" and t.get("canonical_state") != "paused"
+    }
     seen_next_ids: set[str] = set()
     next_up_candidates: list[tuple[str, str, str]] = []
 
@@ -9485,7 +9489,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             next_up_candidates.append((base_id, pri, line))
 
     for t in active_tasks:
-        if t["next_up"] == "yes" and t["id"] not in seen_next_ids:
+        if t["next_up"] == "yes" and t.get("canonical_state") != "paused" and t["id"] not in seen_next_ids:
             seen_next_ids.add(t["id"])
             st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
             line = f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |"
@@ -9968,8 +9972,22 @@ def compute_tasks_graph(
             return node.id.split(".")[0]
         return "emergent"
 
-    # 3. Columns calculation across all open leaves
-    open_leaves_all = [n for n in all_leaf_nodes if n.canonical_state not in TERMINAL_STATES]
+    def _is_paused_or_under_paused(node: TaskNode) -> bool:
+        curr: TaskNode | None = node
+        while curr:
+            if curr.canonical_state == "paused":
+                return True
+            if curr.parent and curr.parent in tree:
+                curr = tree[curr.parent]
+            else:
+                break
+        return False
+
+    # 3. Columns calculation across all open (non-terminal, non-paused) leaves
+    open_leaves_all = [
+        n for n in all_leaf_nodes
+        if n.canonical_state not in TERMINAL_STATES and not _is_paused_or_under_paused(n)
+    ]
     open_set_all = {n.id for n in open_leaves_all}
 
     blocked_by_map: dict[str, list[str]] = {}
@@ -10037,7 +10055,10 @@ def compute_tasks_graph(
     else:
         leaf_nodes = all_leaf_nodes
 
-    open_leaves = [n for n in leaf_nodes if n.canonical_state not in TERMINAL_STATES]
+    open_leaves = [
+        n for n in leaf_nodes
+        if n.canonical_state not in TERMINAL_STATES and not _is_paused_or_under_paused(n)
+    ]
     open_set = {n.id for n in open_leaves}
     columns = {nid: columns_all[nid] for nid in open_set if nid in columns_all}
 

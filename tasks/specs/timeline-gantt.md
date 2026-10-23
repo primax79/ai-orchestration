@@ -1,7 +1,7 @@
 # Spec: Abstract timeline — dependencies and priorities
 
 - **Status:** ready (2026-10-17), revised the same day after owner feedback: no dates and no estimates; dependency management, priority management, and task size (small / medium / long).
-- **Drives:** initiative [10](../10-timeline-gantt/plan.md)
+- **Drives:** initiative [10](../done/10-timeline-gantt/plan.md)
 
 ## 0. Amendments after the Codex review (2026-10-17; normative)
 

@@ -6,26 +6,10 @@
 
 ## Tasks (One Task = One Commit)
 
-### 16.2 - Shared on-disk locks, CAS and idempotency keys in the engine
-
-- **Status:** `delivered` (2026-10-18) · **Short:** Shared locks and idempotency · **Size:** M · **Depends on:** T026 · **Repo:** `ai-orchestration/`
-- **Goal:** spec §2 "Locks are on disk": every task mutation (CLI or broker) under `tasks/.ai-orch.lock` with file-hash CAS; idempotency keys with stored terminal results for mutating calls; broker singleton (`broker.lock`) and the CLI's routing rule (lock held → through the broker or "busy"; never an HTTP-timeout guess); `config_lock` CAS for setup/ensure (C7).
-
-### 16.4 - QualifiedTaskRef, coordinates: links and the placement rule
-
-- **Status:** `delivered` (2026-10-19) · **Short:** Qualified refs and coordination · **Size:** M · **Depends on:** 16.3 · **Repo:** `ai-orchestration/`
-- **Goal:** one parser/canonicaliser for `[workspace:][project/]ID` (malformed prefixes are errors); `coordinates:` on workspace-tree tasks resolved read-only to project tasks; `validate` placement warnings; `tasks move ID --to-project P` with preview and a pointer left behind; on-disk `depends-on` unchanged.
-
 ### 16.5 - Broker MCP tools: reads, then deterministic writes
 
 - **Status:** `bounced` (2026-10-21; Validation NOT OK: 'ai-orch mcp --local' (in-process tools) promised by the Goal is missing; error codes and project field off-spec. Fix in T045 (Broker validation follow-ups).) · **Short:** Broker MCP tools · **Size:** L · **Depends on:** 16.1, 16.2, 16.4 · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
 - **Goal:** spec §3: the broker from the UI backend; read tools; deterministic writes applied directly with optional `expect_hash`, `preview: true`, idempotency keys; `confirm_token` only for destructive/owner-facing actions; lazy console binding with explicit workspace/project (never the broker's cwd); `ai-orch mcp --local`.
-
-### 16.6 - Skills switched to the broker
-
-- **Status:** `delivered` (2026-10-21; ai-coding-tools; Merged 64fd6cb (508 passed + isolated Doctor/launcher/MCP live check + 3-tier Markdown/CLI/MCP task access)) · **Short:** Skills use the broker · **Size:** M · **Depends on:** 16.5 · **Repo:** `ai-orchestration/` + `kilo-mcp/`
-- **Goal:** spec §7: generic templates and bindings tell sessions to use the broker tools, `orchestrator.ask` for formalisation and state updates, the citation rule with qualified refs, `unread_mail`; CLI instructions kept as fallback; MCP registration of the shim offered by the Doctor/setup (preview, never silent), with a version-free command path so registrations survive plugin updates.
-- **Priority (owner, 2026-10-21):** next major item, with T032 (CLI writes through broker). It answers the first feedback round: versioned plugin-cache paths and stale vendored engine copies (inbox N003, N010), and gives every session the same engine. Feedback items on the engine (T035, T036, T041) land in the engine, so both the broker tools and the CLI get them.
 
 ### 16.7 - Orchestrator workers inside the broker; recovery; orchestrator.ask tickets
 
@@ -55,3 +39,19 @@
 - **Status:** `done` (2026-10-21; Verified by d4science-python-library-2e) · **Short:** Project and workspace views · **Size:** L · **Depends on:** 16.4 · **Repo:** `ai-orchestration-ui/` + `vscode-ai-orchestration/`
 - **Goal:** spec §7b: project selector and project view (today's views, bare ids); common workspace view with qualified ids, project column/filters/grouping, coordination tasks expanding into the project tasks they coordinate, workspace-wide questions/inbox/runs/mail with a project column, writes routed to the item's project; remembered view per window; deep links `workspace:project/ID`; then the read-only all-workspaces overview. VS Code: the same views through the bridge and a project picker in the tree views.
 - **Detail spec (2026-10-20):** [`../specs/ui-multi-project.md`](../specs/ui-multi-project.md); no longer waits for 16.5 (the UI calls the engine CLI directly). Parts: 16.9a backend (delivered 2026-10-20, ai-orchestration-ui b4efea0), 16.9b web UI (delivered 2026-10-20, ai-orchestration-ui 2fe1c72; common view loads active tasks, closed on request, every page), 16.9c VS Code (delivered 2026-10-20, vscode-ai-orchestration 0.6.0).
+
+### 16.2 - Shared on-disk locks, CAS and idempotency keys in the engine
+
+- **Status:** `done` (2026-10-23; owner; Validated by automated test suites and approved by owner for cleanup) · **Short:** Shared locks and idempotency · **Size:** M · **Depends on:** T026 · **Repo:** `ai-orchestration/`
+- **Goal:** spec §2 "Locks are on disk": every task mutation (CLI or broker) under `tasks/.ai-orch.lock` with file-hash CAS; idempotency keys with stored terminal results for mutating calls; broker singleton (`broker.lock`) and the CLI's routing rule (lock held → through the broker or "busy"; never an HTTP-timeout guess); `config_lock` CAS for setup/ensure (C7).
+
+### 16.4 - QualifiedTaskRef, coordinates: links and the placement rule
+
+- **Status:** `done` (2026-10-23; owner; Validated by automated test suites and approved by owner for cleanup) · **Short:** Qualified refs and coordination · **Size:** M · **Depends on:** 16.3 · **Repo:** `ai-orchestration/`
+- **Goal:** one parser/canonicaliser for `[workspace:][project/]ID` (malformed prefixes are errors); `coordinates:` on workspace-tree tasks resolved read-only to project tasks; `validate` placement warnings; `tasks move ID --to-project P` with preview and a pointer left behind; on-disk `depends-on` unchanged.
+
+### 16.6 - Skills switched to the broker
+
+- **Status:** `done` (2026-10-23; owner; Validated by automated test suites and approved by owner for cleanup) · **Short:** Skills use the broker · **Size:** M · **Depends on:** 16.5 · **Repo:** `ai-orchestration/` + `kilo-mcp/`
+- **Goal:** spec §7: generic templates and bindings tell sessions to use the broker tools, `orchestrator.ask` for formalisation and state updates, the citation rule with qualified refs, `unread_mail`; CLI instructions kept as fallback; MCP registration of the shim offered by the Doctor/setup (preview, never silent), with a version-free command path so registrations survive plugin updates.
+- **Priority (owner, 2026-10-21):** next major item, with T032 (CLI writes through broker). It answers the first feedback round: versioned plugin-cache paths and stale vendored engine copies (inbox N003, N010), and gives every session the same engine. Feedback items on the engine (T035, T036, T041) land in the engine, so both the broker tools and the CLI get them.

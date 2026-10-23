@@ -1,7 +1,7 @@
 # Spec: Blocking questions (format, engine, pending-answers UI)
 
 - **Status:** draft for review (2026-10-16)
-- **Drives:** initiative [08](../08-blocking-questions/plan.md)
+- **Drives:** initiative [08](../done/08-blocking-questions/plan.md)
 - **Extends:** [`task-and-state-model`](task-and-state-model.md). The `decider` header and the `## Decisions waiting` table become views over question files.
 - **Depends on:** [`control-plane-safety`](control-plane-safety.md) (generated index regions, UI auth, confirmation modal). The "answer and resume" action depends on [`agent-runs-from-ui`](agent-runs-from-ui.md).
 
