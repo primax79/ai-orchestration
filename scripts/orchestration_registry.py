@@ -1559,10 +1559,21 @@ def resolve_workspace_for_path(
 # ---------------------------------------------------------------------------
 
 
+def _join_positional(val: Any, default: str | None = None) -> str | None:
+    if isinstance(val, list):
+        joined = " ".join(str(x) for x in val if x is not None).strip()
+        return joined if joined else default
+    if val is None:
+        return default
+    s = str(val).strip()
+    return s if s else default
+
+
 def cli_workspace_register(args: argparse.Namespace) -> int:
+    target_path = _join_positional(args.path, ".") or "."
     try:
         plan = plan_workspace_register(
-            path=args.path,
+            path=target_path,
             slug=args.id,
             title=args.title,
             config_dir=args.config_dir,
@@ -1593,11 +1604,14 @@ def cli_workspace_register(args: argparse.Namespace) -> int:
                 print(f"Outer WS      : {outer['slug']} ({outer['uuid']})")
                 print(f"Projects left : {len(leaving)} will leave outer workspace")
             print(f"\nPlan hash     : {plan['plan_hash']}")
-            print(f"\nTo apply: ai-orch workspace register {plan['workspace']['canonical_path']} --apply --expect-hash {plan['plan_hash']}")
+            cpath = plan["workspace"]["canonical_path"]
+            quoted_cpath = f'"{cpath}"' if " " in cpath else cpath
+            print(f"\nTo apply: ai-orch workspace register {quoted_cpath} --apply --expect-hash {plan['plan_hash']}")
         return 0
 
     try:
-        res = apply_workspace_register(plan, expect_hash=args.expect_hash, config_dir=args.config_dir)
+        expect_h = args.expect_hash or plan.get("plan_hash")
+        res = apply_workspace_register(plan, expect_hash=expect_h, config_dir=args.config_dir)
         if args.json:
             print(json.dumps(res, indent=2))
         else:
@@ -1703,8 +1717,9 @@ def cli_workspace_show(args: argparse.Namespace) -> int:
 
 
 def cli_projects_discover(args: argparse.Namespace) -> int:
+    target_ws = _join_positional(args.workspace, None)
     try:
-        plan = plan_projects_discover(args.workspace, config_dir=args.config_dir)
+        plan = plan_projects_discover(target_ws, config_dir=args.config_dir)
     except Exception as e:
         if args.json:
             print(json.dumps({"ok": False, "error": str(e)}))
@@ -1731,8 +1746,9 @@ def cli_projects_discover(args: argparse.Namespace) -> int:
                 for sw in plan["sub_workspaces"]:
                     print(f"  - {sw['slug']:<18} path={sw['path']:<20} (sub_workspace, read-only)")
             print(f"\nPlan hash : {plan['plan_hash']}")
-            target_ws = args.workspace or ""
-            print(f"\nTo apply: ai-orch projects discover {target_ws} --apply --expect-hash {plan['plan_hash']}")
+            raw_ws = target_ws or ""
+            quoted_ws = f'"{raw_ws}"' if " " in raw_ws else raw_ws
+            print(f"\nTo apply: ai-orch projects discover {quoted_ws} --apply --expect-hash {plan['plan_hash']}")
         return 0
 
     try:
@@ -1752,8 +1768,9 @@ def cli_projects_discover(args: argparse.Namespace) -> int:
 
 
 def cli_projects_list(args: argparse.Namespace) -> int:
+    target_ws = _join_positional(args.workspace, None)
     try:
-        res = list_projects(args.workspace, config_dir=args.config_dir)
+        res = list_projects(target_ws, config_dir=args.config_dir)
         if args.json:
             print(json.dumps(res, indent=2))
         else:
@@ -1772,7 +1789,7 @@ def cli_projects_list(args: argparse.Namespace) -> int:
 
 
 def cli_workspace_next(args: argparse.Namespace) -> int:
-    ws_target = getattr(args, "root", None) or getattr(args, "workspace", None)
+    ws_target = getattr(args, "root", None) or _join_positional(getattr(args, "workspace", None), None)
     engine_script = (
         REPO_ROOT
         / "plugins"
@@ -1816,7 +1833,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # workspace register
     p_reg = subparsers.add_parser("register", help="Register a workspace")
-    p_reg.add_argument("path", nargs="?", default=".", help="Workspace path (default: .)")
+    p_reg.add_argument("path", nargs="*", default=["."], help="Workspace path (default: .)")
     p_reg.add_argument("--id", dest="id", default=None, help="Workspace slug ID")
     p_reg.add_argument("--title", default=None, help="Workspace title")
     p_reg.add_argument("--apply", action="store_true", help="Apply registration")
@@ -1845,7 +1862,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # workspace next
     p_wnext = subparsers.add_parser("next", help="Show ready queue across all projects in workspace")
-    p_wnext.add_argument("workspace", nargs="?", default=None, help="Workspace slug, UUID, or path")
+    p_wnext.add_argument("workspace", nargs="*", default=None, help="Workspace slug, UUID, or path")
     p_wnext.add_argument("--root", dest="root", default=None, help="Workspace root path")
     p_wnext.add_argument("--limit", type=int, default=None, help="Maximum number of tasks to return")
     p_wnext.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
@@ -1853,7 +1870,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # projects discover
     p_disc = subparsers.add_parser("discover", help="Discover projects in a workspace")
-    p_disc.add_argument("workspace", nargs="?", default=None, help="Workspace slug, UUID, or path")
+    p_disc.add_argument("workspace", nargs="*", default=None, help="Workspace slug, UUID, or path")
     p_disc.add_argument("--apply", action="store_true", help="Apply discovery proposal")
     p_disc.add_argument("--expect-hash", dest="expect_hash", default=None, help="Expected plan hash")
     p_disc.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
@@ -1861,7 +1878,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # projects list
     p_plist = subparsers.add_parser("projects-list", help="List projects in a workspace")
-    p_plist.add_argument("workspace", nargs="?", default=None, help="Workspace slug, UUID, or path")
+    p_plist.add_argument("workspace", nargs="*", default=None, help="Workspace slug, UUID, or path")
     p_plist.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
     p_plist.add_argument("--json", action="store_true", help="Output JSON")
 
