@@ -14,9 +14,12 @@
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Read tasks/tasks/T035-one-shot-close-clearer-derived-state-refusal-bulk.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: owner
+- verify-by: gcube_audit
 - short: One-shot close
 
-verification pending: run Verification checks (independent verifier)
+
+
+verification pending: re-run your four failing commands from the 'Reopened 2026-10-25' section on a scratch copy of your tree, with ai-orch >= architect-side 0.7.1 (launcher or ~/works/ai-coding-tools/ai-orchestration/bin/ai-orch): transition <id> done --verifier X walks the path, close --verified (preview, then --expect-plan-hash), in-progress spelling accepted, one Log line per step (verify-by: gcube_audit)
 
 ## Goal
 
