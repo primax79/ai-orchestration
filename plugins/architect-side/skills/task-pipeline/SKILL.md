@@ -261,7 +261,13 @@ path. A "next steps" paragraph in the chat is not a substitute.
   - **Size:** defaults to `XS`.
   - **Commands:** `ai-orch tasks micro --title ... [--short ...] [--kind ...] [--priority ...] [--label ...]` creates a microtask under the task-write lock; `ai-orch tasks promote <id> [--category <cat>]` promotes it to a full task in a chosen category.
 
-  Other extra fields are not allowed in the header: put the information in the
+  **Per-project extension fields:**
+  A project may declare additional allowed header fields (placed after `handoff`, e.g. `area`) via `[tasks] extension_fields = ["area"]` in its `orchestration.toml` (or `.ai-orchestration.local.toml`) or via a fenced `toml` block in `tasks/AGENTS.md`:
+  ```toml
+  [tasks]
+  extension_fields = ["area"]
+  ```
+  Undeclared extra fields are rejected by `tasks validate`; put other information in the
   body. Then the required sections `## Goal`, `## Steps` and `## Verification`.
   While the state is `delivered`, a line `verification pending: <what is left to
   check, and by whom>` goes right after the header (when `verify-by` is set:
@@ -687,13 +693,14 @@ When working on a project created with older conventions (e.g. legacy `macroplan
 
 1. **Via CLI (`ai-orch tasks upgrade`)**:
    ```bash
-   ./bin/ai-orch tasks upgrade [--tasks-dir /path/to/project/tasks]
+   ./bin/ai-orch tasks upgrade --dry-run [--tasks-dir /path/to/project/tasks]
+   ./bin/ai-orch tasks upgrade --apply --expect-hash <plan_hash> [--tasks-dir /path/to/project/tasks]
    ```
-   This automatically:
-   - Upgrades `tasks/AGENTS.md` to the canonical `task-pipeline` rules and updated skill names (`task-pipeline`, `orchestration-workflow`, `task-spec-authoring`, `task-worktree-ops`, `executor-contract`, `orchestration-setup`);
-   - Scaffolds standard directories (`_inbox/to-analyze`, `_inbox/analyzed`);
-   - Re-syncs `tasks/00-INDEX.md` with standard tables (`Initiatives`, `Specs`, `Next up`, `Tasks by category`, `Decisions waiting`, `Done`);
-   - Runs `validate` across the tree.
+   This non-destructively:
+   - Appends or refreshes a managed block (`<!-- ai-orch:managed begin -->` … `<!-- ai-orch:managed end -->`) in `tasks/AGENTS.md` with the canonical `task-pipeline` rules and skill names, preserving all project-specific content outside the markers byte-for-byte;
+   - Scaffolds standard directories (`_inbox/to-analyze`, `_inbox/analyzed`), `tasks/.gitignore`, and `tasks/.gitattributes`;
+   - Re-syncs `tasks/00-INDEX.md` while preserving project-specific extra table columns (e.g. `Owner`), `Next up` ordering (unless `--reorder` is passed to `sync-index`), and `Id` cell format;
+   - Runs `validate` across the tree and exits `0` on success.
 
 2. **Via Skill (in Chat)**:
    Ask the assistant in your project window:
