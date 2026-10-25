@@ -6,13 +6,14 @@
 - priority: P1
 - priority-reason: Kilo kept outdated orchestration skills after a release; the Doctor called them up to date
 - next-up: no
-- state: open
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: inbox N056 (ai-coding-tools, releasing architect-side 0.7.0)
 - paths: scripts/orchestration_env.py
 - handoff: Read tasks/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: ai-coding-tools-c1
 - short: Doctor fresh skill installs
 
 ## Goal
@@ -33,3 +34,10 @@ install-skills and the status report compare the installed skill content with th
 - `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/ plugins/architect-side/skills/task-pipeline/scripts/ plugins/shared/skills/orchestration-setup/scripts/`: 563 passed in 381.60s.
 - `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/test_orchestration_env.py`: 81 passed in 108.96s.
 - Isolated live check in scratch temp directory: verified `install-skills` installs v1, source edit in scratch clone updates to v2, and subsequent dry-run plans `REPLACE` with `(source newer)` without `--overwrite`.
+
+## Log (newest first)
+
+- 2026-10-25, ai-coding-tools-c1: state `verified` -> `done` — Requester check (independent of the executor, kilo): read-only dry run on the real home shows Kilo skills up to date with no spurious REPLACE and the new warning that the source clone is behind its remote; tests cover outdated-copy replacement without --overwrite; full suite 563 passed
+- 2026-10-25, ai-coding-tools-c1: state `delivered` -> `verified` — Requester check (independent of the executor, kilo): read-only dry run on the real home shows Kilo skills up to date with no spurious REPLACE and the new warning that the source clone is behind its remote; tests cover outdated-copy replacement without --overwrite; full suite 563 passed
+- 2026-10-25, ai-coding-tools-c1: state `in progress` -> `delivered` — Requester check (independent of the executor, kilo): read-only dry run on the real home shows Kilo skills up to date with no spurious REPLACE and the new warning that the source clone is behind its remote; tests cover outdated-copy replacement without --overwrite; full suite 563 passed
+- 2026-10-25, ai-coding-tools-c1: state `open` -> `in progress` — Requester check (independent of the executor, kilo): read-only dry run on the real home shows Kilo skills up to date with no spurious REPLACE and the new warning that the source clone is behind its remote; tests cover outdated-copy replacement without --overwrite; full suite 563 passed

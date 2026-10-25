@@ -106,7 +106,6 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T056 (Doctor fresh skill installs) | P1 | [Doctor: install from an up-to-date source and compare skill content, not the stored hash](env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md) | open | kilo | - |
 
 ### tasks
 
@@ -128,7 +127,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | delivered | kilo | - |
+| T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | delivered (verify-by: gcube_audit) | kilo | - |
 | T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | open | kilo | - |
 | T050 (Non-destructive upgrade) | P1 | [upgrade and sync-index preserve project-specific content; per-project extension fields](engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md) | bounced | kilo | - |
 | T052 (Move answered question guard) | P3 | [questions move refuses or warns on an already answered question](engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | open | kilo | - |
@@ -198,6 +197,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T024 (Proposal confirm engine) | [Confirm or reject trigger-proposed actions (engine + UI wiring)](done/server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
 | T051 (reopen crash) | [tasks reopen crashes on emergent tasks (TypeError in _update_index_task_path)](done/engine/T051-tasks-reopen-crashes-on-emergent-tasks-typeerror-i.md) | done | 2026-10-25 |
 | T054 (Upgrade preview by default) | [tasks upgrade previews by default; writes only with --apply and a plan hash](done/engine/T054-tasks-upgrade-previews-by-default-writes-only-with.md) | done | 2026-10-25 |
+| T056 (Doctor fresh skill installs) | [Doctor: install from an up-to-date source and compare skill content, not the stored hash](done/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md) | done | 2026-10-25 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph
