@@ -127,7 +127,11 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
+| T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | open | kilo | - |
+| T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | open | kilo | - |
 | T050 (Non-destructive upgrade) | P1 | [upgrade and sync-index preserve project-specific content; per-project extension fields](engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md) | open | kilo | - |
+| T051 (reopen crash) | P1 | [tasks reopen crashes on emergent tasks (TypeError in _update_index_task_path)](engine/T051-tasks-reopen-crashes-on-emergent-tasks-typeerror-i.md) | open | kilo | - |
+| T052 (Move answered question guard) | P3 | [questions move refuses or warns on an already answered question](engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -162,9 +166,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T031 (Conditional done follow-ups) | [Conditional done: question age in the index; conditions: header position](done/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md) | done | 2026-10-21 |
 | T034 (Built-in feedback channel) | [Tooling feedback built into the product: ai-orch feedback, skill rule, upgrade AGENTS.md](done/server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md) | done | 2026-10-21 |
 | T019 (Duplicate skills alignment) | [Apply Q005: per-skill diff of the gcube-jenkins, gcube-security-audit and frontend-design copies](done/env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md) | done | 2026-10-21 |
-| T035 (One-shot close) | [One-shot close, clearer derived-state refusal, bulk close of verified](done/engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | done | 2026-10-23 |
 | T036 (Steps by command) | [Steps and verification authored by command; placeholders rejected](done/engine/T036-steps-and-verification-authored-by-command-placeho.md) | done | 2026-10-23 |
-| T037 (Conflict-free task index) | [Task index without merge conflicts across parallel branches](done/engine/T037-task-index-without-merge-conflicts-across-parallel.md) | done | 2026-10-23 |
 | T039 (Adoption helpers) | [Adopting existing trees: legacy plans/, next-id preview, discover before registering](done/engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md) | done | 2026-10-23 |
 | T041 (Question workflow gaps) | [Questions: unapplied answers surfaced, moved-to-tracker status, Notes section](done/engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | done | 2026-10-23 |
 | T042 (Waiting-on qualifier) | [Waiting-on qualifier for waiting tasks](done/engine/T042-waiting-on-qualifier-for-waiting-tasks.md) | done | 2026-10-23 |

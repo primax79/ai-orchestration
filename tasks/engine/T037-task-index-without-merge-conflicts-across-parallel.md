@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Top change of gcube-audit: every parallel merge conflicts in 00-INDEX.md, with duplicate rows and once a lost answer
 - next-up: no
-- state: done
+- state: open
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -34,3 +34,18 @@ Merging two branches that each added tasks never needs a hand-resolved 00-INDEX.
 - 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
 - 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged d70d453; conflict-free 00-INDEX.md, merge-index driver, and tasks/.gitattributes on upgrade verified (169 passed)
 - 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T037 (Conflict-free index across parallel worktrees) to Kilo
+
+## Reopened 2026-10-25 (requester validation, gcube-audit)
+
+Setup: two branches each add one valid task + `sync-index --apply`; tasks/.gitattributes has `00-INDEX.md merge=ai-orch-index`.
+NOT OK:
+1. Nothing sets the git config `merge.ai-orch-index.driver` and no doc mentions it, so the merge still CONFLICTs.
+   `upgrade` writes only .gitattributes. Register the driver (upgrade, with preview; or document a one-line setup)
+   and make `validate` warn when .gitattributes names the driver but git config lacks it.
+2. With the driver configured by hand (`ai-orch tasks merge-index %O %A %B`) the merge has no conflict but drops
+   theirs' row (only ours' row kept); a later `sync-index --apply` restores it. The driver must regenerate from the
+   merged headers, not keep one side.
+OK: duplicate rows are collapsed by `sync-index --apply`.
+Minor: `sync-index` without `--apply` prints the whole index as a dry run; easy to mistake for "done". Print a one-line
+"preview only, nothing written; re-run with --apply" footer.
+Verify again with the requester before closing.

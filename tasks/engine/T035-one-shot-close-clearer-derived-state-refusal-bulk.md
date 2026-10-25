@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Asked by three sessions (two as top change); closing takes four calls today
 - next-up: no
-- state: done
+- state: open
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -33,3 +33,15 @@
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
 - 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
 - 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged 76391c4 + N041 single-file ## Log recording; 12 new unit tests pass
+
+## Reopened 2026-10-25 (requester validation, gcube-audit)
+
+Works: `tasks close <id> --verifier owner --reason r` from 'in progress' reaches done and writes a Log line.
+NOT OK:
+1. `tasks transition <id> done --verifier owner --reason r` is refused ("must pass through 'delivered' first" from in
+   progress; from delivered the allowed list omits done). The goal promised the one-call walk on `transition` too.
+2. `tasks close <id> --verified` (bulk close of verified items) does not exist ("unrecognized arguments").
+3. A header `- state: in-progress` (hyphenated, 6 tasks in their tree) is not normalised: close and transition refuse
+   it, and list shows canonical_state 'in-progress'. Normalise state spellings on read (and offer a fix in validate).
+4. The Log records only the last step (verified -> done), not each intermediate step.
+Verify again with the requester before closing.

@@ -34,3 +34,7 @@ validate and sync-index warn about answered-but-unapplied questions and the inde
 - 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
 - 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged 29f852c; unapplied answers surfaced, questions move, non-blocking --blocks -, and ## Notes verified (163 passed)
 - 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T041 (Questions lifecycle: unapplied answers, move-to-tracker, non-blocking, Notes section) to Kilo
+
+## Validation by the requester (2026-10-25)
+
+OK from gcube-audit: `questions move ... --to <url>` gives status moved and shows in `questions list`; `questions list` prints the answered-but-unapplied notice and `validate` warns per question. Minor gap filed as T052.
