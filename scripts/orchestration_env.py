@@ -923,6 +923,208 @@ def resolve_source_repo(repo_name: str, home: pathlib.Path | None = None) -> pat
     return None
 
 
+def check_source_repo_behind_remote(clone_dir: pathlib.Path, timeout: float = 2.0) -> tuple[bool, str | None]:
+    """Check if clone_dir is behind origin/HEAD. Never fails offline or on timeout."""
+    try:
+        head_res = subprocess.run(
+            ["git", "-C", str(clone_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False, timeout=timeout,
+        )
+        if head_res.returncode != 0:
+            return (False, None)
+        local_head = head_res.stdout.strip()
+
+        rem_res = subprocess.run(
+            ["git", "-C", str(clone_dir), "remote"],
+            capture_output=True, text=True, check=False, timeout=timeout,
+        )
+        if rem_res.returncode != 0:
+            return (False, None)
+        remotes = rem_res.stdout.split()
+        if not remotes:
+            return (False, None)
+        remote_name = "origin" if "origin" in remotes else remotes[0]
+
+        ls_res = subprocess.run(
+            ["git", "-C", str(clone_dir), "ls-remote", remote_name, "HEAD"],
+            capture_output=True, text=True, check=False, timeout=timeout,
+        )
+        if ls_res.returncode == 0 and ls_res.stdout.strip():
+            remote_head = ls_res.stdout.strip().split()[0]
+            if remote_head and local_head and remote_head != local_head:
+                mb = subprocess.run(
+                    ["git", "-C", str(clone_dir), "merge-base", "--is-ancestor", remote_head, local_head],
+                    capture_output=True, check=False, timeout=timeout,
+                )
+                if mb.returncode != 0:
+                    return (True, remote_head)
+    except Exception:
+        pass
+    return (False, None)
+
+
+def find_configured_local_checkout(
+    repo_name: str,
+    home: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+) -> pathlib.Path | None:
+    """Find a configured local checkout of `repo_name` outside ~/.ai-orchestration/repos/.
+
+    Checks orchestration.toml in workspace / config directories, then falls back to
+    resolve_source_repo(repo_name, home=None) (e.g. sibling checkout or REPO_ROOT).
+    """
+    h = home or get_home_dir()
+    cache_dir = get_repos_cache_dir(h)
+
+    cfg_dirs: list[pathlib.Path] = []
+    if workspace:
+        cfg_dirs.extend([
+            workspace / ".config" / "ai-orchestration",
+            workspace,
+            workspace / "tasks",
+        ])
+    cfg_dirs.append(h / ".config" / "ai-orchestration")
+
+    cand_keys = [repo_name, repo_name.replace("-", "_")]
+    if repo_name == "ai-orchestration":
+        cand_keys.extend(["source_checkout", "source_repo", "ai_orchestration_root", "ai_orchestration", "ai-orchestration"])
+
+    for cdir in cfg_dirs:
+        for fname in ("orchestration.toml", ".ai-orchestration.local.toml"):
+            tfile = cdir / fname
+            if not tfile.is_file():
+                continue
+            try:
+                raw = tfile.read_text(encoding="utf-8", errors="replace")
+                data = None
+                if tomllib is not None:
+                    try:
+                        data = tomllib.loads(raw)
+                    except Exception:
+                        data = None
+                if isinstance(data, dict):
+                    for k in cand_keys:
+                        val = data.get(k)
+                        if isinstance(val, str) and val.strip():
+                            cand_p = pathlib.Path(val).expanduser().resolve()
+                            if cand_p.is_dir() and (cand_p / ".git").exists() and cand_p != (cache_dir / repo_name).resolve() and cache_dir not in cand_p.parents:
+                                return cand_p
+                    for sec in ("repos", "paths", "launcher"):
+                        sub = data.get(sec)
+                        if isinstance(sub, dict):
+                            for k in cand_keys:
+                                val = sub.get(k)
+                                if isinstance(val, str) and val.strip():
+                                    cand_p = pathlib.Path(val).expanduser().resolve()
+                                    if cand_p.is_dir() and (cand_p / ".git").exists() and cand_p != (cache_dir / repo_name).resolve() and cache_dir not in cand_p.parents:
+                                        return cand_p
+            except Exception:
+                pass
+
+    real_h = get_home_dir()
+    if home is None or home == real_h:
+        cand = resolve_source_repo(repo_name, home=None)
+        if cand and cand.is_dir() and (cand / ".git").exists():
+            resolved_cand = cand.resolve()
+            if resolved_cand != (cache_dir / repo_name).resolve() and cache_dir not in resolved_cand.parents:
+                return resolved_cand
+
+    return None
+
+
+def check_local_checkout_ahead(
+    clone_dir: pathlib.Path,
+    local_checkout: pathlib.Path,
+    timeout: float = 2.0,
+) -> tuple[bool, str | None]:
+    """Check if local_checkout has commits ahead of clone_dir."""
+    try:
+        c_res = subprocess.run(
+            ["git", "-C", str(clone_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False, timeout=timeout,
+        )
+        l_res = subprocess.run(
+            ["git", "-C", str(local_checkout), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False, timeout=timeout,
+        )
+        if c_res.returncode == 0 and l_res.returncode == 0:
+            c_head = c_res.stdout.strip()
+            l_head = l_res.stdout.strip()
+            if c_head and l_head and c_head != l_head:
+                mb = subprocess.run(
+                    ["git", "-C", str(local_checkout), "merge-base", "--is-ancestor", c_head, l_head],
+                    capture_output=True, check=False, timeout=timeout,
+                )
+                if mb.returncode == 0:
+                    return (True, str(local_checkout))
+    except Exception:
+        pass
+    return (False, None)
+
+
+def check_source_repo_stale(
+    repo_name: str,
+    home: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+    timeout: float = 2.0,
+) -> dict[str, Any]:
+    """Check if the source clone in ~/.ai-orchestration/repos/<repo_name> is behind its remote
+    or behind a configured local checkout. Never fails on network/git errors.
+    """
+    h = home or get_home_dir()
+    cache_dir = get_repos_cache_dir(h)
+    clone_dir = cache_dir / repo_name
+
+    if not clone_dir.is_dir() or not (clone_dir / ".git").exists():
+        return {
+            "has_clone": False,
+            "clone_path": str(clone_dir),
+            "stale": False,
+            "behind_remote": False,
+            "local_ahead": False,
+            "warning": None,
+            "advice": None,
+        }
+
+    behind_remote, remote_head = check_source_repo_behind_remote(clone_dir, timeout=timeout)
+    local_ahead = False
+    local_checkout_path = None
+
+    local_cand = find_configured_local_checkout(repo_name, home=h, workspace=workspace)
+    if local_cand:
+        local_ahead, local_checkout_path = check_local_checkout_ahead(clone_dir, local_cand, timeout=timeout)
+
+    stale = behind_remote or local_ahead
+    stale_reasons = []
+    if behind_remote:
+        stale_reasons.append("behind its remote")
+    if local_ahead:
+        stale_reasons.append(f"configured local checkout ({local_checkout_path}) is ahead")
+    stale_reason = " and ".join(stale_reasons)
+
+    warning = None
+    advice = None
+    if stale:
+        warning = (
+            f"Source clone '{repo_name}' is {stale_reason}. "
+            f"Run `ai-orch env fetch-repos --repos {repo_name}` to update."
+        )
+        advice = f"Run `ai-orch env fetch-repos --repos {repo_name}` to update."
+
+    return {
+        "has_clone": True,
+        "clone_path": str(clone_dir),
+        "behind_remote": behind_remote,
+        "remote_head": remote_head,
+        "local_ahead": local_ahead,
+        "local_checkout_path": local_checkout_path,
+        "stale": stale,
+        "stale_reason": stale_reason,
+        "warning": warning,
+        "advice": advice,
+    }
+
+
 def trash_path(
     path: pathlib.Path,
     assistant: str | None = None,
@@ -1174,11 +1376,14 @@ def detect_skill_state(
             if not cat_entry and matching_entries:
                 cat_entry = matching_entries[0]
             cat_hash = cat_entry["hash"] if cat_entry else None
+            resolved_repo = mrepo or (cat_entry["repo"] if cat_entry else None)
 
-            if inst_hash and inst_hash == mhash and (not cat_hash or inst_hash == cat_hash):
-                return ("up-to-date", mrepo, cat_hash or mhash)
+            if inst_hash and cat_hash and inst_hash == cat_hash:
+                return ("up-to-date", resolved_repo, cat_hash)
+            elif (inst_hash and mhash and inst_hash == mhash) or find_historical_skill_match(inst_hash, matching_entries, home=home):
+                return ("outdated", resolved_repo, cat_hash or mhash)
             else:
-                return ("modified-or-outdated", mrepo, cat_hash or mhash)
+                return ("modified-or-outdated", resolved_repo, cat_hash or mhash)
         except Exception:
             return ("modified-or-outdated", None, None)
 
@@ -1273,10 +1478,14 @@ def detect_agent_state(
             except Exception:
                 pass
 
-        if inst_hash and inst_hash == r_hash and (not cat_trans_hash or inst_hash == cat_trans_hash):
-            return ("up-to-date", r_repo, cat_hash or r_hash)
+        resolved_repo = r_repo or (cat_entry["repo"] if cat_entry else None)
+
+        if inst_hash and cat_trans_hash and inst_hash == cat_trans_hash:
+            return ("up-to-date", resolved_repo, cat_hash or r_hash)
+        elif (inst_hash and r_hash and inst_hash == r_hash) or find_historical_agent_match(inst_hash, matching_entries, assistant=asst, home=home):
+            return ("outdated", resolved_repo, cat_hash or r_hash)
         else:
-            return ("modified-or-outdated", r_repo, cat_hash or r_hash)
+            return ("modified-or-outdated", resolved_repo, cat_hash or r_hash)
 
     # No receipt: check if hash matches any catalog entry (legacy copies)
     for entry in matching_entries:
@@ -3939,7 +4148,7 @@ def plan_for_conflict(
                     s_state = se.get("state")
                     is_norm_cat = any(compare_skill_dirs(sp, pathlib.Path(ce["path"]))["equivalent"] for ce in cat_entries if ce.get("path"))
                     is_current = s_state in ("up-to-date", "up-to-date-legacy") or bool(s_hash and s_hash in cat_hashes) or is_norm_cat
-                    is_outdated_legacy = s_state == "outdated-legacy" or (find_historical_skill_match(s_hash, cat_entries, home=h) is not None)
+                    is_outdated_legacy = s_state in ("outdated", "outdated-legacy") or (find_historical_skill_match(s_hash, cat_entries, home=h) is not None)
                     entry_info.append({
                         "entry": se,
                         "path": sp,
@@ -4041,7 +4250,7 @@ def plan_for_conflict(
                         }
                         p_items.append(p_item)
 
-    elif kind == "outdated-legacy":
+    elif kind in ("outdated", "outdated-legacy"):
         entry = entries[0] if entries else {}
         sp_str = entry.get("path")
         if sp_str and sp_str not in seen:
@@ -4057,8 +4266,8 @@ def plan_for_conflict(
             p_item = {
                 "action": "update",
                 "path": sp_str,
-                "reason": f"Update outdated legacy skill '{sname}' to current version from {repo_name}",
-                "current_state": "outdated-legacy",
+                "reason": f"Update outdated skill '{sname}' to current version from {repo_name}",
+                "current_state": kind,
                 "before_sha256": inst_hash,
                 "after_sha256": cat_hash,
             }
@@ -4159,14 +4368,25 @@ def inspect_environment(
 
     clis = {tool: check_cli_binary(tool) for tool in ASSISTANTS}
     repos_status = {}
+    stale_repos_info: dict[str, dict[str, Any]] = {}
     for rname in ("ai-orchestration", "kilo-mcp", "claude-mcp"):
         rpath = resolve_source_repo(rname, h)
-        repos_status[rname] = {
+        stale_info = check_source_repo_stale(rname, home=h, workspace=ws)
+        stale_repos_info[rname] = stale_info
+        r_entry: dict[str, Any] = {
             "available": rpath is not None,
             "path": str(rpath) if rpath else None,
             "has_server_py": bool(rpath and (rpath / "server.py").is_file()),
             "has_venv": bool(rpath and (rpath / ".venv" / "bin" / "python").is_file()),
+            "behind_remote": stale_info.get("behind_remote", False),
+            "local_ahead": stale_info.get("local_ahead", False),
+            "stale": stale_info.get("stale", False),
         }
+        if stale_info.get("stale"):
+            r_entry["warning"] = stale_info.get("warning")
+            r_entry["stale_reason"] = stale_info.get("stale_reason")
+            r_entry["advice"] = stale_info.get("advice")
+        repos_status[rname] = r_entry
 
     environments: dict[str, Any] = {}
     scopes_to_check = ["global"] + (["project"] if ws else [])
@@ -4232,7 +4452,7 @@ def inspect_environment(
                             s_sev = "info"
                         elif s_state in ("up-to-date", "plugin"):
                             s_sev = "neutral"
-                        elif s_state in ("outdated-legacy", "up-to-date-legacy", "modified-or-outdated", "foreign") or s_state.startswith("obsolete-"):
+                        elif s_state in ("outdated", "outdated-legacy", "up-to-date-legacy", "modified-or-outdated", "foreign") or s_state.startswith("obsolete-"):
                             s_sev = "warning"
                         else:
                             s_sev = "info"
@@ -4253,7 +4473,7 @@ def inspect_environment(
                         s_sev = "info"
                     elif s_state in ("up-to-date", "plugin"):
                         s_sev = "neutral"
-                    elif s_state in ("outdated-legacy", "up-to-date-legacy", "modified-or-outdated", "foreign") or s_state.startswith("obsolete-"):
+                    elif s_state in ("outdated", "outdated-legacy", "up-to-date-legacy", "modified-or-outdated", "foreign") or s_state.startswith("obsolete-"):
                         s_sev = "warning"
                     else:
                         s_sev = "info"
@@ -4557,7 +4777,7 @@ def inspect_environment(
                 elif len(unique_entries) == 1:
                     e = unique_entries[0]
                     e_state = e.get("state")
-                    if e.get("origin", "").startswith("standalone") and e_state in ("outdated-legacy", "up-to-date-legacy", "foreign"):
+                    if e.get("origin", "").startswith("standalone") and e_state in ("outdated", "outdated-legacy", "up-to-date-legacy", "foreign"):
                         # For Kilo: only report single-entry legacy/foreign conflicts for skills in Kilo's own roots,
                         # not for external roots like ~/.claude/skills which belong to Claude!
                         if assistant == "kilo":
@@ -4753,7 +4973,7 @@ def inspect_environment(
         elif kind == "duplicate-name":
             is_any_actionable = any(c.get("actionable") for _, _, c in items_with_loc)
             group_severity = "error" if is_any_actionable else "info"
-        elif kind in ("outdated-legacy", "up-to-date-legacy", "foreign", "modified-or-outdated", "stale-plugin-copy"):
+        elif kind in ("outdated", "outdated-legacy", "up-to-date-legacy", "foreign", "modified-or-outdated", "stale-plugin-copy"):
             group_severity = "warning"
         else:
             group_severity = "info"
@@ -5173,6 +5393,42 @@ def inspect_environment(
                         "count": 1,
                     })
 
+    # Add stale source repo findings to finding_groups
+    for rname, s_info in stale_repos_info.items():
+        if s_info.get("stale"):
+            s_gkey = f"stale-source-repo:{rname}"
+            s_acked, _ = is_finding_acknowledged("stale-source-repo", [rname], [], acks, group_key=s_gkey)
+            adv_text = s_info.get("warning", f"Source clone '{rname}' is stale. Run `ai-orch env fetch-repos --repos {rname}` to update.")
+            finding_groups.append({
+                "group_key": s_gkey,
+                "group": "Source Repositories",
+                "title": f"Stale source repository clone ({rname})",
+                "kind": "stale-source-repo",
+                "names": [rname],
+                "path": s_info.get("clone_path", ""),
+                "severity": "info" if s_acked else "warning",
+                "acknowledged": s_acked,
+                "message": adv_text,
+                "locations": [{"repo": rname, "path": s_info.get("clone_path", "")}],
+                "entries": [{
+                    "name": rname,
+                    "path": s_info.get("clone_path", ""),
+                    "origin": "source-repo",
+                    "scope": "global",
+                    "enabled": True,
+                    "state": "stale",
+                }],
+                "fixable": False,
+                "actionable": True,
+                "actions": [{
+                    "action": "fetch-repos",
+                    "repos": [rname],
+                    "reason": f"Update stale source repository '{rname}' via fetch-repos",
+                }],
+                "advice": [adv_text],
+                "count": 1,
+            })
+
     sev_rank = {"error": 0, "warning": 1, "info": 2, "neutral": 3}
     finding_groups.sort(key=lambda g: (sev_rank.get(g["severity"], 9), g["group_key"]))
 
@@ -5367,6 +5623,9 @@ def install_skills(
     if not rpath or not (rpath / "plugins").is_dir():
         raise FileNotFoundError(f"Source repository {repo_name!r} not found locally. Run `fetch-repos` first.")
 
+    stale_info = check_source_repo_stale(repo_name, home=h, workspace=ws)
+    source_warning = stale_info.get("warning")
+
     selected_plugins = plugins or ["architect-side", "executor-side", "shared"]
     overwrite_set = set(overwrite or [])
     overwrite_all = "all" in overwrite_set
@@ -5444,8 +5703,9 @@ def install_skills(
                                     reason = f"Replace {cur_state} agent '{aname}' with {repo_name}/{p_name} (--overwrite)"
                                     after_sha256 = src_hash
                                 else:
+                                    extra = " (installed edited locally)" if cur_state == "modified-or-outdated" else ""
                                     action = "skip"
-                                    reason = f"Skip {cur_state} agent '{aname}': not in --overwrite list"
+                                    reason = f"Skip {cur_state} agent '{aname}': not in --overwrite list{extra}"
                                     after_sha256 = None
                             elif before_sha256 == src_hash:
                                 # Identical content: nothing to do (avoids trashing/copying on every install)
@@ -5454,7 +5714,7 @@ def install_skills(
                                 after_sha256 = None
                             else:
                                 action = "replace"
-                                reason = f"Update agent '{aname}' from {repo_name}/{p_name}"
+                                reason = f"Update agent '{aname}' from {repo_name}/{p_name} (source newer)"
                                 after_sha256 = src_hash
 
                         p_item = {
@@ -5573,8 +5833,9 @@ def install_skills(
                                 reason = f"Replace {cur_state} skill '{sname}' with {repo_name}/{p_name} (--overwrite)"
                                 after_sha256 = src_hash
                             else:
+                                extra = " (installed edited locally)" if cur_state == "modified-or-outdated" else ""
                                 action = "skip"
-                                reason = f"Skip {cur_state} skill '{sname}': not in --overwrite list"
+                                reason = f"Skip {cur_state} skill '{sname}': not in --overwrite list{extra}"
                                 after_sha256 = None
                         elif before_sha256 == src_hash and not target_dir.is_symlink() and not link:
                             # Identical copy: nothing to do (avoids trashing/copying on every install)
@@ -5583,7 +5844,7 @@ def install_skills(
                             after_sha256 = None
                         else:
                             action = "replace"
-                            reason = f"Update skill '{sname}' from {repo_name}/{p_name}"
+                            reason = f"Update skill '{sname}' from {repo_name}/{p_name} (source newer)"
                             after_sha256 = src_hash
 
                     p_item = {
@@ -5624,12 +5885,17 @@ def install_skills(
         }
 
     if dry_run:
-        return {
+        ret_dry = {
             "ok": True,
             "dry_run": True,
             "plan": plan,
             "plan_hash": plan_hash,
         }
+        if source_warning:
+            ret_dry["warning"] = source_warning
+            ret_dry["source_repo_stale"] = True
+            ret_dry["source_repo_warning"] = source_warning
+        return ret_dry
 
     with env_lock(h):
         plan, planned_ops = _build_plan()
@@ -5732,7 +5998,7 @@ def install_skills(
                     "mode": "symlink" if op["link"] else "copy",
                 })
 
-        return {
+        ret = {
             "ok": True,
             "installed_count": len(installed),
             "installed": installed,
@@ -5740,6 +6006,11 @@ def install_skills(
             "plan": plan,
             "plan_hash": plan_hash,
         }
+        if source_warning:
+            ret["warning"] = source_warning
+            ret["source_repo_stale"] = True
+            ret["source_repo_warning"] = source_warning
+        return ret
 
 
 def remove_skill(
@@ -6714,7 +6985,13 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     print("\n=== Source Repositories ===")
     for rname, rinfo in report["source_repos"].items():
-        status = f"OK ({rinfo['path']}, venv={rinfo['has_venv']})" if rinfo["available"] else "NOT CLONED"
+        if not rinfo.get("available"):
+            status = "NOT CLONED"
+        elif rinfo.get("stale"):
+            reason = rinfo.get("stale_reason", "stale")
+            status = f"WARNING ({reason}; run `ai-orch env fetch-repos --repos {rname}`)"
+        else:
+            status = f"OK ({rinfo['path']}, venv={rinfo['has_venv']})"
         print(f"  {rname:<18}: {status}")
 
     print("\n=== Environments (Skills & Registered MCPs) ===")
@@ -6815,6 +7092,8 @@ def cmd_install_skills(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(res, indent=2))
     else:
+        if res.get("warning"):
+            print(f"[warning] {res['warning']}", file=sys.stderr)
         if not res.get("ok"):
             print(f"[error] {res.get('error', 'Execution refused')}", file=sys.stderr)
         elif res.get("dry_run"):
