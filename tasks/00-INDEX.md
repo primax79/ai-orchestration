@@ -79,48 +79,6 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 ## Tasks by category
 
 <!-- ai-orch:generated tasks-by-category -->
-### methodology
-
-Evolutions and refinements to the orchestration skills (`orchestration-methodology`, `conflict-resolver`, `headless-executor-contract`). Owner session: unassigned ([README](methodology/README.md)).
-
-| Id | Priority | Task | State | Executor | Depends on |
-| --- | --- | --- | --- | --- | --- |
-
-### server-and-bindings
-
-Standalone MCP server evolutions (`../kilo-mcp/`, `../claude-mcp/`). Owner session: unassigned ([README](server-and-bindings/README.md)).
-
-| Id | Priority | Task | State | Executor | Depends on |
-| --- | --- | --- | --- | --- | --- |
-
-### micro
-
-Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
-
-| Id | Priority | Task | State | Executor | Depends on |
-| --- | --- | --- | --- | --- | --- |
-
-### env-doctor
-
-Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)).
-
-| Id | Priority | Task | State | Executor | Depends on |
-| --- | --- | --- | --- | --- | --- |
-
-### tasks
-
-Tasks in `tasks`. Owner session: unassigned ([README](tasks/README.md)).
-
-| Id | Priority | Task | State | Executor | Depends on |
-| --- | --- | --- | --- | --- | --- |
-
-### tooling
-
-Tasks in `tooling`. Owner session: unassigned ([README](tooling/README.md)).
-
-| Id | Priority | Task | State | Executor | Depends on |
-| --- | --- | --- | --- | --- | --- |
-
 ### engine
 
 Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
@@ -130,7 +88,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | delivered (verify-by: gcube_audit) | kilo | - |
 | T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | delivered (verify-by: gcube_audit) | kilo | - |
 | T052 (Move answered question guard) | P3 | [questions move refuses or warns on an already answered question](engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | open | kilo | - |
-| T055 (No phantom categories) | P2 | [Campaign reports never become categories; sync-index drops vanished categories](engine/T055-campaign-reports-never-become-categories-sync-inde.md) | open | kilo | - |
+| T055 (No phantom categories) | P2 | [Campaign reports never become categories; sync-index drops vanished categories](engine/T055-campaign-reports-never-become-categories-sync-inde.md) | delivered (verify-by: ai-coding-tools) | kilo | - |
 | T057 (Walk step attribution) | P2 | [Transition walk attributes each step to the right actor](engine/T057-transition-walk-attributes-each-step-to-the-right.md) | open | kilo | - |
 | T058 (Branch id collisions) | P2 | [Id collisions across branches and a dangling merge driver](engine/T058-id-collisions-across-branches-and-a-dangling-merge.md) | open | kilo | - |
 | T059 (Merge driver opt-in) | P3 | [upgrade explains or gates the local git config write of the index merge driver](engine/T059-upgrade-explains-or-gates-the-local-git-config-wri.md) | open | kilo | - |

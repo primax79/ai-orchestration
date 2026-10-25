@@ -13,7 +13,10 @@
 - sources: inbox N055 (ai-coding-tools-2c)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Read tasks/engine/T055-campaign-reports-never-become-categories-sync-inde.md, do the open steps, run the Verification, update the task and the registry.
+- verify-by: ai-coding-tools
 - short: No phantom categories
+
+verification pending: with ai-orch >= architect-side 0.7.8, on a scratch copy of the workspace tasks/ run the validation campaign (or drop a file in tasks/reports/) and sync-index --apply; expect no 'reports' category, category tables only for folders holding open tasks, no row lost, a second sync 'already in sync' (verify-by: ai-coding-tools)
 
 ## Goal
 
