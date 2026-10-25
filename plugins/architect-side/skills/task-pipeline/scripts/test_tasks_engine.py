@@ -8865,7 +8865,7 @@ def test_t031_header_field_order_error(tmp_path: pathlib.Path) -> None:
     assert f"Canonical sequence: {list(te.OPTIONAL_EXTENSION_FIELDS)}" in err
     # Checks where misplaced fields belong
     assert "field 'conditions' belongs after 'moved-to' and before 'waiting-on'" in err
-    assert "field 'verifier' belongs after 'verification-mode' and before 'size'" in err
+    assert "field 'verifier' belongs after 'verification-mode' and before 'verify-by'" in err
 
     # Now fix the order: verifier before conditions
     good_task = bad_task.read_text(encoding="utf-8").replace(
