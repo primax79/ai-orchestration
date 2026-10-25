@@ -6,13 +6,14 @@
 - priority: P2
 - priority-reason: A flaky test hides real failures and blocks gated merges
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: inbox N054
 - paths: conftest.py, scripts/orchestration_runs.py, scripts/orchestration_env.py, scripts/test_orchestration_triggers.py, scripts/test_orchestration_runs.py, scripts/test_orchestration_env.py, scripts/test_orchestration_invoke.py, scripts/test_orchestration_orchestrator.py, plugins/shared/skills/orchestration-setup/scripts/test_orchestration_config.py
 - handoff: Read tasks/engine/T053-make-test-confirm-start-run-hash-mismatch-if-plan.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: ai-coding-tools-c1
 - short: Flaky trigger test
 
 ## Goal
@@ -38,5 +39,6 @@ The test passes deterministically under load: find the timing assumption behind 
 
 ## Log
 
+- 2026-10-25, ai-coding-tools-c1: state `verified` -> `done`
+- 2026-10-25, ai-coding-tools-c1: state `delivered` -> `verified`
 - 2026-10-25, kilo: state `open` -> `delivered` — stubbed CLI version probes and replaced fixed cancel/startup waits with 30s condition polling; 20/20 stress runs and full suite (579 tests) green.
-
