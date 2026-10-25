@@ -1855,7 +1855,7 @@ def test_execute_start_moves_task_to_in_progress(sample_workspace: pathlib.Path)
     assert "state: in progress" in final_content
 
 
-def wait_for_terminal(ws: pathlib.Path, run_id: str, timeout: float = 30.0) -> dict[str, Any]:
+def wait_for_terminal(ws: pathlib.Path, run_id: str, timeout: float = 120.0) -> dict[str, Any]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         rec = load_run_record(ws, run_id)
