@@ -127,7 +127,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | open | kilo | - |
+| T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | delivered | kilo | - |
 | T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | open | kilo | - |
 | T050 (Non-destructive upgrade) | P1 | [upgrade and sync-index preserve project-specific content; per-project extension fields](engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md) | delivered (verify-by: porting_liferay) | kilo | - |
 | T052 (Move answered question guard) | P3 | [questions move refuses or warns on an already answered question](engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | open | kilo | - |

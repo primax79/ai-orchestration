@@ -11859,4 +11859,228 @@ def test_t054_upgrade_previews_by_default_and_applies_only_with_plan_hash(tmp_pa
     assert utd_data["upgraded_files"] == []
 
 
+# ===========================================================================
+# T035 (Reopened): transition walk to done, bulk close, state spellings, log per step
+# ===========================================================================
+
+
+def test_t035_transition_walks_to_done_from_in_progress_and_delivered(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    t1 = tasks_dir / "features" / "T001-from-ip.md"
+    _write_sample_task(t1, task_id="T001", title="From In Progress", category="features", state="in progress", executor="kilo")
+
+    t2 = tasks_dir / "features" / "T002-from-del.md"
+    _write_sample_task(t2, task_id="T002", title="From Delivered", category="features", state="delivered", executor="kilo")
+
+    # Dry-run prints the planned path without modifying disk
+    res_dry = run_cli(
+        "transition", "T001", "done",
+        "--verifier", "reviewer", "--reason", "all checks green",
+        "--dry-run", "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_dry.returncode == 0
+    dry_data = json.loads(res_dry.stdout)
+    assert dry_data["ok"] is True
+    assert dry_data["dry_run"] is True
+    assert dry_data["path"] == ["in progress", "delivered", "verified", "done"]
+    assert t1.is_file()
+
+    # Walk from 'in progress' to 'done'
+    res_t1 = run_cli(
+        "transition", "T001", "done",
+        "--verifier", "reviewer", "--reason", "all checks green",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_t1.returncode == 0
+    d1 = json.loads(res_t1.stdout)
+    assert d1["ok"] is True
+    assert d1["old_state"] == "in progress"
+    assert d1["new_state"] == "done"
+    assert [t["to"] for t in d1["transitions"]] == ["delivered", "verified", "done"]
+    assert (tasks_dir / "done" / "features" / "T001-from-ip.md").is_file()
+
+    # Walk from 'delivered' to 'done'
+    res_t2 = run_cli(
+        "transition", "T002", "done",
+        "--verifier", "owner", "--reason", "owner checked",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_t2.returncode == 0
+    d2 = json.loads(res_t2.stdout)
+    assert d2["ok"] is True
+    assert d2["old_state"] == "delivered"
+    assert d2["new_state"] == "done"
+    assert [t["to"] for t in d2["transitions"]] == ["verified", "done"]
+    assert (tasks_dir / "done" / "features" / "T002-from-del.md").is_file()
+
+
+def test_t035_transition_walk_guard_refuses_missing_or_executor_verifier(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    t1 = tasks_dir / "features" / "T001-guard.md"
+    _write_sample_task(t1, task_id="T001", title="Guard Test", category="features", state="in progress", executor="kilo")
+
+    # 1. Missing verifier -> refused
+    res_no_ver = run_cli("transition", "T001", "done", "--reason", "try close", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_no_ver.returncode == 1
+    assert not json.loads(res_no_ver.stdout)["ok"]
+    assert t1.is_file()
+
+    # 2. Executor as verifier -> refused
+    res_exec_ver = run_cli(
+        "transition", "T001", "done",
+        "--verifier", "kilo", "--reason", "self check",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_exec_ver.returncode == 1
+    err_data = json.loads(res_exec_ver.stdout)
+    assert err_data["ok"] is False
+    assert "independent verifier" in err_data["error"]
+    assert t1.is_file()
+
+    # 3. With --owner-approved -> allowed
+    res_owner = run_cli(
+        "transition", "T001", "done",
+        "--owner-approved", "--reason", "approved by owner",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_owner.returncode == 0
+    assert json.loads(res_owner.stdout)["ok"] is True
+    assert (tasks_dir / "done" / "features" / "T001-guard.md").is_file()
+
+
+def test_t035_bulk_close_verified_with_plan_hash(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    t1 = tasks_dir / "features" / "T001-ver1.md"
+    _write_sample_task(t1, task_id="T001", title="Verified One", category="features", state="verified", executor="kilo", verifier="owner")
+
+    t2 = tasks_dir / "features" / "T002-ver2.md"
+    _write_sample_task(t2, task_id="T002", title="Verified Two", category="features", state="verified", executor="kilo", verifier="reviewer")
+
+    t3 = tasks_dir / "features" / "T003-open.md"
+    _write_sample_task(t3, task_id="T003", title="Still Open", category="features", state="in progress", executor="kilo")
+
+    # 1. Dry-run returns plan and plan_hash without closing
+    res_dry = run_cli("close", "--verified", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry.returncode == 0
+    dry_data = json.loads(res_dry.stdout)
+    assert dry_data["ok"] is True
+    assert dry_data["dry_run"] is True
+    assert dry_data["closed_count"] == 2
+    assert dry_data["tasks"] == ["T001", "T002"]
+    plan_hash = dry_data["plan_hash"]
+    assert plan_hash
+    assert t1.is_file() and t2.is_file()
+
+    # 2. Without --expect-plan-hash (and without --dry-run) -> refused with plan_hash
+    res_no_hash = run_cli("close", "--verified", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_no_hash.returncode == 1
+    no_hash_data = json.loads(res_no_hash.stdout)
+    assert no_hash_data["ok"] is False
+    assert no_hash_data["plan_hash"] == plan_hash
+    assert t1.is_file() and t2.is_file()
+
+    # 3. With matching --expect-plan-hash -> closes both verified tasks, leaves T003 untouched
+    res_apply = run_cli(
+        "close", "--verified",
+        "--expect-plan-hash", plan_hash,
+        "--reason", "batch cleanup",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_apply.returncode == 0
+    apply_data = json.loads(res_apply.stdout)
+    assert apply_data["ok"] is True
+    assert apply_data["closed_count"] == 2
+    assert apply_data["tasks"] == ["T001", "T002"]
+    assert (tasks_dir / "done" / "features" / "T001-ver1.md").is_file()
+    assert (tasks_dir / "done" / "features" / "T002-ver2.md").is_file()
+    assert t3.is_file()
+
+
+def test_t035_hyphenated_and_variant_state_spellings_accepted_and_warned(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    t1 = tasks_dir / "features" / "T001-hyphen.md"
+    _write_sample_task(t1, task_id="T001", title="Hyphenated State", category="features", state="in-progress", executor="kilo")
+
+    t2 = tasks_dir / "features" / "T002-under.md"
+    _write_sample_task(t2, task_id="T002", title="Underscore State", category="features", state="In_Progress", executor="kilo")
+
+    # Normalisation unit checks
+    assert te.normalize_state("in-progress") == "in progress"
+    assert te.normalize_state("In Progress") == "in progress"
+    assert te.normalize_state("in_progress") == "in progress"
+    assert te.normalize_state("done-with-a-caveat: note") == "done with a caveat"
+
+    # 1. list shows canonical_state 'in progress' and leaves files untouched
+    orig_t1_bytes = t1.read_text(encoding="utf-8")
+    res_list = run_cli("list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_list.returncode == 0
+    list_data = json.loads(res_list.stdout)
+    by_id = {t["id"]: t for t in list_data["emergent_tasks"]}
+    assert by_id["T001"]["canonical_state"] == "in progress"
+    assert by_id["T002"]["canonical_state"] == "in progress"
+    assert t1.read_text(encoding="utf-8") == orig_t1_bytes
+
+    # 2. validate succeeds with a warning naming the canonical spelling 'in progress'
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0
+    val_data = json.loads(res_val.stdout)
+    assert val_data["ok"] is True
+    assert any("in-progress" in w and "'in progress'" in w for w in val_data["warnings"])
+    assert t1.read_text(encoding="utf-8") == orig_t1_bytes
+
+    # 3. transition and close accept the hyphenated / variant tasks
+    res_tr = run_cli("transition", "T001", "delivered", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tr.returncode == 0
+    assert json.loads(res_tr.stdout)["new_state"] == "delivered"
+
+    res_close = run_cli("close", "T002", "--verifier", "owner", "--reason", "ok", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_close.returncode == 0
+    assert json.loads(res_close.stdout)["new_state"] == "done"
+
+
+def test_t035_log_records_every_intermediate_step_for_single_and_folder_tasks(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # 1. Single-file task without pre-existing ## Log section, closed without --reason
+    single_file = tasks_dir / "features" / "T001-single-log.md"
+    _write_sample_task(single_file, task_id="T001", title="Single Log", category="features", state="in progress", executor="kilo")
+
+    res_close = run_cli("close", "T001", "--verifier", "owner", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_close.returncode == 0
+    done_single = tasks_dir / "done" / "features" / "T001-single-log.md"
+    single_content = done_single.read_text(encoding="utf-8")
+    assert "## Log" in single_content
+    assert "state `in progress` -> `delivered`" in single_content
+    assert "state `delivered` -> `verified`" in single_content
+    assert "state `verified` -> `done`" in single_content
+
+    # 2. Folder task walked via `transition <id> done` from 'open'
+    folder_dir = tasks_dir / "features" / "T002-folder-log"
+    _write_sample_task(folder_dir / "README.md", task_id="T002", title="Folder Log", category="features", state="open", executor="kilo")
+
+    res_tr = run_cli(
+        "transition", "T002", "done",
+        "--verifier", "reviewer", "--reason", "walked from open",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_tr.returncode == 0
+    done_progress = tasks_dir / "done" / "features" / "T002-folder-log" / "PROGRESS.md"
+    assert done_progress.is_file()
+    prog_text = done_progress.read_text(encoding="utf-8")
+    assert "state `open` -> `in progress` — walked from open" in prog_text
+    assert "state `in progress` -> `delivered` — walked from open" in prog_text
+    assert "state `delivered` -> `verified` — walked from open" in prog_text
+    assert "state `verified` -> `done` — walked from open" in prog_text
+
+
+
 
