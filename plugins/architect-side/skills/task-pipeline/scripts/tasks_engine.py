@@ -10114,6 +10114,66 @@ def _extract_existing_initiative_next_up_rows(existing_index: str) -> list[str]:
     return rows
 
 
+def _format_initiative_status_cell(
+    init_node: TaskNode,
+    tree: dict[str, TaskNode],
+    fallback_status: str | None = None,
+) -> str:
+    if init_node.children:
+        derived_st = init_node.derived_state or init_node.state
+        if derived_st == "done":
+            return "done"
+        if derived_st == "open":
+            return "open"
+        if derived_st == "waiting" and getattr(init_node, "waiting_on", None):
+            return f"waiting ({init_node.waiting_on})"
+
+        leaf_nodes: list[TaskNode] = []
+
+        def _collect_leaves_rec(nid: str) -> None:
+            if nid in tree:
+                n = tree[nid]
+                if n.is_leaf:
+                    leaf_nodes.append(n)
+                for c in n.children:
+                    _collect_leaves_rec(c)
+
+        for c in init_node.children:
+            _collect_leaves_rec(c)
+
+        done_leaves = [l for l in leaf_nodes if l.canonical_state in ("done", "done with a caveat", "dropped")]
+        running_leaves = [l for l in leaf_nodes if l.canonical_state in ("in progress", "bounced")]
+        # Finished by the executor, waiting for a check (delivered) or for closing (verified)
+        to_check_leaves = [l for l in leaf_nodes if l.canonical_state in ("delivered", "verified")]
+        open_leaves = [l for l in leaf_nodes if l.canonical_state == "open"]
+        blocked_leaves = [l for l in leaf_nodes if l.canonical_state == "blocked"]
+        waiting_leaves = [l for l in leaf_nodes if l.canonical_state == "waiting"]
+
+        summary_parts: list[str] = []
+        if done_leaves:
+            summary_parts.append(f"done: {format_id_ranges([l.id for l in done_leaves])}")
+        if running_leaves:
+            summary_parts.append(f"running: {format_id_ranges([l.id for l in running_leaves])}")
+        if to_check_leaves:
+            summary_parts.append(f"to verify: {format_id_ranges([l.id for l in to_check_leaves])}")
+        if running_leaves or to_check_leaves:
+            pass  # active work already summarised; "next" only when nothing is active
+        elif open_leaves:
+            summary_parts.append(f"next: {format_id_ranges([l.id for l in open_leaves])}")
+        elif blocked_leaves:
+            summary_parts.append(f"blocked: {format_id_ranges([l.id for l in blocked_leaves])}")
+        elif waiting_leaves:
+            w_parts = [f"{l.id} ({l.waiting_on})" if l.waiting_on else l.id for l in waiting_leaves]
+            summary_parts.append(
+                f"waiting: {', '.join(w_parts) if any(l.waiting_on for l in waiting_leaves) else format_id_ranges([l.id for l in waiting_leaves])}"
+            )
+
+        if summary_parts:
+            return f"{derived_st} ({'; '.join(summary_parts)})"
+        return derived_st
+    return fallback_status or init_node.derived_state or init_node.state or "open"
+
+
 def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: bool = False, reorder: bool = False) -> str:
     has_conflict_markers = bool(re.search(r"^(<{7}|={7}|>{7}|\|{7})\b", existing_index, re.MULTILINE)) or ("<<<<<<<" in existing_index)
     if has_conflict_markers:
@@ -10122,8 +10182,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
     prefer_bare_id = (not has_conflict_markers) and _index_uses_bare_id_format(existing_index)
 
+    tree = discover_task_tree(tasks_dir)
     emergent = discover_emergent_tasks(tasks_dir)
-    initiatives = discover_initiatives(tasks_dir)
+    initiatives = discover_initiatives(tasks_dir, tree=tree)
     conditional_tasks = [t for t in emergent if t.get("conditional")]
     active_tasks = [t for t in emergent if not t["in_done"] and t["canonical_state"] not in TERMINAL_STATES and not t.get("conditional")]
     done_tasks = [t for t in emergent if (t["in_done"] or t["canonical_state"] in TERMINAL_STATES) and not t.get("conditional")]
@@ -10148,18 +10209,29 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 "Run with --adopt to wrap existing tables in markers."
             )
 
-    tree = discover_task_tree(tasks_dir)
     pat_init_sec = re.compile(r"^##\s+Initiatives\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
     m_init = pat_init_sec.search(existing_index)
-    if m_init:
-        init_sec_text = m_init.group(0)
-        m_init_marker = _marker_pattern("initiatives").search(init_sec_text)
-        has_init_marker = m_init_marker is not None
-        region_to_search = m_init_marker.group(1) if has_init_marker else init_sec_text
+    m_init_direct_marker = _marker_pattern("initiatives").search(existing_index) if not m_init else None
+    init_table_rendered_content = ""
+    if m_init or m_init_direct_marker or initiatives:
+        if m_init:
+            init_sec_text = m_init.group(0)
+            m_init_marker = _marker_pattern("initiatives").search(init_sec_text)
+            has_init_marker = m_init_marker is not None
+            region_to_search = m_init_marker.group(1) if has_init_marker else init_sec_text
+        elif m_init_direct_marker:
+            init_sec_text = ""
+            has_init_marker = True
+            region_to_search = m_init_direct_marker.group(1)
+        else:
+            init_sec_text = ""
+            has_init_marker = False
+            region_to_search = ""
 
         hdr_init, sep_init = (
             _extract_existing_table_header(region_to_search, 6, allow_extra=True)
             or _extract_existing_table_header(region_to_search, 4, allow_extra=True)
+            or _extract_existing_table_header(region_to_search, 3, allow_extra=True)
             or (
                 "| Priority | # | Initiative | Status | Depends on | Size |",
                 "| --- | --- | --- | --- | --- | --- |",
@@ -10168,114 +10240,175 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         init_hdr_cells = [c.strip() for c in hdr_init.strip("|").split("|")]
         init_col_count = len(init_hdr_cells)
         id_col_idx = 0 if (init_hdr_cells and init_hdr_cells[0].lower() in ("nn", "#", "id")) else 1
-        status_col_idx = next((idx for idx, c in enumerate(init_hdr_cells) if c.lower() == "status"), 3 if id_col_idx == 1 else 2)
+        status_col_idx = next(
+            (idx for idx, c in enumerate(init_hdr_cells) if c.lower() in ("status", "state")),
+            3 if id_col_idx == 1 else 2,
+        )
+        title_col_idx = next(
+            (idx for idx, c in enumerate(init_hdr_cells) if c.lower() in ("initiative", "title", "task")),
+            1 if id_col_idx == 0 else 2,
+        )
+        size_col_idx = next((idx for idx, c in enumerate(init_hdr_cells) if c.lower() == "size"), None)
 
         preamble_lines: list[str] = []
-        init_rows: dict[str, tuple[list[str], str]] = {}
+        ordered_init_rows: list[tuple[str, list[str], str]] = []
+        seen_init_nums: set[str] = set()
         for line in region_to_search.splitlines():
             line_s = line.strip()
             if line_s.startswith(("<", "=", ">")):
                 continue
             if not line_s.startswith("|"):
-                if not init_rows and line_s:
+                if not ordered_init_rows and line_s:
                     preamble_lines.append(line)
                 continue
             cells = [c.strip() for c in line_s.strip("|").split("|")]
-            if not cells or cells[0] in ("Priority", "NN", "#", "Id", "---") or cells[0].startswith("---"):
+            if not cells or cells[0].lower() in ("priority", "nn", "#", "id", "---") or cells[0].startswith("---"):
                 continue
             if len(cells) > max(id_col_idx, status_col_idx):
-                init_num = cells[id_col_idx]
-                if init_num in init_rows:
+                raw_id_cell = cells[id_col_idx]
+                m_inum = re.match(r"^(?:INIT-)?(\d{2,})(?:\s*\(.*\))?$", raw_id_cell.strip())
+                init_num = m_inum.group(1) if m_inum else raw_id_cell.strip()
+                if init_num in seen_init_nums:
                     continue
+                seen_init_nums.add(init_num)
+                row_line = line_s
                 if init_num in tree:
                     init_node = tree[init_num]
                     if init_node.children:
-                        derived_st = init_node.derived_state or init_node.state
-                        if derived_st == "done":
-                            new_status = "done"
-                        elif derived_st == "open":
-                            new_status = "open"
-                        elif derived_st == "waiting" and getattr(init_node, "waiting_on", None):
-                            new_status = f"waiting ({init_node.waiting_on})"
-                        else:
-                            leaf_nodes = []
-                            def _collect_leaves_rec(nid: str):
-                                if nid in tree:
-                                    n = tree[nid]
-                                    if n.is_leaf:
-                                        leaf_nodes.append(n)
-                                    for c in n.children:
-                                        _collect_leaves_rec(c)
-                            for c in init_node.children:
-                                _collect_leaves_rec(c)
+                        new_status = _format_initiative_status_cell(init_node, tree)
+                        if cells[status_col_idx] != new_status:
+                            cells[status_col_idx] = new_status
+                            row_line = "| " + " | ".join(cells) + " |"
+                ordered_init_rows.append((init_num, cells, row_line))
 
-                            done_leaves = [l for l in leaf_nodes if l.canonical_state in ("done", "done with a caveat", "dropped")]
-                            running_leaves = [l for l in leaf_nodes if l.canonical_state in ("in progress", "bounced")]
-                            # Finished by the executor, waiting for a check (delivered) or for closing (verified)
-                            to_check_leaves = [l for l in leaf_nodes if l.canonical_state in ("delivered", "verified")]
-                            open_leaves = [l for l in leaf_nodes if l.canonical_state == "open"]
-                            blocked_leaves = [l for l in leaf_nodes if l.canonical_state == "blocked"]
-                            waiting_leaves = [l for l in leaf_nodes if l.canonical_state == "waiting"]
+        existing_pri_vals = [r[1][0].strip() for r in ordered_init_rows if r[1]] if id_col_idx == 1 else []
+        uses_p_priority = any(re.match(r"^P(?:\d+|-)$", p, re.IGNORECASE) for p in existing_pri_vals)
+        uses_p_dash_for_done = any(p.upper() == "P-" for p in existing_pri_vals)
+        p_digits = [p for p in existing_pri_vals if re.match(r"^P\d+$", p, re.IGNORECASE)]
+        default_p_pri = max(set(p_digits), key=p_digits.count) if p_digits else "P2"
+        int_pairs = [
+            (int(r[1][0].strip()), int(r[0]))
+            for r in ordered_init_rows
+            if r[1] and r[1][0].strip().isdigit() and r[0].isdigit()
+        ]
+        pri_matches_inum = (not ordered_init_rows) or (bool(int_pairs) and all(p == inum_i for p, inum_i in int_pairs))
+        max_int_pri = max((p for p, _ in int_pairs), default=len(ordered_init_rows))
 
-                            summary_parts = []
-                            if done_leaves:
-                                summary_parts.append(f"done: {format_id_ranges([l.id for l in done_leaves])}")
-                            if running_leaves:
-                                summary_parts.append(f"running: {format_id_ranges([l.id for l in running_leaves])}")
-                            if to_check_leaves:
-                                summary_parts.append(f"to verify: {format_id_ranges([l.id for l in to_check_leaves])}")
-                            if running_leaves or to_check_leaves:
-                                pass  # active work already summarised; "next" only when nothing is active
-                            elif open_leaves:
-                                summary_parts.append(f"next: {format_id_ranges([l.id for l in open_leaves])}")
-                            elif blocked_leaves:
-                                summary_parts.append(f"blocked: {format_id_ranges([l.id for l in blocked_leaves])}")
-                            elif waiting_leaves:
-                                w_parts = [f"{l.id} ({l.waiting_on})" if l.waiting_on else l.id for l in waiting_leaves]
-                                summary_parts.append(f"waiting: {', '.join(w_parts) if any(l.waiting_on for l in waiting_leaves) else format_id_ranges([l.id for l in waiting_leaves])}")
+        existing_id_vals = [r[1][id_col_idx].strip() for r in ordered_init_rows if len(r[1]) > id_col_idx]
+        uses_init_prefix = bool(existing_id_vals) and all(v.startswith("INIT-") for v in existing_id_vals)
+        uses_short_in_id = bool(existing_id_vals) and any(re.match(r"^\d{2,}\s+\(.+\)$", v) for v in existing_id_vals)
 
-                            if summary_parts:
-                                new_status = f"{derived_st} ({'; '.join(summary_parts)})"
-                            else:
-                                new_status = derived_st
-                        cells[status_col_idx] = new_status
-                new_line = "| " + " | ".join(cells) + " |"
-                init_rows[init_num] = (cells, new_line)
+        existing_title_vals = [r[1][title_col_idx].strip() for r in ordered_init_rows if len(r[1]) > title_col_idx]
+        uses_plain_title = bool(existing_title_vals) and all(
+            not re.search(r"\[[^\]]+\]\([^)]+\)", v) for v in existing_title_vals
+        )
+
+        existing_size_vals = [
+            r[1][size_col_idx].strip()
+            for r in ordered_init_rows
+            if size_col_idx is not None and len(r[1]) > size_col_idx
+        ]
+        uses_dash_size = bool(existing_size_vals) and all(v == "-" for v in existing_size_vals)
 
         for init in initiatives:
             inum = str(init["id"])
-            if inum not in init_rows and inum in tree:
+            if inum not in seen_init_nums and inum in tree:
+                seen_init_nums.add(inum)
                 inode = tree[inum]
-                st = inode.derived_state or inode.state
-                dep = inode.fields.get("depends_on", {}).get("value") or "-"
-                sz = inode.own_fields.get("size", "-")
-                pri = str(len(init_rows) + 1)
-                if id_col_idx == 0 and init_col_count == 4:
-                    new_cells = [inum, f"[{inode.title}]({inode.rel_path})", st, dep]
+                st = _format_initiative_status_cell(inode, tree, init.get("status"))
+                raw_dep = inode.own_fields.get("depends_on") or inode.own_fields.get("depends-on")
+                if raw_dep and str(raw_dep).strip():
+                    dep = str(raw_dep).strip()
+                elif inode.depends_on:
+                    dep = ", ".join(str(x) for x in inode.depends_on)
                 else:
-                    new_cells = [pri, inum, f"[{inode.title}]({inode.rel_path})", st, dep, sz]
-                    while len(new_cells) < init_col_count:
-                        new_cells.append("")
-                init_rows[inum] = (new_cells, "| " + " | ".join(new_cells) + " |")
+                    dep = "-"
 
-        def _init_sort_key(item: tuple[list[str], str]) -> tuple:
-            cells = item[0]
-            if id_col_idx == 0:
-                return (0, _natural_sort_key(cells[0]))
-            pri_str = cells[0].strip()
-            pri_num = int(pri_str) if pri_str.isdigit() else 999
-            return (pri_num, _natural_sort_key(cells[1]))
+                own_sz = inode.own_fields.get("size")
+                if own_sz and str(own_sz).strip() and str(own_sz).strip() != "-":
+                    sz = str(own_sz).strip().upper()
+                elif uses_dash_size:
+                    sz = "-"
+                else:
+                    sz = inode.size or "M"
 
-        sorted_init_rows = sorted(init_rows.values(), key=_init_sort_key)
-        init_table_lines = [hdr_init, sep_init] + [r[1] for r in sorted_init_rows]
+                if uses_init_prefix:
+                    id_cell = f"INIT-{inum}"
+                elif uses_short_in_id and (inode.short or inode.short_title):
+                    id_cell = f"{inum} ({inode.short or inode.short_title})"
+                else:
+                    id_cell = inum
+
+                if uses_plain_title:
+                    title_cell = inode.title
+                else:
+                    title_cell = f"[{inode.title}]({inode.rel_path})"
+
+                if uses_p_priority:
+                    own_pri = inode.own_fields.get("priority")
+                    if own_pri and str(own_pri).strip() and str(own_pri).strip() != "-":
+                        pri_cell = str(own_pri).strip()
+                    elif (inode.in_done or (inode.derived_state or inode.state) in TERMINAL_STATES) and uses_p_dash_for_done:
+                        pri_cell = "P-"
+                    else:
+                        pri_cell = default_p_pri
+                else:
+                    own_pri = inode.own_fields.get("priority")
+                    if own_pri and str(own_pri).strip().isdigit():
+                        pri_cell = str(own_pri).strip()
+                    elif pri_matches_inum and inum.isdigit():
+                        pri_cell = str(int(inum))
+                    else:
+                        max_int_pri += 1
+                        pri_cell = str(max_int_pri)
+
+                new_cells: list[str] = []
+                for col_idx, col_hdr in enumerate(init_hdr_cells):
+                    cname = col_hdr.strip().lower()
+                    if col_idx == id_col_idx:
+                        new_cells.append(id_cell)
+                    elif col_idx == 0 and id_col_idx == 1:
+                        new_cells.append(pri_cell)
+                    elif col_idx == status_col_idx:
+                        new_cells.append(st)
+                    elif col_idx == title_col_idx:
+                        new_cells.append(title_cell)
+                    elif cname in ("depends on", "depends-on", "depends_on", "deps") or (
+                        id_col_idx == 0 and init_col_count == 4 and col_idx == 3
+                    ):
+                        new_cells.append(dep)
+                    elif cname == "size":
+                        new_cells.append(sz)
+                    else:
+                        ext_val = (
+                            inode.own_fields.get(cname)
+                            or inode.own_fields.get(cname.replace(" ", "_"))
+                            or inode.own_fields.get(cname.replace(" ", "-"))
+                            or "-"
+                        )
+                        new_cells.append(str(ext_val))
+
+                new_row_tuple = (inum, new_cells, "| " + " | ".join(new_cells) + " |")
+                target_key = _natural_sort_key(inum)
+                ins_pos = 0
+                for idx_r, existing_r in enumerate(ordered_init_rows):
+                    if _natural_sort_key(existing_r[0]) <= target_key:
+                        ins_pos = idx_r + 1
+                ordered_init_rows.insert(ins_pos, new_row_tuple)
+
+        if has_conflict_markers:
+            ordered_init_rows.sort(key=lambda r: _natural_sort_key(r[0]))
+
+        init_table_lines = [hdr_init, sep_init] + [r[2] for r in ordered_init_rows]
         init_lines = preamble_lines + ([""] if preamble_lines else []) + init_table_lines
 
         new_region_content = "\n".join(init_lines)
+        init_table_rendered_content = new_region_content.strip()
         if region_to_search.endswith("\n"):
             new_region_content += "\n"
         if has_init_marker:
             existing_index = _replace_generated_region(existing_index, "initiatives", new_region_content)
-        else:
+        elif m_init:
             existing_index = existing_index[:m_init.start()] + new_region_content + existing_index[m_init.end():]
 
     # 0.5. Specs section
@@ -10868,6 +11001,12 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
     if not existing_index.strip() or not has_generated_markers(existing_index):
         title_header = existing_index.strip() if existing_index.strip() else "# Task Index"
+        init_block = ""
+        if initiatives and init_table_rendered_content:
+            init_block = (
+                "## Initiatives\n\n"
+                f"<!-- ai-orch:generated initiatives -->\n{init_table_rendered_content}\n<!-- /ai-orch:generated initiatives -->\n\n"
+            )
         cond_block = ""
         if conditional_tasks:
             cond_block = (
@@ -10876,6 +11015,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             )
         return (
             f"{title_header}\n\n"
+            f"{init_block}"
             "## Next up\n\n"
             f"<!-- ai-orch:generated next-up -->\n{next_up_content}\n<!-- /ai-orch:generated next-up -->\n\n"
             "## Tasks by category\n\n"
@@ -10888,6 +11028,16 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         )
 
     updated = existing_index
+    if initiatives and init_table_rendered_content and not m_init and not m_init_direct_marker:
+        init_block = (
+            "## Initiatives\n\n"
+            f"<!-- ai-orch:generated initiatives -->\n{init_table_rendered_content}\n<!-- /ai-orch:generated initiatives -->\n\n"
+        )
+        m_first_h2 = re.search(r"^##\s+", updated, re.MULTILINE)
+        if m_first_h2:
+            updated = updated[:m_first_h2.start()] + init_block + updated[m_first_h2.start():]
+        else:
+            updated = updated.rstrip() + "\n\n" + init_block
     updated = _replace_generated_region(updated, "next-up", next_up_content)
     updated = _replace_generated_region(updated, "tasks-by-category", cat_content)
     updated = _replace_generated_region(updated, "decisions", dec_content)
@@ -10951,8 +11101,14 @@ def _parse_index_table_rows(block_text: str, section_kind: str = "task") -> tupl
         if c0 == "-":
             continue
         if section_kind == "initiatives":
-            if len(cells) >= 2 and cells[0].isdigit() and re.match(r"^\d{2,}$", cells[1]):
-                row_key = cells[1]
+            m_c1 = re.match(r"^(?:INIT-)?(\d{2,})(?:\s*\(.*\))?$", cells[1]) if len(cells) >= 2 else None
+            m_c0 = re.match(r"^(?:INIT-)?(\d{2,})(?:\s*\(.*\))?$", c0)
+            if m_c1 and (c0.isdigit() or re.match(r"^P(?:\d+|-)$", c0, re.IGNORECASE)):
+                row_key = m_c1.group(1)
+            elif m_c0:
+                row_key = m_c0.group(1)
+            elif m_c1:
+                row_key = m_c1.group(1)
             else:
                 row_key = c0
         elif section_kind == "specs":
@@ -13575,22 +13731,23 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            if diff_str:
+            if diff_str or not index_path.exists():
                 print("[preview] Section summary:")
                 for sline in idx_summary.get("lines", []):
                     print(f"  - {sline}")
-                sys.stdout.write(diff_str)
+                if diff_str:
+                    sys.stdout.write(diff_str)
                 adopt_hint = "--adopt " if adopt else ""
                 print(
                     f"[preview] apply with: {adopt_hint}--apply --expect-hash {current_hash}",
                     file=sys.stderr,
                 )
+                print("[preview] nothing written; re-run with --apply to write these changes")
             else:
                 if adopt:
                     print(f"[ok] {index_path} already has markers and is in sync")
                 else:
                     print(f"[ok] already in sync, nothing written ({index_path})")
-            print("preview only, nothing written; re-run with --apply")
         return 0
 
     # 6. Check mode (--check without adopt)
@@ -13687,10 +13844,15 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
             )
         )
     else:
-        sys.stdout.write(rendered)
-        if not rendered.endswith("\n"):
-            sys.stdout.write("\n")
-        print("preview only, nothing written; re-run with --apply")
+        if in_sync and index_path.exists():
+            print(f"[ok] already in sync, nothing written ({index_path})")
+        else:
+            print("[preview] Section summary:")
+            for sline in idx_summary.get("lines", []):
+                print(f"  - {sline}")
+            if diff_str:
+                sys.stdout.write(diff_str)
+            print("[preview] nothing written; re-run with --apply to write these changes")
     return 0
 
 
