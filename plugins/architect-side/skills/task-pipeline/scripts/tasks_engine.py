@@ -1805,6 +1805,8 @@ def derive_container_state(child_states: list[str]) -> str:
         return "blocked"
     if any(st == "waiting" for st in canon_states):
         return "waiting"
+    if all(st == "paused" for st in canon_states):
+        return "paused"
     return "open"
 
 
@@ -2823,6 +2825,16 @@ def parse_child_blocks(
                 break
 
         if expanded_link:
+            c_own_fields: dict[str, Any] = {}
+            for bl in block_lines[1:]:
+                clean_bl = bl.lstrip("> ").strip() if bl.strip().startswith(">") else bl.strip()
+                if not clean_bl.startswith("- ") and not clean_bl.startswith("* "):
+                    continue
+                _, segs = parse_bullet_line(clean_bl)
+                for seg in segs:
+                    if seg.key:
+                        c_own_fields[seg.key] = seg.clean_value
+
             target_readme = file_path.parent / expanded_link
             rel_readme = target_readme.relative_to(tasks_dir).as_posix() if target_readme.is_relative_to(tasks_dir) else str(target_readme)
             is_done_readme = in_done or ("done" in target_readme.parts)
@@ -2835,7 +2847,7 @@ def parse_child_blocks(
                 is_leaf=False,
                 is_container=True,
                 children=[],
-                own_fields={},
+                own_fields=c_own_fields,
                 fields={},
                 labels=[],
                 label_sources={},
@@ -2868,13 +2880,18 @@ def parse_child_blocks(
                 r_scanned, _ = scan_markdown_blocks(rtext)
                 sub_own_fields: dict[str, Any] = {}
                 for r_sl in r_scanned:
-                    if r_sl.is_fenced or not r_sl.text.startswith("- "):
+                    if r_sl.is_fenced:
                         continue
-                    _, segs = parse_bullet_line(r_sl.text)
+                    if r_sl.text.startswith("## ") or r_sl.text.startswith("### "):
+                        break
+                    clean_r = r_sl.text.lstrip("> ").strip() if r_sl.text.startswith(">") else r_sl.text
+                    if not clean_r.startswith("- ") and not clean_r.startswith("* "):
+                        continue
+                    _, segs = parse_bullet_line(clean_r)
                     for seg in segs:
                         if seg.key:
                             sub_own_fields[seg.key] = seg.clean_value
-                c_node.own_fields = sub_own_fields
+                c_node.own_fields = {**c_own_fields, **sub_own_fields}
                 if "short" in sub_own_fields and sub_own_fields["short"] and sub_own_fields["short"] != "-":
                     c_node.short = str(sub_own_fields["short"]).strip()
                     c_node.short_title = c_node.short
@@ -3135,7 +3152,11 @@ def evaluate_container_states(tree: dict[str, TaskNode], node_id: str) -> None:
     else:
         child_nodes = [tree[cid] for cid in node.children if cid in tree]
         child_states = [c.state for c in child_nodes]
-        if not child_nodes and node.node_type == "initiative" and node.in_done:
+        own_st = node.own_fields.get("status") or node.own_fields.get("state")
+        own_canon = normalize_state(_status_value(own_st)) if own_st else None
+        if own_canon == "paused":
+            derived = "paused"
+        elif not child_nodes and node.node_type == "initiative" and node.in_done:
             derived = "done"
         else:
             derived = derive_container_state(child_states)
@@ -3262,12 +3283,13 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                 continue
             if sline.text.startswith("## ") or sline.text.startswith("### "):
                 break
-            if sline.text.startswith("- ") or sline.text.startswith("* "):
-                _, segs = parse_bullet_line(sline.text)
+            clean_sline = sline.text.lstrip("> ").strip() if sline.text.startswith(">") else sline.text
+            if clean_sline.startswith("- ") or clean_sline.startswith("* "):
+                _, segs = parse_bullet_line(clean_sline)
                 for seg in segs:
                     if seg.key:
                         init_own_fields[seg.key] = seg.clean_value
-                m_plain_short = re.match(r"^[-*]\s+short:\s*(.+?)\s*$", sline.text, flags=re.IGNORECASE)
+                m_plain_short = re.match(r"^[-*]\s+short:\s*(.+?)\s*$", clean_sline, flags=re.IGNORECASE)
                 if m_plain_short and "short" not in init_own_fields:
                     init_own_fields["short"] = m_plain_short.group(1)
 
@@ -3280,6 +3302,9 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             init_short_val = None
             init_st = derive_short_title(t_clean)
             init_st_src = "derived"
+
+        raw_init_st = _status_value(init_own_fields.get("status") or init_own_fields.get("state") or "open")
+        init_st_canon = normalize_state(raw_init_st)
 
         init_node = TaskNode(
             id=num,
@@ -3298,9 +3323,9 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             expanded_depends_on=[],
             own_depends_on=[],
             depends_on_free_text="",
-            state="open",
-            canonical_state="open",
-            derived_state="open",
+            state=raw_init_st,
+            canonical_state=init_st_canon,
+            derived_state=init_st_canon,
             leaves_done=0,
             leaves_total=0,
             file_path=str(plan_path),
@@ -6379,6 +6404,7 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
         else:
             short_val = derive_short_title(title)
 
+        scenario_text = data.get("scenario", "1. User initiates action.\n2. System responds.")
         content = f"""# {uc_id} - {title}
 
 - id: {uc_id}
@@ -6399,7 +6425,7 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
 {data.get("preconditions", "- System running and initialized.")}
 
 ## Scenario / Interaction Steps
-{data.get("scenario", "1. User initiates action.\\n2. System responds.")}
+{scenario_text}
 
 ## Automated Verification Command
 ```bash
