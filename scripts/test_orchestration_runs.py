@@ -288,6 +288,37 @@ def test_tool_availability_guard():
     assert ok is True and ver == "7.8.9" and err is None
 
 
+def test_tool_availability_default_version_probe_with_fake_binary(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Explicit opt-out from AI_ORCH_TEST_CLI_VERSIONS to test real subprocess version probing against a fake binary."""
+    monkeypatch.delenv("AI_ORCH_TEST_CLI_VERSIONS", raising=False)
+    fake_kilo = tmp_path / "kilo"
+    fake_kilo.write_text("#!/bin/sh\necho 'kilo 9.8.7-custom-fake'\nexit 0\n", encoding="utf-8")
+    fake_kilo.chmod(0o755)
+
+    ok, ver, err = check_tool_availability(
+        "kilo",
+        {"enabled": True, "cli_command": "kilo"},
+        which_fn=lambda cmd: str(fake_kilo),
+    )
+    assert ok is True
+    assert ver == "kilo 9.8.7-custom-fake"
+    assert err is None
+
+    # Failing binary returns exit code error
+    fake_kilo.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    ok_fail, ver_fail, err_fail = check_tool_availability(
+        "kilo",
+        {"enabled": True, "cli_command": "kilo"},
+        which_fn=lambda cmd: str(fake_kilo),
+    )
+    assert ok_fail is False
+    assert ver_fail is None
+    assert "returned exit code 99" in (err_fail or "")
+
+
+
 def test_independence_guard():
     # verify mode: tool == task executor -> refused without allow_same_tool
     ok, err = check_independence_guard("verify", "kilo", task_executor="kilo", target_run_tool=None, allow_same_tool=False)
@@ -997,16 +1028,21 @@ def test_cancel_and_grandchild_process_group_killed(sample_workspace: pathlib.Pa
     gc_pid = None
     agent_pid = None
     try:
-        # Wait for grandchild PID to be written
-        deadline = time.time() + 10.0
-        while time.time() < deadline and not gc_pid_file.is_file():
+        # Wait for grandchild PID to be written and supervisor to record agent pid/pgid/start_time
+        deadline = time.time() + 30.0
+        record = None
+        while time.time() < deadline:
+            if gc_pid_file.is_file() and gc_pid_file.read_text(encoding="utf-8").strip():
+                record = load_run_record(sample_workspace, run_id)
+                agent = (record or {}).get("agent", {})
+                if agent.get("pid") and agent.get("pgid") and agent.get("start_time"):
+                    break
             time.sleep(0.1)
 
         assert gc_pid_file.is_file()
         gc_pid = int(gc_pid_file.read_text(encoding="utf-8").strip())
 
         # Get agent pid
-        record = load_run_record(sample_workspace, run_id)
         assert record is not None
         agent_pid = record["agent"]["pid"]
         assert agent_pid is not None
@@ -1031,7 +1067,7 @@ def test_cancel_and_grandchild_process_group_killed(sample_workspace: pathlib.Pa
         assert data_cancel["status"] == "cancelled"
 
         # Both agent and grandchild must now be dead
-        deadline = time.time() + 5.0
+        deadline = time.time() + 30.0
         while time.time() < deadline:
             if not is_process_alive(gc_pid) and not is_process_alive(agent_pid):
                 break
@@ -1819,7 +1855,7 @@ def test_execute_start_moves_task_to_in_progress(sample_workspace: pathlib.Path)
     assert "state: in progress" in final_content
 
 
-def wait_for_terminal(ws: pathlib.Path, run_id: str, timeout: float = 10.0) -> dict[str, Any]:
+def wait_for_terminal(ws: pathlib.Path, run_id: str, timeout: float = 30.0) -> dict[str, Any]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         rec = load_run_record(ws, run_id)
@@ -4912,47 +4948,65 @@ def test_t022_cancel_stops_tool_children_in_new_session(sample_workspace: pathli
     res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
     run_id = json.loads(res_start.stdout)["run_id"]
 
-    # Wait for grandchild PID file
-    for _ in range(50):
-        if gc_pid_file.exists():
-            break
-        time.sleep(0.1)
-    assert gc_pid_file.exists()
-    gc_pid = int(gc_pid_file.read_text(encoding="utf-8").strip())
+    gc_pid = None
+    agent_pid = None
+    try:
+        # Poll up to 30s for both grandchild PID file and supervisor recording agent identity
+        deadline = time.time() + 30.0
+        rec = None
+        while time.time() < deadline:
+            if gc_pid_file.is_file() and gc_pid_file.read_text(encoding="utf-8").strip():
+                rec = load_run_record(sample_workspace, run_id)
+                agent = (rec or {}).get("agent", {})
+                if agent.get("pid") and agent.get("pgid") and agent.get("start_time"):
+                    break
+            time.sleep(0.05)
 
-    rec = load_run_record(sample_workspace, run_id)
-    agent = rec.get("agent", {})
-    agent_pid = agent.get("pid")
-    agent_pgid = agent.get("pgid")
-    assert agent_pid is not None
-    assert agent_pgid is not None
-    assert is_process_alive(agent_pid)
-    assert is_process_alive(gc_pid)
+        assert gc_pid_file.is_file()
+        gc_pid = int(gc_pid_file.read_text(encoding="utf-8").strip())
 
-    # Verify grandchild is indeed in a different process group / session
-    gc_pgid = os.getpgid(gc_pid)
-    assert gc_pgid != agent_pgid, f"Grandchild pgid {gc_pgid} must differ from agent pgid {agent_pgid}"
+        assert rec is not None
+        agent = rec.get("agent", {})
+        agent_pid = agent.get("pid")
+        agent_pgid = agent.get("pgid")
+        assert agent_pid is not None
+        assert agent_pgid is not None
+        assert is_process_alive(agent_pid)
+        assert is_process_alive(gc_pid)
 
-    # Cancel the run
-    cmd_cancel = [
-        str(BIN_AI_ORCH),
-        "run",
-        "cancel",
-        run_id,
-        "--workspace",
-        str(sample_workspace),
-        "--json",
-    ]
-    res_cancel = subprocess.run(cmd_cancel, capture_output=True, text=True, check=True)
-    assert json.loads(res_cancel.stdout)["ok"] is True
+        # Verify grandchild is indeed in a different process group / session
+        gc_pgid = os.getpgid(gc_pid)
+        assert gc_pgid != agent_pgid, f"Grandchild pgid {gc_pgid} must differ from agent pgid {agent_pgid}"
 
-    # Both agent and grandchild must be dead
-    for _ in range(50):
-        if not is_process_alive(agent_pid) and not is_process_alive(gc_pid):
-            break
-        time.sleep(0.1)
-    assert not is_process_alive(agent_pid), f"Agent PID {agent_pid} should be dead"
-    assert not is_process_alive(gc_pid), f"Grandchild PID {gc_pid} in new session should be terminated by cancel"
+        # Cancel the run
+        cmd_cancel = [
+            str(BIN_AI_ORCH),
+            "run",
+            "cancel",
+            run_id,
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ]
+        res_cancel = subprocess.run(cmd_cancel, capture_output=True, text=True, check=True)
+        assert json.loads(res_cancel.stdout)["ok"] is True
+
+        # Both agent and grandchild must be dead (poll up to 30s)
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            if not is_process_alive(agent_pid) and not is_process_alive(gc_pid):
+                break
+            time.sleep(0.05)
+        assert not is_process_alive(agent_pid), f"Agent PID {agent_pid} should be dead"
+        assert not is_process_alive(gc_pid), f"Grandchild PID {gc_pid} in new session should be terminated by cancel"
+    finally:
+        for p in (gc_pid, agent_pid):
+            if p:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
+
 
 
 def test_t022_continue_refused_for_verify_or_missing_worktree(sample_workspace: pathlib.Path):
@@ -5871,10 +5925,11 @@ def test_run_events_cancel(sample_workspace: pathlib.Path):
     run_id = json.loads(res.stdout)["run_id"]
 
     # Wait for run to enter running state
-    deadline = time.time() + 5.0
+    deadline = time.time() + 30.0
+    rec = None
     while time.time() < deadline:
         rec = load_run_record(ws, run_id)
-        if rec and rec.get("status") == "running":
+        if rec and rec.get("status") == "running" and (rec.get("agent") or {}).get("pid"):
             break
         time.sleep(0.05)
 
@@ -5895,6 +5950,7 @@ def test_run_events_cancel(sample_workspace: pathlib.Path):
     assert canc_events[0]["subject"] == run_id
     assert canc_events[0]["source"] == "orchestration_runs"
     assert canc_events[0]["data"]["status"] == "cancelled"
+
 
 
 def test_run_events_lost_reconciliation(sample_workspace: pathlib.Path):

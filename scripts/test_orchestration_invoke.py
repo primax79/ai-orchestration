@@ -48,10 +48,15 @@ def test_get_process_descendants_and_kill(tmp_path: pathlib.Path):
     )
     inv.start()
 
-    # Wait for child to spawn
-    time.sleep(0.5)
+    # Poll for child to spawn
     assert inv.pid is not None
-    descendants = get_process_descendants(inv.pid)
+    descendants: list[int] = []
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        descendants = get_process_descendants(inv.pid)
+        if descendants:
+            break
+        time.sleep(0.05)
     assert len(descendants) >= 1
     child_pid = descendants[0]
     assert is_process_alive(child_pid) is True

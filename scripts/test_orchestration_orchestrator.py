@@ -406,8 +406,15 @@ resume_argv = ["{sys.executable}", "{STUB_AGENT}", "--sleep", "3.0", "--session-
     t_thread = threading.Thread(target=lambda: orch.run_next_turn(ws), daemon=True)
     t_thread.start()
 
-    # Wait for turn 1 to start running
-    time.sleep(0.5)
+    # Poll for turn 1 to enter running state
+    q_file = orch.get_queue_dir(ws) / f"{t1}.json"
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        if q_file.is_file():
+            doc = orch._read_json_safe(q_file)
+            if doc.get("state") == "running" and doc.get("pid"):
+                break
+        time.sleep(0.05)
 
     # Attempt to run next turn while turn 1 is running
     res = orch.run_next_turn(ws)

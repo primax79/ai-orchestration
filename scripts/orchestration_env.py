@@ -1606,6 +1606,13 @@ def check_cli_binary(cmd: str) -> dict[str, Any]:
     exe = shutil.which(cmd)
     if not exe:
         return {"installed": False, "path": None, "version": None}
+    test_vers = os.environ.get("AI_ORCH_TEST_CLI_VERSIONS", "")
+    if test_vers:
+        for item in test_vers.split(","):
+            if "=" in item:
+                k, v = item.split("=", 1)
+                if k.strip() in (cmd, os.path.basename(exe)):
+                    return {"installed": True, "path": exe, "version": v.strip()}
     try:
         res = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=5, check=False)
         ver = (res.stdout or res.stderr).strip().splitlines()[0] if (res.stdout or res.stderr) else "unknown"
