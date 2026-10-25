@@ -19355,6 +19355,29 @@ def _get_ai_orch_version_or_commit() -> str:
     return "1.1.0"
 
 
+def _is_installed_copy(repo: pathlib.Path) -> bool:
+    """True for copies managed by an installer (replaced on update), never a dev checkout."""
+    posix = repo.resolve().as_posix() + "/"
+    markers = ("/.claude/plugins/", "/.ai-orchestration/repos/", "/.kilo/skills/", "/.codex/")
+    return any(m in posix for m in markers)
+
+
+def _launcher_source_repo(path: pathlib.Path) -> pathlib.Path | None:
+    """Source repo named by a version-free ai-orch launcher (DEFAULT_SOURCE_REPO), if path is one."""
+    try:
+        if not path.is_file() or path.stat().st_size > 200_000:
+            return None
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if "ai-orchestration-launcher-v1" not in text:
+        return None
+    m = re.search(r'^DEFAULT_SOURCE_REPO\s*=\s*"([^"]+)"', text, re.M)
+    if not m:
+        return None
+    return pathlib.Path(m.group(1)).expanduser()
+
+
 def resolve_feedback_target(
     config_dir: pathlib.Path | None = None,
     for_flush: bool = False,
@@ -19364,9 +19387,11 @@ def resolve_feedback_target(
     Order of resolution:
       1. $AI_ORCH_FEEDBACK_TASKS_DIR
       2. [feedback] tasks_dir in global config (orchestration.toml)
-      3. The tasks/ dir of the repository that contains the running bin/ai-orch,
-         if that repository is ai-orchestration (it has tasks/00-INDEX.md and
-         plugins/architect-side/skills/task-pipeline).
+      3. The tasks/ dir of the repository that contains the running bin/ai-orch
+         (or the source repo named by the ai-orch launcher), if that repository is
+         an ai-orchestration dev checkout (tasks/00-INDEX.md and
+         plugins/architect-side/skills/task-pipeline) and not an installed copy
+         (plugin marketplace/cache, Doctor clone), which updates replace.
       4. Otherwise a local outbox <global config dir>/feedback-outbox/
          (or None if for_flush=True).
 
@@ -19392,23 +19417,31 @@ def resolve_feedback_target(
         except Exception:
             pass
 
-    # 3. Running bin/ai-orch repository if it is ai-orchestration
+    # 3. Running bin/ai-orch repository if it is an ai-orchestration dev checkout.
+    #    Installed copies (plugin marketplace/cache, Doctor source clones) are
+    #    skipped: they are replaced on every update, so a note written there is lost.
     repo_root = _find_repo_root()
-    running_bin = None
-    for cand in [
-        os.environ.get("AI_ORCH_BIN"),
+    candidates: list[str] = []
+    explicit_bin = os.environ.get("AI_ORCH_BIN")
+    raw_candidates = [explicit_bin] if explicit_bin else [
         sys.argv[0] if (sys.argv and sys.argv[0] and sys.argv[0].endswith("ai-orch")) else None,
         shutil.which("ai-orch"),
         str(repo_root / "bin" / "ai-orch") if repo_root is not None else None,
-    ]:
+    ]
+    for cand in raw_candidates:
         if cand:
-            p = pathlib.Path(cand).resolve()
-            if p.is_file():
-                running_bin = p
-                break
+            candidates.append(cand)
+            src = _launcher_source_repo(pathlib.Path(cand))
+            if src is not None:
+                candidates.append(str(src / "bin" / "ai-orch"))
 
-    if running_bin is not None:
-        cand_repo = running_bin.parent.parent
+    for cand in candidates:
+        p = pathlib.Path(cand).resolve()
+        if not p.is_file():
+            continue
+        cand_repo = p.parent.parent
+        if _is_installed_copy(cand_repo):
+            continue
         if (
             (cand_repo / "tasks" / "00-INDEX.md").is_file()
             and (cand_repo / "plugins" / "architect-side" / "skills" / "task-pipeline").is_dir()
