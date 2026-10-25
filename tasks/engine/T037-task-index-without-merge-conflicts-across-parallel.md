@@ -14,7 +14,10 @@
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py, plugins/architect-side/skills/task-pipeline/SKILL.md
 - handoff: Read tasks/tasks/T037-task-index-without-merge-conflicts-across-parallel.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: owner
+- verify-by: gcube_audit
 - short: Conflict-free task index
+
+verification pending: re-run your two-branch merge scenario from the 'Reopened 2026-10-25' section on a scratch copy of your tree, with ai-orch >= architect-side 0.7.3: run `upgrade` (preview, then --apply --expect-plan-hash) so it registers the merge=ai-orch-index driver, then create one task on each of two branches and merge; expect no conflict in 00-INDEX.md, both rows kept, validate clean. Same-id collisions are tracked in T058, not here (verify-by: gcube_audit)
 
 ## Goal
 
