@@ -23,8 +23,10 @@ verification pending: run Verification checks (independent verifier)
 
 ## Steps
 
-- [ ] Step 1
+- [x] Fix the call to _update_index_task_path in reopen (duplicate old_rel argument) and handle folder tasks (git mv of the T###-slug folder)
+- [x] Regression tests for single-file and folder emergent tasks and for the dry run (test_tasks_engine.py, 10 reopen tests pass)
 
 ## Verification
 
-- Command or check that proves completion
+- Live check on a scratch copy of ai-orchestration/tasks: `tasks reopen T034 --reason ... --expect-plan-hash ...` exits 0, the file returns to server-and-bindings/, the index row points to the new path, `validate` and `sync-index --check` are clean (2026-10-25)
+- Full suite 552 passed; the one failure (test_t022_cancel_stops_tool_children_in_new_session) passes alone 6/6 and is tracked in T053
