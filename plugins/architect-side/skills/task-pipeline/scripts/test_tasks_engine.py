@@ -101,10 +101,20 @@ def test_upgrade_tasks_tree(tmp_path: pathlib.Path) -> None:
     (tasks_dir / "AGENTS.md").write_text("# old convention\nmacroplan-authoring\n", encoding="utf-8")
     (tasks_dir / "00-INDEX.md").write_text("# Task Index\n\n## Initiatives\n\n| 1 | 01 | [Test](01-test/plan.md) | in progress |\n", encoding="utf-8")
 
-    res = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    # Preview by default
+    res_prev = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_prev.returncode == 0
+    prev_payload = json.loads(res_prev.stdout)
+    assert prev_payload["ok"] is True
+    assert prev_payload["applied"] is False
+    assert not (tasks_dir / "_inbox" / "to-analyze").exists()
+
+    # Apply with plan hash
+    res = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--apply", "--expect-plan-hash", prev_payload["plan_hash"], "--json")
     assert res.returncode == 0
     payload = json.loads(res.stdout)
     assert payload["ok"] is True
+    assert payload["applied"] is True
     assert any("AGENTS.md" in f for f in payload["upgraded_files"])
     assert (tasks_dir / "_inbox" / "to-analyze").is_dir()
     assert (tasks_dir / "_inbox" / "analyzed").is_dir()
@@ -8931,9 +8941,25 @@ def test_standalone_execution_no_orchestration_events_warning(tmp_path: pathlib.
         )
 
     # 3. Test upgrade
-    res_upg = run_isolated("upgrade", "--tasks-dir", str(tasks_dir), "--json")
-    assert res_upg.returncode == 0, f"upgrade failed: {res_upg.stdout} {res_upg.stderr}"
+    res_upg_prev = run_isolated("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_upg_prev.returncode == 0, f"upgrade preview failed: {res_upg_prev.stdout} {res_upg_prev.stderr}"
+    assert "[warning] could not import orchestration_events" not in res_upg_prev.stderr
+    upg_prev_data = json.loads(res_upg_prev.stdout)
+    assert upg_prev_data["ok"] is True
+    assert upg_prev_data["applied"] is False
+
+    res_upg = run_isolated(
+        "upgrade",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--apply",
+        "--expect-plan-hash",
+        upg_prev_data["plan_hash"],
+        "--json",
+    )
+    assert res_upg.returncode == 0, f"upgrade apply failed: {res_upg.stdout} {res_upg.stderr}"
     assert "[warning] could not import orchestration_events" not in res_upg.stderr
+    assert json.loads(res_upg.stdout)["applied"] is True
 
     # 4. Test new
     res_new = run_isolated(
@@ -10413,19 +10439,27 @@ def test_upgrade_detects_legacy_plans(tmp_path: pathlib.Path) -> None:
     assert any("02-database.md" in s for s in sources_dry)
     assert any("legacy-spec.md" in s for s in sources_dry)
 
-    # 2. Mutating upgrade without dry-run (migrating non-conflicting NN-*/)
-    res_upg = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    # 2. Mutating upgrade (migrating non-conflicting NN-*/)
+    res_upg = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--apply", "--expect-plan-hash", dry_data["plan_hash"], "--json")
     assert res_upg.returncode == 0
     upg_data = json.loads(res_upg.stdout)
     assert upg_data["ok"] is True
+    assert upg_data["applied"] is True
     assert "legacy_plans" in upg_data
     assert (tasks_dir / "01-bootstrap" / "plan.md").is_file()
 
     # 3. Upgrade with --migrate-plans migrates specs as well
-    res_mig = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--migrate-plans", "--json")
+    res_mig_prev = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--migrate-plans", "--json")
+    assert res_mig_prev.returncode == 0
+    mig_prev_data = json.loads(res_mig_prev.stdout)
+    assert mig_prev_data["ok"] is True
+    assert mig_prev_data["applied"] is False
+
+    res_mig = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--migrate-plans", "--apply", "--expect-plan-hash", mig_prev_data["plan_hash"], "--json")
     assert res_mig.returncode == 0
     mig_data = json.loads(res_mig.stdout)
     assert mig_data["ok"] is True
+    assert mig_data["applied"] is True
     assert (tasks_dir / "specs" / "legacy-spec.md").is_file()
 
 
@@ -11501,7 +11535,20 @@ def test_t050_agents_md_project_rules_survive_upgrade_and_idempotent(tmp_path: p
     # 4. Modifying inside markers and re-running refreshes only the managed block
     tampered = upgraded_text.replace("task-pipeline", "stale-skill-name")
     agents_path.write_text(tampered, encoding="utf-8")
-    res_upg3 = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    res_prev3 = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_prev3.returncode == 0
+    prev3_data = json.loads(res_prev3.stdout)
+    assert prev3_data["ok"] is True
+    assert prev3_data["applied"] is False
+    res_upg3 = run_cli(
+        "upgrade",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--apply",
+        "--expect-plan-hash",
+        prev3_data["plan_hash"],
+        "--json",
+    )
     assert res_upg3.returncode == 0
     assert agents_path.read_text(encoding="utf-8") == upgraded_text
 
@@ -11709,5 +11756,107 @@ def test_t050_extension_fields_per_project_and_upgrade_exit_code(tmp_path: pathl
     res_agents_decl = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
     assert res_agents_decl.returncode == 0, res_agents_decl.stdout
     assert json.loads(res_agents_decl.stdout)["ok"] is True
+
+
+def test_t054_upgrade_previews_by_default_and_applies_only_with_plan_hash(tmp_path: pathlib.Path) -> None:
+    """T054: `tasks upgrade` previews by default and applies only with --apply and matching plan hash."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "AGENTS.md").write_text("# Project convention\n", encoding="utf-8")
+    (tasks_dir / "00-INDEX.md").write_text("# Index\n", encoding="utf-8")
+
+    # 1. Plain upgrade writes nothing and prints plan, hash, and apply instruction
+    res_plain = run_cli("upgrade", "--tasks-dir", str(tasks_dir))
+    assert res_plain.returncode == 0
+    assert "[preview] Upgrade plan" in res_plain.stdout
+    assert "Plan hash:" in res_plain.stdout
+    assert f"To apply: ai-orch tasks upgrade --tasks-dir {tasks_dir} --apply --expect-plan-hash" in res_plain.stdout
+    # Disk remains untouched
+    assert not (tasks_dir / ".gitignore").exists()
+    assert not (tasks_dir / ".gitattributes").exists()
+    assert not (tasks_dir / "_inbox").exists()
+    assert (tasks_dir / "AGENTS.md").read_text(encoding="utf-8") == "# Project convention\n"
+
+    # 2. Plain upgrade with --json returns {ok: True, applied: False, plan_hash: ..., plan: [...]}
+    res_json = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_json.returncode == 0
+    payload = json.loads(res_json.stdout)
+    assert payload["ok"] is True
+    assert payload["applied"] is False
+    assert "plan_hash" in payload and payload["plan_hash"]
+    assert "plan" in payload and len(payload["plan"]) > 0
+    plan_hash = payload["plan_hash"]
+    # Verify plan items carry summary / diff summary
+    for item in payload["plan"]:
+        assert "action" in item
+        assert "path" in item
+        assert "before_hash" in item
+        assert "summary" in item
+
+    # 3. --dry-run and --preview keep working as explicit aliases of default
+    res_dry = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--dry-run", "--json")
+    assert res_dry.returncode == 0
+    dry_data = json.loads(res_dry.stdout)
+    assert dry_data["ok"] is True
+    assert dry_data["applied"] is False
+    assert dry_data["plan_hash"] == plan_hash
+
+    res_prev = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--preview", "--json")
+    assert res_prev.returncode == 0
+    prev_data = json.loads(res_prev.stdout)
+    assert prev_data["ok"] is True
+    assert prev_data["applied"] is False
+    assert prev_data["plan_hash"] == plan_hash
+
+    # Disk still untouched
+    assert not (tasks_dir / ".gitignore").exists()
+
+    # 4. --apply without hash is refused with instruction to preview first
+    res_no_hash = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_no_hash.returncode == 1
+    assert "Applying upgrade requires --expect-plan-hash <hash>" in res_no_hash.stderr
+    assert not (tasks_dir / ".gitignore").exists()
+
+    res_no_hash_json = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--apply", "--json")
+    assert res_no_hash_json.returncode == 1
+    no_hash_data = json.loads(res_no_hash_json.stdout)
+    assert no_hash_data["ok"] is False
+    assert no_hash_data["applied"] is False
+    assert "requires --expect-plan-hash" in no_hash_data["error"]
+    assert no_hash_data["plan_hash"] == plan_hash
+
+    # 5. --apply with a stale/wrong hash is refused
+    stale_hash = "0123456789abcdef" * 4
+    res_stale = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--apply", "--expect-plan-hash", stale_hash)
+    assert res_stale.returncode == 1
+    assert "Upgrade plan hash mismatch" in res_stale.stderr
+    assert not (tasks_dir / ".gitignore").exists()
+
+    res_stale_json = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--apply", "--expect-plan-hash", stale_hash, "--json")
+    assert res_stale_json.returncode == 1
+    stale_data = json.loads(res_stale_json.stdout)
+    assert stale_data["ok"] is False
+    assert stale_data["applied"] is False
+    assert "mismatch" in stale_data["error"]
+
+    # 6. Apply with matching hash writes to disk
+    res_apply = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--apply", "--expect-plan-hash", plan_hash, "--json")
+    assert res_apply.returncode == 0
+    apply_data = json.loads(res_apply.stdout)
+    assert apply_data["ok"] is True
+    assert apply_data["applied"] is True
+    assert (tasks_dir / ".gitignore").is_file()
+    assert (tasks_dir / ".gitattributes").is_file()
+    assert (tasks_dir / "_inbox" / "to-analyze").is_dir()
+    assert "task-pipeline" in (tasks_dir / "AGENTS.md").read_text(encoding="utf-8")
+
+    # 7. Re-running upgrade now reports already up-to-date
+    res_up_to_date = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_up_to_date.returncode == 0
+    utd_data = json.loads(res_up_to_date.stdout)
+    assert utd_data["ok"] is True
+    assert utd_data["applied"] is False
+    assert utd_data["upgraded_files"] == []
+
 
 

@@ -220,8 +220,8 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "Conflict-free merge driver and resolver for tasks/00-INDEX.md.",
                 },
                 "upgrade": {
-                    "usage": "ai-orch tasks upgrade [--tasks-dir <dir>] [--migrate-plans] [--dry-run] [--json]",
-                    "description": "Upgrade an existing tasks/ directory to latest task-pipeline convention and report/migrate legacy plans.",
+                    "usage": "ai-orch tasks upgrade [--tasks-dir <dir>] [--migrate-plans] [--apply --expect-plan-hash <hash>] [--dry-run] [--preview] [--json]",
+                    "description": "Upgrade an existing tasks/ directory to latest task-pipeline convention (previews by default; writes only with --apply and --expect-plan-hash).",
                 },
                 "next-id": {
                     "usage": "ai-orch tasks next-id [--tasks-dir <dir>] [--json]",

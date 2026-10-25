@@ -3715,14 +3715,26 @@ def compute_operation_plan(operations: list[dict[str, Any]]) -> tuple[list[dict[
     Returns (plan, plan_hash) where plan_hash is SHA256 over canonical JSON.
     """
     plan = []
+    canonical_items = []
     for op in operations:
-        plan.append({
+        entry = {
+            "action": op.get("action", "modify"),
+            "before_hash": op.get("before_hash", ""),
+            "path": op["path"],
+        }
+        if "summary" in op:
+            entry["summary"] = op["summary"]
+        elif "diff_summary" in op:
+            entry["summary"] = op["diff_summary"]
+        plan.append(entry)
+        canonical_items.append({
             "action": op.get("action", "modify"),
             "before_hash": op.get("before_hash", ""),
             "path": op["path"],
         })
     plan_sorted = sorted(plan, key=lambda x: (x["path"], x["action"]))
-    canonical = json.dumps(plan_sorted, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    canonical_sorted = sorted(canonical_items, key=lambda x: (x["path"], x["action"]))
+    canonical = json.dumps(canonical_sorted, sort_keys=True, separators=(",", ":")).encode("utf-8")
     plan_hash = hashlib.sha256(canonical).hexdigest()
     return plan_sorted, plan_hash
 
@@ -12747,6 +12759,8 @@ def upgrade_tasks_tree(
     dry_run: bool = False,
     migrate_plans: bool = False,
     expect_hash: str | None = None,
+    apply: bool | None = None,
+    expect_plan_hash: str | None = None,
 ) -> dict[str, Any]:
     """Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention:
       1. Updates tasks/AGENTS.md with a managed block between markers (never replacing existing rules).
@@ -12758,9 +12772,18 @@ def upgrade_tasks_tree(
       5. Validates the upgraded tree.
     """
     tasks_dir = pathlib.Path(tasks_dir).resolve()
-    if not is_platform_supported():
+    if apply is not None:
+        if not apply:
+            dry_run = True
+        else:
+            dry_run = False
+
+    expected_hash = expect_plan_hash or expect_hash
+
+    if not dry_run and not is_platform_supported():
         return {
             "ok": False,
+            "applied": False,
             "error": "unsupported-platform",
             "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
             "upgraded_files": [],
@@ -12778,7 +12801,8 @@ def upgrade_tasks_tree(
         }
 
     try:
-        with task_write_lock(tasks_dir):
+        lock_ctx = task_write_lock(tasks_dir) if not dry_run else contextlib.nullcontext()
+        with lock_ctx:
             upgraded_files: list[str] = []
             created: list[str] = []
             updated: list[str] = []
@@ -12793,10 +12817,29 @@ def upgrade_tasks_tree(
             if existing_agents != new_agents:
                 if not agents_md.is_file():
                     created.append(str(agents_md))
-                    operations.append({"action": "create", "path": "AGENTS.md", "before_hash": ""})
+                    operations.append({
+                        "action": "create",
+                        "path": "AGENTS.md",
+                        "before_hash": "",
+                        "summary": f"+{len(new_agents.splitlines())} lines",
+                    })
                 else:
                     updated.append(str(agents_md))
-                    operations.append({"action": "modify", "path": "AGENTS.md", "before_hash": _file_sha256(agents_md)})
+                    diff_lines = list(difflib.unified_diff(existing_agents.splitlines(), new_agents.splitlines()))
+                    added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+                    removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+                    parts = []
+                    if added:
+                        parts.append(f"+{added}")
+                    if removed:
+                        parts.append(f"-{removed}")
+                    summary = " ".join(parts) + " lines" if parts else "modified"
+                    operations.append({
+                        "action": "modify",
+                        "path": "AGENTS.md",
+                        "before_hash": _file_sha256(agents_md),
+                        "summary": summary,
+                    })
                 pending_writes.append((agents_md, new_agents))
                 upgraded_files.append(str(agents_md))
 
@@ -12805,7 +12848,12 @@ def upgrade_tasks_tree(
             if not gitignore_path.is_file():
                 created.append(str(gitignore_path))
                 upgraded_files.append(str(gitignore_path))
-                operations.append({"action": "create", "path": ".gitignore", "before_hash": ""})
+                operations.append({
+                    "action": "create",
+                    "path": ".gitignore",
+                    "before_hash": "",
+                    "summary": "+1 line",
+                })
                 pending_writes.append((gitignore_path, ".ai-orch.lock\n"))
             else:
                 existing_gi = gitignore_path.read_text(encoding="utf-8")
@@ -12813,7 +12861,12 @@ def upgrade_tasks_tree(
                 if ".ai-orch.lock" not in gi_lines:
                     updated.append(str(gitignore_path))
                     upgraded_files.append(str(gitignore_path))
-                    operations.append({"action": "modify", "path": ".gitignore", "before_hash": _file_sha256(gitignore_path)})
+                    operations.append({
+                        "action": "modify",
+                        "path": ".gitignore",
+                        "before_hash": _file_sha256(gitignore_path),
+                        "summary": "+1 line",
+                    })
                     new_gi = existing_gi + ("\n" if existing_gi and not existing_gi.endswith("\n") else "") + ".ai-orch.lock\n"
                     pending_writes.append((gitignore_path, new_gi))
 
@@ -12823,7 +12876,12 @@ def upgrade_tasks_tree(
             if not gitattributes_path.is_file():
                 created.append(str(gitattributes_path))
                 upgraded_files.append(str(gitattributes_path))
-                operations.append({"action": "create", "path": ".gitattributes", "before_hash": ""})
+                operations.append({
+                    "action": "create",
+                    "path": ".gitattributes",
+                    "before_hash": "",
+                    "summary": "+1 line",
+                })
                 pending_writes.append((gitattributes_path, f"{rule_line}\n"))
             else:
                 existing_ga = gitattributes_path.read_text(encoding="utf-8")
@@ -12831,7 +12889,12 @@ def upgrade_tasks_tree(
                 if not any(line == rule_line or line.startswith("00-INDEX.md merge=") for line in ga_lines):
                     updated.append(str(gitattributes_path))
                     upgraded_files.append(str(gitattributes_path))
-                    operations.append({"action": "modify", "path": ".gitattributes", "before_hash": _file_sha256(gitattributes_path)})
+                    operations.append({
+                        "action": "modify",
+                        "path": ".gitattributes",
+                        "before_hash": _file_sha256(gitattributes_path),
+                        "summary": "+1 line",
+                    })
                     new_ga = existing_ga + ("\n" if existing_ga and not existing_ga.endswith("\n") else "") + f"{rule_line}\n"
                     pending_writes.append((gitattributes_path, new_ga))
 
@@ -12878,10 +12941,12 @@ def upgrade_tasks_tree(
                                             if not target_sub.exists():
                                                 created.append(str(target_sub))
                                                 upgraded_files.append(str(target_sub))
+                                                lines_cnt = len(subitem.read_text(encoding="utf-8", errors="replace").splitlines())
                                                 operations.append({
                                                     "action": "create",
                                                     "path": target_sub.relative_to(tasks_dir).as_posix(),
                                                     "before_hash": "",
+                                                    "summary": f"+{lines_cnt} lines",
                                                 })
                                                 pending_copies.append((subitem, target_sub))
                                     action = "would_migrate" if dry_run else "migrated"
@@ -12909,10 +12974,12 @@ def upgrade_tasks_tree(
                                     if migrate_plans:
                                         created.append(str(dest_file))
                                         upgraded_files.append(str(dest_file))
+                                        lines_cnt = len(subfile.read_text(encoding="utf-8", errors="replace").splitlines())
                                         operations.append({
                                             "action": "create",
                                             "path": dest_file.relative_to(tasks_dir).as_posix(),
                                             "before_hash": "",
+                                            "summary": f"+{lines_cnt} lines",
                                         })
                                         pending_copies.append((subfile, dest_file))
                                         action = "would_migrate" if dry_run else "migrated"
@@ -12940,10 +13007,12 @@ def upgrade_tasks_tree(
                                 if migrate_plans:
                                     created.append(str(dest_file))
                                     upgraded_files.append(str(dest_file))
+                                    lines_cnt = len(child.read_text(encoding="utf-8", errors="replace").splitlines())
                                     operations.append({
                                         "action": "create",
                                         "path": dest_file.relative_to(tasks_dir).as_posix(),
                                         "before_hash": "",
+                                        "summary": f"+{lines_cnt} lines",
                                     })
                                     pending_copies.append((child, dest_file))
                                     action = "would_migrate" if dry_run else "migrated"
@@ -12958,10 +13027,12 @@ def upgrade_tasks_tree(
                                 if migrate_plans:
                                     created.append(str(dest_file))
                                     upgraded_files.append(str(dest_file))
+                                    lines_cnt = len(child.read_text(encoding="utf-8", errors="replace").splitlines())
                                     operations.append({
                                         "action": "create",
                                         "path": dest_file.relative_to(tasks_dir).as_posix(),
                                         "before_hash": "",
+                                        "summary": f"+{lines_cnt} lines",
                                     })
                                     pending_copies.append((child, dest_file))
                                     action = "would_migrate" if dry_run else "migrated"
@@ -12989,20 +13060,59 @@ def upgrade_tasks_tree(
             if existing_idx.strip() != rendered_idx.strip():
                 if not idx_path.is_file():
                     created.append(str(idx_path))
-                    operations.append({"action": "create", "path": "00-INDEX.md", "before_hash": ""})
+                    operations.append({
+                        "action": "create",
+                        "path": "00-INDEX.md",
+                        "before_hash": "",
+                        "summary": f"+{len(rendered_idx.splitlines())} lines",
+                    })
                 else:
                     updated.append(str(idx_path))
-                    operations.append({"action": "modify", "path": "00-INDEX.md", "before_hash": _file_sha256(idx_path)})
+                    diff_lines = list(difflib.unified_diff(existing_idx.splitlines(), rendered_idx.splitlines()))
+                    added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+                    removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+                    parts = []
+                    if added:
+                        parts.append(f"+{added}")
+                    if removed:
+                        parts.append(f"-{removed}")
+                    summary = " ".join(parts) + " lines" if parts else "modified"
+                    operations.append({
+                        "action": "modify",
+                        "path": "00-INDEX.md",
+                        "before_hash": _file_sha256(idx_path),
+                        "summary": summary,
+                    })
                 pending_writes.append((idx_path, rendered_idx))
                 upgraded_files.append(str(idx_path))
 
             plan, plan_hash = compute_operation_plan(operations)
 
-            if expect_hash is not None and not dry_run:
-                if expect_hash.strip().lower() != plan_hash.lower():
+            if apply and not expected_hash:
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "error": "Applying upgrade requires --expect-plan-hash <hash>. Run without --apply (or with --preview) to obtain the plan hash.",
+                    "plan": plan,
+                    "plan_hash": plan_hash,
+                    "hash": plan_hash,
+                    "upgraded_files": [],
+                    "created": [],
+                    "updated": [],
+                    "dry_run": True,
+                    "emergent_count": 0,
+                    "initiative_count": 0,
+                    "legacy_plans": legacy_plans,
+                    "errors": ["Applying upgrade requires --expect-plan-hash <hash>. Run without --apply (or with --preview) to obtain the plan hash."],
+                    "warnings": [],
+                }
+
+            if expected_hash is not None and not dry_run:
+                if expected_hash.strip().lower() != plan_hash.lower():
                     return {
                         "ok": False,
-                        "error": f"Upgrade plan hash mismatch: expected {expect_hash}, got {plan_hash}",
+                        "applied": False,
+                        "error": f"Upgrade plan hash mismatch: expected {expected_hash}, got {plan_hash}",
                         "plan": plan,
                         "plan_hash": plan_hash,
                         "hash": plan_hash,
@@ -13013,7 +13123,7 @@ def upgrade_tasks_tree(
                         "emergent_count": 0,
                         "initiative_count": 0,
                         "legacy_plans": legacy_plans,
-                        "errors": [f"Upgrade plan hash mismatch: expected {expect_hash}, got {plan_hash}"],
+                        "errors": [f"Upgrade plan hash mismatch: expected {expected_hash}, got {plan_hash}"],
                         "warnings": [],
                     }
 
@@ -13045,6 +13155,7 @@ def upgrade_tasks_tree(
 
             return {
                 "ok": True,
+                "applied": not dry_run,
                 "upgraded_files": upgraded_files,
                 "created": created,
                 "updated": updated,
@@ -13062,6 +13173,7 @@ def upgrade_tasks_tree(
     except LockTimeoutError as e:
         return {
             "ok": False,
+            "applied": False,
             "error": "lock-timeout",
             "message": str(e),
             "upgraded_files": [],
@@ -13081,45 +13193,80 @@ def upgrade_tasks_tree(
 
 def cmd_upgrade(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
-    dry_run = bool(getattr(args, "dry_run", False) or getattr(args, "preview", False))
-    migrate_plans = getattr(args, "migrate_plans", False)
-    expect_hash = getattr(args, "expect_hash", None) or getattr(args, "expect_plan_hash", None)
+    apply_flag = bool(getattr(args, "apply", False))
+    dry_run_flag = bool(getattr(args, "dry_run", False) or getattr(args, "preview", False))
+    effective_apply = apply_flag and not dry_run_flag
+    effective_dry_run = not effective_apply
+    migrate_plans = bool(getattr(args, "migrate_plans", False))
+    expect_hash = getattr(args, "expect_plan_hash", None) or getattr(args, "expect_hash", None)
+
     res = upgrade_tasks_tree(
         tasks_dir,
-        dry_run=dry_run,
+        dry_run=effective_dry_run,
         migrate_plans=migrate_plans,
         expect_hash=expect_hash,
+        apply=effective_apply,
+        expect_plan_hash=expect_hash,
     )
     args._last_result = res
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
-    else:
-        if not res["ok"]:
-            for e in res.get("errors", []):
+        return 0 if res.get("ok") else 1
+
+    if not res.get("ok"):
+        err = res.get("error")
+        if err:
+            print(f"[FAIL] {err}", file=sys.stderr)
+        for e in res.get("errors", []):
+            if e != err:
                 print(f"[FAIL] {e}", file=sys.stderr)
-            return 1
-        prefix = "[dry-run] " if dry_run else ""
-        if res["upgraded_files"]:
-            print(f"[ok] {prefix}Upgraded {len(res['upgraded_files'])} file(s) in {tasks_dir}:")
-            for f in res["upgraded_files"]:
-                act_tag = "create" if f in res.get("created", []) else "update"
-                print(f"  - [{act_tag}] {f}")
+        return 1
+
+    tasks_dir_arg = getattr(args, "tasks_dir", "tasks")
+    quoted_td = f'"{tasks_dir_arg}"' if " " in str(tasks_dir_arg) else str(tasks_dir_arg)
+
+    if effective_dry_run:
+        if res.get("plan"):
+            print(f"[preview] Upgrade plan ({len(res['plan'])} file(s), hash: {res['plan_hash']}):")
+            for item in res["plan"]:
+                action = item.get("action", "modify")
+                path = item.get("path", "")
+                summary = item.get("summary") or item.get("diff_summary") or ""
+                summary_str = f" ({summary})" if summary else ""
+                print(f"  - [{action}] {path}{summary_str}")
+            print(f"\nPlan hash: {res['plan_hash']}")
+            mig_flag = " --migrate-plans" if migrate_plans else ""
+            print(f"To apply: ai-orch tasks upgrade --tasks-dir {quoted_td}{mig_flag} --apply --expect-plan-hash {res['plan_hash']}")
         else:
-            print(f"[ok] {prefix}{tasks_dir} is already up-to-date with latest task-pipeline convention.")
-        if dry_run and res.get("plan_hash"):
-            print(f"[preview] Plan hash: {res['plan_hash']} (apply with: upgrade --tasks-dir {tasks_dir} --apply --expect-hash {res['plan_hash']})")
+            print(f"[ok] {tasks_dir} is already up-to-date with latest task-pipeline convention.")
+
         if res.get("legacy_plans"):
-            print(f"\n[legacy-plans] {prefix}Discovered {len(res['legacy_plans'])} legacy plan(s):")
+            print(f"\n[legacy-plans] Discovered {len(res['legacy_plans'])} legacy plan(s):")
             for lp in res["legacy_plans"]:
                 act = lp.get("action", "suggested")
                 print(f"  - [{act}] {lp['source']} -> {lp['destination']}")
-        if res["warnings"]:
+        if res.get("warnings"):
             for w in res["warnings"]:
                 print(f"[WARN] {w}")
-        if res["errors"]:
-            for e in res["errors"]:
-                print(f"[FAIL] {e}")
-    return 0 if res["ok"] else 1
+        return 0
+
+    if res.get("upgraded_files"):
+        print(f"[ok] Upgraded {len(res['upgraded_files'])} file(s) in {tasks_dir}:")
+        for f in res["upgraded_files"]:
+            act_tag = "create" if f in res.get("created", []) else "update"
+            print(f"  - [{act_tag}] {f}")
+    else:
+        print(f"[ok] {tasks_dir} is already up-to-date with latest task-pipeline convention.")
+
+    if res.get("legacy_plans"):
+        print(f"\n[legacy-plans] Discovered {len(res['legacy_plans'])} legacy plan(s):")
+        for lp in res["legacy_plans"]:
+            act = lp.get("action", "suggested")
+            print(f"  - [{act}] {lp['source']} -> {lp['destination']}")
+    if res.get("warnings"):
+        for w in res["warnings"]:
+            print(f"[WARN] {w}")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -18670,13 +18817,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_merge.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_merge.set_defaults(func=cmd_merge_index)
 
-    p_upg = sub.add_parser("upgrade", help="Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention")
+    p_upg = sub.add_parser("upgrade", help="Upgrade a tasks/ directory to the latest task-pipeline convention (previews by default; writes only with --apply and --expect-plan-hash)")
     p_upg.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
-    p_upg.add_argument("--dry-run", action="store_true", default=False, help="Preview changes without writing to disk")
-    p_upg.add_argument("--preview", action="store_true", default=False, help="Preview changes without writing to disk (alias for --dry-run)")
-    p_upg.add_argument("--apply", action="store_true", default=False, help="Apply upgrade changes to disk")
-    p_upg.add_argument("--expect-hash", default=None, help="Refuse to apply if current upgrade plan hash does not match this hash")
+    p_upg.add_argument("--dry-run", action="store_true", default=False, help="Preview changes without writing to disk (alias for default preview)")
+    p_upg.add_argument("--preview", action="store_true", default=False, help="Preview changes without writing to disk (alias for default preview)")
+    p_upg.add_argument("--apply", action="store_true", default=False, help="Apply upgrade changes to disk (requires --expect-plan-hash)")
     p_upg.add_argument("--expect-plan-hash", default=None, help="Refuse to apply if current upgrade plan hash does not match this hash")
+    p_upg.add_argument("--expect-hash", default=None, help="Alias for --expect-plan-hash")
     p_upg.add_argument("--migrate-plans", action="store_true", default=False, help="Migrate discovered legacy plans into tasks/ directory")
     p_upg.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_upg.set_defaults(func=cmd_upgrade)
@@ -19217,7 +19364,7 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
         step_cmd = getattr(args, "step_cmd", None)
         return step_cmd in ("add", "check", "uncheck")
     if cmd == "upgrade":
-        return not bool(getattr(args, "dry_run", False) or getattr(args, "preview", False))
+        return bool(getattr(args, "apply", False)) and not bool(getattr(args, "dry_run", False) or getattr(args, "preview", False))
     if cmd in (
         "close",
         "transition",
