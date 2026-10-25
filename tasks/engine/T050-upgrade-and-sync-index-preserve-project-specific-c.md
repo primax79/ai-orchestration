@@ -13,9 +13,10 @@
 - sources: inbox N049 (porting_liferay, T124 there)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py, plugins/architect-side/skills/task-pipeline/SKILL.md
 - handoff: Read tasks/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md, do the open steps, run the Verification, update the task and the registry.
+- verify-by: porting_liferay
 - short: Non-destructive upgrade
 
-verification pending: run Verification checks
+verification pending: on your tree, declare `area` in the project's `[tasks] extension_fields` (or tasks/AGENTS.md), commit everything first, then run `ai-orch tasks upgrade` and `ai-orch tasks sync-index --apply` and check with `git diff`: your tasks/AGENTS.md rules intact (managed block only appended), Owner column and Id format kept, no row for companion files, `validate` accepts `area`. Note: plain `upgrade` still writes without --apply until T054 ships, so commit first and revert with git if needed (verify-by: porting_liferay)
 
 ## Goal
 
