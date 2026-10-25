@@ -13011,3 +13011,30 @@ def test_t055_sync_index_idempotent(tmp_path: pathlib.Path) -> None:
 
 
 
+
+
+def test_use_cases_create_assigns_next_free_id(tmp_path: pathlib.Path) -> None:
+    """An empty --id gets the next free UC###, counting ids under done/ too; explicit ids still work."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+
+    res1 = run_cli("use-cases", "create", "--title", "First flow", "--tasks-dir", str(tasks_dir), "--json")
+    assert res1.returncode == 0, res1.stdout + res1.stderr
+    assert json.loads(res1.stdout)["id"] == "UC001"
+
+    res_explicit = run_cli("use-cases", "create", "--id", "UC007", "--title", "Explicit", "--tasks-dir", str(tasks_dir), "--json")
+    assert json.loads(res_explicit.stdout)["id"] == "UC007"
+
+    done_dir = tasks_dir / "done" / "use-cases"
+    done_dir.mkdir(parents=True)
+    (done_dir / "UC012-old-flow.md").write_text("# UC012 - Old flow\n", encoding="utf-8")
+
+    res2 = run_cli("use-cases", "create", "--id", "", "--title", "Second flow", "--tasks-dir", str(tasks_dir))
+    assert res2.returncode == 0, res2.stdout + res2.stderr
+    assert "Created use case UC013" in res2.stdout
+    assert len(list((tasks_dir / "use-cases").glob("UC013-*.md"))) == 1
+    # UC001 untouched by the empty-id saves
+    assert "First flow" in next((tasks_dir / "use-cases").glob("UC001-*.md")).read_text(encoding="utf-8")
+
+    bad = run_cli("use-cases", "create", "--id", "X1", "--title", "Bad", "--tasks-dir", str(tasks_dir), "--json")
+    assert bad.returncode != 0
