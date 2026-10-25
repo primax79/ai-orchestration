@@ -3850,6 +3850,240 @@ def test_doctor_detects_vendored_or_stale_tasks_engine(tmp_path: pathlib.Path) -
     assert engine_findings[0]["group_key"] == "stale-vendored-engine:.kilo/skills/task-pipeline/scripts/tasks_engine.py"
 
 
+# ---------------------------------------------------------------------------
+# Task T056: Compare installed and source skill content; warn on stale source clone
+# ---------------------------------------------------------------------------
+
+def test_t056_outdated_installed_copy_replaces_without_overwrite(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Create mock repo in ~/.ai-orchestration/repos/claude-mcp
+    mock_repo = fake_home / ".ai-orchestration" / "repos" / "claude-mcp"
+    src_skill_dir = mock_repo / "plugins" / "architect-side" / "skills" / "t056-test-skill"
+    src_skill_dir.mkdir(parents=True)
+    (src_skill_dir / "SKILL.md").write_text("# T056 Test Skill v1\n")
+
+    # Install for kilo
+    inst1 = run_env(["install-skills", "--repo", "claude-mcp", "--assistants", "kilo"], fake_home)
+    assert inst1["ok"] is True
+    assert inst1["installed_count"] == 1
+
+    installed_dir = fake_home / ".kilo" / "skills" / "t056-test-skill"
+    assert (installed_dir / "SKILL.md").read_text() == "# T056 Test Skill v1\n"
+    marker_file = installed_dir / ".ai-orch-source.json"
+    assert marker_file.is_file()
+    mdata1 = json.loads(marker_file.read_text(encoding="utf-8"))
+    old_hash = mdata1["source_hash"]
+
+    # Now update source in mock_repo to v2
+    (src_skill_dir / "SKILL.md").write_text("# T056 Test Skill v2 (Updated Upstream)\n")
+
+    # 1. Status reports skill as outdated (not up-to-date)
+    st = run_env(["status"], fake_home)
+    k_skills = st["environments"]["kilo"]["global"]["skills"]
+    assert k_skills["t056-test-skill"]["state"] == "outdated"
+
+    # 2. Dry run install-skills without --overwrite plans REPLACE
+    dry = run_env(["install-skills", "--repo", "claude-mcp", "--assistants", "kilo", "--dry-run"], fake_home)
+    assert dry["ok"] is True
+    plan = dry["plan"]
+    plan_item = next(item for item in plan if item["path"] == str(installed_dir))
+    assert plan_item["action"] == "replace"
+    assert plan_item["current_state"] == "outdated"
+    assert "source newer" in plan_item["reason"]
+
+    # 3. Apply install without --overwrite successfully updates skill and updates marker
+    inst2 = run_env(["install-skills", "--repo", "claude-mcp", "--assistants", "kilo"], fake_home)
+    assert inst2["ok"] is True
+    assert inst2["installed_count"] == 1
+    assert (installed_dir / "SKILL.md").read_text() == "# T056 Test Skill v2 (Updated Upstream)\n"
+
+    # Marker is updated with new source hash
+    mdata2 = json.loads(marker_file.read_text(encoding="utf-8"))
+    assert mdata2["source_hash"] != old_hash
+    from orchestration_env import hash_directory
+    assert mdata2["source_hash"] == hash_directory(src_skill_dir)
+
+    # Status now reports up-to-date
+    st_after = run_env(["status"], fake_home)
+    assert st_after["environments"]["kilo"]["global"]["skills"]["t056-test-skill"]["state"] == "up-to-date"
+
+
+def test_t056_locally_edited_installed_copy_requires_overwrite(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    mock_repo = fake_home / ".ai-orchestration" / "repos" / "claude-mcp"
+    src_skill_dir = mock_repo / "plugins" / "architect-side" / "skills" / "t056-local-edit-skill"
+    src_skill_dir.mkdir(parents=True)
+    (src_skill_dir / "SKILL.md").write_text("# Base Skill Content\n")
+
+    inst1 = run_env(["install-skills", "--repo", "claude-mcp", "--assistants", "kilo"], fake_home)
+    assert inst1["ok"] is True
+
+    installed_dir = fake_home / ".kilo" / "skills" / "t056-local-edit-skill"
+    (installed_dir / "SKILL.md").write_text("# Locally Edited Content By User\n")
+
+    # Update source as well
+    (src_skill_dir / "SKILL.md").write_text("# Upstream Change\n")
+
+    # Status detects modified-or-outdated
+    st = run_env(["status"], fake_home)
+    assert st["environments"]["kilo"]["global"]["skills"]["t056-local-edit-skill"]["state"] == "modified-or-outdated"
+
+    # install-skills without --overwrite skips it
+    dry_skip = run_env(["install-skills", "--repo", "claude-mcp", "--assistants", "kilo", "--dry-run"], fake_home)
+    assert dry_skip["ok"] is True
+    plan_item = next(item for item in dry_skip["plan"] if item["path"] == str(installed_dir))
+    assert plan_item["action"] == "skip"
+    assert plan_item["current_state"] == "modified-or-outdated"
+    assert "installed edited locally" in plan_item["reason"]
+
+    # install-skills with --overwrite replaces it
+    dry_ow = run_env(
+        ["install-skills", "--repo", "claude-mcp", "--assistants", "kilo", "--dry-run", "--overwrite", "t056-local-edit-skill"],
+        fake_home,
+    )
+    assert dry_ow["ok"] is True
+    plan_ow_item = next(item for item in dry_ow["plan"] if item["path"] == str(installed_dir))
+    assert plan_ow_item["action"] == "replace"
+    assert "--overwrite" in plan_ow_item["reason"]
+
+
+def test_t056_source_clone_behind_bare_remote_warning(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+
+    # Initial checkout to create commit
+    work = tmp_path / "work"
+    subprocess.run(["git", "clone", str(bare), str(work)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(work), "config", "user.email", "test@test.com"], check=True)
+    skill_dir = work / "plugins" / "architect-side" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Demo Skill v1\n")
+    subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-m", "Commit 1"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "push", "origin", "HEAD"], check=True, capture_output=True)
+
+    # Clone into cache dir
+    cache_clone = fake_home / ".ai-orchestration" / "repos" / "ai-orchestration"
+    cache_clone.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "clone", str(bare), str(cache_clone)], check=True, capture_output=True)
+
+    # Push new commit to remote from work
+    (skill_dir / "SKILL.md").write_text("# Demo Skill v2\n")
+    subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-m", "Commit 2"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "push", "origin", "HEAD"], check=True, capture_output=True)
+
+    # Now cache_clone is behind remote
+    st = run_env(["status"], fake_home)
+    repo_info = st["source_repos"]["ai-orchestration"]
+    assert repo_info["available"] is True
+    assert repo_info["stale"] is True
+    assert repo_info["behind_remote"] is True
+    assert "behind its remote" in repo_info["warning"]
+    assert "fetch-repos" in repo_info["warning"]
+
+    # Finding group created with warning severity
+    stale_fg = next(g for g in st["finding_groups"] if g["kind"] == "stale-source-repo")
+    assert stale_fg["severity"] == "warning"
+    assert stale_fg["names"] == ["ai-orchestration"]
+    assert any("fetch-repos" in adv for adv in stale_fg["advice"])
+
+    # install-skills also warns
+    inst = run_env(["install-skills", "--repo", "ai-orchestration", "--assistants", "kilo", "--dry-run"], fake_home)
+    assert inst["ok"] is True
+    assert inst.get("source_repo_stale") is True
+    assert "fetch-repos" in inst.get("warning", "")
+
+    # CLI human-readable prints warning to stderr
+    res_cli = subprocess.run(
+        [sys.executable, str(SCRIPT), "--home", str(fake_home), "install-skills", "--repo", "ai-orchestration", "--assistants", "kilo", "--dry-run"],
+        capture_output=True, text=True,
+    )
+    assert "[warning]" in res_cli.stderr
+    assert "fetch-repos" in res_cli.stderr
+
+
+def test_t056_offline_unreachable_remote_no_failure(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    repo = fake_home / ".ai-orchestration" / "repos" / "ai-orchestration"
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@test.com"], check=True)
+    skill_dir = repo / "plugins" / "architect-side" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Demo Skill\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "Initial"], check=True, capture_output=True)
+
+    # Add unreachable remote
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "http://192.0.2.1/unreachable.git"], check=True)
+
+    # Status must not fail or raise exception
+    st = run_env(["status"], fake_home)
+    assert st["source_repos"]["ai-orchestration"]["available"] is True
+    assert st["source_repos"]["ai-orchestration"]["stale"] is False
+
+    # install-skills must not fail
+    inst = run_env(["install-skills", "--repo", "ai-orchestration", "--assistants", "kilo", "--dry-run"], fake_home)
+    assert inst["ok"] is True
+    assert inst.get("source_repo_stale") is not True
+
+
+def test_t056_configured_local_checkout_ahead_warning(tmp_path: pathlib.Path) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+
+    # Create cache clone
+    cache_clone = fake_home / ".ai-orchestration" / "repos" / "ai-orchestration"
+    cache_clone.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "clone", str(bare), str(cache_clone)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(cache_clone), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(cache_clone), "config", "user.email", "test@test.com"], check=True)
+    skill_dir = cache_clone / "plugins" / "architect-side" / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Base Skill\n")
+    subprocess.run(["git", "-C", str(cache_clone), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(cache_clone), "commit", "-m", "Base commit"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(cache_clone), "push", "origin", "HEAD"], check=True, capture_output=True)
+
+    # Create local checkout
+    local_dir = tmp_path / "local-ai-orchestration"
+    subprocess.run(["git", "clone", str(bare), str(local_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(local_dir), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(local_dir), "config", "user.email", "test@test.com"], check=True)
+
+    # Local checkout adds a commit ahead of clone
+    (local_dir / "README.md").write_text("# Local commit ahead\n")
+    subprocess.run(["git", "-C", str(local_dir), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(local_dir), "commit", "-m", "Local ahead commit"], check=True, capture_output=True)
+
+    # Configure local checkout in fake_home/.config/ai-orchestration/orchestration.toml
+    cfg_dir = fake_home / ".config" / "ai-orchestration"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "orchestration.toml").write_text(f'[repos]\nai-orchestration = "{local_dir}"\n')
+
+    st = run_env(["status"], fake_home)
+    repo_info = st["source_repos"]["ai-orchestration"]
+    assert repo_info["stale"] is True
+    assert repo_info["local_ahead"] is True
+    assert "ahead" in repo_info["warning"]
+    assert "fetch-repos" in repo_info["warning"]
+
+
 
 
 
