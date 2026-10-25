@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: upgrade/sync-index destroy project rules and registry columns; porting_liferay cannot adopt the current engine and warns its sessions not to run them
 - next-up: no
-- state: bounced
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -68,6 +68,7 @@ Re-ping porting_liferay when fixed; they re-run on the copy.
 
 ## Log (newest first)
 
+- 2026-10-25, kilo: state `bounced` -> `delivered` — KO3 fixed: Id-cell format kept per table; short goes into the Task link text in bare-id tables
 - 2026-10-25, porting-liferay-8c: state `delivered` -> `bounced` — Re-check NOT OK on KO3 only: short label placed in the Id cell instead of the Task link text (57 Id cells changed)
 - 2026-10-25, kilo: state `bounced` -> `delivered` — Fixed all 4 bounce items, added 5 regression tests, verified on scratch copy of porting_liferay/tasks
 - 2026-10-25, porting-liferay-8c: state `delivered` -> `bounced` — Requester validation NOT OK: prose extension_fields not parsed, spurious Decisions row, short titles dropped in category tables (details in the task)
@@ -82,3 +83,9 @@ label as the **Task link text** (`| T154 | P0 | [client/model compatibility chec
 the Id cell exactly in the format the table already uses (bare `T###` here), and put `short`, when present, into the
 Task link text; never change an existing Id-cell format. (The previous spec suggested the Id-cell form; that was wrong
 for tables whose Id column is bare.)
+
+### Fixed 2026-10-25 (kilo), KO3
+
+- `_table_uses_bare_id_format` determines per-table `Id`-cell format from each table's existing rows (falling back to index-level `_index_uses_bare_id_format` for empty or newly created tables, and to `T### (short)` when the index has no `T###` rows).
+- When a table uses bare `T###` IDs (`prefer_bare=True`), `_format_index_id_cell` always emits bare `T###` (even when `short:` is present), and `_format_index_task_cell` puts `short` (or an existing hand-curated short label passing `_extract_hand_curated_short_label`) into the `Task` link text `[short](rel_path)` while keeping the full title otherwise.
+- When a table uses `T### (short)` IDs (`prefer_bare=False`), `_format_index_id_cell` keeps `T### (short)` in the `Id` cell and `_format_index_task_cell` keeps `[title](rel_path)` as the `Task` link text.

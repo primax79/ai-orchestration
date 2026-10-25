@@ -9732,6 +9732,7 @@ def _index_uses_bare_id_format(existing_index: str) -> bool:
         flags=re.MULTILINE | re.DOTALL,
     )
     bare_count = 0
+    short_count = 0
     for line in without_decisions.splitlines():
         line_s = line.strip()
         if not line_s.startswith("|"):
@@ -9742,7 +9743,54 @@ def _index_uses_bare_id_format(existing_index: str) -> bool:
         c0 = cells[0]
         if re.match(r"^T\d{3,}$", c0):
             bare_count += 1
-    return bare_count > 0
+        elif re.match(r"^T\d{3,}\s+\(.+\)$", c0):
+            short_count += 1
+    if bare_count == 0 and short_count == 0:
+        return False
+    return bare_count >= short_count
+
+
+def _table_uses_bare_id_format(
+    row_ids: list[str],
+    default_prefer_bare: bool,
+    has_conflict_markers: bool = False,
+) -> bool:
+    """Return True if a single index table uses bare 'T###' in its Id column, falling back to default_prefer_bare when empty."""
+    if has_conflict_markers:
+        return False
+    bare_count = 0
+    short_count = 0
+    for c0 in row_ids:
+        s = c0.strip()
+        if re.match(r"^T\d{3,}$", s):
+            bare_count += 1
+        elif re.match(r"^T\d{3,}\s+\(.+\)$", s):
+            short_count += 1
+    if bare_count == 0 and short_count == 0:
+        return default_prefer_bare
+    return bare_count >= short_count
+
+
+def _extract_hand_curated_short_label(
+    task: dict[str, Any],
+    existing_task_cell: str | None,
+) -> str | None:
+    if not existing_task_cell:
+        return None
+    m_lbl = re.match(r"^\[([^\]]+)\]\([^)]+\)$", existing_task_cell.strip())
+    if not m_lbl:
+        return None
+    lbl = m_lbl.group(1).strip()
+    title_s = task.get("title", "").strip()
+    if (
+        lbl
+        and lbl != title_s
+        and not lbl.endswith("(missing)")
+        and len(lbl) < len(title_s)
+        and not validate_short_title(lbl)
+    ):
+        return lbl
+    return None
 
 
 def _format_index_id_cell(
@@ -9752,6 +9800,8 @@ def _format_index_id_cell(
     existing_task_cell: str | None = None,
 ) -> str:
     tid = task["id"]
+    if prefer_bare:
+        return tid
     explicit_short = task.get("short")
     if explicit_short and str(explicit_short).strip() and str(explicit_short).strip() != "-":
         return f"{tid} ({str(explicit_short).strip()})"
@@ -9761,24 +9811,29 @@ def _format_index_id_cell(
             return rid
         if rid.startswith("["):
             return rid
-        if existing_task_cell:
-            m_lbl = re.match(r"^\[([^\]]+)\]\([^)]+\)$", existing_task_cell.strip())
-            if m_lbl:
-                lbl = m_lbl.group(1).strip()
-                if (
-                    lbl
-                    and lbl != task.get("title", "").strip()
-                    and not lbl.endswith("(missing)")
-                    and len(lbl) < len(task.get("title", "").strip())
-                    and not validate_short_title(lbl)
-                ):
-                    return f"{tid} ({lbl})"
-        if rid == tid and prefer_bare:
-            return tid
-    if prefer_bare:
-        return tid
+        curated_lbl = _extract_hand_curated_short_label(task, existing_task_cell)
+        if curated_lbl:
+            return f"{tid} ({curated_lbl})"
     st_disp = f" ({task['short_title']})" if task.get("short_title") else ""
     return f"{tid}{st_disp}"
+
+
+def _format_index_task_cell(
+    task: dict[str, Any],
+    existing_task_cell: str | None,
+    prefer_bare: bool,
+) -> str:
+    rel_path = task["rel_path"]
+    title = task.get("title", "")
+    if not prefer_bare:
+        return f"[{title}]({rel_path})"
+    explicit_short = task.get("short")
+    if explicit_short and str(explicit_short).strip() and str(explicit_short).strip() != "-":
+        return f"[{str(explicit_short).strip()}]({rel_path})"
+    curated_lbl = _extract_hand_curated_short_label(task, existing_task_cell)
+    if curated_lbl:
+        return f"[{curated_lbl}]({rel_path})"
+    return f"[{title}]({rel_path})"
 
 
 def _extract_task_decision_question(wt: dict[str, Any]) -> tuple[str, str] | None:
@@ -10309,6 +10364,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         for t in active_tasks
         if t["next_up"] == "yes" and t.get("canonical_state") != "paused"
     }
+    next_prefer_bare = _table_uses_bare_id_format(
+        [r[0] for r in existing_next_rows], prefer_bare_id, has_conflict_markers
+    )
     seen_next_ids: set[str] = set()
     next_up_candidates: list[tuple[str, str, str]] = []
 
@@ -10323,9 +10381,11 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         elif base_id in emergent_next_map:
             t = emergent_next_map[base_id]
             seen_next_ids.add(base_id)
-            id_cell = _format_index_id_cell(t, row_id, prefer_bare_id, cells[2] if len(cells) > 2 else None)
+            existing_task_cell = cells[2] if len(cells) > 2 else None
+            id_cell = _format_index_id_cell(t, row_id, next_prefer_bare, existing_task_cell)
+            task_cell = _format_index_task_cell(t, existing_task_cell, next_prefer_bare)
             extra_s = _format_extra_cells(cells, 5, next_col_count, t, next_hdr_cells)
-            line = f"| {id_cell} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |{extra_s}"
+            line = f"| {id_cell} | {t['priority']} | {task_cell} | {t['executor']} | `{t['handoff']}` |{extra_s}"
             next_up_candidates.append((base_id, t.get("priority", "P2"), line))
         elif base_id not in resolved_ids:
             seen_next_ids.add(base_id)
@@ -10342,9 +10402,10 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     for t in active_tasks:
         if t["next_up"] == "yes" and t.get("canonical_state") != "paused" and t["id"] not in seen_next_ids:
             seen_next_ids.add(t["id"])
-            id_cell = _format_index_id_cell(t, None, prefer_bare_id)
+            id_cell = _format_index_id_cell(t, None, next_prefer_bare)
+            task_cell = _format_index_task_cell(t, None, next_prefer_bare)
             extra_s = _format_extra_cells(None, 5, next_col_count, t, next_hdr_cells)
-            line = f"| {id_cell} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |{extra_s}"
+            line = f"| {id_cell} | {t['priority']} | {task_cell} | {t['executor']} | `{t['handoff']}` |{extra_s}"
             next_up_candidates.append((t["id"], t.get("priority", "P2"), line))
 
     if reorder or not existing_next_rows or has_conflict_markers:
@@ -10426,17 +10487,23 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             ]
         )
         cat_tasks = {t["id"]: t for t in active_tasks if (t["category"] or t["folder_category"]) == cat}
+        cat_existing_rows = existing_by_cat.get(cat, [])
+        cat_prefer_bare = _table_uses_bare_id_format(
+            [r[0] for r in cat_existing_rows], prefer_bare_id, has_conflict_markers
+        )
         seen_cat_ids: set[str] = set()
         cat_rows: list[tuple[str, str]] = []
 
-        for row_id, cells in existing_by_cat.get(cat, []):
+        for row_id, cells in cat_existing_rows:
             base_id = re.sub(r"\s*\(.*?\)", "", row_id).strip()
             if base_id in seen_cat_ids:
                 continue
             if base_id in cat_tasks:
                 t = cat_tasks[base_id]
                 seen_cat_ids.add(base_id)
-                id_cell = _format_index_id_cell(t, row_id, prefer_bare_id, cells[2] if len(cells) > 2 else None)
+                existing_task_cell = cells[2] if len(cells) > 2 else None
+                id_cell = _format_index_id_cell(t, row_id, cat_prefer_bare, existing_task_cell)
+                task_cell = _format_index_task_cell(t, existing_task_cell, cat_prefer_bare)
                 st_val = t['state']
                 if t.get("canonical_state") == "waiting" and t.get("waiting_on"):
                     if "(" not in st_val and ":" not in st_val:
@@ -10449,7 +10516,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 cat_rows.append(
                     (
                         base_id,
-                        f"| {id_cell} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
+                        f"| {id_cell} | {t['priority']} | {task_cell} | "
                         f"{st_val} | {t['executor']} | {t['depends_on_raw']} |{extra_s}",
                     )
                 )
@@ -10468,7 +10535,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         new_cat_tasks = [t for tid, t in cat_tasks.items() if tid not in seen_cat_ids]
         for t in new_cat_tasks:
             seen_cat_ids.add(t["id"])
-            id_cell = _format_index_id_cell(t, None, prefer_bare_id)
+            id_cell = _format_index_id_cell(t, None, cat_prefer_bare)
+            task_cell = _format_index_task_cell(t, None, cat_prefer_bare)
             st_val = t['state']
             if t.get("canonical_state") == "waiting" and t.get("waiting_on"):
                 if "(" not in st_val and ":" not in st_val:
@@ -10481,7 +10549,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             cat_rows.append(
                 (
                     t["id"],
-                    f"| {id_cell} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
+                    f"| {id_cell} | {t['priority']} | {task_cell} | "
                     f"{st_val} | {t['executor']} | {t['depends_on_raw']} |{extra_s}",
                 )
             )
@@ -10691,13 +10759,33 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     )
     done_hdr_cells = [c.strip() for c in hdr_done.strip("|").split("|")]
     done_col_count = len(done_hdr_cells)
+    m_cond = _marker_pattern("conditional").search(existing_index) if existing_index.strip() else None
+    existing_cond_region = m_cond.group(1) if m_cond else ""
+    existing_cond_rows: dict[str, tuple[str, list[str]]] = {}
+    if existing_cond_region:
+        for line in _strip_conflict_markers_ours(existing_cond_region).splitlines():
+            line_s = line.strip()
+            if line_s.startswith(("<", "=", ">")) or not line_s.startswith("|"):
+                continue
+            cells = [c.strip() for c in line_s.strip("|").split("|")]
+            if not cells or cells[0] in ("Id", "---", "-") or cells[0].startswith("---"):
+                continue
+            base_cid = re.sub(r"\s*\(.*?\)", "", cells[0]).strip()
+            if base_cid not in existing_cond_rows:
+                existing_cond_rows[base_cid] = (cells[0], cells)
+    cond_prefer_bare = _table_uses_bare_id_format(
+        [v[0] for v in existing_cond_rows.values()], prefer_bare_id, has_conflict_markers
+    )
     hdr_cond = "| Id | Task | Result | Closed |"
     sep_cond = "| --- | --- | --- | --- |"
     cond_lines = [hdr_cond, sep_cond]
     stale_entries: list[str] = []
     for ct in sorted(conditional_tasks, key=lambda t: _natural_sort_key(t["id"]), reverse=True):
-        id_cell = _format_index_id_cell(ct, None, prefer_bare_id)
-        task_cell = f"[{ct['title']}]({ct['rel_path']})"
+        ex_cond = existing_cond_rows.get(ct["id"])
+        ex_cond_id = ex_cond[0] if ex_cond else None
+        ex_cond_task_cell = ex_cond[1][1] if (ex_cond and len(ex_cond[1]) > 1) else None
+        id_cell = _format_index_id_cell(ct, ex_cond_id, cond_prefer_bare, ex_cond_task_cell)
+        task_cell = _format_index_task_cell(ct, ex_cond_task_cell, cond_prefer_bare)
         open_conditions = [c for c in ct.get("conditions", []) if c.get("status") != "answered"]
         cond_list_to_show = open_conditions if open_conditions else ct.get("conditions", [])
         cond_tokens: list[str] = []
@@ -10730,6 +10818,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             if cells[0] != "-":
                 existing_done_rows.append((cells[0], cells))
 
+    done_prefer_bare = _table_uses_bare_id_format(
+        [r[0] for r in existing_done_rows], prefer_bare_id, has_conflict_markers
+    )
     done_tasks_map = {dt["id"]: dt for dt in done_tasks}
     seen_done_ids: set[str] = set()
     done_rows: list[tuple[str, str]] = []
@@ -10743,8 +10834,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         if base_id in done_tasks_map:
             dt = done_tasks_map[base_id]
             seen_done_ids.add(base_id)
-            id_cell = _format_index_id_cell(dt, row_id, prefer_bare_id, cells[1] if len(cells) > 1 else None)
-            task_cell = f"[{dt['title']}]({dt['rel_path']})"
+            existing_task_cell = cells[1] if len(cells) > 1 else None
+            id_cell = _format_index_id_cell(dt, row_id, done_prefer_bare, existing_task_cell)
+            task_cell = _format_index_task_cell(dt, existing_task_cell, done_prefer_bare)
             res_val = cells[2] if len(cells) > 2 and cells[2] not in ("", "-") else dt["state"]
             closed_val = cells[3] if len(cells) > 3 and cells[3] not in ("", "-") else _git_closed_date(tasks_dir, dt["rel_path"])
             extra_s = _format_extra_cells(cells, 4, done_col_count, dt, done_hdr_cells)
@@ -10764,8 +10856,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     for dt in new_done_tasks:
         dt_id = dt["id"]
         seen_done_ids.add(dt_id)
-        id_cell = _format_index_id_cell(dt, None, prefer_bare_id)
-        task_cell = f"[{dt['title']}]({dt['rel_path']})"
+        id_cell = _format_index_id_cell(dt, None, done_prefer_bare)
+        task_cell = _format_index_task_cell(dt, None, done_prefer_bare)
         res_val = dt["state"]
         closed_val = _git_closed_date(tasks_dir, dt["rel_path"])
         extra_s = _format_extra_cells(None, 4, done_col_count, dt, done_hdr_cells)
