@@ -66,6 +66,27 @@ BIN_AI_ORCH = REPO_ROOT / "bin" / "ai-orch"
 STUB_AGENT = REPO_ROOT / "scripts" / "fixtures" / "runs" / "stub_agent.py"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_agent_clis(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Guard against invoking real agent CLIs in trigger tests."""
+    fake_bin = tmp_path_factory.mktemp("fake-trigger-clis")
+    for name in ("kilo", "claude", "codex"):
+        exe = fake_bin / name
+        exe.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            f'  --version) echo "{name} 0.0.0-test-fake"; exit 0 ;;\n'
+            '  models) echo "google/gemini-3.8-flash"; exit 0 ;;\n'
+            "esac\n"
+            f"echo 'REAL {name} CLI CALLED: configure a stub' >&2\n"
+            "exit 97\n",
+            encoding="utf-8",
+        )
+        exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
+
 @pytest.fixture
 def ws(tmp_path: pathlib.Path) -> pathlib.Path:
     workspace = tmp_path / "test_workspace"
@@ -642,7 +663,9 @@ enabled = true
     t.start()
 
     # Wait for daemon to start
-    time.sleep(0.2)
+    deadline = time.time() + 10.0
+    while time.time() < deadline and not daemon.is_running:
+        time.sleep(0.05)
     assert daemon.is_running is True
 
     lease_path = ws / ".ai-orchestration" / "triggers" / "daemon.json"
@@ -657,7 +680,11 @@ enabled = true
     ev = emit(ws, "task.transitioned", {"to": "delivered"})
 
     # Wait for daemon loop to process
-    time.sleep(0.4)
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        if get_trigger_scan_cursor(ws, role="orchestrator") >= ev["seq"]:
+            break
+        time.sleep(0.05)
     assert get_trigger_scan_cursor(ws, role="orchestrator") >= ev["seq"]
 
     # Stop daemon
@@ -1019,6 +1046,20 @@ def test_confirm_start_run_starts_stub_run(tmp_path: pathlib.Path):
     assert ev["data"]["action_id"] == action_id
     assert ev["data"]["run_id"] == run_id
     assert ev["data"]["type"] == "start-run"
+
+    # Wait for the spawned background supervisor to finish before tmp_path teardown
+    run_file = ws / ".ai-orchestration" / "runs" / run_id / "run.json"
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        if run_file.is_file():
+            try:
+                rec = json.loads(run_file.read_text(encoding="utf-8"))
+                if rec.get("status") in ("succeeded", "failed", "cancelled", "lost"):
+                    break
+            except Exception:
+                pass
+        time.sleep(0.05)
+
 
 
 def test_confirm_command_runs_only_ai_orch(ws: pathlib.Path):

@@ -91,14 +91,21 @@ effort = "low"
 
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_global_config(tmp_path_factory: pytest.TempPathFactory):
-    saved = {k: os.environ.get(k) for k in ("AI_ORCHESTRATION_CONFIG", "AI_ORCH_BROKER_CHILD")}
+    saved = {
+        k: os.environ.get(k)
+        for k in ("AI_ORCHESTRATION_CONFIG", "AI_ORCH_BROKER_CHILD", "AI_ORCH_TEST_CLI_VERSIONS")
+    }
     cfg_dir = tmp_path_factory.mktemp("global-config")
     (cfg_dir / "orchestration.toml").write_text(_TEST_GLOBAL_CONFIG, encoding="utf-8")
     os.environ["AI_ORCHESTRATION_CONFIG"] = str(cfg_dir)
     os.environ.pop("AI_ORCH_BROKER_CHILD", None)
+    # Stub CLI version probes across all tests (in-process and subprocesses) so tests
+    # never spawn real kilo/claude/codex binaries for version checks.
+    os.environ["AI_ORCH_TEST_CLI_VERSIONS"] = "kilo=0.0.0-test-fake,claude=0.0.0-test-fake,codex=0.0.0-test-fake"
     yield
     for key, value in saved.items():
         if value is None:
             os.environ.pop(key, None)
         else:
             os.environ[key] = value
+

@@ -13,6 +13,50 @@ import pytest
 SCRIPT = pathlib.Path(__file__).resolve().parent / "orchestration_env.py"
 
 
+@pytest.fixture(autouse=True)
+def _stub_agent_clis(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub kilo/claude/codex CLIs so env tests never execute real agent binaries."""
+    fake_bin = tmp_path_factory.mktemp("fake-env-clis")
+    for name in ("kilo", "claude", "codex"):
+        exe = fake_bin / name
+        exe.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, pathlib, sys\n"
+            f"name = {name!r}\n"
+            "args = sys.argv[1:]\n"
+            "if args and args[0] == '--version':\n"
+            "    print(f'{name} 0.0.0-test-fake')\n"
+            "    sys.exit(0)\n"
+            "if name == 'claude' and args[:2] == ['mcp', 'add'] and '--' in args:\n"
+            "    idx = args.index('--')\n"
+            "    srv = args[idx - 1]\n"
+            "    cmd_list = args[idx + 1:]\n"
+            "    scope = args[args.index('--scope') + 1] if '--scope' in args else 'user'\n"
+            "    cfg = (pathlib.Path(os.environ.get('HOME', '~')).expanduser() / '.claude.json') if scope == 'user' else (pathlib.Path.cwd() / '.mcp.json')\n"
+            "    data = json.loads(cfg.read_text()) if cfg.exists() else {}\n"
+            "    data.setdefault('mcpServers', {})[srv] = {'type': 'stdio', 'command': cmd_list[0], 'args': cmd_list[1:]}\n"
+            "    cfg.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    cfg.write_text(json.dumps(data, indent=2) + '\\n')\n"
+            "    sys.exit(0)\n"
+            "if name == 'codex' and args[:2] == ['mcp', 'add'] and '--' in args:\n"
+            "    idx = args.index('--')\n"
+            "    srv = args[idx - 1]\n"
+            "    cmd_list = args[idx + 1:]\n"
+            "    cfg = pathlib.Path(os.environ.get('HOME', '~')).expanduser() / '.codex' / 'config.toml'\n"
+            "    cfg.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    existing = cfg.read_text() if cfg.exists() else ''\n"
+            "    block = f'\\n[mcp_servers.{srv}]\\ncommand = {json.dumps(cmd_list[0])}\\nargs = {json.dumps(cmd_list[1:])}\\n'\n"
+            "    cfg.write_text(existing + block)\n"
+            "    sys.exit(0)\n"
+            "sys.stderr.write(f'REAL {name} CLI CALLED FROM A TEST: {args}\\n')\n"
+            "sys.exit(97)\n",
+            encoding="utf-8",
+        )
+        exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
+
 def run_env(args: list[str], home: pathlib.Path, env: dict | None = None) -> dict:
     cmd = [sys.executable, str(SCRIPT), "--home", str(home), "--json", *args]
     res = subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)

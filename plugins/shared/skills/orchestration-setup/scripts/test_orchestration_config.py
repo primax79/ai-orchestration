@@ -34,6 +34,28 @@ def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_agent_clis(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub kilo/claude/codex CLIs so config tests never spawn real agent binaries."""
+    import os
+    fake_bin = tmp_path_factory.mktemp("fake-cfg-clis")
+    for name in ("kilo", "claude", "codex"):
+        exe = fake_bin / name
+        exe.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            f'  --version) echo "{name} 0.0.0-test-fake"; exit 0 ;;\n'
+            '  models) echo "google/gemini-3.8-flash"; echo "google/gemini-4-argon"; exit 0 ;;\n'
+            "esac\n"
+            f"echo 'REAL {name} CLI CALLED: configure a stub' >&2\n"
+            "exit 97\n",
+            encoding="utf-8",
+        )
+        exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
+
 def test_init_global_and_project_deep_merge(tmp_path: pathlib.Path) -> None:
     global_cfg_path = tmp_path / "global" / "orchestration.toml"
     workspace = tmp_path / "workspace"

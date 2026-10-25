@@ -1522,10 +1522,40 @@ def check_task_state_and_mode(
     return True, None
 
 
+def _default_cli_version_probe(cli_path: str, cli_cmd: str | None = None) -> str:
+    """Probe `<cli_path> --version` with a 5s timeout, returning the first output line."""
+    cli_name = cli_cmd or os.path.basename(cli_path)
+    test_vers = os.environ.get("AI_ORCH_TEST_CLI_VERSIONS", "")
+    if test_vers:
+        for item in test_vers.split(","):
+            if "=" in item:
+                k, v = item.split("=", 1)
+                if k.strip() in (cli_name, os.path.basename(cli_path)):
+                    return v.strip()
+    try:
+        res = subprocess.run(
+            [cli_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        out = (res.stdout or res.stderr or "").strip()
+        if res.returncode == 0 and out:
+            return out.splitlines()[0].strip()
+        raise RuntimeError(f"CLI '{cli_name} --version' returned exit code {res.returncode}")
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError(f"Version check timed out (5s) for '{cli_name}'") from e
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"Failed to execute '{cli_name} --version': {e}") from e
+
+
 def check_tool_availability(
     tool_id: str,
     tool_cfg: dict[str, Any],
-    which_fn: Any = shutil.which,
+    which_fn: Any = None,
     version_fn: Any = None,
 ) -> tuple[bool, str | None, str | None]:
     """Guard: Tool must be enabled in config AND installed with working CLI version."""
@@ -1534,6 +1564,9 @@ def check_tool_availability(
 
     if not tool_cfg.get("enabled", True):
         return False, None, f"Tool '{tool_id}' is disabled in configuration"
+
+    if which_fn is None:
+        which_fn = shutil.which
 
     cli_cmd = tool_cfg.get("cli_command", tool_id)
     cli_path = which_fn(cli_cmd)
@@ -1546,24 +1579,17 @@ def check_tool_availability(
             version_str = version_fn(cli_path)
             if not version_str:
                 return False, None, f"Could not determine version for CLI '{cli_cmd}'"
+        except TimeoutError as e:
+            return False, None, str(e)
         except Exception as e:
             return False, None, f"Version check failed for '{cli_cmd}': {e}"
     else:
         try:
-            res = subprocess.run(
-                [cli_path, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            out = (res.stdout or res.stderr or "").strip()
-            if res.returncode == 0 and out:
-                version_str = out.splitlines()[0].strip()
-            else:
-                return False, None, f"CLI '{cli_cmd} --version' returned exit code {res.returncode}"
-        except subprocess.TimeoutExpired:
-            return False, None, f"Version check timed out (5s) for '{cli_cmd}'"
+            version_str = _default_cli_version_probe(cli_path, cli_cmd)
+            if not version_str:
+                return False, None, f"Could not determine version for CLI '{cli_cmd}'"
+        except (TimeoutError, RuntimeError) as e:
+            return False, None, str(e)
         except Exception as e:
             return False, None, f"Failed to execute '{cli_cmd} --version': {e}"
 
