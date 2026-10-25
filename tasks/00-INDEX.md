@@ -106,6 +106,7 @@ Tasks in `env-doctor`. Owner session: unassigned ([README](env-doctor/README.md)
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
+| T056 (Doctor fresh skill installs) | P1 | [Doctor: install from an up-to-date source and compare skill content, not the stored hash](env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md) | open | kilo | - |
 
 ### tasks
 
