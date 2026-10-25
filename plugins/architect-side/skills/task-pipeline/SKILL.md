@@ -699,7 +699,7 @@ When working on a project created with older conventions (e.g. legacy `macroplan
    This non-destructively:
    - Appends or refreshes a managed block (`<!-- ai-orch:managed begin -->` … `<!-- ai-orch:managed end -->`) in `tasks/AGENTS.md` with the canonical `task-pipeline` rules and skill names, preserving all project-specific content outside the markers byte-for-byte;
    - Scaffolds standard directories (`_inbox/to-analyze`, `_inbox/analyzed`), `tasks/.gitignore`, and `tasks/.gitattributes` (`00-INDEX.md merge=ai-orch-index`), and registers `merge.ai-orch-index.driver` and `merge.ai-orch-index.name` in the repository's local git config;
-   - Re-syncs `tasks/00-INDEX.md` while preserving project-specific extra table columns (e.g. `Owner`), `Next up` ordering (unless `--reorder` is passed to `sync-index`), and `Id` cell format;
+   - Re-syncs `tasks/00-INDEX.md` while preserving project-specific extra table columns (e.g. `Owner`), `Next up` ordering (unless `--reorder` is passed to `sync-index`), and each table's `Id` cell format (putting `short` into the `Task` link text when the `Id` column uses bare `T###` IDs);
    - Runs `validate` across the tree and exits `0` on success.
 
 2. **Via Skill (in Chat)**:

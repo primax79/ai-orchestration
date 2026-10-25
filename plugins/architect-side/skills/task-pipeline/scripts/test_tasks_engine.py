@@ -11880,7 +11880,7 @@ def test_t050_no_decisions_row_for_decider_only_blocked_task(tmp_path: pathlib.P
 
 
 def test_t050_short_title_in_category_rows(tmp_path: pathlib.Path) -> None:
-    """T050 bounce fix 3: Tasks with `short:` header show `T### (short)` in category rows even in a bare-ID index, and hand-curated short labels never disappear."""
+    """T050 KO3: Keep each table's Id-cell format; in bare-ID tables put `short` (or hand-curated label) into Task link text; in `T### (short)` tables keep Id `T### (short)` and full title in Task link text."""
     tasks_dir = tmp_path / "tasks"
     (tasks_dir / "social-sg4").mkdir(parents=True)
 
@@ -11908,7 +11908,7 @@ def test_t050_short_title_in_category_rows(tmp_path: pathlib.Path) -> None:
         state="in progress",
     )
 
-    # T037 has no `- short:` header and uses full title in bare-ID index -> stays bare `T037`
+    # T037 has no `- short:` header and uses full title in bare-ID index -> stays bare `T037` with full title
     _write_sample_task(
         tasks_dir / "social-sg4" / "T037-plain.md",
         task_id="T037",
@@ -11925,7 +11925,7 @@ def test_t050_short_title_in_category_rows(tmp_path: pathlib.Path) -> None:
         "<!-- ai-orch:generated next-up -->\n"
         "| Id | Priority | Task | Executor | Handoff |\n"
         "| --- | --- | --- | --- | --- |\n"
-        "| T037 | P1 | [Audit follow-ups and decisions](social-sg4/T037-plain.md) | kilo | `Read tasks/social-sg4/T037-plain.md and execute.` |\n"
+        "| T154 | P0 | [Compatibility of social-service-client 3.1.0 and social-service-model 2.0.2 with the social WS](social-sg4/T154-compatibility.md) | kilo | `Read tasks/social-sg4/T154-compatibility.md and execute.` |\n"
         "<!-- /ai-orch:generated next-up -->\n\n"
         "## Tasks by category\n\n"
         "<!-- ai-orch:generated tasks-by-category -->\n"
@@ -11933,7 +11933,7 @@ def test_t050_short_title_in_category_rows(tmp_path: pathlib.Path) -> None:
         "Social SG4.\n\n"
         "| Id | Priority | Task | State | Executor | Depends on |\n"
         "| --- | --- | --- | --- | --- | --- |\n"
-        "| T154 | P0 | [client/model compatibility check](social-sg4/T154-compatibility.md) | delivered | kilo | - |\n"
+        "| T154 | P0 | [Compatibility of social-service-client 3.1.0 and social-service-model 2.0.2 with the social WS](social-sg4/T154-compatibility.md) | delivered | kilo | - |\n"
         "| T155 | P0 | [step 1 docker env](social-sg4/T155-roadmap.md) | in progress | kilo | - |\n"
         "| T037 | P1 | [Audit follow-ups and decisions](social-sg4/T037-plain.md) | open | kilo | - |\n"
         "<!-- /ai-orch:generated tasks-by-category -->\n\n"
@@ -11947,18 +11947,128 @@ def test_t050_short_title_in_category_rows(tmp_path: pathlib.Path) -> None:
         "| --- | --- | --- | --- |\n"
         "<!-- /ai-orch:generated done -->\n"
     )
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(existing_index, encoding="utf-8")
 
-    rendered = te.render_synced_index(tasks_dir, existing_index, adopt=False)
-    next_sec = rendered.split("## Tasks by category")[0]
-    cat_sec = rendered.split("## Tasks by category")[1].split("## Decisions waiting")[0]
+    def _extract_id_cells(text: str) -> list[str]:
+        out: list[str] = []
+        for ln in text.splitlines():
+            s = ln.strip()
+            if not s.startswith("|"):
+                continue
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if cells and re.match(r"^T\d{3,}", cells[0]):
+                out.append(cells[0])
+        return out
 
-    # T154 shows `T154 (client/model compatibility check)` in both Next up and category table
-    assert "| T154 (client/model compatibility check) | P0 |" in next_sec
-    assert "| T154 (client/model compatibility check) | P0 |" in cat_sec
-    # T155 preserves its hand-curated short label `step 1 docker env`
-    assert "| T155 (step 1 docker env) | P0 |" in cat_sec
-    # T037 stays bare `T037`
-    assert "| T037 | P1 |" in cat_sec
+    before_ids = _extract_id_cells(existing_index)
+    assert before_ids == ["T154", "T154", "T155", "T037"]
+
+    # 1. sync-index --apply on bare-ID index
+    res_sync1 = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync1.returncode == 0, res_sync1.stderr
+    synced = index_path.read_text(encoding="utf-8")
+    after_ids = _extract_id_cells(synced)
+    # All Id cells unchanged (bare T###)
+    assert after_ids == before_ids
+
+    next_sec = synced.split("## Tasks by category")[0]
+    cat_sec = synced.split("## Tasks by category")[1].split("## Decisions waiting")[0]
+
+    # T154 has bare Id and `short` as Task link text in both Next up and category table
+    assert "| T154 | P0 | [client/model compatibility check](social-sg4/T154-compatibility.md) |" in next_sec
+    assert "| T154 | P0 | [client/model compatibility check](social-sg4/T154-compatibility.md) | delivered | kilo | - |" in cat_sec
+    assert re.search(r"^\| T154 \|", cat_sec, flags=re.MULTILINE)
+    assert "T154 (" not in synced
+
+    # T155 preserves its hand-curated short label in link text and keeps bare Id
+    assert "| T155 | P0 | [step 1 docker env](social-sg4/T155-roadmap.md) | in progress | kilo | - |" in cat_sec
+    # T037 stays bare `T037` with full title
+    assert "| T037 | P1 | [Audit follow-ups and decisions](social-sg4/T037-plain.md) | open | kilo | - |" in cat_sec
+
+    # 2. Idempotence: running sync-index --apply a second time reports "already in sync"
+    res_sync2 = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync2.returncode == 0
+    assert "[ok] already in sync, nothing written" in res_sync2.stdout
+    assert index_path.read_text(encoding="utf-8") == synced
+
+    # 3. upgrade --apply path preserves bare-ID format and puts `short` into link text
+    index_path.write_text(existing_index, encoding="utf-8")
+    res_upg_prev = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_upg_prev.returncode == 0
+    upg_plan_hash = json.loads(res_upg_prev.stdout)["plan_hash"]
+    res_upg_app = run_cli(
+        "upgrade",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--apply",
+        "--expect-plan-hash",
+        upg_plan_hash,
+        "--json",
+    )
+    assert res_upg_app.returncode == 0
+    upgraded_index = index_path.read_text(encoding="utf-8")
+    assert _extract_id_cells(upgraded_index) == before_ids
+    assert "| T154 | P0 | [client/model compatibility check](social-sg4/T154-compatibility.md) | delivered | kilo | - |" in upgraded_index
+
+    # 4. `T### (short)` index keeps `T### (short)` in Id cell and full title in Task link text
+    short_id_index = (
+        "# Task Index\n\n"
+        "## Next up\n\n"
+        "<!-- ai-orch:generated next-up -->\n"
+        "| Id | Priority | Task | Executor | Handoff |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n"
+        "<!-- ai-orch:generated tasks-by-category -->\n"
+        "### social-sg4\n\n"
+        "Social SG4.\n\n"
+        "| Id | Priority | Task | State | Executor | Depends on |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| T154 (client/model compatibility check) | P0 | [Compatibility of social-service-client 3.1.0 and social-service-model 2.0.2 with the social WS](social-sg4/T154-compatibility.md) | delivered | kilo | - |\n"
+        "| T155 (Roadmap step 1) | P0 | [step 1 docker env](social-sg4/T155-roadmap.md) | in progress | kilo | - |\n"
+        "| T037 (Audit follow-ups and decisions) | P1 | [Audit follow-ups and decisions](social-sg4/T037-plain.md) | open | kilo | - |\n"
+        "<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n"
+        "<!-- ai-orch:generated decisions -->\n"
+        "| - | None. | - | - |\n"
+        "<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n"
+        "<!-- ai-orch:generated done -->\n"
+        "| Id | Task | Result | Closed |\n"
+        "| --- | --- | --- | --- |\n"
+        "<!-- /ai-orch:generated done -->\n"
+    )
+    rendered_short_idx = te.render_synced_index(tasks_dir, short_id_index, adopt=False)
+    assert (
+        "| T154 (client/model compatibility check) | P0 | "
+        "[Compatibility of social-service-client 3.1.0 and social-service-model 2.0.2 with the social WS](social-sg4/T154-compatibility.md) |"
+    ) in rendered_short_idx
+    assert (
+        "| T155 (Roadmap step 1) | P0 | "
+        "[Roadmap step 1: dockerized environment with social-service-sg4 and Liferay](social-sg4/T155-roadmap.md) |"
+    ) in rendered_short_idx
+    # Next up was empty in short_id_index: new row T154 follows the other tables in the same index (`T### (short)`)
+    short_next_sec = rendered_short_idx.split("## Tasks by category")[0]
+    assert (
+        "| T154 (client/model compatibility check) | P0 | "
+        "[Compatibility of social-service-client 3.1.0 and social-service-model 2.0.2 with the social WS](social-sg4/T154-compatibility.md) |"
+    ) in short_next_sec
+
+    # 5. Empty/new table in a bare-ID index follows the bare-ID format of the other tables in the same index
+    (tasks_dir / "new-cat").mkdir(parents=True)
+    _write_sample_task(
+        tasks_dir / "new-cat" / "T200-new-cat-task.md",
+        task_id="T200",
+        title="Full title of the new category task",
+        category="new-cat",
+        priority="P1",
+        next_up="no",
+        state="open",
+        short="new cat short",
+    )
+    rendered_with_new_cat = te.render_synced_index(tasks_dir, synced, adopt=False)
+    assert "| T200 | P1 | [new cat short](new-cat/T200-new-cat-task.md) | open | kilo | - |" in rendered_with_new_cat
 
 
 def test_t050_per_section_summary_in_upgrade_and_sync_index_preview(tmp_path: pathlib.Path) -> None:
