@@ -19423,11 +19423,18 @@ def resolve_feedback_target(
     repo_root = _find_repo_root()
     candidates: list[str] = []
     explicit_bin = os.environ.get("AI_ORCH_BIN")
-    raw_candidates = [explicit_bin] if explicit_bin else [
-        sys.argv[0] if (sys.argv and sys.argv[0] and sys.argv[0].endswith("ai-orch")) else None,
-        shutil.which("ai-orch"),
-        str(repo_root / "bin" / "ai-orch") if repo_root is not None else None,
-    ]
+    # An explicit AI_ORCH_BIN is authoritative unless it is an installed copy
+    # (bin/ai-orch of an installed copy sets it to itself); then the launcher
+    # on PATH may still name the dev source repo.
+    if explicit_bin and not _is_installed_copy(pathlib.Path(explicit_bin).resolve().parent.parent):
+        raw_candidates = [explicit_bin]
+    else:
+        raw_candidates = [
+            explicit_bin,
+            sys.argv[0] if (sys.argv and sys.argv[0] and sys.argv[0].endswith("ai-orch")) else None,
+            shutil.which("ai-orch"),
+            str(repo_root / "bin" / "ai-orch") if repo_root is not None else None,
+        ]
     for cand in raw_candidates:
         if cand:
             candidates.append(cand)
