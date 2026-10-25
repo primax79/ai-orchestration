@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
+- applied: yes
 - short: Both architect plugins
 
 ## Context

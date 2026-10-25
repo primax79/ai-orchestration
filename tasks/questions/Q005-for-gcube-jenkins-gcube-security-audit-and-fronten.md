@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: C
+- applied: yes
 - short: Canonical skill copies
 
 ## Context

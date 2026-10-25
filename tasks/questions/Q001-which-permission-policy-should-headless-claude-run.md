@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
+- applied: yes
 - short: Headless Claude permissions
 
 ## Context
