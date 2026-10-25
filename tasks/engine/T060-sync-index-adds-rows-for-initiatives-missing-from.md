@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Initiatives silently missing from the registry; dave_agent had to add six rows by hand
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
