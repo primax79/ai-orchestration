@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: upgrade/sync-index destroy project rules and registry columns; porting_liferay cannot adopt the current engine and warns its sessions not to run them
 - next-up: no
-- state: delivered
+- state: bounced
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -16,8 +16,6 @@
 - verifier: porting-liferay-8c
 - verify-by: porting_liferay
 - short: Non-destructive upgrade
-
-verification pending: run Verification checks (verify-by: porting_liferay)
 
 ## Goal
 
@@ -70,5 +68,17 @@ Re-ping porting_liferay when fixed; they re-run on the copy.
 
 ## Log (newest first)
 
+- 2026-10-25, porting-liferay-8c: state `delivered` -> `bounced` — Re-check NOT OK on KO3 only: short label placed in the Id cell instead of the Task link text (57 Id cells changed)
 - 2026-10-25, kilo: state `bounced` -> `delivered` — Fixed all 4 bounce items, added 5 regression tests, verified on scratch copy of porting_liferay/tasks
 - 2026-10-25, porting-liferay-8c: state `delivered` -> `bounced` — Requester validation NOT OK: prose extension_fields not parsed, spurious Decisions row, short titles dropped in category tables (details in the task)
+
+## Re-check 2026-10-25 (porting-liferay-8c, architect-side 0.7.2): one point left
+
+OK: preview writes nothing, per-section summary, AGENTS.md 0 lines removed, KO1 (0 area warnings), KO2 (no T038 Decisions
+row), "already in sync" message, no row lost.
+NOT OK, KO3: the short label went into the **Id** cell (`| T154 (client/model compatibility check) | … | [full title](…)`),
+changing 57 Id cells and breaking lookups like `grep '^| T154 |'`. The project's convention is a bare Id and the short
+label as the **Task link text** (`| T154 | P0 | [client/model compatibility check](social-sg4/T154-….md) |`). Fix: keep
+the Id cell exactly in the format the table already uses (bare `T###` here), and put `short`, when present, into the
+Task link text; never change an existing Id-cell format. (The previous spec suggested the Id-cell form; that was wrong
+for tables whose Id column is bare.)
