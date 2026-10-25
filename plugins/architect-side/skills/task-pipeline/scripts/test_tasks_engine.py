@@ -12817,7 +12817,7 @@ def test_t037_upgrade_registers_git_merge_driver_and_validate_warns_when_missing
 
 
 def test_t037_sync_index_without_apply_prints_dry_run_footer(tmp_path: pathlib.Path) -> None:
-    """sync-index without --apply ends with a one-line footer: 'preview only, nothing written; re-run with --apply'."""
+    """sync-index without --apply ends with a one-line footer: '[preview] nothing written; re-run with --apply to write these changes'."""
     tasks_dir = tmp_path / "tasks"
     _write_sample_task(tasks_dir / "features" / "T001.md", task_id="T001", category="features")
 
@@ -12825,14 +12825,14 @@ def test_t037_sync_index_without_apply_prints_dry_run_footer(tmp_path: pathlib.P
     res_plain = run_cli("sync-index", "--tasks-dir", str(tasks_dir))
     assert res_plain.returncode == 0
     lines = res_plain.stdout.strip().splitlines()
-    assert lines[-1] == "preview only, nothing written; re-run with --apply"
+    assert lines[-1] == "[preview] nothing written; re-run with --apply to write these changes"
     assert not (tasks_dir / "00-INDEX.md").exists()
 
     # 2. sync-index --preview (no --apply)
     res_prev = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--preview")
     assert res_prev.returncode == 0
     prev_lines = res_prev.stdout.strip().splitlines()
-    assert prev_lines[-1] == "preview only, nothing written; re-run with --apply"
+    assert prev_lines[-1] == "[preview] nothing written; re-run with --apply to write these changes"
 
 
 # ===========================================================================
@@ -13005,6 +13005,201 @@ def test_t055_sync_index_idempotent(tmp_path: pathlib.Path) -> None:
     assert payload_json["ok"] is True
     assert payload_json["in_sync"] is True
     assert payload_json["changed"] is False
+
+
+# ===========================================================================
+# Initiative T060: sync-index adds rows for missing initiatives & preview msg
+# ===========================================================================
+
+
+def test_t060_sync_index_adds_missing_initiative_rows_and_preserves_existing(tmp_path: pathlib.Path) -> None:
+    """T060: Three initiatives on disk (01-a, 02-b, 03-c with plan.md and task blocks), index lists only 01:
+    - Preview without --apply prints '[preview] nothing written; re-run with --apply to write these changes' and writes nothing.
+    - sync-index --apply adds 02 and 03 rows with derived status in initiative-number order; 01 row (including custom link text) unchanged byte for byte.
+    - Re-run reports 'already in sync' (both with and without --apply).
+    """
+    tasks_dir = tmp_path / "tasks"
+    for folder, num, title, blocks in [
+        (
+            "01-a",
+            "01",
+            "Alpha Initiative",
+            "### 01.1 - First Alpha\n- **Status:** `done`\n- **Goal:** G1.\n",
+        ),
+        (
+            "02-b",
+            "02",
+            "Beta Initiative",
+            "### 02.1 - Beta Done\n- **Status:** `done`\n- **Goal:** G2a.\n\n"
+            "### 02.2 - Beta Open\n- **Status:** `open`\n- **Goal:** G2b.\n",
+        ),
+        (
+            "03-c",
+            "03",
+            "Gamma Initiative",
+            "### 03.1 - Gamma Running\n- **Status:** `in progress`\n- **Goal:** G3a.\n\n"
+            "### 03.2 - Gamma Open\n- **Status:** `open`\n- **Goal:** G3b.\n",
+        ),
+    ]:
+        init_dir = tasks_dir / folder
+        init_dir.mkdir(parents=True)
+        (init_dir / "plan.md").write_text(
+            f"# {num} - {title}\n\n## Tasks\n\n{blocks}",
+            encoding="utf-8",
+        )
+
+    row_01_exact = "| 1 | 01 | [Custom Alpha Link](01-a/plan.md) | done | - | M |"
+    initial_index = (
+        "# Task Index\n\n"
+        "## Initiatives\n\n"
+        "<!-- ai-orch:generated initiatives -->\n"
+        "| Priority | # | Initiative | Status | Depends on | Size |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        f"{row_01_exact}\n"
+        "<!-- /ai-orch:generated initiatives -->\n\n"
+        "## Next up\n\n"
+        "<!-- ai-orch:generated next-up -->\n"
+        "| Id | Priority | Task | Executor | Handoff |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n"
+        "<!-- ai-orch:generated tasks-by-category -->\n"
+        "<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n"
+        "<!-- ai-orch:generated decisions -->\n"
+        "| Key | Question | Blocks | Decider | Recommended |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| - | None. | - | - | - |\n"
+        "<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n"
+        "<!-- ai-orch:generated done -->\n"
+        "| Id | Task | Result | Closed |\n"
+        "| --- | --- | --- | --- |\n"
+        "<!-- /ai-orch:generated done -->\n"
+    )
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(initial_index, encoding="utf-8")
+
+    # 1. Preview without --apply prints summary + new preview line, writes nothing
+    res_preview = run_cli("sync-index", "--tasks-dir", str(tasks_dir))
+    assert res_preview.returncode == 0
+    preview_lines = res_preview.stdout.strip().splitlines()
+    assert "[preview] Section summary:" in res_preview.stdout
+    assert "Initiatives: +2 -0 ~0 row(s)" in res_preview.stdout
+    assert preview_lines[-1] == "[preview] nothing written; re-run with --apply to write these changes"
+    assert index_path.read_text(encoding="utf-8") == initial_index
+
+    # 2. sync-index --apply adds 02 and 03 with derived status; 01 row unchanged byte-for-byte
+    res_apply = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_apply.returncode == 0
+    updated_index = index_path.read_text(encoding="utf-8")
+    assert row_01_exact in updated_index
+    row_02_expected = "| 2 | 02 | [Beta Initiative](02-b/plan.md) | in progress (done: 02.1; next: 02.2) | - | M |"
+    row_03_expected = "| 3 | 03 | [Gamma Initiative](03-c/plan.md) | in progress (running: 03.1) | - | M |"
+    assert row_02_expected in updated_index
+    assert row_03_expected in updated_index
+    assert updated_index.index(row_01_exact) < updated_index.index(row_02_expected) < updated_index.index(row_03_expected)
+
+    # 3. Re-run with --apply: "already in sync"
+    res_rerun = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_rerun.returncode == 0
+    assert "already in sync" in res_rerun.stdout
+    assert index_path.read_text(encoding="utf-8") == updated_index
+
+    # 4. Re-run without --apply when nothing would change: keeps "already in sync"
+    res_rerun_preview = run_cli("sync-index", "--tasks-dir", str(tasks_dir))
+    assert res_rerun_preview.returncode == 0
+    assert "already in sync" in res_rerun_preview.stdout
+    assert "[preview] nothing written" not in res_rerun_preview.stdout
+
+
+def test_t060_sync_index_preserves_p_style_priority_and_inserts_in_number_order(tmp_path: pathlib.Path) -> None:
+    """T060: When existing Initiatives table uses P1/P- priorities and lists 01 and 03 with custom link text,
+    missing 02 and 04 are inserted in initiative-number order (01, 02, 03, 04) with P1 priority and derived status.
+    """
+    tasks_dir = tmp_path / "tasks"
+    for folder, num, title, st in [
+        ("done/01-first", "01", "First Full Title", "done"),
+        ("02-second", "02", "Second Full Title", "open"),
+        ("03-third", "03", "Third Full Title", "open"),
+        ("04-fourth", "04", "Fourth Full Title", "in progress"),
+    ]:
+        init_dir = tasks_dir / folder
+        init_dir.mkdir(parents=True)
+        (init_dir / "plan.md").write_text(
+            f"# {num} - {title}\n\n## Tasks\n\n### {num}.1 - Subtask\n- **Status:** `{st}`\n- **Goal:** G.\n",
+            encoding="utf-8",
+        )
+
+    row_01 = "| P- | 01 | [Custom First](done/01-first/plan.md) | done | - | M |"
+    row_03 = "| P1 | 03 | [Custom Third](03-third/plan.md) | open | - | M |"
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        "# Task Index\n\n"
+        "## Initiatives\n\n"
+        "<!-- ai-orch:generated initiatives -->\n"
+        "| Priority | # | Initiative | Status | Depends on | Size |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        f"{row_01}\n"
+        f"{row_03}\n"
+        "<!-- /ai-orch:generated initiatives -->\n\n"
+        "## Next up\n\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+
+    res = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res.returncode == 0
+    synced = index_path.read_text(encoding="utf-8")
+    row_02 = "| P1 | 02 | [Second Full Title](02-second/plan.md) | open | - | M |"
+    row_04 = "| P1 | 04 | [Fourth Full Title](04-fourth/plan.md) | in progress (running: 04.1) | - | M |"
+    assert row_01 in synced
+    assert row_02 in synced
+    assert row_03 in synced
+    assert row_04 in synced
+    assert synced.index(row_01) < synced.index(row_02) < synced.index(row_03) < synced.index(row_04)
+
+
+def test_t060_n062_unmarked_initiatives_and_specs_tables_do_not_duplicate_specs_heading(tmp_path: pathlib.Path) -> None:
+    """N062: When ## Initiatives and ## Specs tables lack <!-- ai-orch:generated ... --> markers,
+    sync-index --apply does not glue ## Specs to the last Initiatives row and does not duplicate ## Specs.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "01-alpha").mkdir(parents=True)
+    (tasks_dir / "01-alpha" / "plan.md").write_text(
+        "# 01 - Alpha\n\n## Tasks\n\n### 01.1 - Sub\n- **Status:** `done`\n- **Goal:** G.\n",
+        encoding="utf-8",
+    )
+    (tasks_dir / "specs").mkdir(parents=True)
+    (tasks_dir / "specs" / "spec-one.md").write_text("# Spec One\n", encoding="utf-8")
+
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        "# Task Index\n\n"
+        "## Initiatives\n\n"
+        "| Priority | # | Initiative | Status | Depends on | Size |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| 1 | 01 | [Alpha](01-alpha/plan.md) | done | - | L |\n\n"
+        "## Specs\n\n"
+        "| Spec | Drives |\n"
+        "| --- | --- |\n"
+        "| [spec-one](specs/spec-one.md) | 01 |\n\n"
+        "## Next up\n\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+
+    res = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res.returncode == 0
+    synced = index_path.read_text(encoding="utf-8")
+    assert synced.count("## Specs") == 1
+    assert "| L |\n\n## Specs" in synced
+
+
 
 
 
