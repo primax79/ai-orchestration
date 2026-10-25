@@ -460,7 +460,8 @@ def extract_verify_by(raw_state: str | None) -> str | None:
 
 def normalize_state(raw_state: str) -> str:
     """Map parameterized state strings like 'done with a caveat: self-verified only',
-    'dropped: reason', '`done` (2026-10-16)', or '`in progress`' to their canonical base state."""
+    'dropped: reason', '`done` (2026-10-16)', or '`in progress`', and spelling variants
+    like 'in-progress', 'In Progress', 'in_progress' to their canonical base state."""
     s = raw_state.strip()
     m_tick = re.match(r"^`([^`]+)`(?:\s*\(.*\))?\s*$", s)
     if m_tick:
@@ -470,7 +471,7 @@ def normalize_state(raw_state: str) -> str:
     m_date = re.match(r"^(.+?)\s*\(\d{4}-\d{2}-\d{2}\)$", s)
     if m_date:
         s = m_date.group(1).strip().strip("`").strip()
-    s_lower = s.lower()
+    s_lower = re.sub(r"[-_\s]+", " ", s.lower()).strip()
     if (
         s_lower == "waiting"
         or s_lower.startswith("waiting:")
@@ -485,6 +486,7 @@ def normalize_state(raw_state: str) -> str:
         "blocked",
         "dropped",
         "in progress",
+        "paused",
         "delivered",
         "bounced",
         "verified",
@@ -492,9 +494,29 @@ def normalize_state(raw_state: str) -> str:
         "open",
         "moved",
     ):
-        if s == base or s.startswith(base + ":") or s.startswith(base + " ("):
+        if s_lower == base or s_lower.startswith(base + ":") or s_lower.startswith(base + " ("):
             return base
     return s
+
+
+def is_canonical_state_spelling(raw_state: str) -> bool:
+    """Return True if raw_state uses the canonical lowercase space-separated spelling for its base state."""
+    if not raw_state or not isinstance(raw_state, str):
+        return False
+    canon = normalize_state(raw_state)
+    if canon not in CANONICAL_STATES:
+        return False
+    s = raw_state.strip()
+    m_tick = re.match(r"^`([^`]+)`(?:\s*\(.*\))?\s*$", s)
+    if m_tick:
+        s = m_tick.group(1)
+    s = s.strip("`").strip()
+    m_date = re.match(r"^(.+?)\s*\(\d{4}-\d{2}-\d{2}\)$", s)
+    if m_date:
+        s = m_date.group(1).strip().strip("`").strip()
+    if canon == "waiting" and (s.startswith("waiting on ") or s.startswith("waiting on:")):
+        return True
+    return s == canon or s.startswith(canon + ":") or s.startswith(canon + " (")
 
 
 def is_valid_state(raw_state: str) -> bool:
@@ -7211,6 +7233,10 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                         warnings.append(f"{rel}: archived leaf node {nid} has no 'Status' (read as done).")
                     else:
                         errors.append(f"{rel}: leaf node {nid} missing required 'Status'.")
+                elif node.state and is_valid_state(node.state) and not is_canonical_state_spelling(node.state):
+                    warnings.append(
+                        f"{rel}: non-canonical state spelling {node.state!r} on node {nid} (canonical spelling: {node.canonical_state!r})."
+                    )
 
         for dep in node.own_depends_on:
             if is_external_task_ref(dep):
@@ -7392,6 +7418,10 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 errors.append(
                     f"{rel}: invalid state {task['state']!r} (expected one of {sorted(CANONICAL_STATES)})."
                 )
+            elif not is_canonical_state_spelling(task["state"]):
+                warnings.append(
+                    f"{rel}: non-canonical state spelling {task['state']!r} (canonical spelling: {task['canonical_state']!r})."
+                )
 
             # Done placement consistency
             cstate = task["canonical_state"]
@@ -7496,6 +7526,10 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             if not task["state"] or not is_valid_state(task["state"]):
                 errors.append(
                     f"{rel}: invalid state {task['state']!r} (expected one of {sorted(CANONICAL_STATES)})."
+                )
+            elif not is_canonical_state_spelling(task["state"]):
+                warnings.append(
+                    f"{rel}: non-canonical state spelling {task['state']!r} (canonical spelling: {task['canonical_state']!r})."
                 )
 
             # Done placement consistency
@@ -8328,6 +8362,7 @@ def _append_progress_log(
     actor: str | None,
     verifier: str | None,
     reason: str | None,
+    force_log: bool = False,
 ) -> pathlib.Path | None:
     file_path = pathlib.Path(task_info["file_path"])
     progress_path = file_path.parent / "PROGRESS.md" if task_info["is_folder"] else None
@@ -8336,7 +8371,7 @@ def _append_progress_log(
             progress_path = file_path.parent / "PROGRESS.md"
         elif file_path.is_file():
             content = file_path.read_text(encoding="utf-8")
-            if "## Log" in content or verifier or reason:
+            if "## Log" in content or verifier or reason or force_log:
                 progress_path = file_path
     if progress_path is None and not (file_path.parent / "PROGRESS.md").exists():
         # For single-file tasks that bounce or get owner-verified, only write PROGRESS.md if it's a folder task
@@ -8434,8 +8469,12 @@ def transition_task(
     waiting_on: str | None = None,
     verify_by: str | None = None,
     verify_check: str | None = None,
+    owner_approved: bool = False,
+    dry_run: bool = False,
+    force_log: bool = False,
+    _internal_walk_step: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
-    if not is_platform_supported():
+    if not is_platform_supported() and not dry_run:
         return False, {
             "ok": False,
             "task_id": task_id,
@@ -8445,7 +8484,8 @@ def transition_task(
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     try:
-        with task_write_lock(tasks_dir):
+        lock_ctx = contextlib.nullcontext() if dry_run else task_write_lock(tasks_dir)
+        with lock_ctx:
             if not is_valid_state(new_state):
                 return False, {
                     "ok": False,
@@ -8506,6 +8546,110 @@ def transition_task(
                     "ok": False,
                     "task_id": task_id,
                     "error": "derived state; transition its leaves",
+                }
+
+            old_canon_check = node.canonical_state
+            new_canon_check = normalize_state(new_state)
+            if not _internal_walk_step and new_canon_check == "done" and old_canon_check != "verified":
+                if old_canon_check in TERMINAL_STATES or node.in_done or node.in_closed_section:
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": node.state,
+                        "new_state": new_state,
+                        "error": (
+                            f"Illegal transition '{node.state}' -> '{new_state}'. "
+                            f"Allowed target states from '{node.state}': []."
+                        ),
+                    }
+                executor_check = node.executor or "kilo"
+                vmode_check = None
+                if node.block_text is not None:
+                    vmode_check = node.fields.get("verification_mode", {}).get("value") or node.own_fields.get("verification_mode")
+                else:
+                    emergent_list = discover_emergent_tasks(tasks_dir)
+                    target_em = next((t for t in emergent_list if t["id"] == task_id), None)
+                    if target_em:
+                        vmode_check = (target_em.get("verification_mode") or "cross-agent").strip()
+                        executor_check = target_em.get("executor") or executor_check
+                if vmode_check in (None, "", "-"):
+                    vmode_check = "cross-agent"
+
+                eff_actor = "owner" if owner_approved else actor
+                eff_verifier = verifier or ("owner" if owner_approved else None)
+
+                if vmode_check == "self" and not _is_independent_verifier(executor_check, eff_actor, eff_verifier):
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": node.state,
+                        "new_state": new_state,
+                        "error": (
+                            "Task has verification-mode='self' and no independent verifier or owner approval was supplied; "
+                            "transition to 'done with a caveat: self-verified only' instead of 'done'."
+                        ),
+                    }
+                if vmode_check == "owner" and (eff_actor or "").lower() != "owner" and (eff_verifier or "").lower() != "owner":
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": node.state,
+                        "new_state": new_state,
+                        "error": "Task requires owner verification (--actor owner, --verifier owner, or --owner-approved).",
+                    }
+                if not _is_independent_verifier(executor_check, eff_actor, eff_verifier):
+                    if not eff_verifier and not eff_actor:
+                        return False, {
+                            "ok": False,
+                            "task_id": task_id,
+                            "old_state": node.state,
+                            "new_state": new_state,
+                            "error": (
+                                f"Illegal transition '{node.state}' -> '{new_state}': "
+                                "no direct path from open/in progress to verified or done; task must pass through 'delivered' first "
+                                f"(or pass an independent --verifier / --owner-approved to walk the legal path from '{node.state}' to 'done')."
+                            ),
+                        }
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": node.state,
+                        "new_state": new_state,
+                        "error": (
+                            f"Independent verification guard failed: task executor is {executor_check!r}, "
+                            f"so transitioning to 'done' requires an independent verifier "
+                            f"(--verifier <v>, different from executor {executor_check!r}) or owner approval (--owner-approved)."
+                        ),
+                    }
+                return close_task(
+                    tasks_dir=tasks_dir,
+                    task_id=task_id,
+                    actor=actor,
+                    verifier=verifier,
+                    reason=reason,
+                    owner_approved=owner_approved,
+                    dry_run=dry_run,
+                    expect_task_hash=expect_task_hash,
+                    force_unblock=force_unblock,
+                )
+
+            if dry_run:
+                curr_st = node.state
+                eff_st = normalize_state(new_state) if is_valid_state(new_state) else new_state
+                if eff_st == "done with a caveat" and ":" in new_state:
+                    eff_st = new_state.strip()
+                elif eff_st == "done with a caveat" and reason:
+                    eff_st = f"done with a caveat: {reason.strip()}"
+                return True, {
+                    "ok": True,
+                    "dry_run": True,
+                    "task_id": task_id,
+                    "old_state": curr_st,
+                    "new_state": eff_st,
+                    "path": [curr_st, eff_st],
+                    "transitions": [{"from": curr_st, "to": eff_st}],
+                    "rel_path": node.rel_path,
+                    "file_path": str(node.file_path),
                 }
 
             if node.block_text is not None:
@@ -8605,7 +8749,7 @@ def transition_task(
                         "error": "Transitioning to 'bounced' requires --reason with the failing criterion / B1..Bn findings.",
                     }
 
-                effective_state = "waiting" if new_canon == "waiting" else new_state
+                effective_state = "waiting" if new_canon == "waiting" else (new_canon if (new_canon in CANONICAL_STATES and not is_canonical_state_spelling(new_state)) else new_state)
                 if new_canon == "done with a caveat" and ":" not in new_state and reason:
                     effective_state = f"done with a caveat: {reason.strip()}"
                 elif new_canon == "done with a caveat" and ":" not in new_state and vmode == "self":
@@ -8832,7 +8976,7 @@ def transition_task(
                 }
 
             # Format state string when self-verified caveat is used
-            effective_state = "waiting" if new_canon == "waiting" else new_state
+            effective_state = "waiting" if new_canon == "waiting" else (new_canon if (new_canon in CANONICAL_STATES and not is_canonical_state_spelling(new_state)) else new_state)
             if new_canon == "done with a caveat" and ":" not in new_state and reason:
                 effective_state = f"done with a caveat: {reason.strip()}"
             elif new_canon == "done with a caveat" and ":" not in new_state and vmode == "self":
@@ -8851,7 +8995,7 @@ def transition_task(
                 waiting_on=waiting_on,
                 clear_waiting_on=clear_wo,
             )
-            _append_progress_log(target, old_state, effective_state, actor, verifier, reason)
+            _append_progress_log(target, old_state, effective_state, actor, verifier, reason, force_log=force_log)
 
             final_path = file_path
             if is_terminal and not target["in_done"]:
@@ -8910,8 +9054,13 @@ def close_task(
     reason: str | None = None,
     owner_approved: bool = False,
     caveat: str | None = None,
+    self_verified: bool = False,
+    dry_run: bool = False,
+    expect_task_hash: str | None = None,
+    force_unblock: bool = False,
+    sync_index_after: bool = True,
 ) -> tuple[bool, dict[str, Any]]:
-    if not is_platform_supported():
+    if not is_platform_supported() and not dry_run:
         return False, {
             "ok": False,
             "task_id": task_id,
@@ -8921,7 +9070,8 @@ def close_task(
 
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     try:
-        with task_write_lock(tasks_dir):
+        lock_ctx = contextlib.nullcontext() if dry_run else task_write_lock(tasks_dir)
+        with lock_ctx:
             tree = discover_task_tree(tasks_dir)
             if task_id not in tree:
                 return False, {
@@ -8986,7 +9136,7 @@ def close_task(
                     "error": f"Task {task_id!r} is already closed in state '{curr_state}'.",
                 }
 
-            valid_start = ("open", "in progress", "delivered", "verified", "bounced")
+            valid_start = ("open", "in progress", "delivered", "verified", "bounced", "paused", "waiting", "blocked")
             if curr_canon not in valid_start:
                 return False, {
                     "ok": False,
@@ -8996,6 +9146,7 @@ def close_task(
 
             executor = node.executor or "kilo"
             vmode = None
+            target = None
             if node.block_text is not None:
                 vmode = node.fields.get("verification_mode", {}).get("value") or node.own_fields.get("verification_mode")
             else:
@@ -9007,25 +9158,48 @@ def close_task(
             if vmode in (None, "", "-"):
                 vmode = "cross-agent"
 
+            if expect_task_hash is not None:
+                current_hash = node.task_hash if node.block_text is not None else (task_bundle_sha256(target) if target else node.task_hash)
+                if current_hash.lower() != expect_task_hash.strip().lower():
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "error": "stale-task",
+                        "expected": expect_task_hash,
+                        "actual": current_hash,
+                    }
+
+            if curr_canon == "waiting" and target is not None:
+                raw_dec = target.get("decider", "").strip()
+                q_ids = re.findall(r"Q\d{3,}", raw_dec)
+                if q_ids:
+                    all_questions = discover_questions(tasks_dir)
+                    q_map = {q["id"]: q for q in all_questions}
+                    open_q = [qid for qid in q_ids if qid in q_map and q_map[qid]["status"] == "open"]
+                    if open_q and not force_unblock:
+                        return False, {
+                            "ok": False,
+                            "task_id": task_id,
+                            "old_state": curr_state,
+                            "new_state": "done",
+                            "error": (
+                                f"Waiting invariant violated: task {task_id!r} is waiting on open question(s): "
+                                f"{', '.join(open_q)}. Resolve them via 'questions answer' or 'questions withdraw', "
+                                "or pass --force-unblock --reason TEXT."
+                            ),
+                        }
+
             is_already_verified = (curr_canon == "verified")
-            is_self_vmode = (vmode == "self")
+            is_self_vmode = (vmode == "self") or self_verified
+
+            eff_actor_for_check = "owner" if owner_approved else actor
+            eff_verifier_for_check = verifier or ("owner" if owner_approved else None)
 
             if not is_already_verified and not is_self_vmode:
                 if owner_approved:
                     pass
-                elif verifier:
-                    exec_norm = executor.strip().lower()
-                    verif_norm = verifier.strip().lower()
-                    tool_prefix = verif_norm.split(":", 1)[0].strip()
-                    if verif_norm == exec_norm or tool_prefix == exec_norm:
-                        return False, {
-                            "ok": False,
-                            "task_id": task_id,
-                            "error": (
-                                f"Closing task requires an independent verifier (--verifier <v>, different from executor {executor!r}) "
-                                "or owner approval (--owner-approved)."
-                            ),
-                        }
+                elif _is_independent_verifier(executor, eff_actor_for_check, eff_verifier_for_check):
+                    pass
                 else:
                     return False, {
                         "ok": False,
@@ -9039,18 +9213,18 @@ def close_task(
             if caveat and caveat.strip():
                 c_text = caveat.strip()
                 target_terminal = c_text if c_text.startswith("done with a caveat") else f"done with a caveat: {c_text}"
-            elif is_self_vmode and not verifier and not owner_approved:
+            elif is_self_vmode and not _is_independent_verifier(executor, eff_actor_for_check, eff_verifier_for_check):
                 target_terminal = "done with a caveat: self-verified only"
             else:
                 target_terminal = "done"
 
             steps: list[str] = []
-            if curr_canon in ("open", "bounced"):
+            if curr_canon in ("open", "bounced", "paused", "waiting", "blocked"):
                 steps.extend(["in progress", "delivered"])
             elif curr_canon == "in progress":
                 steps.append("delivered")
 
-            if is_self_vmode and not verifier and not owner_approved:
+            if is_self_vmode and not _is_independent_verifier(executor, eff_actor_for_check, eff_verifier_for_check):
                 pass
             elif curr_canon == "verified":
                 pass
@@ -9059,10 +9233,30 @@ def close_task(
 
             steps.append(target_terminal)
 
+            if dry_run:
+                path_states = [curr_state] + steps
+                planned_transitions = [
+                    {"from": path_states[i], "to": path_states[i + 1]}
+                    for i in range(len(steps))
+                ]
+                return True, {
+                    "ok": True,
+                    "dry_run": True,
+                    "task_id": task_id,
+                    "old_state": curr_state,
+                    "new_state": target_terminal,
+                    "verifier": verifier or ("owner" if owner_approved else None),
+                    "reason": reason,
+                    "path": path_states,
+                    "transitions": planned_transitions,
+                    "rel_path": node.rel_path,
+                    "file_path": str(node.file_path),
+                }
+
             transitions_recorded: list[dict[str, Any]] = []
             last_payload: dict[str, Any] = {}
 
-            for next_st in steps:
+            for idx_step, next_st in enumerate(steps):
                 next_canon = normalize_state(next_st)
                 if next_canon == "verified":
                     step_actor = "owner" if owner_approved else (actor or "owner")
@@ -9082,6 +9276,10 @@ def close_task(
                     actor=step_actor,
                     verifier=step_verifier,
                     reason=step_reason,
+                    expect_task_hash=expect_task_hash if idx_step == 0 else None,
+                    force_unblock=force_unblock if idx_step == 0 else False,
+                    force_log=True,
+                    _internal_walk_step=True,
                 )
                 if not ok:
                     return False, {
@@ -9098,12 +9296,14 @@ def close_task(
                     "task_hash": res.get("bundle_sha256") or res.get("task_hash"),
                 })
 
-            idx_path = tasks_dir / "00-INDEX.md"
-            if idx_path.is_file():
-                existing_idx = idx_path.read_text(encoding="utf-8")
-                rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
-                _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
+            if sync_index_after:
+                idx_path = tasks_dir / "00-INDEX.md"
+                if idx_path.is_file():
+                    existing_idx = idx_path.read_text(encoding="utf-8")
+                    rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
+                    _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
 
+            path_states = [curr_state] + [t["to"] for t in transitions_recorded]
             return True, {
                 "ok": True,
                 "task_id": task_id,
@@ -9111,6 +9311,7 @@ def close_task(
                 "new_state": last_payload.get("new_state", target_terminal),
                 "verifier": verifier or ("owner" if owner_approved else None),
                 "reason": reason,
+                "path": path_states,
                 "transitions": transitions_recorded,
                 "rel_path": last_payload.get("rel_path"),
                 "file_path": last_payload.get("file_path"),
@@ -9128,6 +9329,150 @@ def close_task(
         return False, {
             "ok": False,
             "task_id": task_id,
+            "error": "unsupported-platform",
+            "message": str(e),
+        }
+
+
+def close_verified_tasks(
+    tasks_dir: pathlib.Path,
+    actor: str | None = None,
+    verifier: str | None = None,
+    reason: str | None = None,
+    dry_run: bool = False,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    """Bulk close every leaf task currently in state 'verified', using a single plan hash for the batch."""
+    if not is_platform_supported() and not dry_run:
+        return {
+            "ok": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    try:
+        lock_ctx = contextlib.nullcontext() if dry_run else task_write_lock(tasks_dir)
+        with lock_ctx:
+            tree = discover_task_tree(tasks_dir)
+            verified_nodes = [
+                n for n in tree.values()
+                if n.is_leaf and n.canonical_state == "verified" and not n.in_done and not n.in_closed_section
+            ]
+            verified_nodes.sort(key=lambda n: _natural_sort_key(n.id))
+
+            if not verified_nodes:
+                plan, plan_hash = compute_operation_plan([])
+                return {
+                    "ok": True,
+                    "dry_run": dry_run,
+                    "plan": [],
+                    "plan_hash": plan_hash,
+                    "closed_count": 0,
+                    "tasks": [],
+                    "closed": [],
+                    "message": "No verified tasks to close.",
+                }
+
+            operations: list[dict[str, Any]] = []
+            seen_op_paths: set[str] = set()
+            for n in verified_nodes:
+                fpath = pathlib.Path(n.file_path)
+                rel_p = fpath.relative_to(tasks_dir).as_posix() if fpath.is_relative_to(tasks_dir) else n.rel_path
+                if rel_p not in seen_op_paths:
+                    seen_op_paths.add(rel_p)
+                    operations.append({
+                        "action": "modify",
+                        "path": rel_p,
+                        "before_hash": _file_sha256(fpath) if fpath.is_file() else "",
+                        "summary": f"close {n.id} (verified -> done)",
+                    })
+
+            idx_path = tasks_dir / "00-INDEX.md"
+            if idx_path.is_file():
+                operations.append({
+                    "action": "modify",
+                    "path": "00-INDEX.md",
+                    "before_hash": _file_sha256(idx_path),
+                    "summary": "sync index",
+                })
+
+            plan, plan_hash = compute_operation_plan(operations)
+            task_ids = [n.id for n in verified_nodes]
+
+            if dry_run or not expect_plan_hash:
+                if not dry_run and not expect_plan_hash:
+                    return {
+                        "ok": False,
+                        "dry_run": False,
+                        "error": "Bulk close of verified tasks requires --expect-plan-hash <hash>. Run with --dry-run to preview the batch and obtain the plan hash.",
+                        "plan": plan,
+                        "plan_hash": plan_hash,
+                        "closed_count": len(verified_nodes),
+                        "tasks": task_ids,
+                    }
+                return {
+                    "ok": True,
+                    "dry_run": True,
+                    "plan": plan,
+                    "plan_hash": plan_hash,
+                    "closed_count": len(verified_nodes),
+                    "tasks": task_ids,
+                }
+
+            if expect_plan_hash.strip().lower() != plan_hash.lower():
+                return {
+                    "ok": False,
+                    "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
+                    "plan": plan,
+                    "plan_hash": plan_hash,
+                    "closed_count": 0,
+                    "tasks": task_ids,
+                }
+
+            closed_results: list[dict[str, Any]] = []
+            for n in verified_nodes:
+                ok_c, res_c = close_task(
+                    tasks_dir=tasks_dir,
+                    task_id=n.id,
+                    actor=actor,
+                    verifier=verifier,
+                    reason=reason,
+                    sync_index_after=False,
+                )
+                if not ok_c:
+                    return {
+                        "ok": False,
+                        "error": f"Failed closing verified task {n.id}: {res_c.get('error')}",
+                        "failed_id": n.id,
+                        "closed": closed_results,
+                        "plan_hash": plan_hash,
+                    }
+                closed_results.append(res_c)
+
+            if idx_path.is_file():
+                existing_idx = idx_path.read_text(encoding="utf-8")
+                rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
+                _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
+
+            return {
+                "ok": True,
+                "dry_run": False,
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "closed_count": len(closed_results),
+                "tasks": [r["task_id"] for r in closed_results],
+                "closed": closed_results,
+            }
+    except LockTimeoutError as e:
+        return {
+            "ok": False,
+            "error": "lock-timeout",
+            "message": str(e),
+        }
+    except UnsupportedPlatformError as e:
+        return {
+            "ok": False,
             "error": "unsupported-platform",
             "message": str(e),
         }
@@ -10968,7 +11313,8 @@ def cmd_list(args: argparse.Namespace) -> int:
             st = (t.get("state") or "").strip().lower()
             cst = (t.get("canonical_state") or "").strip().lower()
             tgt = state_filter.strip().lower()
-            if st != tgt and cst != tgt:
+            tgt_canon = normalize_state(state_filter).strip().lower()
+            if st != tgt and cst != tgt and cst != tgt_canon:
                 return False
         return True
 
@@ -11153,6 +11499,8 @@ def cmd_transition(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     expect_task_hash = getattr(args, "expect_task_hash", None)
     force_unblock = getattr(args, "force_unblock", False)
+    owner_approved = getattr(args, "owner_approved", False)
+    dry_run = getattr(args, "dry_run", False)
     is_json = getattr(args, "json", False)
 
     pos_state = getattr(args, "new_state", None)
@@ -11191,13 +11539,22 @@ def cmd_transition(args: argparse.Namespace) -> int:
         waiting_on=getattr(args, "waiting_on", None),
         verify_by=getattr(args, "verify_by", None),
         verify_check=getattr(args, "verify_check", None),
+        owner_approved=owner_approved,
+        dry_run=dry_run,
     )
     args._last_result = payload
-    if getattr(args, "json", False):
+    if is_json:
         print(json.dumps(payload, indent=2))
     else:
         if ok:
-            print(f"[ok] {args.task_id}: {payload['old_state']!r} -> {payload['new_state']!r} ({payload['rel_path']})")
+            if payload.get("dry_run"):
+                path_str = " -> ".join(repr(s) for s in payload.get("path", [payload.get("old_state"), payload.get("new_state")]))
+                print(f"[dry-run] {args.task_id}: {path_str} ({payload.get('rel_path', '')})")
+            elif payload.get("transitions") and len(payload["transitions"]) > 1:
+                path_str = " -> ".join(repr(s) for s in payload.get("path", [payload.get("old_state"), payload.get("new_state")]))
+                print(f"[ok] {args.task_id}: {path_str} ({payload.get('rel_path', '')})")
+            else:
+                print(f"[ok] {args.task_id}: {payload['old_state']!r} -> {payload['new_state']!r} ({payload['rel_path']})")
         else:
             err = payload.get("error", "transition failed")
             if "expected" in payload and "actual" in payload:
@@ -11217,6 +11574,53 @@ def cmd_close(args: argparse.Namespace) -> int:
     actor = getattr(args, "actor", None)
     owner_approved = getattr(args, "owner_approved", False)
     caveat = getattr(args, "caveat", None)
+    self_verified = getattr(args, "self_verified", False)
+    verified_flag = getattr(args, "verified", False)
+    dry_run = getattr(args, "dry_run", False)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    is_json = getattr(args, "json", False)
+
+    if verified_flag and not task_id:
+        res = close_verified_tasks(
+            tasks_dir=tasks_dir,
+            actor=actor,
+            verifier=verifier,
+            reason=reason,
+            dry_run=dry_run,
+            expect_plan_hash=expect_plan_hash,
+        )
+        args._last_result = res
+        if is_json:
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get("ok"):
+                if res.get("dry_run"):
+                    count = res.get("closed_count", 0)
+                    t_list = ", ".join(res.get("tasks", []))
+                    print(f"[dry-run] Would close {count} verified task(s){': ' + t_list if t_list else ''}")
+                    if res.get("plan_hash"):
+                        print(f"Plan hash: {res['plan_hash']}")
+                else:
+                    count = res.get("closed_count", 0)
+                    t_list = ", ".join(res.get("tasks", []))
+                    print(f"[ok] Closed {count} verified task(s){': ' + t_list if t_list else ''}")
+            else:
+                err = res.get("error", "bulk close failed")
+                print(f"[FAIL] {err}", file=sys.stderr)
+                if res.get("plan_hash"):
+                    print(f"Plan hash: {res['plan_hash']}", file=sys.stderr)
+        return 0 if res.get("ok") else 1
+
+    if not task_id:
+        err_msg = "Missing task ID: provide positional <id> or --verified for bulk closing verified tasks."
+        if is_json:
+            print(json.dumps({"ok": False, "error": "missing-task-id", "message": err_msg}, indent=2))
+        else:
+            print(f"[FAIL] {err_msg}", file=sys.stderr)
+        return 2
+
+    if verified_flag and not verifier and not owner_approved:
+        verifier = "owner"
 
     ok, payload = close_task(
         tasks_dir=tasks_dir,
@@ -11226,13 +11630,20 @@ def cmd_close(args: argparse.Namespace) -> int:
         reason=reason,
         owner_approved=owner_approved,
         caveat=caveat,
+        self_verified=self_verified,
+        dry_run=dry_run,
+        expect_task_hash=expect_plan_hash,
     )
     args._last_result = payload
-    if getattr(args, "json", False):
+    if is_json:
         print(json.dumps(payload, indent=2))
     else:
         if ok:
-            print(f"[ok] Closed {task_id}: {payload['old_state']!r} -> {payload['new_state']!r} ({payload.get('rel_path', '')})")
+            if payload.get("dry_run"):
+                path_str = " -> ".join(repr(s) for s in payload.get("path", [payload.get("old_state"), payload.get("new_state")]))
+                print(f"[dry-run] Would close {task_id}: {path_str} ({payload.get('rel_path', '')})")
+            else:
+                print(f"[ok] Closed {task_id}: {payload['old_state']!r} -> {payload['new_state']!r} ({payload.get('rel_path', '')})")
         else:
             err = payload.get("error", "close failed")
             if "message" in payload:
@@ -18698,18 +19109,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("--verify-by", default=None, help="Durable verification request target (e.g. gcube_atlas, workspace:gcube_atlas, session:...)")
     p_tr.add_argument("--verify-check", default=None, help="What to check during verification")
     p_tr.add_argument("--reason", default=None, help="Bounce findings (B1..Bn), caveat reason, or transition note")
+    p_tr.add_argument("--owner-approved", action="store_true", default=False, help="Flag indicating explicit owner approval for verification")
+    p_tr.add_argument("--dry-run", action="store_true", default=False, help="Preview transition path without writing to disk")
     p_tr.add_argument("--expect-task-hash", default=None, help="Refuse to transition if task bundle SHA256 does not match this hash")
     p_tr.add_argument("--force-unblock", action="store_true", help="Force move task out of waiting, withdrawing open questions with --reason")
     p_tr.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_tr.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_tr.set_defaults(func=cmd_transition)
 
-    p_close = sub.add_parser("close", help="One-shot close a task through legal intermediate transitions to done")
-    p_close.add_argument("task_id", metavar="id", help="Task ID (e.g. T001, 01.1)")
+    p_close = sub.add_parser("close", help="One-shot close a task through legal intermediate transitions to done, or bulk close verified tasks")
+    p_close.add_argument("task_id", metavar="id", nargs="?", default=None, help="Task ID (e.g. T001, 01.1); omit when using --verified for bulk close")
+    p_close.add_argument("--verified", action="store_true", default=False, help="Bulk close all tasks currently in 'verified' state (or mark single task verified)")
+    p_close.add_argument("--dry-run", action="store_true", default=False, help="Preview close path or batch plan without writing to disk")
+    p_close.add_argument("--expect-plan-hash", "--expect-task-hash", "--expect-hash", dest="expect_plan_hash", default=None, help="Expected plan hash for bulk close or task hash for single close")
     p_close.add_argument("--verifier", default=None, help="Independent verifier identifier (e.g. reviewer, owner)")
     p_close.add_argument("--reason", default=None, help="Closure reason or caveat reason")
     p_close.add_argument("--actor", default=None, help="Actor performing the close")
     p_close.add_argument("--owner-approved", action="store_true", default=False, help="Flag indicating explicit owner approval for verification")
+    p_close.add_argument("--self-verified", action="store_true", default=False, help="Self-close as 'done with a caveat: self-verified only'")
     p_close.add_argument("--caveat", default=None, help="Caveat description for closing to 'done with a caveat'")
     p_close.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_close.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
@@ -19365,9 +19782,13 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
         return step_cmd in ("add", "check", "uncheck")
     if cmd == "upgrade":
         return bool(getattr(args, "apply", False)) and not bool(getattr(args, "dry_run", False) or getattr(args, "preview", False))
+    if cmd in ("close", "transition"):
+        if bool(getattr(args, "dry_run", False)):
+            return False
+        if cmd == "close" and bool(getattr(args, "verified", False)) and not (getattr(args, "task_id", None) or getattr(args, "id", None)):
+            return bool(getattr(args, "expect_plan_hash", None))
+        return True
     if cmd in (
-        "close",
-        "transition",
         "new",
         "attach",
         "detach",

@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Asked by three sessions (two as top change); closing takes four calls today
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -16,20 +16,29 @@
 - verifier: owner
 - short: One-shot close
 
+verification pending: run Verification checks (independent verifier)
+
 ## Goal
 
 'tasks transition <id> done --verifier X [--reason R]' walks the legal states in one call, runs every guard once and records the same reason/verifier on each step (dry-run first). A refusal on a derived-state parent shows the current derived state and says it closes when its leaves do. A bulk 'tasks close --verified [--dry-run]' closes verified items, and the index counts 'finished, not archived'. Also from the N035 consultation: a one-command self-close for solo repositories ('--self-verified', which records 'done with a caveat: self-verified only' and a PROGRESS line); the close command offers 'done with a caveat' with its reason (a session closed an incident as plain 'done' for lack of it); '--verifier' accepts a session name as a first-class value (e.g. 'gcube-atlas-83'). Every transition writes a dated line (from, to, actor, verifier, reason) into the task itself: PROGRESS.md for folder tasks, a '## Log' section for single-file tasks, so validations are recorded where the owner reads them (inbox N041, gcube_atlas).
 
 ## Steps
 
-- [ ] Implement task steps.
+- [x] Walk `tasks transition <id> done --verifier X [--reason R]` through legal intermediate states (`in progress -> delivered -> verified -> done`) from any non-terminal state, enforcing the independent-verifier guard and supporting `--dry-run` and `--owner-approved`.
+- [x] Add bulk `tasks close --verified [--dry-run] [--expect-plan-hash <hash>]` to preview and close all tasks in `verified` state with a single batch plan hash.
+- [x] Normalise state spellings (`in-progress`, `In Progress`, `in_progress`, etc.) on read in `normalize_state`, accept them in `list`, `transition`, and `close`, and emit a warning with the canonical spelling in `validate` without rewriting files on read.
+- [x] Record a `## Log` line (or `PROGRESS.md` entry for folder tasks) for every intermediate transition step during `close` and `transition` walks.
+- [x] Add unit tests in `test_tasks_engine.py` covering all four reopened points.
 
 ## Verification
 
-- [ ] Verify task implementation.
+- [x] Full pytest suite passes (`563 passed`): `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/ plugins/architect-side/skills/task-pipeline/scripts/ plugins/shared/skills/orchestration-setup/scripts/`.
+- [x] Live verification on a scratch `git init` copy of `tasks/` in the OS temp dir reproduces and validates all four `gcube-audit` scenarios (`transition <id> done`, `close --verified`, hyphenated `- state: in-progress` in `list`/`validate`/`close`, and per-step `## Log` lines).
 
 ## Log (newest first)
 
+- 2026-10-25, kilo: state `in progress` -> `delivered` — Implemented transition walk to done, bulk close --verified, state spelling normalisation, and per-step Log entries; 563 tests pass
+- 2026-10-25, kilo: state `open` -> `in progress`
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
 - 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
 - 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged 76391c4 + N041 single-file ## Log recording; 12 new unit tests pass
