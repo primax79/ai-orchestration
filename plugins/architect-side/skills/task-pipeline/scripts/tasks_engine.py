@@ -265,7 +265,7 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
 - **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
 - **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
-- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Per-project extra fields after `handoff` can be declared via `[tasks] extension_fields = ["area"]` in `orchestration.toml` (or `.ai-orchestration.local.toml`) or a fenced `toml` block in `tasks/AGENTS.md`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
+- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Per-project extra fields after `handoff` can be declared via `[tasks] extension_fields = ["area"]` in `orchestration.toml` (or `.ai-orchestration.local.toml`), a fenced `toml` block in `tasks/AGENTS.md`, or a prose/bullet line ``Extra header fields: `area` `` (with or without bold, comma or `and` separated) in `tasks/AGENTS.md`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
 - **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
 - **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
@@ -358,12 +358,15 @@ def get_project_extension_fields(tasks_dir: pathlib.Path) -> tuple[str, ...]:
     if agents_md.is_file():
         try:
             raw_agents = agents_md.read_text(encoding="utf-8")
-            unmanaged = re.sub(
-                r"<!--\s*ai-orch:managed\s+begin\s*-->.*?<!--\s*ai-orch:managed\s+end\s*-->",
-                "",
-                raw_agents,
-                flags=re.DOTALL,
-            )
+            if raw_agents.strip() == CANONICAL_TASKS_AGENTS_MD.strip():
+                unmanaged = ""
+            else:
+                unmanaged = re.sub(
+                    r"<!--\s*ai-orch:managed\s+begin\s*-->.*?<!--\s*ai-orch:managed\s+end\s*-->",
+                    "",
+                    raw_agents,
+                    flags=re.DOTALL,
+                )
             # Check fenced toml/tasks blocks
             for m_fence in re.finditer(r"```(?:toml|tasks-config)\s*\n(.*?)```", unmanaged, re.DOTALL):
                 block_body = m_fence.group(1)
@@ -376,10 +379,24 @@ def get_project_extension_fields(tasks_dir: pathlib.Path) -> tuple[str, ...]:
                             _add_fields(bdata["extension_fields"])
                     except Exception:
                         pass
-            # Also check inline `extension_fields = [...]` or `Extra header fields: \`area\``
+            # Check inline `extension_fields = [...]`
             for m_inline in re.finditer(r"extension_fields\s*=\s*\[([^\]]*)\]", unmanaged):
                 raw_list = [x.strip().strip("'\"`") for x in m_inline.group(1).split(",") if x.strip()]
                 _add_fields(raw_list)
+            # Check prose/bullet declaration: `Extra header fields: \`area\`, \`subdomain\` and \`component\``
+            for m_prose in re.finditer(
+                r"^\s*(?:[-*+]\s+)?\*{0,2}Extra\s+header\s+fields?\s*\*{0,2}\s*:\s*\*{0,2}\s*(.+)$",
+                unmanaged,
+                flags=re.IGNORECASE | re.MULTILINE,
+            ):
+                tail = m_prose.group(1).strip()
+                m_seq = re.match(
+                    r"^(`[^`]+`(?:\s*\*{0,2}\s*(?:,\s*(?:and\b|or\b)?|\band\b|\bor\b)\s*\*{0,2}\s*`[^`]+`)*)",
+                    tail,
+                    flags=re.IGNORECASE,
+                )
+                if m_seq:
+                    _add_fields(re.findall(r"`([^`]+)`", m_seq.group(1)))
         except Exception:
             pass
 
@@ -3748,6 +3765,10 @@ def compute_operation_plan(operations: list[dict[str, Any]]) -> tuple[list[dict[
             entry["summary"] = op["summary"]
         elif "diff_summary" in op:
             entry["summary"] = op["diff_summary"]
+        if "sections" in op:
+            entry["sections"] = op["sections"]
+        if "summary_lines" in op:
+            entry["summary_lines"] = op["summary_lines"]
         plan.append(entry)
         canonical_items.append({
             "action": op.get("action", "modify"),
@@ -9553,12 +9574,17 @@ def _extract_existing_table_header(
 
 
 def _index_uses_bare_id_format(existing_index: str) -> bool:
-    """Return True if existing 00-INDEX.md tables use bare 'T###' in Id cells (no '(short)')."""
+    """Return True if existing 00-INDEX.md tables (outside Decisions waiting) use bare 'T###' in Id cells."""
     if not existing_index or not existing_index.strip():
         return False
+    without_decisions = re.sub(
+        r"^##\s+Decisions waiting\b.*?(?=^## |\Z)",
+        "",
+        existing_index,
+        flags=re.MULTILINE | re.DOTALL,
+    )
     bare_count = 0
-    short_count = 0
-    for line in existing_index.splitlines():
+    for line in without_decisions.splitlines():
         line_s = line.strip()
         if not line_s.startswith("|"):
             continue
@@ -9568,26 +9594,80 @@ def _index_uses_bare_id_format(existing_index: str) -> bool:
         c0 = cells[0]
         if re.match(r"^T\d{3,}$", c0):
             bare_count += 1
-        elif re.match(r"^T\d{3,}\s+\([^)]+\)$", c0):
-            short_count += 1
-    return bare_count > 0 and short_count == 0
+    return bare_count > 0
 
 
-def _format_index_id_cell(task: dict[str, Any], existing_row_id: str | None, prefer_bare: bool) -> str:
+def _format_index_id_cell(
+    task: dict[str, Any],
+    existing_row_id: str | None,
+    prefer_bare: bool,
+    existing_task_cell: str | None = None,
+) -> str:
     tid = task["id"]
+    explicit_short = task.get("short")
+    if explicit_short and str(explicit_short).strip() and str(explicit_short).strip() != "-":
+        return f"{tid} ({str(explicit_short).strip()})"
     if existing_row_id is not None:
         rid = existing_row_id.strip()
-        if rid == tid and prefer_bare:
-            return tid
         if re.match(rf"^{re.escape(tid)}\s+\(.+\)$", rid):
-            st_disp = f" ({task['short_title']})" if task.get("short_title") else ""
-            return f"{tid}{st_disp}" if st_disp else rid
+            return rid
         if rid.startswith("["):
             return rid
+        if existing_task_cell:
+            m_lbl = re.match(r"^\[([^\]]+)\]\([^)]+\)$", existing_task_cell.strip())
+            if m_lbl:
+                lbl = m_lbl.group(1).strip()
+                if (
+                    lbl
+                    and lbl != task.get("title", "").strip()
+                    and not lbl.endswith("(missing)")
+                    and len(lbl) < len(task.get("title", "").strip())
+                    and not validate_short_title(lbl)
+                ):
+                    return f"{tid} ({lbl})"
+        if rid == tid and prefer_bare:
+            return tid
     if prefer_bare:
         return tid
     st_disp = f" ({task['short_title']})" if task.get("short_title") else ""
     return f"{tid}{st_disp}"
+
+
+def _extract_task_decision_question(wt: dict[str, Any]) -> tuple[str, str] | None:
+    """Return (decider_who, question_text) when a waiting/blocked task has a real question, else None.
+    Never returns the decider's name as the question text.
+    """
+    raw_dec = (wt.get("decider") or "").strip()
+    if not raw_dec or raw_dec == "-" or re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", raw_dec):
+        return None
+    if ":" in raw_dec:
+        who, q_part = [p.strip() for p in raw_dec.split(":", 1)]
+        if q_part and q_part != "-" and q_part.lower() != who.lower():
+            return (who, q_part)
+        return None
+    who = raw_dec
+    fpath = wt.get("file_path")
+    if fpath:
+        try:
+            text = pathlib.Path(fpath).read_text(encoding="utf-8")
+            m_qline = re.search(
+                r"^\s*(?:[-*]\s+)?\*{0,2}Question(?:\s*\(exact\))?\*{0,2}\s*:\s*(.+)$",
+                text,
+                flags=re.IGNORECASE | re.MULTILINE,
+            )
+            if m_qline:
+                q_body = m_qline.group(1).strip()
+                if q_body and q_body != "-" and q_body.lower() != who.lower():
+                    return (who, q_body)
+            sec = find_markdown_section(text, "Question") or find_markdown_section(text, "Questions")
+            if sec and sec.body.strip():
+                for b_line in sec.body.strip().splitlines():
+                    b_s = b_line.strip().lstrip("-*0123456789. ").strip()
+                    if b_s and not b_s.startswith("#") and b_s.lower() != who.lower():
+                        return (who, b_s)
+        except Exception:
+            pass
+    return None
 
 
 def _format_extra_cells(existing_cells: list[str] | None, base_cols: int, total_cols: int, task: dict[str, Any] | None = None, header_cells: list[str] | None = None) -> str:
@@ -10095,7 +10175,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         elif base_id in emergent_next_map:
             t = emergent_next_map[base_id]
             seen_next_ids.add(base_id)
-            id_cell = _format_index_id_cell(t, row_id, prefer_bare_id)
+            id_cell = _format_index_id_cell(t, row_id, prefer_bare_id, cells[2] if len(cells) > 2 else None)
             extra_s = _format_extra_cells(cells, 5, next_col_count, t, next_hdr_cells)
             line = f"| {id_cell} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |{extra_s}"
             next_up_candidates.append((base_id, t.get("priority", "P2"), line))
@@ -10208,7 +10288,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             if base_id in cat_tasks:
                 t = cat_tasks[base_id]
                 seen_cat_ids.add(base_id)
-                id_cell = _format_index_id_cell(t, row_id, prefer_bare_id)
+                id_cell = _format_index_id_cell(t, row_id, prefer_bare_id, cells[2] if len(cells) > 2 else None)
                 st_val = t['state']
                 if t.get("canonical_state") == "waiting" and t.get("waiting_on"):
                     if "(" not in st_val and ":" not in st_val:
@@ -10305,6 +10385,14 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 [re.sub(r"\s*\([^)]*\)", "", b).strip() for b in q["blocks"].split(",") if b.strip()]
             ) or "-"
             dec_lines.append(f"| {q_key} | {q_text} | {blocks_clean} | {q['decider']} | {q['recommended']} |")
+    elif is_legacy_5col_priority:
+        for q in open_questions:
+            q_key = f"[{q['id']}](questions/{q['filename']})"
+            q_text = q["question"]
+            blocks_clean = ", ".join(
+                [re.sub(r"\s*\([^)]*\)", "", b).strip() for b in q["blocks"].split(",") if b.strip()]
+            ) or "-"
+            dec_lines.append(f"| {q_key} | P2 | {q_text} | {q['decider']} | {blocks_clean} |")
 
     existing_dec_rows: list[tuple[str, list[str]]] = []
     if existing_dec_region:
@@ -10362,18 +10450,32 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         if base_dec_id in seen_dec_ids:
             continue
         if is_legacy_5col_priority and base_dec_id in resolved_ids:
+            if len(cells) >= 4 and cells[2].strip().lower() == cells[3].strip().lower():
+                wt_cand = qualifying_tasks.get(base_dec_id)
+                dec_pair = _extract_task_decision_question(wt_cand) if wt_cand else None
+                if not dec_pair:
+                    continue
+                seen_dec_ids.add(base_dec_id)
+                who, q_cell = dec_pair
+                blocks_str = ", ".join(blocks_map.get(base_dec_id, [])) or "-"
+                legacy_dec_rows.append((base_dec_id, f"| {row_id} | {cells[1]} | {q_cell} | {who} | {blocks_str} |"))
+                continue
             seen_dec_ids.add(base_dec_id)
             legacy_dec_rows.append((base_dec_id, "| " + " | ".join(cells) + " |"))
             continue
         if base_dec_id in qualifying_tasks:
-            seen_dec_ids.add(base_dec_id)
             wt = qualifying_tasks[base_dec_id]
-            q_cell = cells[1] if len(cells) > 1 and cells[1] not in ("", "-") else ""
-            if not q_cell:
-                raw_dec = wt["decider"]
-                q_cell = raw_dec.split(":", 1)[1].strip() if ":" in raw_dec else raw_dec
             raw_dec = wt["decider"]
-            who = raw_dec.split(":", 1)[0].strip() if ":" in raw_dec else raw_dec
+            who = raw_dec.split(":", 1)[0].strip() if ":" in raw_dec else raw_dec.strip()
+            q_cell = cells[1].strip() if len(cells) > 1 and cells[1].strip() not in ("", "-") else ""
+            if q_cell.lower() == who.lower():
+                q_cell = ""
+            if not q_cell:
+                dec_pair = _extract_task_decision_question(wt)
+                if not dec_pair:
+                    continue
+                who, q_cell = dec_pair
+            seen_dec_ids.add(base_dec_id)
             blocks_str = ", ".join(blocks_map.get(base_dec_id, [])) or "-"
             if use_5_cols:
                 line = f"| {row_id} | {q_cell} | {blocks_str} | {who} | - |"
@@ -10403,12 +10505,11 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         if tid not in seen_dec_ids and tid not in existing_waiting_ids_without_dec
     ]
     for wt in new_dec_tasks:
+        dec_pair = _extract_task_decision_question(wt)
+        if not dec_pair:
+            continue
+        who, question = dec_pair
         seen_dec_ids.add(wt["id"])
-        raw_dec = wt["decider"]
-        if ":" in raw_dec:
-            who, question = [p.strip() for p in raw_dec.split(":", 1)]
-        else:
-            who, question = raw_dec, raw_dec
         blocks_str = ", ".join(blocks_map.get(wt["id"], [])) or "-"
         if use_5_cols:
             line = f"| {wt['id']} | {question} | {blocks_str} | {who} | - |"
@@ -10494,7 +10595,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         if base_id in done_tasks_map:
             dt = done_tasks_map[base_id]
             seen_done_ids.add(base_id)
-            id_cell = _format_index_id_cell(dt, row_id, prefer_bare_id)
+            id_cell = _format_index_id_cell(dt, row_id, prefer_bare_id, cells[1] if len(cells) > 1 else None)
             task_cell = f"[{dt['title']}]({dt['rel_path']})"
             res_val = cells[2] if len(cells) > 2 and cells[2] not in ("", "-") else dt["state"]
             closed_val = cells[3] if len(cells) > 3 and cells[3] not in ("", "-") else _git_closed_date(tasks_dir, dt["rel_path"])
@@ -10577,6 +10678,198 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
 
     updated = _replace_generated_region(updated, "done", done_content)
     return updated
+
+
+def _extract_index_section_text(index_text: str, heading: str, marker_name: str) -> str:
+    if not index_text or not index_text.strip():
+        return ""
+    m_mark = _marker_pattern(marker_name).search(index_text)
+    if m_mark:
+        return m_mark.group(1)
+    pat_sec = re.compile(rf"^##\s+{re.escape(heading)}\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+    m_sec = pat_sec.search(index_text)
+    return m_sec.group(0) if m_sec else ""
+
+
+def _parse_index_table_rows(block_text: str, section_kind: str = "task") -> tuple[list[str], dict[str, str]]:
+    order: list[str] = []
+    rows_map: dict[str, str] = {}
+    if not block_text:
+        return order, rows_map
+    header_seen = False
+    for raw_line in block_text.splitlines():
+        line_s = raw_line.strip()
+        if not line_s.startswith("|"):
+            continue
+        cells = [c.strip() for c in line_s.strip("|").split("|")]
+        if not cells:
+            continue
+        c0 = cells[0]
+        if c0.startswith("---") or all(c == "---" or (c.startswith("---") and set(c) <= {"-", ":", " "}) for c in cells):
+            header_seen = True
+            continue
+        if not header_seen and c0.lower() in ("id", "priority", "nn", "#", "spec", "key", "task", "task / initiative", "question"):
+            header_seen = True
+            continue
+        if c0 == "-":
+            continue
+        if section_kind == "initiatives":
+            if len(cells) >= 2 and cells[0].isdigit() and re.match(r"^\d{2,}$", cells[1]):
+                row_key = cells[1]
+            else:
+                row_key = c0
+        elif section_kind == "specs":
+            m_slug = re.search(r"\[([^\]]+)\]", c0)
+            row_key = m_slug.group(1) if m_slug else c0
+        else:
+            m_id = re.search(r"\b(T\d{3,}(?:\.\d+)*|Q\d{3,}|INIT-\d+|\d{2,}(?:\.\d+[a-z]?)*)\b", c0)
+            row_key = m_id.group(1) if m_id else re.sub(r"\s*\(.*?\)", "", c0).strip()
+        if row_key not in rows_map:
+            order.append(row_key)
+        rows_map[row_key] = "| " + " | ".join(cells) + " |"
+    return order, rows_map
+
+
+def _diff_index_table(old_order: list[str], old_map: dict[str, str], new_order: list[str], new_map: dict[str, str]) -> dict[str, Any]:
+    added = [k for k in new_order if k not in old_map]
+    removed = [k for k in old_order if k not in new_map]
+    changed = [k for k in new_order if k in old_map and new_map[k] != old_map[k]]
+    common_old = [k for k in old_order if k in new_map]
+    common_new = [k for k in new_order if k in old_map]
+    reordered = common_old != common_new
+    return {
+        "added": len(added),
+        "removed": len(removed),
+        "changed": len(changed),
+        "added_ids": added,
+        "removed_ids": removed,
+        "changed_ids": changed,
+        "reordered": reordered,
+        "old_order": old_order,
+        "new_order": new_order,
+    }
+
+
+def summarize_index_changes(existing_index: str, rendered_index: str) -> dict[str, Any]:
+    """Summarise 00-INDEX.md differences per section: rows added, removed, changed per table, and Next up membership changes."""
+    sections: dict[str, Any] = {}
+    lines: list[str] = []
+
+    # 1. Next up
+    old_nu_order, old_nu_map = _parse_index_table_rows(_extract_index_section_text(existing_index, "Next up", "next-up"), "next-up")
+    new_nu_order, new_nu_map = _parse_index_table_rows(_extract_index_section_text(rendered_index, "Next up", "next-up"), "next-up")
+    nu_diff = _diff_index_table(old_nu_order, old_nu_map, new_nu_order, new_nu_map)
+    mem_parts: list[str] = [f"+{i}" for i in nu_diff["added_ids"]] + [f"-{i}" for i in nu_diff["removed_ids"]]
+    if nu_diff["reordered"]:
+        mem_parts.append(f"reordered: {', '.join(new_nu_order)}")
+    mem_summary = f"membership: {', '.join(mem_parts)}" if mem_parts else "membership unchanged"
+    nu_diff["membership_summary"] = mem_summary
+    sections["next-up"] = nu_diff
+    lines.append(
+        f"Next up: +{nu_diff['added']} -{nu_diff['removed']} ~{nu_diff['changed']} row(s) ({mem_summary})"
+    )
+
+    # 2. Initiatives (if present in either)
+    old_init_txt = _extract_index_section_text(existing_index, "Initiatives", "initiatives")
+    new_init_txt = _extract_index_section_text(rendered_index, "Initiatives", "initiatives")
+    if old_init_txt or new_init_txt:
+        old_io, old_im = _parse_index_table_rows(old_init_txt, "initiatives")
+        new_io, new_im = _parse_index_table_rows(new_init_txt, "initiatives")
+        init_diff = _diff_index_table(old_io, old_im, new_io, new_im)
+        sections["initiatives"] = init_diff
+        if init_diff["added"] or init_diff["removed"] or init_diff["changed"] or old_io or new_io:
+            lines.append(f"Initiatives: +{init_diff['added']} -{init_diff['removed']} ~{init_diff['changed']} row(s)")
+
+    # 3. Specs (if present in either)
+    old_sp_txt = _extract_index_section_text(existing_index, "Specs", "specs")
+    new_sp_txt = _extract_index_section_text(rendered_index, "Specs", "specs")
+    if old_sp_txt or new_sp_txt:
+        old_so, old_sm = _parse_index_table_rows(old_sp_txt, "specs")
+        new_so, new_sm = _parse_index_table_rows(new_sp_txt, "specs")
+        sp_diff = _diff_index_table(old_so, old_sm, new_so, new_sm)
+        sections["specs"] = sp_diff
+        if sp_diff["added"] or sp_diff["removed"] or sp_diff["changed"]:
+            lines.append(f"Specs: +{sp_diff['added']} -{sp_diff['removed']} ~{sp_diff['changed']} row(s)")
+
+    # 4. Tasks by category (overall + per-category tables)
+    def _extract_cat_blocks(txt: str) -> dict[str, str]:
+        sec_txt = _extract_index_section_text(txt, "Tasks by category", "tasks-by-category")
+        res: dict[str, str] = {}
+        if not sec_txt:
+            return res
+        cat_matches = list(re.finditer(r"^###\s+([A-Za-z0-9_-]+)\s*$", sec_txt, re.MULTILINE))
+        for idx, cm in enumerate(cat_matches):
+            cname = cm.group(1)
+            start_pos = cm.end()
+            end_pos = cat_matches[idx + 1].start() if idx + 1 < len(cat_matches) else len(sec_txt)
+            res[cname] = sec_txt[start_pos:end_pos]
+        return res
+
+    old_cats = _extract_cat_blocks(existing_index)
+    new_cats = _extract_cat_blocks(rendered_index)
+    all_cat_names = list(dict.fromkeys(list(old_cats.keys()) + list(new_cats.keys())))
+    by_category: dict[str, Any] = {}
+    cat_total_added = 0
+    cat_total_removed = 0
+    cat_total_changed = 0
+    cat_parts: list[str] = []
+    for cname in all_cat_names:
+        co_old, cm_old = _parse_index_table_rows(old_cats.get(cname, ""), "category")
+        co_new, cm_new = _parse_index_table_rows(new_cats.get(cname, ""), "category")
+        cdiff = _diff_index_table(co_old, cm_old, co_new, cm_new)
+        by_category[cname] = cdiff
+        cat_total_added += cdiff["added"]
+        cat_total_removed += cdiff["removed"]
+        cat_total_changed += cdiff["changed"]
+        if cdiff["added"] or cdiff["removed"] or cdiff["changed"]:
+            cat_parts.append(f"{cname}: +{cdiff['added']} -{cdiff['removed']} ~{cdiff['changed']}")
+
+    sections["tasks-by-category"] = {
+        "added": cat_total_added,
+        "removed": cat_total_removed,
+        "changed": cat_total_changed,
+        "categories": by_category,
+    }
+    cat_detail = f" ({'; '.join(cat_parts)})" if cat_parts else ""
+    lines.append(
+        f"Tasks by category: +{cat_total_added} -{cat_total_removed} ~{cat_total_changed} row(s){cat_detail}"
+    )
+
+    # 5. Decisions waiting
+    old_do, old_dm = _parse_index_table_rows(_extract_index_section_text(existing_index, "Decisions waiting", "decisions"), "decisions")
+    new_do, new_dm = _parse_index_table_rows(_extract_index_section_text(rendered_index, "Decisions waiting", "decisions"), "decisions")
+    dec_diff = _diff_index_table(old_do, old_dm, new_do, new_dm)
+    sections["decisions"] = dec_diff
+    lines.append(
+        f"Decisions waiting: +{dec_diff['added']} -{dec_diff['removed']} ~{dec_diff['changed']} row(s)"
+    )
+
+    # 6. Conditional (if present in either)
+    old_co_txt = _extract_index_section_text(existing_index, "Conditional", "conditional")
+    new_co_txt = _extract_index_section_text(rendered_index, "Conditional", "conditional")
+    if old_co_txt or new_co_txt:
+        old_co, old_cm = _parse_index_table_rows(old_co_txt, "conditional")
+        new_co, new_cm = _parse_index_table_rows(new_co_txt, "conditional")
+        cond_diff = _diff_index_table(old_co, old_cm, new_co, new_cm)
+        sections["conditional"] = cond_diff
+        if cond_diff["added"] or cond_diff["removed"] or cond_diff["changed"]:
+            lines.append(f"Conditional: +{cond_diff['added']} -{cond_diff['removed']} ~{cond_diff['changed']} row(s)")
+
+    # 7. Done
+    old_dno, old_dnm = _parse_index_table_rows(_extract_index_section_text(existing_index, "Done", "done"), "done")
+    new_dno, new_dnm = _parse_index_table_rows(_extract_index_section_text(rendered_index, "Done", "done"), "done")
+    done_diff = _diff_index_table(old_dno, old_dnm, new_dno, new_dnm)
+    sections["done"] = done_diff
+    lines.append(
+        f"Done: +{done_diff['added']} -{done_diff['removed']} ~{done_diff['changed']} row(s)"
+    )
+
+    return {
+        "sections": sections,
+        "next_up": nu_diff,
+        "lines": lines,
+        "inline": "; ".join(lines),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -12781,11 +13074,12 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
     adopt = getattr(args, "adopt", False)
     apply_flag = getattr(args, "apply", False)
     check_flag = getattr(args, "check", False)
+    preview_flag = bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
     expect_hash = getattr(args, "expect_hash", None)
     reorder = getattr(args, "reorder", False)
 
     # If --apply, run under exclusive task-write lock
-    if apply_flag:
+    if apply_flag and not preview_flag:
         if not is_platform_supported():
             err_msg = "Mutating commands are unsupported on Windows (requires fcntl for flock)."
             if getattr(args, "json", False):
@@ -12875,7 +13169,31 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         print(f"[FAIL] {err_msg}", file=sys.stderr)
                     return 1
 
-                # 5. Apply
+                idx_summary = summarize_index_changes(existing, rendered)
+
+                # 5. Apply (skip writing when already in sync)
+                if existing == rendered and index_path.exists():
+                    if getattr(args, "json", False):
+                        print(
+                            json.dumps(
+                                {
+                                    "ok": True,
+                                    "applied": True,
+                                    "changed": False,
+                                    "in_sync": True,
+                                    "adopted": adopt,
+                                    "path": str(index_path),
+                                    "hash": current_hash,
+                                    "section_summary": idx_summary,
+                                    "sync_data": _build_index_sync_data(tasks_dir),
+                                },
+                                indent=2,
+                            )
+                        )
+                    else:
+                        print(f"[ok] already in sync, nothing written ({index_path})")
+                    return 0
+
                 _atomic_write_text(index_path, rendered, encoding="utf-8")
                 new_hash = _file_sha256(index_path)
                 if getattr(args, "json", False):
@@ -12884,9 +13202,12 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                             {
                                 "ok": True,
                                 "applied": True,
+                                "changed": True,
+                                "in_sync": False,
                                 "adopted": adopt,
                                 "path": str(index_path),
                                 "hash": new_hash,
+                                "section_summary": idx_summary,
                                 "sync_data": _build_index_sync_data(tasks_dir),
                             },
                             indent=2,
@@ -12985,6 +13306,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
         return 1
 
     in_sync = existing == rendered
+    idx_summary = summarize_index_changes(existing, rendered)
 
     diff_lines = list(
         difflib.unified_diff(
@@ -12996,8 +13318,8 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
     )
     diff_str = "".join(diff_lines)
 
-    # 5. Adopt alone (without --apply) is PREVIEW only: prints diff and writes nothing
-    if adopt and not apply_flag:
+    # 5. Adopt alone or --preview / --dry-run (without --apply) is PREVIEW only: prints summary + diff and writes nothing
+    if (adopt or preview_flag) and not (apply_flag and not preview_flag):
         if getattr(args, "json", False):
             print(
                 json.dumps(
@@ -13009,6 +13331,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         "diff": diff_str,
                         "hash": current_hash,
                         "path": str(index_path),
+                        "section_summary": idx_summary,
                         "sync_data": _build_index_sync_data(tasks_dir),
                     },
                     indent=2,
@@ -13016,13 +13339,20 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
             )
         else:
             if diff_str:
+                print("[preview] Section summary:")
+                for sline in idx_summary.get("lines", []):
+                    print(f"  - {sline}")
                 sys.stdout.write(diff_str)
+                adopt_hint = "--adopt " if adopt else ""
                 print(
-                    f"[preview] apply with: --adopt --apply --expect-hash {current_hash}",
+                    f"[preview] apply with: {adopt_hint}--apply --expect-hash {current_hash}",
                     file=sys.stderr,
                 )
             else:
-                print(f"[ok] {index_path} already has markers and is in sync")
+                if adopt:
+                    print(f"[ok] {index_path} already has markers and is in sync")
+                else:
+                    print(f"[ok] already in sync, nothing written ({index_path})")
         return 0
 
     # 6. Check mode (--check without adopt)
@@ -13036,6 +13366,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         "diff": diff_str,
                         "hash": current_hash,
                         "path": str(index_path),
+                        "section_summary": idx_summary,
                         "sync_data": _build_index_sync_data(tasks_dir),
                     },
                     indent=2,
@@ -13045,6 +13376,9 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
             if in_sync:
                 print(f"[ok] {index_path} is in sync with task headers")
             else:
+                print("[preview] Section summary:")
+                for sline in idx_summary.get("lines", []):
+                    print(f"  - {sline}")
                 if diff_str:
                     sys.stdout.write(diff_str)
                 print(f"[FAIL] {index_path} is out of sync with task headers", file=sys.stderr)
@@ -13052,6 +13386,27 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
 
     # 7. Apply mode: either normal --apply (on marked index) or --adopt --apply --expect-hash
     if apply_flag:
+        if in_sync and index_path.exists():
+            if getattr(args, "json", False):
+                print(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "applied": True,
+                            "changed": False,
+                            "in_sync": True,
+                            "adopted": adopt,
+                            "path": str(index_path),
+                            "hash": current_hash,
+                            "section_summary": idx_summary,
+                            "sync_data": _build_index_sync_data(tasks_dir),
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"[ok] already in sync, nothing written ({index_path})")
+            return 0
         _atomic_write_text(index_path, rendered, encoding="utf-8")
         new_hash = _file_sha256(index_path)
         if getattr(args, "json", False):
@@ -13060,9 +13415,12 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                     {
                         "ok": True,
                         "applied": True,
+                        "changed": True,
+                        "in_sync": False,
                         "adopted": adopt,
                         "path": str(index_path),
                         "hash": new_hash,
+                        "section_summary": idx_summary,
                         "sync_data": _build_index_sync_data(tasks_dir),
                     },
                     indent=2,
@@ -13084,6 +13442,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                     "hash": current_hash,
                     "path": str(index_path),
                     "rendered": rendered,
+                    "section_summary": idx_summary,
                     "sync_data": _build_index_sync_data(tasks_dir),
                 },
                 indent=2,
@@ -13468,6 +13827,7 @@ def upgrade_tasks_tree(
                 (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
 
             rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
+            idx_summary = summarize_index_changes(existing_idx, rendered_idx)
             if existing_idx.strip() != rendered_idx.strip():
                 if not idx_path.is_file():
                     created.append(str(idx_path))
@@ -13475,7 +13835,9 @@ def upgrade_tasks_tree(
                         "action": "create",
                         "path": "00-INDEX.md",
                         "before_hash": "",
-                        "summary": f"+{len(rendered_idx.splitlines())} lines",
+                        "summary": f"+{len(rendered_idx.splitlines())} lines; {idx_summary['inline']}",
+                        "sections": idx_summary["sections"],
+                        "summary_lines": idx_summary["lines"],
                     })
                 else:
                     updated.append(str(idx_path))
@@ -13487,12 +13849,15 @@ def upgrade_tasks_tree(
                         parts.append(f"+{added}")
                     if removed:
                         parts.append(f"-{removed}")
-                    summary = " ".join(parts) + " lines" if parts else "modified"
+                    line_summary = " ".join(parts) + " lines" if parts else "modified"
+                    summary = f"{line_summary}; {idx_summary['inline']}"
                     operations.append({
                         "action": "modify",
                         "path": "00-INDEX.md",
                         "before_hash": _file_sha256(idx_path),
                         "summary": summary,
+                        "sections": idx_summary["sections"],
+                        "summary_lines": idx_summary["lines"],
                     })
                 pending_writes.append((idx_path, rendered_idx))
                 upgraded_files.append(str(idx_path))
@@ -13573,6 +13938,7 @@ def upgrade_tasks_tree(
                 "plan": plan,
                 "plan_hash": plan_hash,
                 "hash": plan_hash,
+                "index_summary": idx_summary,
                 "dry_run": dry_run,
                 "emergent_count": len(emergent),
                 "initiative_count": len(initiatives),
@@ -13645,6 +14011,8 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
                 summary = item.get("summary") or item.get("diff_summary") or ""
                 summary_str = f" ({summary})" if summary else ""
                 print(f"  - [{action}] {path}{summary_str}")
+                for sline in item.get("summary_lines", []):
+                    print(f"      * {sline}")
             print(f"\nPlan hash: {res['plan_hash']}")
             mig_flag = " --migrate-plans" if migrate_plans else ""
             print(f"To apply: ai-orch tasks upgrade --tasks-dir {quoted_td}{mig_flag} --apply --expect-plan-hash {res['plan_hash']}")
@@ -19220,6 +19588,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_sync.add_argument("--apply", action="store_true", help="Write updated 00-INDEX.md in place")
     p_sync.add_argument("--check", action="store_true", help="Exit non-zero if 00-INDEX.md is out of sync")
+    p_sync.add_argument("--preview", action="store_true", default=False, help="Preview per-section summary and diff without writing")
+    p_sync.add_argument("--dry-run", action="store_true", default=False, help="Alias for --preview")
     p_sync.add_argument("--adopt", action="store_true", help="Preview wrapping existing generated tables in markers (apply with --adopt --apply --expect-hash <hash>)")
     p_sync.add_argument("--reorder", action="store_true", help="Re-sort rows in Next up and category tables by priority and ID")
     p_sync.add_argument("--expect-hash", default=None, help="Refuse to apply if current index SHA256 does not match this hash")
@@ -19762,7 +20132,7 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
     if cmd == "feedback":
         return False
     if cmd == "sync-index":
-        return bool(getattr(args, "apply", False))
+        return bool(getattr(args, "apply", False)) and not bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
     if cmd in ("list", "validate", "graph", "next", "labels", "next-id", "verification-queue"):
         return False
     if cmd == "questions":

@@ -262,7 +262,7 @@ path. A "next steps" paragraph in the chat is not a substitute.
   - **Commands:** `ai-orch tasks micro --title ... [--short ...] [--kind ...] [--priority ...] [--label ...]` creates a microtask under the task-write lock; `ai-orch tasks promote <id> [--category <cat>]` promotes it to a full task in a chosen category.
 
   **Per-project extension fields:**
-  A project may declare additional allowed header fields (placed after `handoff`, e.g. `area`) via `[tasks] extension_fields = ["area"]` in its `orchestration.toml` (or `.ai-orchestration.local.toml`) or via a fenced `toml` block in `tasks/AGENTS.md`:
+  A project may declare additional allowed header fields (placed after `handoff`, e.g. `area`) via `[tasks] extension_fields = ["area"]` in its `orchestration.toml` (or `.ai-orchestration.local.toml`), via a fenced `toml` block in `tasks/AGENTS.md`, or via a prose/bullet line in `tasks/AGENTS.md` (e.g. ``Extra header fields: `area` `` or ``- **Extra header fields: `area`, `subdomain` and `component`**``):
   ```toml
   [tasks]
   extension_fields = ["area"]

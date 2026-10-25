@@ -11758,6 +11758,308 @@ def test_t050_extension_fields_per_project_and_upgrade_exit_code(tmp_path: pathl
     assert json.loads(res_agents_decl.stdout)["ok"] is True
 
 
+def test_t050_extension_fields_prose_declarations(tmp_path: pathlib.Path) -> None:
+    """T050 bounce fix 1: Prose declarations of extra header fields in tasks/AGENTS.md are recognised."""
+    tasks_dir = tmp_path / "tasks"
+    cat_dir = tasks_dir / "audit-auth"
+    cat_dir.mkdir(parents=True)
+
+    # Managed block documents prose form
+    assert "Extra header fields:" in te.MANAGED_TASKS_AGENTS_BLOCK
+
+    prose_cases = [
+        ("**Extra header fields: `area`** (free-text topic label), placed right after `handoff`.", ("area",)),
+        ("Extra header fields: `area`", ("area",)),
+        ("- Extra header fields: `area`, `subdomain` and `component`", ("area", "subdomain", "component")),
+        ("* **Extra header fields**: `area` and `topic` (free-text)", ("area", "topic")),
+    ]
+    for prose_line, expected in prose_cases:
+        (tasks_dir / "AGENTS.md").write_text(f"# Project rules\n\n{prose_line}\n", encoding="utf-8")
+        assert te.get_project_extension_fields(tasks_dir) == expected
+
+    # Validate passes with porting_liferay's exact prose line
+    (tasks_dir / "AGENTS.md").write_text(
+        "# Rules\n\n**Extra header fields: `area`** (free-text topic label), placed right after `handoff`.\n",
+        encoding="utf-8",
+    )
+    (cat_dir / "T038-audit.md").write_text(
+        "# T038 Audit low-severity code backlog\n\n"
+        "- id: T038\n"
+        "- title: Audit low-severity code backlog\n"
+        "- category: audit-auth\n"
+        "- priority: P2\n"
+        "- priority-reason: Low-severity backlog\n"
+        "- next-up: no\n"
+        "- state: open\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: Alfredo\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: Read tasks/audit-auth/T038-audit.md and execute.\n"
+        "- area: security audit\n\n"
+        "## Goal\n\nFix items.\n\n"
+        "## Steps\n\n- [ ] Fix.\n\n"
+        "## Verification\n\n- Compile passes.\n",
+        encoding="utf-8",
+    )
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0, res_val.stdout
+    assert json.loads(res_val.stdout)["ok"] is True
+
+
+def test_t050_no_decisions_row_for_decider_only_blocked_task(tmp_path: pathlib.Path) -> None:
+    """T050 bounce fix 2: A blocked/waiting task with `decider: Alfredo` and no question gets no Decisions row."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "audit-auth").mkdir(parents=True)
+
+    # T038: blocked, decider: Alfredo, no question anywhere -> must NOT get a Decisions row
+    _write_sample_task(
+        tasks_dir / "audit-auth" / "T038-audit-low-severity-batch.md",
+        task_id="T038",
+        title="Audit low-severity code backlog (Kilo batch)",
+        category="audit-auth",
+        priority="P2",
+        state="blocked",
+        depends_on="T001",
+        decider="Alfredo",
+    )
+    # T039: waiting, explicit question in decider (`Alfredo: Should we enable strict mode?`) -> gets a row
+    _write_sample_task(
+        tasks_dir / "audit-auth" / "T039-strict-mode.md",
+        task_id="T039",
+        title="Strict mode check",
+        category="audit-auth",
+        priority="P1",
+        state="waiting",
+        decider="Alfredo: Should we enable strict mode?",
+    )
+    # T040: blocked, decider: Alfredo, explicit Question in body -> gets a row
+    t040_path = tasks_dir / "audit-auth" / "T040-body-question.md"
+    _write_sample_task(
+        t040_path,
+        task_id="T040",
+        title="Body question task",
+        category="audit-auth",
+        priority="P2",
+        state="blocked",
+        decider="Alfredo",
+    )
+    t040_path.write_text(
+        t040_path.read_text(encoding="utf-8") + "\n## Question\n\nWhich certificate chain should we trust?\n",
+        encoding="utf-8",
+    )
+
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        "# Task Index\n\n"
+        "## Next up\n\n"
+        "| Id | Priority | Task | Executor | Handoff |\n"
+        "| --- | --- | --- | --- | --- |\n\n"
+        "## Tasks by category\n\n"
+        "### audit-auth\n\n"
+        "Auth.\n\n"
+        "| Id | Priority | Task | State | Executor | Depends on |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| T038 | P2 | [Audit low-severity code backlog (Kilo batch)](audit-auth/T038-audit-low-severity-batch.md) | open | kilo | - |\n\n"
+        "## Decisions waiting\n\n"
+        "| Task | Priority | Question (exact) | Decider | Blocks |\n"
+        "| --- | --- | --- | --- | --- |\n\n"
+        "## Done\n\n"
+        "| Id | Task | Result | Closed |\n"
+        "| --- | --- | --- | --- |\n",
+        encoding="utf-8",
+    )
+
+    rendered = te.render_synced_index(tasks_dir, index_path.read_text(encoding="utf-8"), adopt=True)
+    dec_sec = rendered.split("## Decisions waiting")[1].split("## Done")[0]
+    assert "T038" not in dec_sec
+    assert "| Alfredo | Alfredo |" not in dec_sec
+    assert "| T039 | P1 | Should we enable strict mode? | Alfredo | - |" in dec_sec
+    assert "| T040 | P2 | Which certificate chain should we trust? | Alfredo | - |" in dec_sec
+
+
+def test_t050_short_title_in_category_rows(tmp_path: pathlib.Path) -> None:
+    """T050 bounce fix 3: Tasks with `short:` header show `T### (short)` in category rows even in a bare-ID index, and hand-curated short labels never disappear."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "social-sg4").mkdir(parents=True)
+
+    # T154 has explicit `- short: client/model compatibility check`
+    t154_path = tasks_dir / "social-sg4" / "T154-compatibility.md"
+    _write_sample_task(
+        t154_path,
+        task_id="T154",
+        title="Compatibility of social-service-client 3.1.0 and social-service-model 2.0.2 with the social WS",
+        category="social-sg4",
+        priority="P0",
+        next_up="yes",
+        state="delivered",
+        short="client/model compatibility check",
+    )
+
+    # T155 has no `- short:` header in file, but hand-curated short label in existing category table
+    _write_sample_task(
+        tasks_dir / "social-sg4" / "T155-roadmap.md",
+        task_id="T155",
+        title="Roadmap step 1: dockerized environment with social-service-sg4 and Liferay",
+        category="social-sg4",
+        priority="P0",
+        next_up="no",
+        state="in progress",
+    )
+
+    # T037 has no `- short:` header and uses full title in bare-ID index -> stays bare `T037`
+    _write_sample_task(
+        tasks_dir / "social-sg4" / "T037-plain.md",
+        task_id="T037",
+        title="Audit follow-ups and decisions",
+        category="social-sg4",
+        priority="P1",
+        next_up="no",
+        state="open",
+    )
+
+    existing_index = (
+        "# Task Index\n\n"
+        "## Next up\n\n"
+        "<!-- ai-orch:generated next-up -->\n"
+        "| Id | Priority | Task | Executor | Handoff |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| T037 | P1 | [Audit follow-ups and decisions](social-sg4/T037-plain.md) | kilo | `Read tasks/social-sg4/T037-plain.md and execute.` |\n"
+        "<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n"
+        "<!-- ai-orch:generated tasks-by-category -->\n"
+        "### social-sg4\n\n"
+        "Social SG4.\n\n"
+        "| Id | Priority | Task | State | Executor | Depends on |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| T154 | P0 | [client/model compatibility check](social-sg4/T154-compatibility.md) | delivered | kilo | - |\n"
+        "| T155 | P0 | [step 1 docker env](social-sg4/T155-roadmap.md) | in progress | kilo | - |\n"
+        "| T037 | P1 | [Audit follow-ups and decisions](social-sg4/T037-plain.md) | open | kilo | - |\n"
+        "<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n"
+        "<!-- ai-orch:generated decisions -->\n"
+        "| - | None. | - | - |\n"
+        "<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n"
+        "<!-- ai-orch:generated done -->\n"
+        "| Id | Task | Result | Closed |\n"
+        "| --- | --- | --- | --- |\n"
+        "<!-- /ai-orch:generated done -->\n"
+    )
+
+    rendered = te.render_synced_index(tasks_dir, existing_index, adopt=False)
+    next_sec = rendered.split("## Tasks by category")[0]
+    cat_sec = rendered.split("## Tasks by category")[1].split("## Decisions waiting")[0]
+
+    # T154 shows `T154 (client/model compatibility check)` in both Next up and category table
+    assert "| T154 (client/model compatibility check) | P0 |" in next_sec
+    assert "| T154 (client/model compatibility check) | P0 |" in cat_sec
+    # T155 preserves its hand-curated short label `step 1 docker env`
+    assert "| T155 (step 1 docker env) | P0 |" in cat_sec
+    # T037 stays bare `T037`
+    assert "| T037 | P1 |" in cat_sec
+
+
+def test_t050_per_section_summary_in_upgrade_and_sync_index_preview(tmp_path: pathlib.Path) -> None:
+    """T050 bounce fix 4a: upgrade and sync-index previews summarise rows added/removed/changed per table and Next up membership changes."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "audit-auth").mkdir(parents=True)
+    (tasks_dir / "done" / "audit-auth").mkdir(parents=True)
+
+    _write_sample_task(
+        tasks_dir / "audit-auth" / "T001-keep.md",
+        task_id="T001",
+        title="Keep task",
+        category="audit-auth",
+        priority="P0",
+        next_up="yes",
+        state="in progress",
+    )
+    _write_sample_task(
+        tasks_dir / "audit-auth" / "T002-new.md",
+        task_id="T002",
+        title="New task",
+        category="audit-auth",
+        priority="P1",
+        next_up="yes",
+        state="open",
+    )
+    _write_sample_task(
+        tasks_dir / "done" / "audit-auth" / "T003-finished.md",
+        task_id="T003",
+        title="Finished task",
+        category="audit-auth",
+        priority="P2",
+        next_up="no",
+        state="done",
+    )
+
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        "# Task Index\n\n"
+        "## Next up\n\n"
+        "| Id | Priority | Task | Executor | Handoff |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| T001 | P0 | [Keep task](audit-auth/T001-keep.md) | kilo | `Read tasks/audit-auth/T001-keep.md and execute.` |\n"
+        "| T003 | P2 | [Finished task](audit-auth/T003-finished.md) | kilo | `Read tasks/audit-auth/T003-finished.md and execute.` |\n\n"
+        "## Tasks by category\n\n"
+        "### audit-auth\n\n"
+        "Auth.\n\n"
+        "| Id | Priority | Task | State | Executor | Depends on |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| T001 | P0 | [Keep task](audit-auth/T001-keep.md) | open | kilo | - |\n"
+        "| T003 | P2 | [Finished task](audit-auth/T003-finished.md) | open | kilo | - |\n\n"
+        "## Decisions waiting\n\n"
+        "| - | None. | - | - |\n\n"
+        "## Done\n\n"
+        "| Id | Task | Result | Closed |\n"
+        "| --- | --- | --- | --- |\n",
+        encoding="utf-8",
+    )
+
+    # 1. Check upgrade preview output
+    res_upg = run_cli("upgrade", "--tasks-dir", str(tasks_dir))
+    assert res_upg.returncode == 0
+    assert "Next up: +1 -1 ~1 row(s) (membership: +T002, -T003)" in res_upg.stdout
+    assert "Tasks by category: +1 -1 ~1 row(s) (audit-auth: +1 -1 ~1)" in res_upg.stdout
+    assert "Decisions waiting: +0 -0 ~0 row(s)" in res_upg.stdout
+    assert "Done: +1 -0 ~0 row(s)" in res_upg.stdout
+
+    # 2. Check sync-index --adopt preview output
+    res_adopt = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt")
+    assert res_adopt.returncode == 0
+    assert "[preview] Section summary:" in res_adopt.stdout
+    assert "Next up: +1 -1 ~1 row(s) (membership: +T002, -T003)" in res_adopt.stdout
+    assert "Tasks by category: +1 -1 ~1 row(s) (audit-auth: +1 -1 ~1)" in res_adopt.stdout
+    assert "Done: +1 -0 ~0 row(s)" in res_adopt.stdout
+
+
+def test_t050_sync_index_no_change_message(tmp_path: pathlib.Path) -> None:
+    """T050 bounce fix 4b: sync-index prints '[ok] already in sync, nothing written' when nothing changed."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "audit-auth").mkdir(parents=True)
+    _write_sample_task(
+        tasks_dir / "audit-auth" / "T001-first.md",
+        task_id="T001",
+        title="Task 001",
+        category="audit-auth",
+        priority="P1",
+        state="open",
+    )
+
+    # First sync-index --apply writes the initial index
+    res1 = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res1.returncode == 0
+    assert "[ok] updated" in res1.stdout
+
+    # Second sync-index --apply when nothing changed prints "[ok] already in sync, nothing written"
+    res2 = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res2.returncode == 0
+    assert "[ok] already in sync, nothing written" in res2.stdout
+    assert "[ok] updated" not in res2.stdout
+
+
 def test_t054_upgrade_previews_by_default_and_applies_only_with_plan_hash(tmp_path: pathlib.Path) -> None:
     """T054: `tasks upgrade` previews by default and applies only with --apply and matching plan hash."""
     tasks_dir = tmp_path / "tasks"

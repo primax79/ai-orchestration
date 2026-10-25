@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: upgrade/sync-index destroy project rules and registry columns; porting_liferay cannot adopt the current engine and warns its sessions not to run them
 - next-up: no
-- state: bounced
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -16,6 +16,8 @@
 - verifier: porting-liferay-8c
 - verify-by: porting_liferay
 - short: Non-destructive upgrade
+
+verification pending: run Verification checks (verify-by: porting_liferay)
 
 ## Goal
 
@@ -27,11 +29,13 @@ upgrade never replaces an existing tasks/AGENTS.md: it adds or refreshes a manag
 - [x] Non-destructive `sync-index`: preserve extra columns in tables (such as `Owner` in category tables), preserve existing `Next up` and category row order unless `--reorder` is passed, preserve bare `Id` cell format when the existing index uses it, and ignore companion files (`T###-*.md`) that lack a task header block.
 - [x] Per-project header extension fields and `upgrade` exit code: allow `[tasks] extension_fields = ["area", ...]` in `orchestration.toml` or fenced `toml` blocks in `tasks/AGENTS.md`; `upgrade` exits `0` when its own work succeeds and surfaces pre-existing validation issues as warnings.
 - [x] Add regression tests in `test_tasks_engine.py` and verify on a temporary copy of `~/works/gcube/porting_liferay/tasks`.
+- [x] Bounce fixes (2026-10-25): parse prose `Extra header fields:` declarations in `tasks/AGENTS.md` and document accepted forms in the managed block; omit decider-only blocked/waiting tasks without an explicit question from `Decisions waiting`; honour `short:` headers and hand-curated short labels as `T### (short)` in category tables; add per-section table/Next-up diff summaries in `upgrade`/`sync-index` previews and print `[ok] already in sync, nothing written` when `sync-index --apply` has no changes.
 
 ## Verification
 
-- `python3 -m pytest -q plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py -k "test_t050"`
-- `python3 -m pytest -q scripts/ plugins/architect-side/skills/task-pipeline/scripts/ plugins/shared/skills/orchestration-setup/scripts/`
+- `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py -k "test_t050"`
+- `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/ plugins/architect-side/skills/task-pipeline/scripts/ plugins/shared/skills/orchestration-setup/scripts/`
+- Live check on a scratch copy of `~/works/gcube/porting_liferay/tasks` (`upgrade` preview + `--apply --expect-plan-hash`, `sync-index --apply`, `validate`): 0 `unknown header field(s): area` warnings, no `T038` row in `Decisions waiting`, `T154 (client/model compatibility check)` preserved in category table, per-section preview summary printed, and `[ok] already in sync, nothing written` on subsequent `sync-index --apply`.
 - `python3 plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py validate --tasks-dir tasks`
 - `python3 plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py sync-index --tasks-dir tasks --check`
 
@@ -57,6 +61,14 @@ Delivery: `~/.local/bin/ai-orch` resolves an older installed plugin copy without
 and T050 are not live for projects using the launcher until the plugins are released and reinstalled.
 Re-ping porting_liferay when fixed; they re-run on the copy.
 
+### Fixed 2026-10-25 (kilo)
+
+1. **Prose declaration of extension fields:** `get_project_extension_fields` now parses prose/bullet declarations ``Extra header fields: `area` `` (with or without bold, one or several backticked field names separated by commas or `and`/`or`), alongside fenced `toml` blocks and `orchestration.toml`. Documented all accepted forms in `MANAGED_TASKS_AGENTS_BLOCK` and `SKILL.md`.
+2. **No spurious Decisions rows:** `_extract_task_decision_question` requires an explicit question (either `<who>: <question>` in `decider` where the question differs from the decider name, or an explicit `Question:` / `## Question(s)` in the body, or an open `Q###` question file) and never falls back to putting the decider's name in `Question (exact)`. Blocked/waiting tasks with `decider: Alfredo` and no question (such as `T038`) produce no Decisions row.
+3. **Short titles in category tables:** `_format_index_id_cell` honours explicit `short:` headers and hand-curated short labels in `[label](path)` cells by formatting the `Id` cell as `T### (short)` (e.g. `T154 (client/model compatibility check)`) consistently across `Next up`, `Tasks by category`, and `Done`, while keeping bare `T###` IDs for tasks without `short:` in bare-ID indices.
+4. **Per-section plan summary and no-change message:** `summarize_index_changes` reports rows added/removed/changed per section and per category table plus `Next up` membership changes in `upgrade` and `sync-index` previews; `sync-index --apply` prints `[ok] already in sync, nothing written` when no changes are needed.
+
 ## Log (newest first)
 
+- 2026-10-25, kilo: state `bounced` -> `delivered` — Fixed all 4 bounce items, added 5 regression tests, verified on scratch copy of porting_liferay/tasks
 - 2026-10-25, porting-liferay-8c: state `delivered` -> `bounced` — Requester validation NOT OK: prose extension_fields not parsed, spurious Decisions row, short titles dropped in category tables (details in the task)
