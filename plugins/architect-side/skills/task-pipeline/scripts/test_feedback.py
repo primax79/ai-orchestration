@@ -164,6 +164,32 @@ def test_feedback_skips_installed_copy_and_uses_launcher_source(tmp_path: pathli
     assert path == (dev / "tasks").resolve()
 
 
+def test_feedback_installed_ai_orch_bin_still_follows_launcher(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """bin/ai-orch of an installed copy exports AI_ORCH_BIN=itself; the launcher source must still win."""
+    monkeypatch.delenv("AI_ORCH_FEEDBACK_TASKS_DIR", raising=False)
+    config_dir = tmp_path / "global_config"
+    config_dir.mkdir()
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(config_dir))
+    installed = _fake_dev_repo(tmp_path / ".claude" / "plugins" / "marketplaces" / "ai-orchestration")
+    dev = _fake_dev_repo(tmp_path / "dev" / "ai-orchestration")
+    launcher_dir = tmp_path / "localbin"
+    launcher_dir.mkdir()
+    launcher = launcher_dir / "ai-orch"
+    launcher.write_text(
+        "#!/usr/bin/env python3\n# ai-orchestration-launcher-v1\n"
+        f'DEFAULT_SOURCE_REPO = "{dev}"\n',
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    monkeypatch.setenv("AI_ORCH_BIN", str(installed / "bin" / "ai-orch"))
+    monkeypatch.setenv("PATH", str(launcher_dir))
+    monkeypatch.setattr(te, "_find_repo_root", lambda: None)
+
+    source, path = te.resolve_feedback_target(config_dir=config_dir)
+    assert source == "repo"
+    assert path == (dev / "tasks").resolve()
+
+
 def test_feedback_installed_copy_only_falls_back_to_outbox(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AI_ORCH_FEEDBACK_TASKS_DIR", raising=False)
     config_dir = tmp_path / "global_config"
