@@ -88,7 +88,6 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | delivered (verify-by: gcube_audit) | kilo | - |
 | T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | delivered (verify-by: gcube_audit) | kilo | - |
 | T052 (Move answered question guard) | P3 | [questions move refuses or warns on an already answered question](engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | open | kilo | - |
-| T055 (No phantom categories) | P2 | [Campaign reports never become categories; sync-index drops vanished categories](engine/T055-campaign-reports-never-become-categories-sync-inde.md) | delivered (verify-by: ai-coding-tools) | kilo | - |
 | T057 (Walk step attribution) | P2 | [Transition walk attributes each step to the right actor](engine/T057-transition-walk-attributes-each-step-to-the-right.md) | open | kilo | - |
 | T058 (Branch id collisions) | P2 | [Id collisions across branches and a dangling merge driver](engine/T058-id-collisions-across-branches-and-a-dangling-merge.md) | open | kilo | - |
 | T059 (Merge driver opt-in) | P3 | [upgrade explains or gates the local git config write of the index merge driver](engine/T059-upgrade-explains-or-gates-the-local-git-config-wri.md) | open | kilo | - |
@@ -163,6 +162,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T056 (Doctor fresh skill installs) | [Doctor: install from an up-to-date source and compare skill content, not the stored hash](done/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md) | done | 2026-10-25 |
 | T050 (Non-destructive upgrade) | [upgrade and sync-index preserve project-specific content; per-project extension fields](done/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md) | done | 2026-10-25 |
 | T053 (Flaky trigger test) | [Make test_confirm_start_run_hash_mismatch_if_plan_changed deterministic](done/engine/T053-make-test-confirm-start-run-hash-mismatch-if-plan.md) | done | 2026-10-25 |
+| T055 (No phantom categories) | [Campaign reports never become categories; sync-index drops vanished categories](done/engine/T055-campaign-reports-never-become-categories-sync-inde.md) | done | 2026-10-25 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

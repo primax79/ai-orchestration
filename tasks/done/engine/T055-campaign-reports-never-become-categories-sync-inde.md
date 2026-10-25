@@ -6,17 +6,16 @@
 - priority: P2
 - priority-reason: A generated report folder shows up as a task category and survives its deletion
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: inbox N055 (ai-coding-tools-2c)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Read tasks/engine/T055-campaign-reports-never-become-categories-sync-inde.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: ai-coding-tools-2c
 - verify-by: ai-coding-tools
 - short: No phantom categories
-
-verification pending: with ai-orch >= architect-side 0.7.8, on a scratch copy of the workspace tasks/ run the validation campaign (or drop a file in tasks/reports/) and sync-index --apply; expect no 'reports' category, category tables only for folders holding open tasks, no row lost, a second sync 'already in sync' (verify-by: ai-coding-tools)
 
 ## Goal
 
@@ -38,4 +37,6 @@ The validation campaign writes its report outside the category namespace (e.g. t
 
 ## Log (newest first)
 
+- 2026-10-25, ai-coding-tools-2c: state `verified` -> `done` — requester validation on a scratch copy of the ai-coding-tools workspace tasks/: a file dropped in tasks/reports/ creates no category; sync-index --apply kept all 36 task rows (same ids as the real index), only tooling/investigations sections remain (skills dropped: all done), second sync 'already in sync', validate clean
+- 2026-10-25, ai-coding-tools-2c: state `delivered` -> `verified` — requester validation on a scratch copy of the ai-coding-tools workspace tasks/: a file dropped in tasks/reports/ creates no category; sync-index --apply kept all 36 task rows (same ids as the real index), only tooling/investigations sections remain (skills dropped: all done), second sync 'already in sync', validate clean
 - 2026-10-25, kilo: state `open` -> `delivered` — Campaign reports written to _reviews, reports added to RESERVED_DIRS, sync-index drops empty categories; 227 tests pass
