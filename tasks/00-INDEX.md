@@ -133,6 +133,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T052 (Move answered question guard) | P3 | [questions move refuses or warns on an already answered question](engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | open | kilo | - |
 | T053 (Flaky trigger test) | P2 | [Make test_confirm_start_run_hash_mismatch_if_plan_changed deterministic](engine/T053-make-test-confirm-start-run-hash-mismatch-if-plan.md) | open | kilo | - |
 | T055 (No phantom categories) | P2 | [Campaign reports never become categories; sync-index drops vanished categories](engine/T055-campaign-reports-never-become-categories-sync-inde.md) | open | kilo | - |
+| T057 (Walk step attribution) | P2 | [Transition walk attributes each step to the right actor](engine/T057-transition-walk-attributes-each-step-to-the-right.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
