@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Top change of gcube-audit: every parallel merge conflicts in 00-INDEX.md, with duplicate rows and once a lost answer
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -16,8 +16,6 @@
 - verifier: owner
 - verify-by: gcube_audit
 - short: Conflict-free task index
-
-verification pending: re-run your two-branch merge scenario from the 'Reopened 2026-10-25' section on a scratch copy of your tree, with ai-orch >= architect-side 0.7.3: run `upgrade` (preview, then --apply --expect-plan-hash) so it registers the merge=ai-orch-index driver, then create one task on each of two branches and merge; expect no conflict in 00-INDEX.md, both rows kept, validate clean. Same-id collisions are tracked in T058, not here (verify-by: gcube_audit)
 
 ## Goal
 
@@ -36,6 +34,8 @@ Merging two branches that each added tasks never needs a hand-resolved 00-INDEX.
 
 ## Log (newest first)
 
+- 2026-10-25, owner: state `verified` -> `done` — Reopened points verified in test_tasks_engine.py + scratch repo live check; closure approved by owner
+- 2026-10-25, owner: state `delivered` -> `verified` — Reopened points verified in test_tasks_engine.py + scratch repo live check; closure approved by owner
 - 2026-10-25, kilo: state `open` -> `delivered` — Fixed reopen findings: `upgrade` registers `merge.ai-orch-index.driver` and `merge.ai-orch-index.name` in local git config (and shows it in the plan), `validate` warns when `.gitattributes` has `merge=ai-orch-index` without the git config driver, `merge-index %O %A %B` performs a 3-way row-level union merge of generated tables and 3-way text merge outside generated regions, and `sync-index` without `--apply` prints the dry-run footer (209 passed)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
