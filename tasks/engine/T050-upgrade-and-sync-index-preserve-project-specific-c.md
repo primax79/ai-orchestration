@@ -6,17 +6,16 @@
 - priority: P1
 - priority-reason: upgrade/sync-index destroy project rules and registry columns; porting_liferay cannot adopt the current engine and warns its sessions not to run them
 - next-up: no
-- state: delivered
+- state: bounced
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: inbox N049 (porting_liferay, T124 there)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py, plugins/architect-side/skills/task-pipeline/SKILL.md
 - handoff: Read tasks/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: porting-liferay-8c
 - verify-by: porting_liferay
 - short: Non-destructive upgrade
-
-verification pending: on your tree, declare `area` in the project's `[tasks] extension_fields` (or tasks/AGENTS.md), then run `ai-orch tasks upgrade` (a preview: it writes nothing and prints a plan hash, since T054), apply it with `ai-orch tasks upgrade --apply --expect-plan-hash <hash>`, run `ai-orch tasks sync-index --apply`, and check with `git diff`: your tasks/AGENTS.md rules intact (managed block only appended), Owner column and Id format kept, no row for companion files, `validate` accepts `area` (verify-by: porting_liferay)
 
 ## Goal
 
@@ -35,3 +34,29 @@ upgrade never replaces an existing tasks/AGENTS.md: it adds or refreshes a manag
 - `python3 -m pytest -q scripts/ plugins/architect-side/skills/task-pipeline/scripts/ plugins/shared/skills/orchestration-setup/scripts/`
 - `python3 plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py validate --tasks-dir tasks`
 - `python3 plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py sync-index --tasks-dir tasks --check`
+
+## Bounced 2026-10-25 (requester validation, porting-liferay-8c, on a throwaway copy of their tree)
+
+OK: the preview writes nothing and the plan hash works; tasks/AGENTS.md project rules intact, managed block only
+appended; Owner column and Id format kept; no companion-file rows; no row lost; sync-index after upgrade idempotent.
+NOT OK:
+1. **`area` declared in prose is not recognised.** Their tasks/AGENTS.md says ``**Extra header fields: `area`** (free-text
+   topic label)``; validate warns 100x "unknown header field(s): area". get_project_extension_fields claims (comment) to
+   read "Extra header fields: `area`" but only matches `extension_fields = [...]`. A fenced ```toml [tasks]
+   extension_fields = ["area"]``` works. Parse the prose form (with or without bold), or drop the claim and document
+   the fence form in the managed block.
+2. **Spurious Decisions row.** After upgrade the decisions table gets `| T038 | P2 | Alfredo | Alfredo | - |` (decider
+   name in the "Question (exact)" column) for a blocked task with `decider: Alfredo` and no question. Expected: no
+   row, or the question text from the body.
+3. **`short` ignored in the category tables.** Rows that used the short label (e.g. T154 `- short: client/model
+   compatibility check`) become full titles; honour `short` (as elsewhere: `ID (short)` or a short column), or flag it
+   in the plan.
+4. Minor: the preview summarises only "+94/-67 lines"; give a per-section summary (rows added/removed/changed per
+   table, Next up changes). sync-index prints "[ok] updated" even when nothing changed.
+Delivery: `~/.local/bin/ai-orch` resolves an older installed plugin copy without --apply/--expect-plan-hash, so T054
+and T050 are not live for projects using the launcher until the plugins are released and reinstalled.
+Re-ping porting_liferay when fixed; they re-run on the copy.
+
+## Log (newest first)
+
+- 2026-10-25, porting-liferay-8c: state `delivered` -> `bounced` — Requester validation NOT OK: prose extension_fields not parsed, spurious Decisions row, short titles dropped in category tables (details in the task)
