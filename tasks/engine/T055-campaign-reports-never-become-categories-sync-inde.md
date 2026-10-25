@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: A generated report folder shows up as a task category and survives its deletion
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -21,8 +21,18 @@ The validation campaign writes its report outside the category namespace (e.g. t
 
 ## Steps
 
-- [ ] Step 1
+- [x] Configure `run_validation_campaign` to output reports to `tasks/_reviews/` and add `"reports"` to `RESERVED_DIRS`.
+- [x] Update `render_synced_index` and `merge_index_three_way` in `tasks_engine.py` to build the "Tasks by category" list only from category folders that exist and hold at least one active task.
+- [x] Add 4 unit tests in `test_tasks_engine.py` verifying campaign reports go to `_reviews/`, `tasks/reports/` is not a category, emptied or deleted category tables are dropped on sync-index, and sync-index is idempotent.
+- [x] Run full pytest suite across `plugins/architect-side/skills/task-pipeline/scripts/` (227 passed).
+- [x] Verify `sync-index` preview on this repository drops empty categories and retains `engine` with active tasks.
 
 ## Verification
 
-- Command or check that proves completion
+- [x] `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider plugins/architect-side/skills/task-pipeline/scripts/ -k "test_t055"` (4 passed in 3.57s)
+- [x] `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider plugins/architect-side/skills/task-pipeline/scripts/` (227 passed in 154.34s)
+- [x] `~/.pyenv/shims/python3 plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py sync-index --tasks-dir tasks` (preview confirms removal of empty category tables and preservation of active category `engine`)
+
+## Log (newest first)
+
+- 2026-10-25, kilo: state `open` -> `delivered` — Campaign reports written to _reviews, reports added to RESERVED_DIRS, sync-index drops empty categories; 227 tests pass

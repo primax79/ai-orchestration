@@ -193,7 +193,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 }
 
 REQUIRED_SECTIONS: tuple[str, ...] = ("## Goal", "## Steps", "## Verification")
-RESERVED_DIRS: set[str] = {"_inbox", "_reviews", "specs", "done", "merged", "notes", "reviews", "questions", "use-cases"}
+RESERVED_DIRS: set[str] = {"_inbox", "_reviews", "specs", "done", "merged", "notes", "reviews", "questions", "use-cases", "reports"}
 
 STEP_ITEM_RE = re.compile(r"^(\s*[-*]|\s*\d+\.)\s+\[([ xX])\]\s*(.*)$")
 STEP_PLACEHOLDER_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+(?:\[[ xX]\]\s+)?(?:TODO:\s*)?Step\s+1\.?\s*$", re.IGNORECASE)
@@ -6808,7 +6808,7 @@ def run_validation_campaign(
     score_pct = round((passed / total * 100), 1) if total > 0 else 0.0
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    reports_dir = tasks_dir / "reports"
+    reports_dir = tasks_dir / "_reviews"
     reports_dir.mkdir(parents=True, exist_ok=True)
     report_file = reports_dir / f"validation-campaign-{int(time.time())}.md"
 
@@ -10420,9 +10420,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         existing_cat_region = _strip_conflict_markers_ours(existing_cat_region)
 
     existing_cat_order = _extract_existing_category_order(existing_index)
-    discovered_cats: list[str] = []
+    valid_cats: set[str] = set()
     if tasks_dir.is_dir():
-        for child in sorted(tasks_dir.iterdir()):
+        for child in tasks_dir.iterdir():
             if (
                 child.is_dir()
                 and not child.name.startswith(".")
@@ -10430,11 +10430,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 and child.name not in RESERVED_DIRS
                 and not INITIATIVE_DIR_RE.match(child.name)
             ):
-                discovered_cats.append(child.name)
-    for t in active_tasks:
-        cat = t["category"] or t["folder_category"]
-        if cat and cat not in discovered_cats:
-            discovered_cats.append(cat)
+                cname = child.name
+                if any((t.get("category") or t.get("folder_category")) == cname for t in active_tasks):
+                    valid_cats.add(cname)
 
     existing_by_cat: dict[str, list[tuple[str, list[str]]]] = {}
     existing_cat_headers: dict[str, tuple[str, str]] = {}
@@ -10460,9 +10458,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                     continue
                 existing_by_cat[cname].append((cells[0], cells))
 
-    all_cats = list(dict.fromkeys(discovered_cats))
-    ordered_cats = [c for c in existing_cat_order if c in all_cats or c in existing_by_cat] + [
-        c for c in all_cats if c not in existing_cat_order
+    ordered_cats = [c for c in existing_cat_order if c in valid_cats] + [
+        c for c in sorted(valid_cats) if c not in existing_cat_order
     ]
 
     cat_lines: list[str] = []
@@ -14079,7 +14076,7 @@ def merge_index_three_way(
         )
         mc_order = [k for k in mc_order if k not in merged_terminal_ids]
 
-        if cat in b_cats and (cat not in o_cats or cat not in t_cats) and not mc_order and not (tasks_dir / cat).is_dir():
+        if not mc_order or not (tasks_dir / cat).is_dir() or cat in RESERVED_DIRS:
             continue
 
         if co_m != ct_m or was_pre_conflicted:
