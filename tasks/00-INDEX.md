@@ -132,6 +132,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T050 (Non-destructive upgrade) | P1 | [upgrade and sync-index preserve project-specific content; per-project extension fields](engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md) | open | kilo | - |
 | T051 (reopen crash) | P1 | [tasks reopen crashes on emergent tasks (TypeError in _update_index_task_path)](engine/T051-tasks-reopen-crashes-on-emergent-tasks-typeerror-i.md) | open | kilo | - |
 | T052 (Move answered question guard) | P3 | [questions move refuses or warns on an already answered question](engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | open | kilo | - |
+| T053 (Flaky trigger test) | P2 | [Make test_confirm_start_run_hash_mismatch_if_plan_changed deterministic](engine/T053-make-test-confirm-start-run-hash-mismatch-if-plan.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
