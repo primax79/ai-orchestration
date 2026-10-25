@@ -16,7 +16,7 @@
 - verify-by: porting_liferay
 - short: Non-destructive upgrade
 
-verification pending: on your tree, declare `area` in the project's `[tasks] extension_fields` (or tasks/AGENTS.md), commit everything first, then run `ai-orch tasks upgrade` and `ai-orch tasks sync-index --apply` and check with `git diff`: your tasks/AGENTS.md rules intact (managed block only appended), Owner column and Id format kept, no row for companion files, `validate` accepts `area`. Note: plain `upgrade` still writes without --apply until T054 ships, so commit first and revert with git if needed (verify-by: porting_liferay)
+verification pending: on your tree, declare `area` in the project's `[tasks] extension_fields` (or tasks/AGENTS.md), then run `ai-orch tasks upgrade` (a preview: it writes nothing and prints a plan hash, since T054), apply it with `ai-orch tasks upgrade --apply --expect-plan-hash <hash>`, run `ai-orch tasks sync-index --apply`, and check with `git diff`: your tasks/AGENTS.md rules intact (managed block only appended), Owner column and Id format kept, no row for companion files, `validate` accepts `area` (verify-by: porting_liferay)
 
 ## Goal
 

@@ -6,13 +6,14 @@
 - priority: P1
 - priority-reason: Plain 'upgrade' writes AGENTS.md and the index without a preview, against the preview-then-apply convention; seen while checking T050
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: ai-coding-tools review of T050 (2026-10-25)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Read tasks/engine/T054-tasks-upgrade-previews-by-default-writes-only-with.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: ai-coding-tools-c1
 - short: Upgrade preview by default
 
 ## Goal
@@ -40,3 +41,8 @@
   - Apply without hash refused with code 1 (`git status` clean).
   - Apply with stale hash refused with code 1 (`git status` clean).
   - Apply with plan hash applies modifications cleanly with code 0.
+
+## Log (newest first)
+
+- 2026-10-25, orchestrator: state `verified` -> `done` — Verified by its requester
+- 2026-10-25, ai-coding-tools-c1: state `delivered` -> `verified` — Requester check (independent of the executor, kilo): on a scratch copy of porting_liferay/tasks, plain upgrade wrote nothing and printed a hash; --apply without a hash and with a wrong hash were refused; --apply with the hash wrote the 2 files; full suite 558 passed
