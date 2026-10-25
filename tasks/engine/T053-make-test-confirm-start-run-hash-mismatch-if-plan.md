@@ -17,7 +17,7 @@
 
 ## Goal
 
-The test passes deterministically under load: find the timing assumption behind 'preview_failed' (seen once in a 32-minute suite run, passes alone), fix the test or the code, and prove it with 20 consecutive runs under a CPU stress (e.g. running it in parallel with other tests).
+The test passes deterministically under load: find the timing assumption behind 'preview_failed' (seen once in a 32-minute suite run, passes alone), fix the test or the code, and prove it with 20 consecutive runs under a CPU stress (e.g. running it in parallel with other tests). Same for scripts/test_orchestration_runs.py::test_t022_cancel_stops_tool_children_in_new_session (failed once in a 13-minute full run on 2026-10-25, passes alone 6/6 on main and on a branch): likely a process-kill timing assumption.
 
 ## Steps
 

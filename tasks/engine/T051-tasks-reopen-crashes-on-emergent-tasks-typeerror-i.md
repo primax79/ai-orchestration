@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Reopening is the path for every NOT OK validation; it crashes halfway
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -14,6 +14,8 @@
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Read tasks/engine/T051-tasks-reopen-crashes-on-emergent-tasks-typeerror-i.md, do the open steps, run the Verification, update the task and the registry.
 - short: reopen crash
+
+verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
