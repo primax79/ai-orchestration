@@ -381,10 +381,29 @@ def test_tasks_upgrade_writes_feedback_rule_in_agents_md(tmp_path: pathlib.Path)
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
 
-    res = run_bin("tasks", "upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    # Plain upgrade previews by default and writes nothing
+    res_prev = run_bin("tasks", "upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_prev.returncode == 0, res_prev.stdout + res_prev.stderr
+    prev_payload = json.loads(res_prev.stdout)
+    assert prev_payload["ok"] is True
+    assert prev_payload["applied"] is False
+    assert not (tasks_dir / "AGENTS.md").exists()
+
+    # Apply with plan hash writes
+    res = run_bin(
+        "tasks",
+        "upgrade",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--apply",
+        "--expect-plan-hash",
+        prev_payload["plan_hash"],
+        "--json",
+    )
     assert res.returncode == 0, res.stdout + res.stderr
     payload = json.loads(res.stdout)
     assert payload["ok"] is True
+    assert payload["applied"] is True
 
     agents_file = tasks_dir / "AGENTS.md"
     assert agents_file.is_file()

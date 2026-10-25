@@ -684,7 +684,7 @@ ai-orch inbox add --title "..." --kind idea --body "..." [--json]
 ai-orch tasks ship <id> [--dry-run] [--expect-plan-hash <hash>] [--json]
 ai-orch tasks archive [--dry-run] [--expect-plan-hash <hash>] [--json]
 ai-orch tasks reopen <id> --reason "..." [--dry-run] [--expect-plan-hash <hash>] [--json]
-ai-orch tasks upgrade [--tasks-dir tasks] [--json]
+ai-orch tasks upgrade [--tasks-dir tasks] [--migrate-plans] [--apply --expect-plan-hash <hash>] [--dry-run] [--preview] [--json]
 ```
 
 ## Upgrading an Existing Project to the Latest Convention
@@ -693,8 +693,8 @@ When working on a project created with older conventions (e.g. legacy `macroplan
 
 1. **Via CLI (`ai-orch tasks upgrade`)**:
    ```bash
-   ./bin/ai-orch tasks upgrade --dry-run [--tasks-dir /path/to/project/tasks]
-   ./bin/ai-orch tasks upgrade --apply --expect-hash <plan_hash> [--tasks-dir /path/to/project/tasks]
+   ./bin/ai-orch tasks upgrade [--tasks-dir /path/to/project/tasks]
+   ./bin/ai-orch tasks upgrade --apply --expect-plan-hash <plan_hash> [--tasks-dir /path/to/project/tasks]
    ```
    This non-destructively:
    - Appends or refreshes a managed block (`<!-- ai-orch:managed begin -->` … `<!-- ai-orch:managed end -->`) in `tasks/AGENTS.md` with the canonical `task-pipeline` rules and skill names, preserving all project-specific content outside the markers byte-for-byte;
