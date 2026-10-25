@@ -1,6 +1,6 @@
 {
   "name": "architect-side",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "description": "Architect-side skills for the protocol-agnostic Architect/Executor pattern (Single-Framework Native and Multi-Framework MCP): orchestration workflow (6 phases), task-pipeline authoring (task-pipeline), orchestration metrics & ROI analysis, conflict resolution, task-spec authoring, and manual task-worktree-ops mechanics. Install this if you're the orchestrating AI.",
   "author": {
     "name": "Alfredo Oliviero"

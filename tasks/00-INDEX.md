@@ -130,11 +130,14 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T035 (One-shot close) | P1 | [One-shot close, clearer derived-state refusal, bulk close of verified](engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | delivered (verify-by: gcube_audit) | kilo | - |
 | T037 (Conflict-free task index) | P1 | [Task index without merge conflicts across parallel branches](engine/T037-task-index-without-merge-conflicts-across-parallel.md) | delivered (verify-by: gcube_audit) | kilo | - |
 | T052 (Move answered question guard) | P3 | [questions move refuses or warns on an already answered question](engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | open | kilo | - |
-| T053 (Flaky trigger test) | P2 | [Make test_confirm_start_run_hash_mismatch_if_plan_changed deterministic](engine/T053-make-test-confirm-start-run-hash-mismatch-if-plan.md) | open | kilo | - |
 | T055 (No phantom categories) | P2 | [Campaign reports never become categories; sync-index drops vanished categories](engine/T055-campaign-reports-never-become-categories-sync-inde.md) | open | kilo | - |
 | T057 (Walk step attribution) | P2 | [Transition walk attributes each step to the right actor](engine/T057-transition-walk-attributes-each-step-to-the-right.md) | open | kilo | - |
 | T058 (Branch id collisions) | P2 | [Id collisions across branches and a dangling merge driver](engine/T058-id-collisions-across-branches-and-a-dangling-merge.md) | open | kilo | - |
 | T059 (Merge driver opt-in) | P3 | [upgrade explains or gates the local git config write of the index merge driver](engine/T059-upgrade-explains-or-gates-the-local-git-config-wri.md) | open | kilo | - |
+| T060 (Initiative rows added) | P2 | [sync-index adds rows for initiatives missing from the index](engine/T060-sync-index-adds-rows-for-initiatives-missing-from.md) | open | kilo | - |
+| T061 (Ask from task keeps args) | P2 | [questions ask --from-task keeps explicit arguments](engine/T061-questions-ask-from-task-keeps-explicit-arguments.md) | open | kilo | - |
+| T062 (No delivery with placeholders) | P2 | [transition to delivered refuses template placeholder sections](engine/T062-transition-to-delivered-refuses-template-placehold.md) | open | kilo | - |
+| T063 (Reopen to delivered) | P3 | [reopen can target delivered and set verify-by](engine/T063-reopen-can-target-delivered-and-set-verify-by.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -201,6 +204,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T054 (Upgrade preview by default) | [tasks upgrade previews by default; writes only with --apply and a plan hash](done/engine/T054-tasks-upgrade-previews-by-default-writes-only-with.md) | done | 2026-10-25 |
 | T056 (Doctor fresh skill installs) | [Doctor: install from an up-to-date source and compare skill content, not the stored hash](done/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md) | done | 2026-10-25 |
 | T050 (Non-destructive upgrade) | [upgrade and sync-index preserve project-specific content; per-project extension fields](done/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md) | done | 2026-10-25 |
+| T053 (Flaky trigger test) | [Make test_confirm_start_run_hash_mismatch_if_plan_changed deterministic](done/engine/T053-make-test-confirm-start-run-hash-mismatch-if-plan.md) | done | 2026-10-25 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph
