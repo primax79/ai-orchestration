@@ -21,13 +21,9 @@
 Add the extension handlers for every message type the dashboard now sends (tree structure actions, micro create, promote, set-kind, set-labels, labels list) so test-bridge-parity is green, then sync the webview and release the extension.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

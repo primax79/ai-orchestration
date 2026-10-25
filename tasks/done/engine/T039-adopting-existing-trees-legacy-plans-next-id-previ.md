@@ -21,13 +21,9 @@
 'tasks upgrade --dry-run' (or a normalize command) proposes moving a legacy plans/NN-*/ macroplan into tasks/; 'tasks new --dry-run' prints the id it would take; 'projects discover <path>' works read-only on an unregistered workspace. Also (inbox N038): validate warns, never fails, on legacy free-text header fields of old tasks. Also (inbox N043): the registry warns about registered projects whose folder is gone, and 'projects discover' prints added/removed projects instead of the whole list.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

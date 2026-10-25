@@ -4128,6 +4128,29 @@ def test_t056_configured_local_checkout_ahead_warning(tmp_path: pathlib.Path) ->
     assert "fetch-repos" in repo_info["warning"]
 
 
+def test_n063_identical_per_assistant_skill_copies_not_flagged_as_duplicates(tmp_path: pathlib.Path) -> None:
+    """N063: Identical/equivalent standalone skill copies in ~/.claude/skills/<s/> and ~/.kilo/skills/<s/>
+    (same scope, one per assistant root family) are recognized as intentional per-assistant copies and not flagged.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    sname = "d4science-ansible-operations"
+    claude_skill = fake_home / ".claude" / "skills" / sname
+    kilo_skill = fake_home / ".kilo" / "skills" / sname
+    claude_skill.mkdir(parents=True)
+    kilo_skill.mkdir(parents=True)
+    skill_md = "---\nname: d4science-ansible-operations\ndescription: Ansible ops\n---\n\n# Body\n"
+    (claude_skill / "SKILL.md").write_text(skill_md, encoding="utf-8")
+    (kilo_skill / "SKILL.md").write_text(skill_md, encoding="utf-8")
+
+    st = run_env(["status"], fake_home)
+    k_conflicts = st["environments"]["kilo"]["global"]["conflicts"]
+    assert not any(sname in c for c in k_conflicts)
+    assert not any(g["group_key"] == f"duplicate-name:{sname}" for g in st["finding_groups"])
+
+
+
 
 
 

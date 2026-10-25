@@ -21,13 +21,9 @@
 Re-scoped 2026-10-21 (owner): agents reach the engine through the broker MCP (16.6), which also gives the shim a version-free path; this task keeps only the CLI fallback and small fixes. For sessions that work without MCP, 'ai-orch' runs from the same version-free path (documented in the plugin README); running the engine script directly never warns about orchestration_events; 'tasks upgrade' writes tasks/.gitignore with the lock; the Doctor reports vendored copies of tasks_engine.py inside projects as stale.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

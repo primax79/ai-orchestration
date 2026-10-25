@@ -21,13 +21,9 @@
 A task in 'waiting' can carry a 'waiting-on' header (owner, team, external, or a free short text), set by the transition or a set command, shown in the index and the UIs and filterable; it is not a new state.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

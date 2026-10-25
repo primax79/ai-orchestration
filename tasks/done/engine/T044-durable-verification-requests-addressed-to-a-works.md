@@ -22,13 +22,9 @@
 A delivered task can carry a 'verify-by: <workspace or session>' request with what to check, set by a command; 'ai-orch tasks verification-queue [--for <workspace>]' lists the requests addressed to the caller's workspace across registered workspaces; the index and the UIs show them; the skills tell every session to drain its queue at session start (method 0.17) and answer with transition verified --verifier or a NOT OK note.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

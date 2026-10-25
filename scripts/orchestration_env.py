@@ -4734,6 +4734,24 @@ def inspect_environment(
                     unique_entries.append(e)
 
                 if len(unique_entries) > 1:
+                    if assistant == "kilo":
+                        def _entry_assistant_family(ent: dict[str, Any]) -> str:
+                            orig = ent.get("origin", "")
+                            if ".claude" in orig:
+                                return "claude"
+                            if ".agents" in orig:
+                                return "agents"
+                            return "kilo"
+
+                        all_standalone = all(e.get("origin", "").startswith("standalone") for e in unique_entries)
+                        same_scope = len({e.get("scope", scope) for e in unique_entries}) == 1
+                        families = [_entry_assistant_family(e) for e in unique_entries]
+                        one_per_family = len(families) == len(set(families))
+                        if all_standalone and same_scope and one_per_family:
+                            p0 = pathlib.Path(unique_entries[0]["path"])
+                            if all(skill_equivalent(p0, pathlib.Path(e["path"])) for e in unique_entries[1:]):
+                                continue
+
                     names = [name]
                     key = ("duplicate-name", tuple(sorted(names)))
 

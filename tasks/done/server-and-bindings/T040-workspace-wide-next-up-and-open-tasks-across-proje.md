@@ -21,13 +21,9 @@
 'ai-orch workspace next [--root P]' lists next-up and open tasks of every project of the workspace (qualified ids, short titles, coordinates expanded), from the same resolver as the UI's common view.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

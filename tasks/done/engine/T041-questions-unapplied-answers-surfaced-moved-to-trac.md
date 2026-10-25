@@ -21,13 +21,9 @@
 validate and sync-index warn about answered-but-unapplied questions and the index shows them; 'questions answer' can apply in the same call (--apply-ref, --note); a 'moved' status with an external link for questions turned into tracker issues; an optional free 'Notes' section in question files; the docs present '--blocks -' as the way to ask a non-blocking question.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

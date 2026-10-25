@@ -20,9 +20,6 @@
 test_preview_side_effect_free (hash mismatch) and test_reconcile_pid_reuse_simulated_does_not_kill (process not alive) fail about once in two full runs of scripts/test_orchestration_runs.py, never in isolation. Find the root cause (shared state, timing, real PIDs) and make them deterministic without weakening what they check.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
+- [x] Verified by automated test suite and validation checks.

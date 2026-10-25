@@ -196,8 +196,14 @@ REQUIRED_SECTIONS: tuple[str, ...] = ("## Goal", "## Steps", "## Verification")
 RESERVED_DIRS: set[str] = {"_inbox", "_reviews", "specs", "done", "merged", "notes", "reviews", "questions", "use-cases", "reports"}
 
 STEP_ITEM_RE = re.compile(r"^(\s*[-*]|\s*\d+\.)\s+\[([ xX])\]\s*(.*)$")
-STEP_PLACEHOLDER_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+(?:\[[ xX]\]\s+)?(?:TODO:\s*)?Step\s+1\.?\s*$", re.IGNORECASE)
-VERIFICATION_PLACEHOLDER_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+(?:\[[ xX]\]\s+)?(?:TODO:\s*)?Command or check(?:\s+that proves completion)?\.?\s*$", re.IGNORECASE)
+STEP_PLACEHOLDER_RE = re.compile(
+    r"^\s*(?:[-*]|\d+\.)\s+(?:\[[ xX]\]\s+)?(?:TODO:\s*)?(?:Step\s+1|Implement\s+task\s+steps)\.?\s*$",
+    re.IGNORECASE,
+)
+VERIFICATION_PLACEHOLDER_RE = re.compile(
+    r"^\s*(?:[-*]|\d+\.)\s+(?:\[[ xX]\]\s+)?(?:TODO:\s*)?(?:Command or check(?:\s+that proves completion)?|Verify\s+task\s+implementation)\.?\s*$",
+    re.IGNORECASE,
+)
 
 QUESTION_MANDATORY_HEADER_FIELDS: tuple[str, ...] = (
     "id",
@@ -1667,9 +1673,19 @@ SHORT_TITLE_STOP_WORDS: set[str] = {
     "which", "what", "should", "would", "could", "does", "do",
     "before", "after", "that", "this", "into", "when", "where", "be", "but",
     "not", "than", "then", "so", "if", "all", "each", "every",
+    # Italian articles, prepositions, conjunctions
+    "il", "lo", "la", "i", "gli", "le", "un", "uno", "una",
+    "di", "del", "dello", "della", "dei", "degli", "delle",
+    "da", "dal", "dallo", "dalla", "dai", "dagli", "dalle",
+    "in", "nel", "nello", "nella", "nei", "negli", "nelle",
+    "su", "sul", "sullo", "sulla", "sui", "sugli", "sulle",
+    "al", "allo", "alla", "ai", "agli", "alle",
+    "con", "per", "tra", "fra", "ed", "od", "che", "cui", "non", "più",
+    "come", "quando", "dove", "se", "ma", "anche", "solo", "tutti", "tutte", "ogni",
 }
 SHORT_TITLE_LEADING_STOP_WORDS: set[str] = {
     "a", "an", "the", "which", "what", "how", "who", "should", "would",
+    "il", "lo", "la", "i", "gli", "le", "un", "uno", "una", "come", "quando", "dove",
 }
 
 
@@ -1725,11 +1741,12 @@ def derive_short_title(title: str) -> str:
             text = " ".join(inner).strip()
         else:
             text = no_parens or text
-    # 5. Clean individual words of outer punctuation
+    # 5. Clean individual words of outer punctuation and Italian apostrophe prefixes (l', un', dell', etc.)
     raw_words = text.split()
     cleaned_words = []
     for w in raw_words:
         cw = re.sub(r"^[^\w]+|[^\w]+$", "", w)
+        cw = re.sub(r"^(?:l|un|dell|all|nell|sull|dall)['’]", "", cw, flags=re.IGNORECASE)
         if cw:
             cleaned_words.append(cw)
     # 6. Drop leading stop words
@@ -4294,7 +4311,15 @@ def reopen_node(
     reason: str,
     dry_run: bool = False,
     expect_plan_hash: str | None = None,
+    to_state: str | None = None,
+    verify_by: str | None = None,
+    verify_check: str | None = None,
+    apply_direct: bool = False,
 ) -> dict[str, Any]:
+    target_state = (to_state or ("delivered" if verify_by else "open")).strip().lower()
+    if target_state not in ("open", "delivered"):
+        return {"ok": False, "error": f"Invalid reopen target state '{target_state}' (allowed: open, delivered)."}
+    auto_apply = apply_direct or (to_state is not None) or (verify_by is not None)
     with task_write_lock(tasks_dir):
         tree = discover_task_tree(tasks_dir)
         if node_id not in tree:
@@ -4391,8 +4416,8 @@ def reopen_node(
         ancestors_to_restore: list[tuple[TaskNode, str]] = []
         old_st = node.state
         old_cst = node.canonical_state
-        node.state = "open"
-        node.canonical_state = "open"
+        node.state = target_state
+        node.canonical_state = target_state
 
         curr = node.parent
         while curr and curr in tree:
@@ -4425,14 +4450,14 @@ def reopen_node(
 
         plan, plan_hash = compute_operation_plan(operations)
         if dry_run:
-            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash}
-        if not expect_plan_hash:
+            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash, "new_state": target_state}
+        if not expect_plan_hash and not auto_apply:
             return {
                 "ok": False,
                 "error": "Applying reopen requires --expect-plan-hash <hash>. Run with --dry-run to obtain the plan hash.",
                 "plan_hash": plan_hash,
             }
-        if expect_plan_hash != plan_hash:
+        if expect_plan_hash and expect_plan_hash != plan_hash:
             return {
                 "ok": False,
                 "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
@@ -4504,9 +4529,11 @@ def reopen_node(
         # 3. Reopen the leaf block or task
         if node.block_text is not None:
             if node.in_closed_section:
-                move_block_to_open(file_path, node_id, new_status="open", status_note=status_note)
+                move_block_to_open(file_path, node_id, new_status=target_state, status_note=status_note)
             else:
-                rewrite_block_in_file(file_path, node_id, new_status="open", status_note=status_note)
+                rewrite_block_in_file(file_path, node_id, new_status=target_state, status_note=status_note)
+            if verify_by:
+                rewrite_block_in_file(file_path, node_id, new_verify_by=verify_by)
         else:
             if node.in_done:
                 emergent = discover_emergent_tasks(tasks_dir)
@@ -4546,7 +4573,13 @@ def reopen_node(
 
                 old_rel = node.rel_path
                 file_path = dest_file
-                _update_task_file_headers_and_state(file_path, "open")
+                _update_task_file_headers_and_state(
+                    file_path,
+                    target_state,
+                    verify_by=verify_by,
+                    verify_check=verify_check,
+                    clear_verifier=True,
+                )
                 dest_rel = dest_file.relative_to(tasks_dir).as_posix()
                 node.file_path = str(file_path)
                 node.rel_path = dest_rel
@@ -4556,9 +4589,15 @@ def reopen_node(
                     target["rel_path"] = dest_rel
                 _update_index_task_path(tasks_dir, old_rel=old_rel, new_rel=dest_rel)
             else:
-                _update_task_file_headers_and_state(file_path, "open")
+                _update_task_file_headers_and_state(
+                    file_path,
+                    target_state,
+                    verify_by=verify_by,
+                    verify_check=verify_check,
+                    clear_verifier=True,
+                )
             t_dict = node.to_dict() if hasattr(node, "to_dict") else vars(node)
-            _append_progress_log(t_dict, old_st, "open", actor="owner", verifier=None, reason=reason_clean)
+            _append_progress_log(t_dict, old_st, target_state, actor="owner", verifier=None, reason=reason_clean)
 
         for anc, new_anc_state in ancestors_to_restore:
             anc_file = pathlib.Path(anc.file_path)
@@ -4582,9 +4621,10 @@ def reopen_node(
             "task.transitioned",
             {
                 "from": old_st,
-                "to": "open",
+                "to": target_state,
                 "actor": "owner",
                 "reason": reason_clean,
+                **({"verify_by": verify_by} if verify_by else {}),
             },
             subject=node_id,
             actor="owner",
@@ -4603,7 +4643,10 @@ def reopen_node(
                 actor="owner",
             )
 
-        return {"ok": True, "task_id": node_id, "new_state": "open", "plan_hash": plan_hash}
+        res_out: dict[str, Any] = {"ok": True, "task_id": node_id, "new_state": target_state, "plan_hash": plan_hash}
+        if verify_by:
+            res_out["verify_by"] = verify_by
+        return res_out
 
 
 def ship_initiative(
@@ -6509,27 +6552,76 @@ def parse_use_case_file(file_path: pathlib.Path, tasks_dir: pathlib.Path) -> dic
     last_tested = headers.get("last-tested") or headers.get("last_tested")
     last_verdict = headers.get("last-verdict") or headers.get("last_verdict")
 
-    def _extract_section(heading: str) -> str:
-        pos = text.find(heading)
-        if pos < 0:
-            return ""
-        after = text[pos + len(heading):]
-        next_pos = re.search(r"\n##\s+", after)
-        if next_pos:
-            return after[:next_pos.start()].strip()
-        return after.strip()
+    def _extract_section(*headings: str) -> str:
+        for heading in headings:
+            m = re.search(rf"^{re.escape(heading)}\s*$", text, re.MULTILINE | re.IGNORECASE)
+            if not m:
+                pos = text.find(heading)
+                if pos < 0:
+                    continue
+                after = text[pos + len(heading):]
+            else:
+                after = text[m.end():]
+            next_pos = re.search(r"\n##\s+", after)
+            if next_pos:
+                return after[:next_pos.start()].strip()
+            return after.strip()
+        return ""
 
-    desc = _extract_section("## Description & Business Value") or _extract_section("## Description")
-    preconditions = _extract_section("## Preconditions")
-    scenario = _extract_section("## Scenario / Interaction Steps") or _extract_section("## Scenario")
-    command = _extract_section("## Automated Verification Command") or _extract_section("## Verification Command")
+    desc = _extract_section(
+        "## Description & Business Value",
+        "## Description",
+        "## Descrizione e valore",
+        "## Descrizione",
+        "## Innesco",
+        "## Trigger",
+    )
+    actor_sec = _extract_section("## Actor", "## Attore")
+    if not headers.get("actor") and not headers.get("attore") and actor_sec:
+        actor = actor_sec.splitlines()[0].lstrip("-* ").strip() or actor
+    elif headers.get("attore"):
+        actor = headers["attore"]
+    preconditions = _extract_section("## Preconditions", "## Precondizioni")
+    scenario = _extract_section(
+        "## Scenario / Interaction Steps",
+        "## Scenario",
+        "## Main Flow",
+        "## Main flow",
+        "## Scenario principale",
+        "## Flusso principale",
+        "## Flusso",
+        "## Passi dello scenario",
+    )
+    command = _extract_section(
+        "## Automated Verification Command",
+        "## Verification Command",
+        "## Comando di verifica automatico",
+        "## Comando di verifica",
+    )
     cmd_clean = command
     cmd_m = re.search(r"```(?:bash|sh)?\n(.*?)\n```", command, re.DOTALL)
     if cmd_m:
         cmd_clean = cmd_m.group(1).strip()
 
-    criteria = _extract_section("## Acceptance Criteria")
-    log = _extract_section("## AI Validation Log") or _extract_section("## Validation History")
+    criteria = _extract_section(
+        "## Acceptance Criteria",
+        "## Acceptance criteria",
+        "## Criteri di accettazione",
+        "## Outcome",
+        "## Risultato",
+        "## Postcondizioni",
+    )
+    log = _extract_section(
+        "## AI Validation Log",
+        "## Validation History",
+        "## Registro delle verifiche",
+        "## Log di validazione AI",
+    )
+    linked_sec = _extract_section("## Linked tasks", "## Linked Tasks", "## Task collegati")
+    if not linked_tasks and linked_sec:
+        for m_lt in re.findall(r"(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.\d+[a-z]?)+)", linked_sec):
+            if m_lt not in linked_tasks:
+                linked_tasks.append(m_lt)
 
     short_field = headers.get("short")
     if short_field and str(short_field).strip() and str(short_field).strip() != "-":
@@ -6582,13 +6674,61 @@ def discover_use_cases(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
 
 
 def _next_use_case_id(tasks_dir: pathlib.Path) -> str:
-    """Next free UC### id: one above the highest id found anywhere under tasks/ (use-cases/ and done/)."""
+    """Next free UC### id: one above the highest id found anywhere under tasks/ (use-cases/, done/, and git branches/worktrees)."""
     highest = 0
     for f in pathlib.Path(tasks_dir).rglob("UC*.md"):
         m = re.match(r"^UC(\d{3,})(?:-|\.md$)", f.name)
         if m:
             highest = max(highest, int(m.group(1)))
+    for n in _scan_git_branch_and_worktree_ids(pathlib.Path(tasks_dir), prefix="UC"):
+        highest = max(highest, n)
     return f"UC{highest + 1:03d}"
+
+
+def _detect_use_case_language(tasks_dir: pathlib.Path, explicit_lang: str | None = None) -> str:
+    if explicit_lang and explicit_lang.strip().lower() in ("it", "en"):
+        return explicit_lang.strip().lower()
+    ws_root = tasks_dir.parent
+    for cfg in (
+        ws_root / "orchestration.toml",
+        ws_root / ".ai-orchestration" / "orchestration.toml",
+        ws_root / ".ai-orchestration.local.toml",
+    ):
+        if cfg.is_file():
+            try:
+                raw = cfg.read_text(encoding="utf-8")
+                m = re.search(r'^\s*(?:use_case_language|language)\s*=\s*["\']([a-zA-Z-]+)["\']', raw, re.MULTILINE)
+                if m and m.group(1).lower().startswith("it"):
+                    return "it"
+            except Exception:
+                pass
+    return "en"
+
+
+def _format_acceptance_criteria(raw_criteria: Any, lang: str = "en") -> str:
+    default_line = "- [ ] Il flusso principale funziona come previsto." if lang == "it" else "- [ ] Core flow works as expected."
+    if not raw_criteria:
+        return default_line
+    items: list[str] = []
+    if isinstance(raw_criteria, str):
+        parts = [p.strip() for p in re.split(r"[\n;]+", raw_criteria) if p.strip()]
+        items.extend(parts)
+    elif isinstance(raw_criteria, list):
+        for elem in raw_criteria:
+            for p in re.split(r"[\n;]+", str(elem)):
+                if p.strip():
+                    items.append(p.strip())
+    if not items:
+        return default_line
+    formatted: list[str] = []
+    for it in items:
+        if re.match(r"^[-*]\s+\[[ xX]\]\s+", it):
+            formatted.append(it)
+        elif it.startswith(("- ", "* ")):
+            formatted.append(f"- [ ] {it[2:].strip()}")
+        else:
+            formatted.append(f"- [ ] {it}")
+    return "\n".join(formatted)
 
 
 def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
@@ -6618,8 +6758,51 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
         else:
             short_val = derive_short_title(title)
 
-        scenario_text = data.get("scenario", "1. User initiates action.\n2. System responds.")
-        content = f"""# {uc_id} - {title}
+        lang = _detect_use_case_language(tasks_dir, data.get("lang") or data.get("language"))
+        criteria_text = _format_acceptance_criteria(
+            data.get("acceptance_criteria") or data.get("criteria"), lang=lang
+        )
+        if lang == "it":
+            scenario_text = data.get("scenario") or "1. L'utente avvia l'azione.\n2. Il sistema risponde."
+            desc_text = data.get("description") or "Descrivere il valore per l'utente e il contesto."
+            pre_text = data.get("preconditions") or "- Sistema avviato e inizializzato."
+            cmd_text = data.get("verification_command") or "echo 'No verification command specified'"
+            content = f"""# {uc_id} - {title}
+
+- id: {uc_id}
+- title: {title}
+- actor: {data.get("actor", "End-User")}
+- status: {data.get("status", "draft")}
+- priority: {data.get("priority", "P1")}
+- linked-tasks: {linked_tasks_str}
+- verification-type: {data.get("verification_type", "automated-probe")}
+- last-tested: {data.get("last_tested") or "-"}
+- last-verdict: {data.get("last_verdict") or "-"}
+- short: {short_val}
+
+## Descrizione
+{desc_text}
+
+## Precondizioni
+{pre_text}
+
+## Scenario
+{scenario_text}
+
+## Comando di verifica
+```bash
+{cmd_text}
+```
+
+## Criteri di accettazione
+{criteria_text}
+
+## Registro delle verifiche
+{data.get("validation_log", "")}
+"""
+        else:
+            scenario_text = data.get("scenario") or "1. User initiates action.\n2. System responds."
+            content = f"""# {uc_id} - {title}
 
 - id: {uc_id}
 - title: {title}
@@ -6633,21 +6816,21 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
 - short: {short_val}
 
 ## Description & Business Value
-{data.get("description", "Describe user value and business context.")}
+{data.get("description") or "Describe user value and business context."}
 
 ## Preconditions
-{data.get("preconditions", "- System running and initialized.")}
+{data.get("preconditions") or "- System running and initialized."}
 
 ## Scenario / Interaction Steps
 {scenario_text}
 
 ## Automated Verification Command
 ```bash
-{data.get("verification_command", "echo 'No verification command specified'")}
+{data.get("verification_command") or "echo 'No verification command specified'"}
 ```
 
 ## Acceptance Criteria
-{data.get("acceptance_criteria", "- [ ] Core flow works as expected.")}
+{criteria_text}
 
 ## AI Validation Log
 {data.get("validation_log", "")}
@@ -6688,7 +6871,10 @@ def record_use_case_validation(
         updated_content = re.sub(r"-\s+last-verdict:\s*.*$", f"- last-verdict: {verdict_clean}", updated_content, flags=re.MULTILINE)
         updated_content = re.sub(r"-\s+status:\s*.*$", f"- status: {new_status}", updated_content, flags=re.MULTILINE)
 
-        if "## AI Validation Log" in updated_content:
+        if any(
+            h in updated_content
+            for h in ("## AI Validation Log", "## Registro delle verifiche", "## Log di validazione AI")
+        ):
             updated_content = updated_content.rstrip() + "\n" + log_entry
         else:
             updated_content = updated_content.rstrip() + "\n\n## AI Validation Log\n" + log_entry
@@ -8193,6 +8379,17 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
         except OSError:
             pass
 
+    # Validate inbox notes for duplicate IDs
+    seen_n_ids: dict[str, str] = {}
+    for note in discover_inbox_notes(tasks_dir):
+        nid = (note.get("id") or "").strip()
+        n_rel = note.get("rel_path") or note.get("folder_name") or "inbox"
+        if nid and NOTE_ID_RE.match(nid):
+            if nid in seen_n_ids:
+                errors.append(f"{n_rel}: duplicate inbox note id {nid!r} (already defined in {seen_n_ids[nid]}).")
+            else:
+                seen_n_ids[nid] = n_rel
+
     if _gitattributes_names_ai_orch_index(tasks_dir) and _is_inside_git_repo(tasks_dir):
         existing_drv, _ = _get_git_merge_driver_config(tasks_dir)
         if not existing_drv:
@@ -8371,6 +8568,7 @@ def _update_task_file_headers_and_state(
     file_path: pathlib.Path,
     new_state: str | None,
     verifier: str | None = None,
+    clear_verifier: bool = False,
     verify_by: str | None = None,
     clear_verify_by: bool = False,
     verify_check: str | None = None,
@@ -8434,7 +8632,10 @@ def _update_task_file_headers_and_state(
             lines[header_end] = "- next-up: no"
         elif key == "verifier":
             verifier_line_idx = header_end
-            if verifier is not None:
+            if clear_verifier:
+                del lines[header_end]
+                continue
+            elif verifier is not None:
                 lines[header_end] = f"- verifier: {verifier}"
         elif key == "handoff":
             handoff_line_idx = header_end
@@ -9109,6 +9310,26 @@ def transition_task(
                     ),
                 }
 
+            if new_canon == "delivered" and not target.get("is_micro"):
+                bad_sections: list[str] = []
+                if target.get("step_placeholders"):
+                    bad_sections.append("## Steps")
+                if target.get("verification_placeholders"):
+                    bad_sections.append("## Verification")
+                if bad_sections:
+                    secs_str = " and ".join(bad_sections)
+                    return False, {
+                        "ok": False,
+                        "task_id": task_id,
+                        "old_state": old_state,
+                        "new_state": new_state,
+                        "sections": bad_sections,
+                        "error": (
+                            f"Cannot transition {task_id!r} to 'delivered': {secs_str} still contain(s) "
+                            "unedited template placeholder text. Replace placeholders with concrete steps/verification first."
+                        ),
+                    }
+
             # Guard on delivered -> verified
             vmode = (target.get("verification_mode") or "cross-agent").strip()
             if vmode == "-":
@@ -9441,15 +9662,17 @@ def close_task(
             for idx_step, next_st in enumerate(steps):
                 next_canon = normalize_state(next_st)
                 if next_canon == "verified":
-                    step_actor = "owner" if owner_approved else (actor or "owner")
+                    step_actor = "owner" if owner_approved else (verifier or actor or "owner")
                     step_verifier = verifier or ("owner" if owner_approved else None)
+                    step_reason = reason
                 elif next_canon in TERMINAL_STATES:
-                    step_actor = "owner" if owner_approved else (actor or verifier or executor or "owner")
+                    step_actor = "owner" if owner_approved else (verifier or actor or executor or "owner")
                     step_verifier = verifier or ("owner" if owner_approved else None)
+                    step_reason = reason
                 else:
-                    step_actor = actor or executor
-                    step_verifier = verifier or ("owner" if owner_approved else None)
-                step_reason = reason
+                    step_actor = executor or actor or "kilo"
+                    step_verifier = None
+                    step_reason = None
 
                 ok, res = transition_task(
                     tasks_dir=tasks_dir,
@@ -12426,12 +12649,20 @@ def cmd_reopen(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     dry_run = getattr(args, "dry_run", False)
     expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    to_state = getattr(args, "to_state", None)
+    verify_by = getattr(args, "verify_by", None)
+    verify_check = getattr(args, "verify_check", None)
+    apply_direct = getattr(args, "apply", False)
     res = reopen_node(
         tasks_dir=tasks_dir,
         node_id=args.id,
         reason=args.reason,
         dry_run=dry_run,
         expect_plan_hash=expect_plan_hash,
+        to_state=to_state,
+        verify_by=verify_by,
+        verify_check=verify_check,
+        apply_direct=apply_direct,
     )
     args._last_result = res
     if getattr(args, "json", False):
@@ -12439,7 +12670,8 @@ def cmd_reopen(args: argparse.Namespace) -> int:
     else:
         if res.get("ok"):
             action = "planned reopening of" if dry_run else "reopened"
-            print(f"[ok] {action} {args.id}")
+            st_info = f" (state: {res.get('new_state', 'open')})" if res.get("new_state") else ""
+            print(f"[ok] {action} {args.id}{st_info}")
             if dry_run and res.get("plan_hash"):
                 print(f"Plan hash: {res['plan_hash']}")
         else:
@@ -13378,6 +13610,65 @@ def cmd_tasks_next(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scan_git_branch_and_worktree_ids(tasks_dir: pathlib.Path, prefix: str = "T") -> list[int]:
+    """Scan local git branches and sibling worktrees for allocated ID numbers (T###, Q###, UC###, N###)."""
+    nums: list[int] = []
+    if not ((tasks_dir / ".git").exists() or (tasks_dir.parent / ".git").exists()):
+        return nums
+    git_cwd = _git_working_dir(tasks_dir)
+    if git_cwd is None:
+        return nums
+
+    pat = re.compile(rf"(?:^|/){re.escape(prefix)}(\d{{3,}})(?:-|\.md$|/)")
+    try:
+        r_log = subprocess.run(
+            ["git", "log", "--all", "--diff-filter=A", "--name-only", "--pretty=format:", "-n", "250"],
+            cwd=str(git_cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if r_log.returncode == 0 and r_log.stdout:
+            for line in r_log.stdout.splitlines():
+                m = pat.search(line.strip())
+                if m:
+                    nums.append(int(m.group(1)))
+    except Exception:
+        pass
+
+    try:
+        r_wt = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=str(git_cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if r_wt.returncode == 0 and r_wt.stdout:
+            for line in r_wt.stdout.splitlines():
+                if line.startswith("worktree "):
+                    wt_root = pathlib.Path(line[len("worktree "):].strip())
+                    wt_tasks = wt_root / tasks_dir.name
+                    if not wt_tasks.is_dir() or wt_tasks.resolve() == tasks_dir.resolve():
+                        continue
+                    if prefix == "N":
+                        for nf in wt_tasks.rglob("note.md"):
+                            try:
+                                m_id = re.search(r"^-\s+id:\s*N(\d{3,})\b", nf.read_text(encoding="utf-8"), re.MULTILINE)
+                                if m_id:
+                                    nums.append(int(m_id.group(1)))
+                            except Exception:
+                                pass
+                    else:
+                        for f in wt_tasks.rglob(f"{prefix}[0-9][0-9][0-9]*"):
+                            m = re.match(rf"^{re.escape(prefix)}(\d{{3,}})", f.name)
+                            if m:
+                                nums.append(int(m.group(1)))
+    except Exception:
+        pass
+    return nums
+
+
 def get_next_task_id(tasks_dir: pathlib.Path) -> dict[str, Any]:
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     nums: list[int] = []
@@ -13408,6 +13699,8 @@ def get_next_task_id(tasks_dir: pathlib.Path) -> dict[str, Any]:
             m = re.match(r"^T(\d{3,})", p.name)
             if m:
                 nums.append(int(m.group(1)))
+
+        nums.extend(_scan_git_branch_and_worktree_ids(tasks_dir, prefix="T"))
 
     if nums:
         highest_num = max(nums)
@@ -14489,6 +14782,7 @@ def upgrade_tasks_tree(
     expect_hash: str | None = None,
     apply: bool | None = None,
     expect_plan_hash: str | None = None,
+    skip_git_config: bool = False,
 ) -> dict[str, Any]:
     """Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention:
       1. Updates tasks/AGENTS.md with a managed block between markers (never replacing existing rules).
@@ -14629,7 +14923,7 @@ def upgrade_tasks_tree(
 
             # 2.6. Register git merge driver in repository's local git config
             pending_git_config: tuple[str, str] | None = None
-            if _is_inside_git_repo(tasks_dir):
+            if not skip_git_config and _is_inside_git_repo(tasks_dir):
                 driver_cmd, driver_name = _merge_driver_config_spec()
                 existing_drv, existing_name = _get_git_merge_driver_config(tasks_dir)
                 if existing_drv != driver_cmd or existing_name != driver_name:
@@ -14978,6 +15272,7 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     effective_apply = apply_flag and not dry_run_flag
     effective_dry_run = not effective_apply
     migrate_plans = bool(getattr(args, "migrate_plans", False))
+    skip_git_config = bool(getattr(args, "skip_git_config", False))
     expect_hash = getattr(args, "expect_plan_hash", None) or getattr(args, "expect_hash", None)
 
     res = upgrade_tasks_tree(
@@ -14987,6 +15282,7 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
         expect_hash=expect_hash,
         apply=effective_apply,
         expect_plan_hash=expect_hash,
+        skip_git_config=skip_git_config,
     )
     args._last_result = res
     if getattr(args, "json", False):
@@ -15008,17 +15304,27 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     if effective_dry_run:
         if res.get("plan"):
             print(f"[preview] Upgrade plan ({len(res['plan'])} file(s), hash: {res['plan_hash']}):")
+            has_git_cfg = False
             for item in res["plan"]:
                 action = item.get("action", "modify")
                 path = item.get("path", "")
+                if path == "git config merge.ai-orch-index":
+                    has_git_cfg = True
                 summary = item.get("summary") or item.get("diff_summary") or ""
                 summary_str = f" ({summary})" if summary else ""
                 print(f"  - [{action}] {path}{summary_str}")
                 for sline in item.get("summary_lines", []):
                     print(f"      * {sline}")
+            if has_git_cfg:
+                print(
+                    "\n  Note: 'git config merge.ai-orch-index' writes to the repository's local .git/config "
+                    "so git merges tasks/00-INDEX.md without conflicts (as declared in tasks/.gitattributes). "
+                    "Pass --skip-git-config to skip modifying .git/config."
+                )
             print(f"\nPlan hash: {res['plan_hash']}")
             mig_flag = " --migrate-plans" if migrate_plans else ""
-            print(f"To apply: ai-orch tasks upgrade --tasks-dir {quoted_td}{mig_flag} --apply --expect-plan-hash {res['plan_hash']}")
+            skip_flag = " --skip-git-config" if skip_git_config else ""
+            print(f"To apply: ai-orch tasks upgrade --tasks-dir {quoted_td}{mig_flag}{skip_flag} --apply --expect-plan-hash {res['plan_hash']}")
         else:
             print(f"[ok] {tasks_dir} is already up-to-date with latest task-pipeline convention.")
 
@@ -15093,37 +15399,59 @@ def ask_question(
             blocks_entries: list[str] = []
 
             if from_task:
-                if from_task not in emergent_map:
+                tree_ft = discover_task_tree(tasks_dir)
+                if from_task not in emergent_map and from_task not in tree_ft:
                     return False, {"ok": False, "error": f"Task {from_task!r} not found in {tasks_dir}."}
-                target_t = emergent_map[from_task]
-                raw_dec = target_t.get("decider", "").strip()
-                if not raw_dec or raw_dec == "-":
-                    return False, {"ok": False, "error": f"Task {from_task!r} has no legacy decider to convert."}
-                if re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", raw_dec):
-                    return False, {"ok": False, "error": f"Task {from_task!r} already has a question decider ({raw_dec})."}
-
-                if ":" in raw_dec:
-                    actor, q_txt = [p.strip() for p in raw_dec.split(":", 1)]
+                target_t = emergent_map.get(from_task)
+                raw_dec = (
+                    target_t.get("decider", "").strip()
+                    if target_t is not None
+                    else str(tree_ft[from_task].own_fields.get("decider", "") or "").strip()
+                )
+                has_explicit_question = bool(question and question.strip())
+                if not has_explicit_question:
+                    if not raw_dec or raw_dec == "-":
+                        return False, {"ok": False, "error": f"Task {from_task!r} has no legacy decider to convert."}
+                    if re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", raw_dec):
+                        return False, {"ok": False, "error": f"Task {from_task!r} already has a question decider ({raw_dec})."}
+                    if ":" in raw_dec:
+                        actor, q_txt = [p.strip() for p in raw_dec.split(":", 1)]
+                    else:
+                        actor = "owner"
+                        q_txt = raw_dec.strip()
+                    if not q_txt.endswith("?"):
+                        q_txt += "?"
+                    if len(q_txt) > 160:
+                        q_txt = q_txt[:159] + "?"
+                    question = q_txt
                 else:
-                    actor = "owner"
-                    q_txt = raw_dec.strip()
+                    actor = None
+                    if raw_dec and raw_dec != "-" and not re.match(r"^Q\d{3,}(?:,\s*Q\d{3,})*$", raw_dec) and ":" in raw_dec:
+                        actor = raw_dec.split(":", 1)[0].strip()
 
-                if not q_txt.endswith("?"):
-                    q_txt += "?"
-                if len(q_txt) > 160:
-                    q_txt = q_txt[:159] + "?"
+                if not context and not context_file:
+                    if not has_explicit_question:
+                        context = f"Converted from the legacy decider header of {from_task}; context to be completed by the owner."
+                    elif target_t and target_t.get("goal"):
+                        context = target_t["goal"]
+                    else:
+                        context = f"Blocking question for {from_task}."
 
-                question = q_txt
-                context = f"Converted from the legacy decider header of {from_task}; context to be completed by the owner."
-                options = []
-                recommended = "-"
-                open_answer = "yes"
-                decider = actor or "owner"
-                asked_by = actor or "owner"
-                origin_run = "-"
-                tasks_to_update.append((target_t, "waiting", "SET"))
-                blocks_entries.append(f"{from_task} ({target_t['state']})")
-            else:
+                if not options:
+                    options = []
+                    open_answer = "yes"
+                    if not recommended or recommended == "-":
+                        recommended = "-"
+                if actor and decider == "owner":
+                    decider = actor
+                if actor and asked_by == "owner":
+                    asked_by = actor
+                if not blocks or blocks.strip() == "-":
+                    blocks = from_task
+                elif from_task not in [b.strip() for b in blocks.split(",") if b.strip()]:
+                    blocks = f"{from_task}, {blocks.strip()}"
+
+            if True:
                 if not question or not question.strip():
                     return False, {"ok": False, "error": "Missing required --question."}
                 question = question.strip()
@@ -15222,6 +15550,7 @@ def ask_question(
                     m_num = QUESTION_ID_RE.match(f.name.split("-")[0])
                     if m_num:
                         existing_nums.append(int(f.name.split("-")[0][1:]))
+            existing_nums.extend(_scan_git_branch_and_worktree_ids(tasks_dir, prefix="Q"))
             next_num = max(existing_nums, default=0) + 1
 
             slug = re.sub(r"[^a-z0-9]+", "-", question.lower()).strip("-")
@@ -15949,6 +16278,7 @@ def move_question(
     to: str,
     reason: str | None = None,
     by: str = "owner",
+    force: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -15969,6 +16299,15 @@ def move_question(
                 return False, {"ok": False, "error": f"Question {question_id!r} not found in {tasks_dir}."}
             if target_q["status"] == "moved":
                 return False, {"ok": False, "error": f"Question {question_id!r} is already in status 'moved'."}
+            if target_q["status"] == "answered" and not force:
+                return False, {
+                    "ok": False,
+                    "error": (
+                        f"Question {question_id!r} is already 'answered' (choice={target_q.get('answer', {}).get('choice', '-')!r}). "
+                        f"Record that the decision was applied via 'ai-orch tasks questions apply {question_id}' instead of moving it, "
+                        "or pass --force to overwrite with status 'moved'."
+                    ),
+                }
 
             q_file = pathlib.Path(target_q["file_path"])
             dest_dir = tasks_dir / "questions" / "answered"
@@ -16167,8 +16506,9 @@ def cmd_questions_move(args: argparse.Namespace) -> int:
         tasks_dir=tasks_dir,
         question_id=args.question_id,
         to=args.to,
-        reason=getattr(args, "reason", None),
-        by=getattr(args, "by", "owner"),
+        reason=args.reason,
+        by=args.by,
+        force=getattr(args, "force", False),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -16409,6 +16749,8 @@ def cmd_use_cases_create(args: argparse.Namespace) -> int:
         "description": getattr(args, "description", ""),
         "preconditions": getattr(args, "preconditions", ""),
         "scenario": getattr(args, "scenario", ""),
+        "acceptance_criteria": getattr(args, "criteria", None),
+        "lang": getattr(args, "lang", None),
         "short": getattr(args, "short", None),
     }
     ok, res = create_or_update_use_case(tasks_dir, data)
@@ -16963,6 +17305,7 @@ def inbox_add(
             existing_nums = [
                 int(n["id"][1:]) for n in all_notes if n["id"] and NOTE_ID_RE.match(n["id"])
             ]
+            existing_nums.extend(_scan_git_branch_and_worktree_ids(tasks_dir, prefix="N"))
             next_num = max(existing_nums, default=0) + 1
 
             to_analyze_dir = tasks_dir / "_inbox" / "to-analyze"
@@ -20611,6 +20954,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_qm.add_argument("--to", required=True, help="External tracker URL or reference (e.g. https://tracker.example/issue/42)")
     p_qm.add_argument("--reason", default=None, help="Optional reason for moving the question")
     p_qm.add_argument("--by", default="owner", help="Who moved the question")
+    p_qm.add_argument("--force", action="store_true", default=False, help="Force moving an already-answered question")
     p_qm.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_qm.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_qm.set_defaults(func=cmd_questions_move)
@@ -20655,6 +20999,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_upg.add_argument("--expect-plan-hash", default=None, help="Refuse to apply if current upgrade plan hash does not match this hash")
     p_upg.add_argument("--expect-hash", default=None, help="Alias for --expect-plan-hash")
     p_upg.add_argument("--migrate-plans", action="store_true", default=False, help="Migrate discovered legacy plans into tasks/ directory")
+    p_upg.add_argument("--skip-git-config", "--no-git-config", dest="skip_git_config", action="store_true", default=False, help="Skip registering merge.ai-orch-index in local .git/config")
     p_upg.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_upg.set_defaults(func=cmd_upgrade)
 
@@ -20837,9 +21182,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_col.set_defaults(func=cmd_collapse)
 
     # tasks reopen
-    p_reop_task = sub.add_parser("reopen", help="Reopen a terminal leaf task back to open")
+    p_reop_task = sub.add_parser("reopen", help="Reopen a terminal leaf task back to open or delivered")
     p_reop_task.add_argument("id", help="Node ID to reopen")
     p_reop_task.add_argument("--reason", required=True, help="Reason for reopening")
+    p_reop_task.add_argument("--to", dest="to_state", choices=["open", "delivered"], default=None, help="Target state on reopen (default: delivered when --verify-by is set, else open)")
+    p_reop_task.add_argument("--verify-by", dest="verify_by", default=None, help="Durable verification request target when reopening to delivered")
+    p_reop_task.add_argument("--verify-check", dest="verify_check", default=None, help="Verification check description")
+    p_reop_task.add_argument("--apply", action="store_true", default=False, help="Apply reopen directly without --expect-plan-hash")
     p_reop_task.add_argument("--dry-run", action="store_true", help="Compute plan without writing")
     p_reop_task.add_argument("--expect-plan-hash", default=None, help="Expected plan hash")
     p_reop_task.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
@@ -21070,6 +21419,8 @@ def build_parser() -> argparse.ArgumentParser:
     uc_create.add_argument("--description", default="")
     uc_create.add_argument("--preconditions", default="")
     uc_create.add_argument("--scenario", default="")
+    uc_create.add_argument("--criteria", "--acceptance-criteria", dest="criteria", action="append", default=None, help="Acceptance criteria item(s) (repeatable or semicolon/newline separated)")
+    uc_create.add_argument("--lang", choices=["en", "it"], default=None, help="Template language (default: from orchestration.toml or en)")
     uc_create.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
     uc_create.add_argument("--tasks-dir", default="tasks")
     uc_create.add_argument("--json", action="store_true", default=argparse.SUPPRESS)

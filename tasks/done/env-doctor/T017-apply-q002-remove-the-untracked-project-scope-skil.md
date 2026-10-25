@@ -21,13 +21,9 @@
 Delete the untracked skill copies under .claude/skills, .codex/skills and .kilo/skills of the ai-orchestration repo (never .kilo/worktrees or anything tracked), after listing them; they are reproducible from the source plugins. Decision: questions/Q002.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup

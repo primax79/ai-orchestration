@@ -21,13 +21,9 @@
 Every task, plan task and question carries a 3-4 word short title (header field, e.g. 'Short: release manager'), generated when missing, validated by the engine, shown by the UI/VS Code next to the id, and the skills (task-pipeline, orchestration-workflow template, kilo binding, executor contract) instruct agents to always cite 'ID (short title)' in chat and reports.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

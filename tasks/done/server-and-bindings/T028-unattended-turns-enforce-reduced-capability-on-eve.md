@@ -21,13 +21,9 @@
 Reduced-capability (triage/event_batch) turns are enforced only by Claude's allow-list and Codex's read-only sandbox; the Kilo adapter passes no restriction (orchestration_runs.py:2098-2116), so unattended Kilo turns can edit and run anything. And format_untrusted_event_data wraps data in fixed tags that the data itself can close. Enforce a restricted profile for Kilo unattended turns (verify Kilo's real permission/agent options in references/ or kilo --help before choosing; refuse to run an unattended Kilo turn if no restriction is available), and wrap untrusted data with a per-turn random nonce tag plus escaping, with tests.
 
 ## Steps
-
-- [x] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [x] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup

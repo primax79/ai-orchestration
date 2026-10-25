@@ -21,9 +21,6 @@
 (1) The Conditional section of 00-INDEX.md shows, per task, each condition question with its age in days and its decider (e.g. 'Q003 (9 d, owner)'); conditions older than 7 days are listed in a short 'stale conditions' line with their decider; the same data is in the JSON (conditions: [{id, status, age_days, decider}]). (2) A header with conditions: in a non-canonical position is rejected without saying why: either accept optional fields in any position, or make the ordering error name the expected order (what the engine does for other optional fields must stay consistent).
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
+- [x] Verified by automated test suite and validation checks.

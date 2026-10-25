@@ -21,13 +21,9 @@
 Every pytest session gets a temporary global config with a fixed model mapping, so a broker started by another session or the operator's own mapping cannot change results. Also: the sync-index --adopt preview prints the hash to apply it with. Delivered in 4f1caab and 4a3c4f2; full suite 490 passed.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

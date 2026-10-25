@@ -21,13 +21,9 @@
 orchestration_triggers.py allocates <seq>.json for event_batch turns without the orchestrator lock (it should call the canonical enqueue_turn) and advances the shared role cursor when it merely enqueues a turn, while spec events-and-triggers.md 0c says the cursor advances only after the turn's transcript is persisted. Make triggers enqueue through enqueue_turn under the lock, give trigger scanning its own cursor separate from the role delivery cursor, advance the delivery cursor only after durable turn completion, with tests reproducing the race (concurrent owner enqueue + trigger enqueue) and the lost-event case (turn crashes after the trigger advanced the cursor). Evidence from the review: orchestration_triggers.py:938, :947, :1762; orchestration_orchestrator.py:627, :1372.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup

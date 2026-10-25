@@ -21,13 +21,9 @@
 While a live broker holds broker.lock, a mutating ai-orch CLI command forwards the write to it (stdio shim or local HTTP with the UI token) and returns the broker's result, instead of failing with broker-owns-writes. The guard treats a lock as held only when the manifest pid is alive, and its message never cites a dead pid from a stale broker.json. No session ever needs AI_ORCH_BROKER_CHILD to write.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

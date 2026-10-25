@@ -21,13 +21,9 @@
 In the All-projects view the Queue shows a compact next-up list (like the project view, a few items per project or overall) with a link to the full list, and backlog rows show the task kind.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

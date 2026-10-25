@@ -21,13 +21,9 @@
 'ai-orch mcp --local' serves the broker tools in-process (no broker process) as 16.5 promised; every broker error carries a stable kebab-case 'error' code (e.g. hash-mismatch) and a readable 'message' (no raw CLI JSON); tasks.next and questions.list items carry 'project', and workspace-level next distinguishes _workspace items.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

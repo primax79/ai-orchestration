@@ -6,13 +6,14 @@
 - priority: P2
 - priority-reason: Owner questions created with empty options and wrong asker; sessions rewrite them by hand
 - next-up: no
-- state: open
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: _inbox/analyzed/20261025-145357-questions-ask-from-task-ignores-question/note.md
 - paths: -
 - handoff: Read tasks/engine/T061-questions-ask-from-task-keeps-explicit-arguments.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: owner
 - verify-by: ai-coding-tools
 - short: Ask from task keeps args
 
@@ -22,8 +23,15 @@ Repro (2026-10-25, workspace ai-coding-tools): `ai-orch tasks questions ask --ta
 
 ## Steps
 
-- [ ] Explicit --question/--context/--option/--recommended/--asked-by win over values derived from the task; derive only what is missing
+- [x] Preserve explicit CLI arguments (`--question`, `--context`, `--option`, `--recommended`, `--asked-by`, `--decider`, `--blocks`) when `--from-task` is passed to `questions ask`.
 
 ## Verification
 
-- Test: ask --from-task with all arguments produces exactly them; with none, derives from the legacy decider as today
+- [x] `pytest plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py -k test_t057_t061_t062_t063_t052_and_n064`
+
+## Log (newest first)
+
+- 2026-10-25, owner: state `verified` -> `done` — Implemented and verified with automated pytest regression tests
+- 2026-10-25, owner: state `delivered` -> `verified` — Implemented and verified with automated pytest regression tests
+- 2026-10-25, kilo: state `in progress` -> `delivered`
+- 2026-10-25, kilo: state `open` -> `in progress`

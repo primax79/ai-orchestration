@@ -79,20 +79,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 ## Tasks by category
 
 <!-- ai-orch:generated tasks-by-category -->
-### engine
 
-Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
-
-| Id | Priority | Task | State | Executor | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| T052 (Move answered question guard) | P3 | [questions move refuses or warns on an already answered question](engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | open | kilo | - |
-| T057 (Walk step attribution) | P2 | [Transition walk attributes each step to the right actor](engine/T057-transition-walk-attributes-each-step-to-the-right.md) | open | kilo | - |
-| T058 (Branch id collisions) | P2 | [Id collisions across branches and a dangling merge driver](engine/T058-id-collisions-across-branches-and-a-dangling-merge.md) | open | kilo | - |
-| T059 (Merge driver opt-in) | P3 | [upgrade explains or gates the local git config write of the index merge driver](engine/T059-upgrade-explains-or-gates-the-local-git-config-wri.md) | open | kilo | - |
-| T060 (Initiative rows added) | P2 | [sync-index adds rows for initiatives missing from the index](engine/T060-sync-index-adds-rows-for-initiatives-missing-from.md) | in progress | kilo | - |
-| T061 (Ask from task keeps args) | P2 | [questions ask --from-task keeps explicit arguments](engine/T061-questions-ask-from-task-keeps-explicit-arguments.md) | open | kilo | - |
-| T062 (No delivery with placeholders) | P2 | [transition to delivered refuses template placeholder sections](engine/T062-transition-to-delivered-refuses-template-placehold.md) | open | kilo | - |
-| T063 (Reopen to delivered) | P3 | [reopen can target delivered and set verify-by](engine/T063-reopen-can-target-delivered-and-set-verify-by.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -163,6 +150,16 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T055 (No phantom categories) | [Campaign reports never become categories; sync-index drops vanished categories](done/engine/T055-campaign-reports-never-become-categories-sync-inde.md) | done | 2026-10-25 |
 | T035 (One-shot close) | [One-shot close, clearer derived-state refusal, bulk close of verified](done/engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | done | 2026-10-23 |
 | T037 (Conflict-free task index) | [Task index without merge conflicts across parallel branches](done/engine/T037-task-index-without-merge-conflicts-across-parallel.md) | done | 2026-10-23 |
+| T052 (Move answered question guard) | [questions move refuses or warns on an already answered question](done/engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | done | 2026-10-25 |
+| T057 (Walk step attribution) | [Transition walk attributes each step to the right actor](done/engine/T057-transition-walk-attributes-each-step-to-the-right.md) | done | 2026-10-25 |
+| T058 (Branch id collisions) | [Id collisions across branches and a dangling merge driver](done/engine/T058-id-collisions-across-branches-and-a-dangling-merge.md) | done | 2026-10-25 |
+| T059 (Merge driver opt-in) | [upgrade explains or gates the local git config write of the index merge driver](done/engine/T059-upgrade-explains-or-gates-the-local-git-config-wri.md) | done | 2026-10-25 |
+| T060 (Initiative rows added) | [sync-index adds rows for initiatives missing from the index](done/engine/T060-sync-index-adds-rows-for-initiatives-missing-from.md) | done | 2026-10-25 |
+| T061 (Ask from task keeps args) | [questions ask --from-task keeps explicit arguments](done/engine/T061-questions-ask-from-task-keeps-explicit-arguments.md) | done | 2026-10-25 |
+| T062 (No delivery with placeholders) | [transition to delivered refuses template placeholder sections](done/engine/T062-transition-to-delivered-refuses-template-placehold.md) | done | 2026-10-25 |
+| T063 (Reopen to delivered) | [reopen can target delivered and set verify-by](done/engine/T063-reopen-can-target-delivered-and-set-verify-by.md) | done | 2026-10-25 |
+| T064 (env doctor recognizes identical) | [env doctor recognizes identical per-assistant skill copies across ~/.claude/skills and ~/.kilo/skills as intentional](done/env-doctor/T064-env-doctor-recognizes-identical-per-assistant-skil.md) | done | 2026-10-25 |
+| T065 (Use-case localized Italian section) | [Use-case localized Italian section headings, --criteria option, and Italian stop-word short titles](done/engine/T065-use-case-localized-italian-section-headings-criter.md) | done | 2026-10-25 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

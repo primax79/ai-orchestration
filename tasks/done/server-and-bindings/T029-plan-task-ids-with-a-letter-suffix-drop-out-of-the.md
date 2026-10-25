@@ -21,13 +21,9 @@
 tasks_engine.py does not parse plan tasks with a letter suffix (### 06.1b - ...); validate only warns about a missing ' - ' separator while the task drops out of the index and the initiative count. Accept NN.Tx ids everywhere ids are parsed (plan blocks, depends-on, transitions, qualified refs) or refuse them with a validate ERROR that names the cause; never drop a block silently.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

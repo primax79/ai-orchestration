@@ -21,13 +21,9 @@
 Add ai-orch triggers confirm ACTION_ID --expect-hash H and triggers reject ACTION_ID --reason R: confirm executes the proposed command/run through the same paths as an owner action (run start with plan hash for runs), records the outcome and emits events; reject records the reason. Then wire the UI endpoints (12.6 left them as list-only) and the VS Code handlers.
 
 ## Steps
-
-- [x] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [x] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup

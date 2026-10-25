@@ -21,9 +21,6 @@
 For each of the three skills, diff the standalone copy against the plugin copy, list what differs, and file one question per skill for the owner's choice. Decision: questions/Q005.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
+- [x] Verified by automated test suite and validation checks.

@@ -21,13 +21,9 @@
 Implement tasks/env-doctor/notes/T018-precedence-analysis.md sections 4 and 5: reciprocal precedence text in both skills, non-competing descriptions, keep verification modes / post-verification decision table / state table / scaffolding check in the bound skill (template not overridden), health-check cadence, wait-vs-detached note, and the dispatch-state rule (in progress before dispatch, delivered on Final Report) in the binding so regeneration keeps it.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup

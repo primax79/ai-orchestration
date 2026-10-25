@@ -21,13 +21,9 @@
 A conditions: header (open question ids whose answer may change a finished result; distinct from blocks:): validate checks each id exists; sync-index renders a 'Conditional' section above Done listing such tasks as 'done, conditional (Qnnn)'; when every condition is answered the marker disappears; an answer that changes the result opens a follow-up task. UI (ai-orchestration-ui, VS Code): distinct badge and a KPI counter.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

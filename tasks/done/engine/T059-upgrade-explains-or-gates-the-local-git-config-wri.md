@@ -6,13 +6,14 @@
 - priority: P3
 - priority-reason: Declared in the plan already; requester note, not a blocker
 - next-up: no
-- state: open
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: porting-liferay-8c, T050 re-check 2026-10-25, note (a)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Read tasks/engine/T059-upgrade-explains-or-gates-the-local-git-config-wri.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: owner
 - short: Merge driver opt-in
 
 ## Goal
@@ -21,9 +22,15 @@ upgrade writes merge.ai-orch-index.driver into the target repo's .git/config wit
 
 ## Steps
 
-- [ ] Choose opt-in vs explanation (minor decision, architect)
-- [ ] Implement and test
+- [x] Add `--skip-git-config` (`--no-git-config`) to `tasks upgrade` and print explanatory note when `.git/config` is in the upgrade plan.
 
 ## Verification
 
-- Preview shows the explanation line or the flag gates the write; tests cover both
+- [x] `pytest plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py -k upgrade`
+
+## Log (newest first)
+
+- 2026-10-25, owner: state `verified` -> `done` — Implemented and verified with automated pytest regression tests
+- 2026-10-25, owner: state `delivered` -> `verified` — Implemented and verified with automated pytest regression tests
+- 2026-10-25, kilo: state `in progress` -> `delivered`
+- 2026-10-25, kilo: state `open` -> `in progress`

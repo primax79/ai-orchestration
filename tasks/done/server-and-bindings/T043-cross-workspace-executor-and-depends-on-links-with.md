@@ -21,13 +21,9 @@
 'executor: <workspace>:T030' and cross-workspace depends-on resolve through the workspace registry and show the remote task's live state in validate, the index and the UIs, read-only, like coordinates inside a workspace (16.4).
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup

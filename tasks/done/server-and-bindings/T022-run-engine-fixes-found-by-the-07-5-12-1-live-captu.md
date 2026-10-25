@@ -21,13 +21,9 @@
 Fix the engine problems listed in tasks/12-events-and-triggers/notes/12.1-resumption-facts.md: (1) run cancel must also stop Kilo's tool child processes; (2) continuing a verify run or a run whose worktree was removed must be refused, not run in an empty dir; (3) a verify run must only remove worktrees it created; (4) the supervisor's in-progress transition must not leave the target repo dirty (second execute refused); (5) a failed execute run must let the task go back to open/bounced with a reason; (6) document/handle that a Kilo session resumes only from its original repo; (7) a verify run without --profile must use the configured profile/routing, never silently fall back to built-in expensive models (and Kilo must stay on gemini-3.8-flash).
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup

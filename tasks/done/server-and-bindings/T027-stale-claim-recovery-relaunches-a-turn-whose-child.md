@@ -21,13 +21,9 @@
 run_next_turn claims a turn, releases the orchestrator lock, and the pid is written only after the child starts; a concurrent run-next sees pid=None and treats the claim as crashed (orchestration_orchestrator.py:1034-1052, :1112, :1186-1193), requeueing and launching a second resumption. Respect lease_expires_at and a startup grace period before recovering a claim with no pid; add a test that runs two drains concurrently against a slow-starting stub and asserts a single resumption.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup

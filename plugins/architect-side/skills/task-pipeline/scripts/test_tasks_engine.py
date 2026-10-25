@@ -13228,8 +13228,148 @@ def test_use_cases_create_assigns_next_free_id(tmp_path: pathlib.Path) -> None:
     assert res2.returncode == 0, res2.stdout + res2.stderr
     assert "Created use case UC013" in res2.stdout
     assert len(list((tasks_dir / "use-cases").glob("UC013-*.md"))) == 1
-    # UC001 untouched by the empty-id saves
     assert "First flow" in next((tasks_dir / "use-cases").glob("UC001-*.md")).read_text(encoding="utf-8")
 
     bad = run_cli("use-cases", "create", "--id", "X1", "--title", "Bad", "--tasks-dir", str(tasks_dir), "--json")
     assert bad.returncode != 0
+
+
+def test_t057_t061_t062_t063_t052_and_n064(tmp_path: pathlib.Path) -> None:
+    """Verify T057 (walk step actors), T061 (ask --from-task explicit args),
+    T062 (refuse placeholder delivery), T063 (reopen --to delivered --verify-by),
+    T052 (questions move refuses answered without --force), and N064 (Italian use-case headings & --criteria).
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n"
+        "## Next up\n\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+
+    # T062: task with template placeholders in Steps and Verification is refused on transition to delivered
+    t_ph = tasks_dir / "features" / "T001-placeholder-task.md"
+    t_ph.write_text(
+        "# T001 Placeholder task\n\n"
+        "- id: T001\n"
+        "- title: Placeholder task\n"
+        "- category: features\n"
+        "- priority: P2\n"
+        "- priority-reason: test\n"
+        "- next-up: no\n"
+        "- state: in progress\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: Read tasks/features/T001-placeholder-task.md\n\n"
+        "## Goal\n\nTest goal.\n\n"
+        "## Steps\n\n- [ ] Implement task steps.\n\n"
+        "## Verification\n\n- [ ] Verify task implementation.\n",
+        encoding="utf-8",
+    )
+    res_ph = run_cli("transition", "T001", "delivered", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_ph.returncode != 0
+    ph_data = json.loads(res_ph.stdout)
+    assert "## Steps" in ph_data["error"]
+    assert "## Verification" in ph_data["error"]
+
+    # Replace placeholders with concrete steps & verification and verify T057 walk step actor attribution
+    t_ph.write_text(
+        t_ph.read_text(encoding="utf-8")
+        .replace("- [ ] Implement task steps.", "- [x] Implemented feature X.")
+        .replace("- [ ] Verify task implementation.", "- [x] pytest passed.")
+        .replace("- state: in progress", "- state: open"),
+        encoding="utf-8",
+    )
+    res_walk = run_cli(
+        "close", "T001",
+        "--verifier", "claude:deep-reasoning",
+        "--reason", "Independent check passed",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_walk.returncode == 0, res_walk.stdout + res_walk.stderr
+    done_t1 = tasks_dir / "done" / "features" / "T001-placeholder-task.md"
+    assert done_t1.is_file()
+    t1_text = done_t1.read_text(encoding="utf-8")
+    assert "kilo: state `open` -> `in progress`" in t1_text
+    assert "kilo: state `in progress` -> `delivered`" in t1_text
+    assert "claude:deep-reasoning: state `delivered` -> `verified` — Independent check passed" in t1_text
+    assert "claude:deep-reasoning: state `verified` -> `done` — Independent check passed" in t1_text
+
+    # T063: reopen T001 directly to delivered with --verify-by
+    res_reop = run_cli(
+        "reopen", "T001",
+        "--to", "delivered",
+        "--verify-by", "gcube_atlas",
+        "--reason", "Closed by architect; requester validates",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_reop.returncode == 0, res_reop.stdout + res_reop.stderr
+    active_t1 = tasks_dir / "features" / "T001-placeholder-task.md"
+    assert active_t1.is_file()
+    assert not done_t1.exists()
+    reop_text = active_t1.read_text(encoding="utf-8")
+    assert "- state: delivered\n" in reop_text
+    assert "- verify-by: gcube_atlas\n" in reop_text
+    assert "- verifier:" not in reop_text
+    assert "state `done` -> `delivered` — Closed by architect; requester validates" in reop_text
+
+    # T061: questions ask --from-task keeps explicit --question, --option, --recommended, --asked-by, --decider
+    active_t1.write_text(reop_text.replace("- state: delivered\n", "- state: open\n"), encoding="utf-8")
+    res_q = run_cli(
+        "questions", "ask",
+        "--from-task", "T001",
+        "--question", "Which backend should T001 use?",
+        "--context", "Explicit context for T001.",
+        "--option", "A: SQLite",
+        "--option", "B: Postgres",
+        "--recommended", "A",
+        "--asked-by", "claude",
+        "--decider", "owner",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_q.returncode == 0, res_q.stdout + res_q.stderr
+    q_data = json.loads(res_q.stdout)
+    qid = q_data["id"]
+    q_show = json.loads(run_cli("questions", "show", qid, "--tasks-dir", str(tasks_dir), "--json").stdout)["question"]
+    assert q_show["question"] == "Which backend should T001 use?"
+    assert q_show["recommended"] == "A"
+    assert q_show["asked_by"] == "claude"
+    assert q_show["decider"] == "owner"
+    assert [o["label"] for o in q_show["options"]] == ["A", "B"]
+
+    # T052: answer Q001, then verify questions move refuses without --force and succeeds with --force
+    res_ans = run_cli("questions", "answer", qid, "--choice", "A", "--by", "owner", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_ans.returncode == 0
+    res_mv_refuse = run_cli("questions", "move", qid, "--to", "https://example.org/1", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_mv_refuse.returncode != 0
+    assert "already 'answered'" in json.loads(res_mv_refuse.stdout)["error"]
+    res_mv_force = run_cli("questions", "move", qid, "--to", "https://example.org/1", "--force", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_mv_force.returncode == 0
+
+    # N064: Italian use-case creation with --lang it and --criteria, plus clean Italian short-title derivation
+    res_uc = run_cli(
+        "use-cases", "create",
+        "--title", "Tenere una cartella del progetto sincronizzata",
+        "--lang", "it",
+        "--criteria", "La cartella viene indicizzata; I file eliminati spariscono",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_uc.returncode == 0, res_uc.stdout + res_uc.stderr
+    uc_id = json.loads(res_uc.stdout)["id"]
+    uc_show = json.loads(run_cli("use-cases", "show", uc_id, "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc_show["short_title"] == "Tenere cartella progetto sincronizzata"
+    assert "La cartella viene indicizzata" in uc_show["acceptance_criteria"]
+    assert "I file eliminati spariscono" in uc_show["acceptance_criteria"]
+    assert "## Descrizione" in uc_show["content"]
+    assert "## Criteri di accettazione" in uc_show["content"]
+

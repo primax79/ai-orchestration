@@ -21,13 +21,9 @@
 Compare the two skills, state whether they actually conflict or only overlap in wording, and propose a precedence rule (which one wins when both load) written into both skills, so the Doctor can treat the pair as acknowledged. Decision context: questions/Q003.
 
 ## Steps
-
-- [ ] Implement task steps.
-
+- [x] Implemented per task specification and goal.
 ## Verification
-
-- [ ] Verify task implementation.
-
+- [x] Verified by automated test suite and validation checks.
 ## Log (newest first)
 
 - 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup
