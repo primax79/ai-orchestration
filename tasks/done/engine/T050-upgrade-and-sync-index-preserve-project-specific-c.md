@@ -6,14 +6,14 @@
 - priority: P1
 - priority-reason: upgrade/sync-index destroy project rules and registry columns; porting_liferay cannot adopt the current engine and warns its sessions not to run them
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: inbox N049 (porting_liferay, T124 there)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py, plugins/architect-side/skills/task-pipeline/SKILL.md
 - handoff: Read tasks/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md, do the open steps, run the Verification, update the task and the registry.
-- verifier: porting-liferay-8c
+- verifier: porting_liferay
 - verify-by: porting_liferay
 - short: Non-destructive upgrade
 
@@ -68,6 +68,8 @@ Re-ping porting_liferay when fixed; they re-run on the copy.
 
 ## Log (newest first)
 
+- 2026-10-25, porting_liferay: state `verified` -> `done`
+- 2026-10-25, porting_liferay: state `delivered` -> `verified`
 - 2026-10-25, kilo: state `bounced` -> `delivered` — KO3 fixed: Id-cell format kept per table; short goes into the Task link text in bare-id tables
 - 2026-10-25, porting-liferay-8c: state `delivered` -> `bounced` — Re-check NOT OK on KO3 only: short label placed in the Id cell instead of the Task link text (57 Id cells changed)
 - 2026-10-25, kilo: state `bounced` -> `delivered` — Fixed all 4 bounce items, added 5 regression tests, verified on scratch copy of porting_liferay/tasks
