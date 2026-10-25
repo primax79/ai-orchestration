@@ -21,6 +21,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -8179,7 +8180,154 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
         except OSError:
             pass
 
+    if _gitattributes_names_ai_orch_index(tasks_dir) and _is_inside_git_repo(tasks_dir):
+        existing_drv, _ = _get_git_merge_driver_config(tasks_dir)
+        if not existing_drv:
+            driver_cmd, _ = _merge_driver_config_spec()
+            warnings.append(
+                f".gitattributes configures merge=ai-orch-index for 00-INDEX.md, but git config lacks merge.ai-orch-index.driver; "
+                f'fix with: git config merge.ai-orch-index.driver "{driver_cmd}" (or run \'ai-orch tasks upgrade\').'
+            )
+
     return errors, warnings, emergent, initiatives
+
+
+def _resolve_stable_ai_orch_command() -> str:
+    """Resolve a stable ai-orch command: the version-free launcher if installed and current,
+    else the absolute path of this checkout's bin/ai-orch."""
+    cur = pathlib.Path(__file__).resolve().parent
+    this_bin: pathlib.Path | None = None
+    for parent in [cur, *cur.parents]:
+        cand = parent / "bin" / "ai-orch"
+        if cand.is_file():
+            this_bin = cand.resolve()
+            break
+
+    raw_home = os.environ.get("AI_ORCH_HOME")
+    if raw_home and raw_home.strip():
+        home = pathlib.Path(os.path.abspath(os.path.expanduser(raw_home.strip())))
+    else:
+        home = pathlib.Path(os.path.abspath(os.path.expanduser("~")))
+
+    launcher = home / ".local" / "bin" / "ai-orch"
+    if launcher.is_file() and os.access(launcher, os.X_OK):
+        use_launcher = True
+        if this_bin is not None:
+            try:
+                head = launcher.read_text(encoding="utf-8", errors="replace")[:4096]
+                if "# ai-orchestration-launcher-v1" in head:
+                    import importlib.machinery
+                    import importlib.util
+
+                    loader = importlib.machinery.SourceFileLoader("_ai_orch_launcher_probe", str(launcher))
+                    spec = importlib.util.spec_from_loader("_ai_orch_launcher_probe", loader)
+                    if spec is not None:
+                        mod = importlib.util.module_from_spec(spec)
+                        loader.exec_module(mod)
+                        resolved_bin = pathlib.Path(mod.resolve_ai_orch_bin()).resolve()
+                        target_engine = (
+                            resolved_bin.parent.parent
+                            / "plugins"
+                            / "architect-side"
+                            / "skills"
+                            / "task-pipeline"
+                            / "scripts"
+                            / "tasks_engine.py"
+                        )
+                        if target_engine.is_file():
+                            eng_text = target_engine.read_text(encoding="utf-8", errors="replace")
+                            if "def merge_index_three_way" not in eng_text:
+                                use_launcher = False
+            except Exception:
+                pass
+        if use_launcher:
+            cmd_path = str(launcher)
+            return shlex.quote(cmd_path) if " " in cmd_path else cmd_path
+
+    if this_bin is not None:
+        cmd_path = str(this_bin)
+        return shlex.quote(cmd_path) if " " in cmd_path else cmd_path
+
+    env_bin = os.environ.get("AI_ORCH_BIN")
+    if env_bin and pathlib.Path(env_bin).is_file():
+        cmd_path = str(pathlib.Path(env_bin).resolve())
+        return shlex.quote(cmd_path) if " " in cmd_path else cmd_path
+
+    return "ai-orch"
+
+
+def _merge_driver_config_spec() -> tuple[str, str]:
+    stable_cmd = _resolve_stable_ai_orch_command()
+    driver_cmd = f"{stable_cmd} tasks merge-index %O %A %B"
+    driver_name = "ai-orch conflict-free 00-INDEX.md merge driver"
+    return driver_cmd, driver_name
+
+
+def _git_working_dir(tasks_dir: pathlib.Path) -> pathlib.Path | None:
+    for cand in (tasks_dir, tasks_dir.parent):
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def _is_inside_git_repo(tasks_dir: pathlib.Path) -> bool:
+    git_cwd = _git_working_dir(tasks_dir)
+    if git_cwd is None:
+        return False
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=str(git_cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return res.returncode == 0
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _get_git_merge_driver_config(tasks_dir: pathlib.Path) -> tuple[str, str]:
+    git_cwd = _git_working_dir(tasks_dir)
+    if git_cwd is None:
+        return "", ""
+    drv_val = ""
+    name_val = ""
+    try:
+        r_drv = subprocess.run(
+            ["git", "config", "--get", "merge.ai-orch-index.driver"],
+            cwd=str(git_cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if r_drv.returncode == 0:
+            drv_val = r_drv.stdout.strip()
+        r_name = subprocess.run(
+            ["git", "config", "--get", "merge.ai-orch-index.name"],
+            cwd=str(git_cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if r_name.returncode == 0:
+            name_val = r_name.stdout.strip()
+    except (FileNotFoundError, OSError):
+        pass
+    return drv_val, name_val
+
+
+def _gitattributes_names_ai_orch_index(tasks_dir: pathlib.Path) -> bool:
+    for ga_path in (tasks_dir / ".gitattributes", tasks_dir.parent / ".gitattributes"):
+        if ga_path.is_file():
+            try:
+                for line in ga_path.read_text(encoding="utf-8").splitlines():
+                    s = line.strip()
+                    if s and not s.startswith("#") and "merge=ai-orch-index" in s:
+                        return True
+            except OSError:
+                pass
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -13353,6 +13501,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                     print(f"[ok] {index_path} already has markers and is in sync")
                 else:
                     print(f"[ok] already in sync, nothing written ({index_path})")
+            print("preview only, nothing written; re-run with --apply")
         return 0
 
     # 6. Check mode (--check without adopt)
@@ -13450,7 +13599,532 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
         )
     else:
         sys.stdout.write(rendered)
+        if not rendered.endswith("\n"):
+            sys.stdout.write("\n")
+        print("preview only, nothing written; re-run with --apply")
     return 0
+
+
+def _split_conflicted_text(text: str) -> tuple[str, str, str]:
+    """Split text containing git conflict markers into (base, ours, theirs)."""
+    lines = text.splitlines(keepends=True)
+    base_out: list[str] = []
+    ours_out: list[str] = []
+    theirs_out: list[str] = []
+    state = "normal"
+    cur_ours: list[str] = []
+    cur_base: list[str] = []
+    cur_theirs: list[str] = []
+    has_diff3_base = False
+
+    for line in lines:
+        if line.startswith("<<<<<<<"):
+            state = "ours"
+            cur_ours = []
+            cur_base = []
+            cur_theirs = []
+            has_diff3_base = False
+            continue
+        if state == "ours" and line.startswith("|||||||"):
+            state = "base"
+            has_diff3_base = True
+            continue
+        if state in ("ours", "base") and line.startswith("======="):
+            state = "theirs"
+            continue
+        if state in ("ours", "base", "theirs") and line.startswith(">>>>>>>"):
+            ours_out.extend(cur_ours)
+            theirs_out.extend(cur_theirs)
+            if has_diff3_base:
+                base_out.extend(cur_base)
+            state = "normal"
+            continue
+        if state == "normal":
+            base_out.append(line)
+            ours_out.append(line)
+            theirs_out.append(line)
+        elif state == "ours":
+            cur_ours.append(line)
+        elif state == "base":
+            cur_base.append(line)
+        elif state == "theirs":
+            cur_theirs.append(line)
+
+    return "".join(base_out), "".join(ours_out), "".join(theirs_out)
+
+
+def _merge_table_rows_3way(
+    base_order: list[str],
+    base_map: dict[str, str],
+    ours_order: list[str],
+    ours_map: dict[str, str],
+    theirs_order: list[str],
+    theirs_map: dict[str, str],
+    disk_order: list[str],
+    disk_map: dict[str, str],
+    disk_existing_ids: set[str],
+    was_pre_conflicted: bool = False,
+) -> tuple[list[str], dict[str, str]]:
+    """Row-level 3-way merge of a generated index table keyed by task/item ID.
+    Union of rows: ours U theirs minus rows deleted on either side relative to base;
+    conflicting edits of the same row -> regenerate from disk header if file exists, else keep theirs.
+    """
+    candidate_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for seq in (ours_order, theirs_order, disk_order):
+        for k in seq:
+            if k not in seen_keys:
+                seen_keys.add(k)
+                candidate_keys.append(k)
+
+    merged_order: list[str] = []
+    merged_map: dict[str, str] = {}
+
+    for k in candidate_keys:
+        in_base = k in base_map
+        in_ours = k in ours_map
+        in_theirs = k in theirs_map
+        in_disk = k in disk_existing_ids and k in disk_map
+
+        if in_base:
+            if not in_ours or not in_theirs:
+                # Deleted on at least one branch relative to base
+                continue
+            b_row = base_map[k]
+            o_row = ours_map[k]
+            t_row = theirs_map[k]
+            if o_row == t_row:
+                chosen = disk_map[k] if (was_pre_conflicted and in_disk) else o_row
+            elif o_row == b_row and t_row != b_row:
+                # Only theirs changed this row relative to base
+                chosen = t_row
+            elif t_row == b_row and o_row != b_row:
+                # Only ours changed this row relative to base
+                chosen = o_row
+            else:
+                # Conflicting edits on both sides -> regenerate from header if file exists, else keep theirs
+                chosen = disk_map[k] if in_disk else t_row
+            merged_order.append(k)
+            merged_map[k] = chosen
+        else:
+            if in_ours and in_theirs:
+                o_row = ours_map[k]
+                t_row = theirs_map[k]
+                if o_row == t_row:
+                    chosen = disk_map[k] if (was_pre_conflicted and in_disk) else o_row
+                else:
+                    chosen = disk_map[k] if in_disk else t_row
+                merged_order.append(k)
+                merged_map[k] = chosen
+            elif in_ours:
+                chosen = disk_map[k] if (was_pre_conflicted and in_disk) else ours_map[k]
+                merged_order.append(k)
+                merged_map[k] = chosen
+            elif in_theirs:
+                chosen = disk_map[k] if (was_pre_conflicted and in_disk) else theirs_map[k]
+                merged_order.append(k)
+                merged_map[k] = chosen
+            elif in_disk:
+                merged_order.append(k)
+                merged_map[k] = disk_map[k]
+
+    return merged_order, merged_map
+
+
+def _extract_table_preamble(block_text: str) -> list[str]:
+    preamble: list[str] = []
+    for line in block_text.splitlines():
+        line_s = line.strip()
+        if line_s.startswith("|"):
+            break
+        if line_s and not line_s.startswith(("<", "=", ">", "<!--")):
+            preamble.append(line)
+    return preamble
+
+
+def merge_index_three_way(
+    tasks_dir: pathlib.Path,
+    base_text: str,
+    ours_text: str,
+    theirs_text: str,
+) -> tuple[str, bool]:
+    """Perform a 3-way merge of tasks/00-INDEX.md:
+    - Row-level 3-way merge inside <!-- ai-orch:generated ... --> regions (union of rows keyed by ID,
+      respecting deletions relative to base, regenerating conflicting row edits from disk headers if
+      present else keeping theirs, with zero duplicate rows).
+    - Standard 3-way text merge outside generated regions (leaving conflict markers and returning
+      has_conflict=True if non-generated lines truly conflict).
+    """
+    was_pre_conflicted = ("<<<<<<<" in ours_text) or bool(
+        re.search(r"^(<{7}|={7}|>{7}|\|{7})\b", ours_text, re.MULTILINE)
+    )
+    if was_pre_conflicted:
+        c_base, c_ours, c_theirs = _split_conflicted_text(ours_text)
+        ours_clean = c_ours
+        if not theirs_text.strip() or (not has_generated_markers(theirs_text) and "|" not in theirs_text):
+            base_text = c_base
+            theirs_text = c_theirs
+    else:
+        ours_clean = ours_text
+
+    if "<<<<<<<" in theirs_text:
+        _, _, theirs_clean = _split_conflicted_text(theirs_text)
+    else:
+        theirs_clean = theirs_text
+
+    if "<<<<<<<" in base_text:
+        base_clean, _, _ = _split_conflicted_text(base_text)
+    else:
+        base_clean = base_text
+
+    base_marked = adopt_markers(base_clean) if (base_clean.strip() and not has_generated_markers(base_clean)) else base_clean
+    ours_marked = adopt_markers(ours_clean) if (ours_clean.strip() and not has_generated_markers(ours_clean)) else ours_clean
+    theirs_marked = adopt_markers(theirs_clean) if (theirs_clean.strip() and not has_generated_markers(theirs_clean)) else theirs_clean
+
+    try:
+        disk_rendered = render_synced_index(tasks_dir, ours_text if was_pre_conflicted else ours_marked, adopt=True)
+    except Exception:
+        disk_rendered = ours_marked
+
+    if not ours_marked.strip() and disk_rendered.strip():
+        ours_marked = disk_rendered
+    if not theirs_marked.strip() and ours_marked.strip():
+        theirs_marked = ours_marked
+
+    # Discover IDs whose backing files actually exist on disk right now
+    disk_existing_ids: set[str] = set()
+    try:
+        for t in discover_emergent_tasks(tasks_dir):
+            if t.get("id"):
+                disk_existing_ids.add(t["id"])
+        for init in discover_initiatives(tasks_dir):
+            iid = str(init["id"])
+            disk_existing_ids.add(iid)
+            disk_existing_ids.add(f"INIT-{iid}")
+            for sub_t in init.get("tasks", []):
+                disk_existing_ids.add(sub_t["id"])
+                disk_existing_ids.add(f"{iid}.{sub_t['id']}")
+        for q in discover_questions(tasks_dir):
+            if q.get("id"):
+                disk_existing_ids.add(q["id"])
+        specs_dir = tasks_dir / "specs"
+        if specs_dir.is_dir():
+            for sf in specs_dir.glob("*.md"):
+                if sf.is_file() and not sf.name.startswith("."):
+                    disk_existing_ids.add(sf.stem)
+    except Exception:
+        pass
+
+    # 1. Done & Conditional sections first (so we know terminal IDs)
+    b_done_txt = _extract_index_section_text(base_marked, "Done", "done")
+    o_done_txt = _extract_index_section_text(ours_marked, "Done", "done")
+    t_done_txt = _extract_index_section_text(theirs_marked, "Done", "done")
+    d_done_txt = _extract_index_section_text(disk_rendered, "Done", "done")
+
+    hdr_done, sep_done = (
+        _extract_existing_table_header(o_done_txt, 4, allow_extra=True)
+        or _extract_existing_table_header(t_done_txt, 4, allow_extra=True)
+        or _extract_existing_table_header(d_done_txt, 4, allow_extra=True)
+        or ("| Id | Task | Result | Closed |", "| --- | --- | --- | --- |")
+    )
+    b_do, b_dm = _parse_index_table_rows(b_done_txt, "done")
+    o_do, o_dm = _parse_index_table_rows(o_done_txt, "done")
+    t_do, t_dm = _parse_index_table_rows(t_done_txt, "done")
+    d_do, d_dm = _parse_index_table_rows(d_done_txt, "done")
+    m_done_order, m_done_map = _merge_table_rows_3way(
+        b_do, b_dm, o_do, o_dm, t_do, t_dm, d_do, d_dm, disk_existing_ids, was_pre_conflicted
+    )
+    if o_dm != t_dm or was_pre_conflicted:
+        m_done_order.sort(key=_natural_sort_key, reverse=True)
+    done_content = "\n".join([hdr_done, sep_done] + [m_done_map[k] for k in m_done_order])
+
+    b_cond_txt = _extract_index_section_text(base_marked, "Conditional", "conditional")
+    o_cond_txt = _extract_index_section_text(ours_marked, "Conditional", "conditional")
+    t_cond_txt = _extract_index_section_text(theirs_marked, "Conditional", "conditional")
+    d_cond_txt = _extract_index_section_text(disk_rendered, "Conditional", "conditional")
+    b_co, b_cm = _parse_index_table_rows(b_cond_txt, "conditional")
+    o_co, o_cm = _parse_index_table_rows(o_cond_txt, "conditional")
+    t_co, t_cm = _parse_index_table_rows(t_cond_txt, "conditional")
+    d_co, d_cm = _parse_index_table_rows(d_cond_txt, "conditional")
+    m_cond_order, m_cond_map = _merge_table_rows_3way(
+        b_co, b_cm, o_co, o_cm, t_co, t_cm, d_co, d_cm, disk_existing_ids, was_pre_conflicted
+    )
+    m_cond_order.sort(key=_natural_sort_key, reverse=True)
+    cond_content = "\n".join(
+        ["| Id | Task | Result | Closed |", "| --- | --- | --- | --- |"] + [m_cond_map[k] for k in m_cond_order]
+    )
+
+    merged_terminal_ids = set(m_done_map.keys()) | set(m_cond_map.keys())
+
+    # 2. Initiatives section
+    b_init_txt = _extract_index_section_text(base_marked, "Initiatives", "initiatives")
+    o_init_txt = _extract_index_section_text(ours_marked, "Initiatives", "initiatives")
+    t_init_txt = _extract_index_section_text(theirs_marked, "Initiatives", "initiatives")
+    d_init_txt = _extract_index_section_text(disk_rendered, "Initiatives", "initiatives")
+    hdr_init, sep_init = (
+        _extract_existing_table_header(o_init_txt, 6, allow_extra=True)
+        or _extract_existing_table_header(o_init_txt, 4, allow_extra=True)
+        or _extract_existing_table_header(t_init_txt, 6, allow_extra=True)
+        or _extract_existing_table_header(t_init_txt, 4, allow_extra=True)
+        or _extract_existing_table_header(d_init_txt, 6, allow_extra=True)
+        or ("| Priority | # | Initiative | Status | Depends on | Size |", "| --- | --- | --- | --- | --- | --- |")
+    )
+    b_io, b_im = _parse_index_table_rows(b_init_txt, "initiatives")
+    o_io, o_im = _parse_index_table_rows(o_init_txt, "initiatives")
+    t_io, t_im = _parse_index_table_rows(t_init_txt, "initiatives")
+    d_io, d_im = _parse_index_table_rows(d_init_txt, "initiatives")
+    m_init_order, m_init_map = _merge_table_rows_3way(
+        b_io, b_im, o_io, o_im, t_io, t_im, d_io, d_im, disk_existing_ids, was_pre_conflicted
+    )
+    init_hdr_cells = [c.strip() for c in hdr_init.strip("|").split("|")]
+    init_id_col = 0 if (init_hdr_cells and init_hdr_cells[0].lower() in ("nn", "#", "id")) else 1
+    if o_im != t_im or was_pre_conflicted:
+        def _merged_init_sort_key(k: str) -> tuple:
+            row_s = m_init_map[k]
+            cells = [c.strip() for c in row_s.strip("|").split("|")]
+            if init_id_col == 0:
+                return (0, _natural_sort_key(k))
+            pri_s = cells[0] if cells else ""
+            return (int(pri_s) if pri_s.isdigit() else 999, _natural_sort_key(k))
+        m_init_order.sort(key=_merged_init_sort_key)
+    init_preamble = _extract_table_preamble(o_init_txt or t_init_txt or d_init_txt)
+    init_lines = init_preamble + ([""] if init_preamble else []) + [hdr_init, sep_init] + [m_init_map[k] for k in m_init_order]
+    init_content = "\n".join(init_lines)
+
+    # 3. Specs section
+    b_sp_txt = _extract_index_section_text(base_marked, "Specs", "specs")
+    o_sp_txt = _extract_index_section_text(ours_marked, "Specs", "specs")
+    t_sp_txt = _extract_index_section_text(theirs_marked, "Specs", "specs")
+    d_sp_txt = _extract_index_section_text(disk_rendered, "Specs", "specs")
+    hdr_specs, sep_specs = (
+        _extract_existing_table_header(o_sp_txt, 2)
+        or _extract_existing_table_header(t_sp_txt, 2)
+        or _extract_existing_table_header(d_sp_txt, 2)
+        or ("| Spec | Drives |", "| --- | --- |")
+    )
+    b_so, b_sm = _parse_index_table_rows(b_sp_txt, "specs")
+    o_so, o_sm = _parse_index_table_rows(o_sp_txt, "specs")
+    t_so, t_sm = _parse_index_table_rows(t_sp_txt, "specs")
+    d_so, d_sm = _parse_index_table_rows(d_sp_txt, "specs")
+    m_sp_order, m_sp_map = _merge_table_rows_3way(
+        b_so, b_sm, o_so, o_sm, t_so, t_sm, d_so, d_sm, disk_existing_ids, was_pre_conflicted
+    )
+    m_sp_order.sort(key=_natural_sort_key)
+    sp_preamble = _extract_table_preamble(o_sp_txt or t_sp_txt or d_sp_txt)
+    sp_lines = sp_preamble + ([""] if sp_preamble else []) + [hdr_specs, sep_specs] + [m_sp_map[k] for k in m_sp_order]
+    specs_content = "\n".join(sp_lines)
+
+    # 4. Next up section
+    b_nu_txt = _extract_index_section_text(base_marked, "Next up", "next-up")
+    o_nu_txt = _extract_index_section_text(ours_marked, "Next up", "next-up")
+    t_nu_txt = _extract_index_section_text(theirs_marked, "Next up", "next-up")
+    d_nu_txt = _extract_index_section_text(disk_rendered, "Next up", "next-up")
+    hdr_next, sep_next = (
+        _extract_existing_table_header(o_nu_txt, 5, allow_extra=True)
+        or _extract_existing_table_header(t_nu_txt, 5, allow_extra=True)
+        or _extract_existing_table_header(d_nu_txt, 5, allow_extra=True)
+        or ("| Id | Priority | Task | Executor | Handoff |", "| --- | --- | --- | --- | --- |")
+    )
+    b_no, b_nm = _parse_index_table_rows(b_nu_txt, "next-up")
+    o_no, o_nm = _parse_index_table_rows(o_nu_txt, "next-up")
+    t_no, t_nm = _parse_index_table_rows(t_nu_txt, "next-up")
+    d_no, d_nm = _parse_index_table_rows(d_nu_txt, "next-up")
+    m_nu_order, m_nu_map = _merge_table_rows_3way(
+        b_no, b_nm, o_no, o_nm, t_no, t_nm, d_no, d_nm, disk_existing_ids, was_pre_conflicted
+    )
+    m_nu_order = [k for k in m_nu_order if k not in merged_terminal_ids]
+    if o_nm != t_nm or was_pre_conflicted:
+        def _nu_sort_key(k: str) -> tuple:
+            cells = [c.strip() for c in m_nu_map[k].strip("|").split("|")]
+            pri = cells[1] if len(cells) > 1 else "P2"
+            return (PRIORITY_SORT_KEY.get(pri, 99), _natural_sort_key(k))
+        m_nu_order.sort(key=_nu_sort_key)
+    next_up_content = "\n".join([hdr_next, sep_next] + [m_nu_map[k] for k in m_nu_order[:5]])
+
+    # 5. Tasks by category section
+    def _extract_cat_blocks(sec_txt: str) -> tuple[list[str], dict[str, str]]:
+        cats: list[str] = []
+        blocks: dict[str, str] = {}
+        if not sec_txt:
+            return cats, blocks
+        cat_matches = list(re.finditer(r"^###\s+([A-Za-z0-9_-]+)\s*$", sec_txt, re.MULTILINE))
+        for idx, cm in enumerate(cat_matches):
+            cname = cm.group(1)
+            start_pos = cm.end()
+            end_pos = cat_matches[idx + 1].start() if idx + 1 < len(cat_matches) else len(sec_txt)
+            if cname not in blocks:
+                cats.append(cname)
+            blocks[cname] = sec_txt[start_pos:end_pos]
+        return cats, blocks
+
+    b_cat_txt = _extract_index_section_text(base_marked, "Tasks by category", "tasks-by-category")
+    o_cat_txt = _extract_index_section_text(ours_marked, "Tasks by category", "tasks-by-category")
+    t_cat_txt = _extract_index_section_text(theirs_marked, "Tasks by category", "tasks-by-category")
+    d_cat_txt = _extract_index_section_text(disk_rendered, "Tasks by category", "tasks-by-category")
+
+    b_cats, b_cblocks = _extract_cat_blocks(b_cat_txt)
+    o_cats, o_cblocks = _extract_cat_blocks(o_cat_txt)
+    t_cats, t_cblocks = _extract_cat_blocks(t_cat_txt)
+    d_cats, d_cblocks = _extract_cat_blocks(d_cat_txt)
+
+    all_cats: list[str] = []
+    for seq in (o_cats, t_cats, d_cats):
+        for c in seq:
+            if c not in all_cats:
+                all_cats.append(c)
+
+    combined_cat_source = "\n\n".join(x for x in (o_cat_txt, t_cat_txt, d_cat_txt) if x)
+    cat_lines: list[str] = []
+    out_cat_idx = 0
+    for cat in all_cats:
+        cb_o, cb_m = _parse_index_table_rows(b_cblocks.get(cat, ""), "category")
+        co_o, co_m = _parse_index_table_rows(o_cblocks.get(cat, ""), "category")
+        ct_o, ct_m = _parse_index_table_rows(t_cblocks.get(cat, ""), "category")
+        cd_o, cd_m = _parse_index_table_rows(d_cblocks.get(cat, ""), "category")
+
+        mc_order, mc_map = _merge_table_rows_3way(
+            cb_o, cb_m, co_o, co_m, ct_o, ct_m, cd_o, cd_m, disk_existing_ids, was_pre_conflicted
+        )
+        mc_order = [k for k in mc_order if k not in merged_terminal_ids]
+
+        if cat in b_cats and (cat not in o_cats or cat not in t_cats) and not mc_order and not (tasks_dir / cat).is_dir():
+            continue
+
+        if co_m != ct_m or was_pre_conflicted:
+            mc_order.sort(key=_natural_sort_key)
+
+        if out_cat_idx > 0:
+            cat_lines.append("")
+        out_cat_idx += 1
+
+        blurb = _read_category_blurb(tasks_dir, cat, combined_cat_source)
+        hdr_cat, sep_cat = (
+            _extract_existing_table_header(o_cblocks.get(cat, ""), 6, allow_extra=True)
+            or _extract_existing_table_header(t_cblocks.get(cat, ""), 6, allow_extra=True)
+            or _extract_existing_table_header(d_cblocks.get(cat, ""), 6, allow_extra=True)
+            or ("| Id | Priority | Task | State | Executor | Depends on |", "| --- | --- | --- | --- | --- | --- |")
+        )
+        cat_lines.extend([f"### {cat}", "", blurb, "", hdr_cat, sep_cat])
+        cat_lines.extend([mc_map[k] for k in mc_order])
+
+    cat_content = "\n".join(cat_lines)
+
+    # 6. Decisions waiting section
+    b_dec_txt = _extract_index_section_text(base_marked, "Decisions waiting", "decisions")
+    o_dec_txt = _extract_index_section_text(ours_marked, "Decisions waiting", "decisions")
+    t_dec_txt = _extract_index_section_text(theirs_marked, "Decisions waiting", "decisions")
+    d_dec_txt = _extract_index_section_text(disk_rendered, "Decisions waiting", "decisions")
+
+    hdr_dec_5 = (
+        _extract_existing_table_header(o_dec_txt, 5)
+        or _extract_existing_table_header(t_dec_txt, 5)
+        or _extract_existing_table_header(d_dec_txt, 5)
+    )
+    hdr_dec_4 = (
+        _extract_existing_table_header(o_dec_txt, 4)
+        or _extract_existing_table_header(t_dec_txt, 4)
+        or _extract_existing_table_header(d_dec_txt, 4)
+    )
+    hdr_dec, sep_dec = hdr_dec_5 or hdr_dec_4 or (
+        "| Task / Initiative | Question (exact) | Decider | Blocks |",
+        "| --- | --- | --- | --- |",
+    )
+    dec_cols = len([c.strip() for c in hdr_dec.strip("|").split("|")])
+
+    b_dco, b_dcm = _parse_index_table_rows(b_dec_txt, "decisions")
+    o_dco, o_dcm = _parse_index_table_rows(o_dec_txt, "decisions")
+    t_dco, t_dcm = _parse_index_table_rows(t_dec_txt, "decisions")
+    d_dco, d_dcm = _parse_index_table_rows(d_dec_txt, "decisions")
+    m_dec_order, m_dec_map = _merge_table_rows_3way(
+        b_dco, b_dcm, o_dco, o_dcm, t_dco, t_dcm, d_dco, d_dcm, disk_existing_ids, was_pre_conflicted
+    )
+    if o_dcm != t_dcm or was_pre_conflicted:
+        m_dec_order.sort(key=lambda k: (0 if k.startswith("Q") else 1, _natural_sort_key(k)))
+    dec_lines = [hdr_dec, sep_dec] + [m_dec_map[k] for k in m_dec_order]
+    if len(dec_lines) == 2:
+        if dec_cols >= 5:
+            dec_lines.append("| - | None. | - | - | - |")
+        else:
+            dec_lines.append("| - | None. | - | - |")
+    dec_content = "\n".join(dec_lines)
+
+    # 7. Merge outside generated regions via 3-way text merge on skeleton
+    section_contents = {
+        "initiatives": init_content,
+        "specs": specs_content,
+        "next-up": next_up_content,
+        "tasks-by-category": cat_content,
+        "decisions": dec_content,
+        "conditional": cond_content,
+        "done": done_content,
+    }
+
+    def _to_skeleton(doc: str) -> str:
+        out = doc
+        for sec in section_contents:
+            pat = _marker_pattern(sec)
+            m = pat.search(out)
+            if m:
+                placeholder = f"<!-- ai-orch:generated {sec} -->\n__AI_ORCH_GEN_{sec.upper()}__\n<!-- /ai-orch:generated {sec} -->"
+                out = out[:m.start()] + placeholder + out[m.end():]
+        return out
+
+    has_outside_conflict = False
+    if was_pre_conflicted:
+        merged_skeleton = _to_skeleton(ours_marked)
+    else:
+        b_skel = _to_skeleton(base_marked)
+        o_skel = _to_skeleton(ours_marked)
+        t_skel = _to_skeleton(theirs_marked)
+        if o_skel == t_skel or t_skel == b_skel:
+            merged_skeleton = o_skel
+        elif o_skel == b_skel:
+            merged_skeleton = t_skel
+        else:
+            try:
+                with tempfile.TemporaryDirectory() as tmp_d:
+                    td_p = pathlib.Path(tmp_d)
+                    f_b = td_p / "base.md"
+                    f_o = td_p / "ours.md"
+                    f_t = td_p / "theirs.md"
+                    f_b.write_text(b_skel, encoding="utf-8")
+                    f_o.write_text(o_skel, encoding="utf-8")
+                    f_t.write_text(t_skel, encoding="utf-8")
+                    res_mf = subprocess.run(
+                        ["git", "merge-file", "-p", "-L", "HEAD", "-L", "base", "-L", "incoming", str(f_o), str(f_b), str(f_t)],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    merged_skeleton = res_mf.stdout
+                    has_outside_conflict = res_mf.returncode > 0
+            except Exception:
+                merged_skeleton = o_skel
+
+    if not has_generated_markers(merged_skeleton):
+        merged_skeleton = _to_skeleton(disk_rendered)
+
+    merged_doc = merged_skeleton
+    for sec, sec_body in section_contents.items():
+        if _marker_pattern(sec).search(merged_doc):
+            merged_doc = _replace_generated_region(merged_doc, sec, sec_body)
+
+    if m_cond_order and not _marker_pattern("conditional").search(merged_doc):
+        cond_block = (
+            "## Conditional\n\n"
+            f"<!-- ai-orch:generated conditional -->\n{cond_content}\n<!-- /ai-orch:generated conditional -->\n\n"
+        )
+        pat_done = re.compile(r"^##\s+Done\b.*", re.MULTILINE)
+        m_d = pat_done.search(merged_doc)
+        if m_d:
+            merged_doc = merged_doc[:m_d.start()] + cond_block + merged_doc[m_d.start():]
+        else:
+            merged_doc = merged_doc.rstrip() + "\n\n" + cond_block
+
+    if not merged_doc.endswith("\n"):
+        merged_doc += "\n"
+
+    return merged_doc, has_outside_conflict
 
 
 def cmd_merge_index(args: argparse.Namespace) -> int:
@@ -13461,12 +14135,16 @@ def cmd_merge_index(args: argparse.Namespace) -> int:
 
     if tasks_dir_arg:
         tasks_dir = pathlib.Path(tasks_dir_arg).resolve()
+    elif pathlib.Path("tasks").is_dir() and (pathlib.Path("tasks") / "00-INDEX.md").exists():
+        tasks_dir = pathlib.Path("tasks").resolve()
     elif ours:
         ours_p = pathlib.Path(ours).resolve()
         if ours_p.name == "00-INDEX.md":
             tasks_dir = ours_p.parent
         elif (ours_p.parent / "00-INDEX.md").is_file():
             tasks_dir = ours_p.parent
+        elif (ours_p.parent / "tasks" / "00-INDEX.md").is_file():
+            tasks_dir = (ours_p.parent / "tasks").resolve()
         elif (ours_p.parent.parent / "tasks" / "00-INDEX.md").is_file():
             tasks_dir = (ours_p.parent.parent / "tasks").resolve()
         elif pathlib.Path("tasks").is_dir():
@@ -13491,21 +14169,31 @@ def cmd_merge_index(args: argparse.Namespace) -> int:
 
     try:
         with task_write_lock(tasks_dir):
-            existing = target_path.read_text(encoding="utf-8") if target_path.is_file() else ""
-            if not existing and (tasks_dir / "00-INDEX.md").is_file():
-                existing = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
-
-            rendered = render_synced_index(tasks_dir, existing, adopt=True)
-            _atomic_write_text(target_path, rendered, encoding="utf-8")
-            if target_path.resolve() != (tasks_dir / "00-INDEX.md").resolve() and (tasks_dir / "00-INDEX.md").exists():
-                _atomic_write_text(tasks_dir / "00-INDEX.md", rendered, encoding="utf-8")
+            if base and ours and theirs:
+                base_p = pathlib.Path(base)
+                ours_p = pathlib.Path(ours)
+                theirs_p = pathlib.Path(theirs)
+                base_text = base_p.read_text(encoding="utf-8") if base_p.is_file() else ""
+                ours_text = ours_p.read_text(encoding="utf-8") if ours_p.is_file() else ""
+                theirs_text = theirs_p.read_text(encoding="utf-8") if theirs_p.is_file() else ""
+                rendered, has_conflict = merge_index_three_way(tasks_dir, base_text, ours_text, theirs_text)
+                _atomic_write_text(target_path, rendered, encoding="utf-8")
+            else:
+                existing = target_path.read_text(encoding="utf-8") if target_path.is_file() else ""
+                if not existing and (tasks_dir / "00-INDEX.md").is_file():
+                    existing = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+                rendered, has_conflict = merge_index_three_way(tasks_dir, "", existing, "")
+                _atomic_write_text(target_path, rendered, encoding="utf-8")
+                if target_path.resolve() != (tasks_dir / "00-INDEX.md").resolve() and (tasks_dir / "00-INDEX.md").exists():
+                    _atomic_write_text(tasks_dir / "00-INDEX.md", rendered, encoding="utf-8")
 
             if getattr(args, "json", False):
                 print(
                     json.dumps(
                         {
-                            "ok": True,
-                            "merged": True,
+                            "ok": not has_conflict,
+                            "merged": not has_conflict,
+                            "has_conflict": has_conflict,
                             "path": str(target_path),
                             "tasks_dir": str(tasks_dir),
                         },
@@ -13513,8 +14201,11 @@ def cmd_merge_index(args: argparse.Namespace) -> int:
                     )
                 )
             else:
-                print(f"[ok] merged index {target_path}")
-            return 0
+                if has_conflict:
+                    print(f"[FAIL] conflict outside generated regions in {target_path}", file=sys.stderr)
+                else:
+                    print(f"[ok] merged index {target_path}")
+            return 1 if has_conflict else 0
     except LockTimeoutError as e:
         err_msg = str(e)
         if getattr(args, "json", False):
@@ -13535,7 +14226,8 @@ def upgrade_tasks_tree(
     """Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention:
       1. Updates tasks/AGENTS.md with a managed block between markers (never replacing existing rules).
       2. Ensures tasks/.gitignore exists and ignores .ai-orch.lock.
-      2.5. Ensures tasks/.gitattributes exists and configures 00-INDEX.md merge=ai-orch-index.
+      2.5. Ensures tasks/.gitattributes exists and configures 00-INDEX.md merge=ai-orch-index,
+           and registers merge.ai-orch-index.driver and merge.ai-orch-index.name in local git config.
       3. Ensures standard directories exist (_inbox/to-analyze, _inbox/analyzed).
       3.5. Discovers and reports/migrates legacy plans/ directories.
       4. Regenerates/updates 00-INDEX.md with standard tables (Initiatives, Specs, Next up, Tasks by category, Decisions waiting, Done).
@@ -13667,6 +14359,34 @@ def upgrade_tasks_tree(
                     })
                     new_ga = existing_ga + ("\n" if existing_ga and not existing_ga.endswith("\n") else "") + f"{rule_line}\n"
                     pending_writes.append((gitattributes_path, new_ga))
+
+            # 2.6. Register git merge driver in repository's local git config
+            pending_git_config: tuple[str, str] | None = None
+            if _is_inside_git_repo(tasks_dir):
+                driver_cmd, driver_name = _merge_driver_config_spec()
+                existing_drv, existing_name = _get_git_merge_driver_config(tasks_dir)
+                if existing_drv != driver_cmd or existing_name != driver_name:
+                    pending_git_config = (driver_cmd, driver_name)
+                    cfg_target = "git config merge.ai-orch-index"
+                    if not existing_drv and not existing_name:
+                        created.append(cfg_target)
+                        cfg_action = "create"
+                        cfg_before_hash = ""
+                    else:
+                        updated.append(cfg_target)
+                        cfg_action = "modify"
+                        cfg_before_hash = hashlib.sha256(f"{existing_drv}\n{existing_name}".encode("utf-8")).hexdigest()
+                    upgraded_files.append(cfg_target)
+                    operations.append({
+                        "action": cfg_action,
+                        "path": cfg_target,
+                        "before_hash": cfg_before_hash,
+                        "summary": f'driver="{driver_cmd}"',
+                        "summary_lines": [
+                            f'git config merge.ai-orch-index.driver "{driver_cmd}"',
+                            f'git config merge.ai-orch-index.name "{driver_name}"',
+                        ],
+                    })
 
             # 3.5. Legacy plans discovery & migration
             legacy_plans: list[dict[str, Any]] = []
@@ -13924,6 +14644,22 @@ def upgrade_tasks_tree(
                 for target_p, target_content in pending_writes:
                     target_p.parent.mkdir(parents=True, exist_ok=True)
                     _atomic_write_text(target_p, target_content, encoding="utf-8")
+                if pending_git_config is not None:
+                    git_cwd = _git_working_dir(tasks_dir)
+                    if git_cwd is not None:
+                        drv_cmd, drv_name = pending_git_config
+                        subprocess.run(
+                            ["git", "config", "merge.ai-orch-index.name", drv_name],
+                            cwd=str(git_cwd),
+                            capture_output=True,
+                            check=False,
+                        )
+                        subprocess.run(
+                            ["git", "config", "merge.ai-orch-index.driver", drv_cmd],
+                            cwd=str(git_cwd),
+                            capture_output=True,
+                            check=False,
+                        )
 
             # 5. Inspect tree for validation summary (pre-existing task errors become warnings so upgrade exits 0)
             val_errors, val_warnings, emergent, initiatives = validate_tasks_tree(tasks_dir)
