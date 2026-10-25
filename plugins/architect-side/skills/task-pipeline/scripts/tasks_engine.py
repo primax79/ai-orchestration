@@ -265,7 +265,7 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
 - **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
 - **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
-- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
+- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Per-project extra fields after `handoff` can be declared via `[tasks] extension_fields = ["area"]` in `orchestration.toml` (or `.ai-orchestration.local.toml`) or a fenced `toml` block in `tasks/AGENTS.md`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
 - **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
 - **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
@@ -273,6 +273,118 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
 - **Tooling feedback:** when `ai-orch` is installed, report friction, defects, or improvements at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."` (without `ai-orch`, drop a Markdown note in `tasks/_inbox/to-analyze/`). Do not work around tooling issues silently; maintainers triage notes into tasks.
 """
+
+MANAGED_AGENTS_BEGIN = "<!-- ai-orch:managed begin -->"
+MANAGED_AGENTS_END = "<!-- ai-orch:managed end -->"
+_MANAGED_AGENTS_BODY = "\n".join(CANONICAL_TASKS_AGENTS_MD.strip().splitlines()[1:]).strip()
+MANAGED_TASKS_AGENTS_BLOCK = f"{MANAGED_AGENTS_BEGIN}\n## task-pipeline managed convention\n\n{_MANAGED_AGENTS_BODY}\n{MANAGED_AGENTS_END}\n"
+
+
+def render_upgraded_agents_md(existing_agents: str) -> str:
+    """Render tasks/AGENTS.md preserving all project-specific content outside managed markers.
+    If existing_agents is empty, returns CANONICAL_TASKS_AGENTS_MD with the managed block wrapped.
+    If existing_agents already has markers, refreshes only the block between markers.
+    Otherwise, appends the managed block at the end while keeping existing content byte-for-byte.
+    """
+    if not existing_agents:
+        return f"# tasks/ convention (task-pipeline + emergent tasks)\n\n{MANAGED_TASKS_AGENTS_BLOCK}"
+    pat = re.compile(
+        r"<!--\s*ai-orch:managed\s+begin\s*-->.*?<!--\s*ai-orch:managed\s+end\s*-->\n?",
+        re.DOTALL,
+    )
+    m = pat.search(existing_agents)
+    if m:
+        replacement = MANAGED_TASKS_AGENTS_BLOCK
+        if not existing_agents[m.start():m.end()].endswith("\n"):
+            replacement = replacement.rstrip("\n")
+        return existing_agents[:m.start()] + replacement + existing_agents[m.end():]
+    if existing_agents.strip() == CANONICAL_TASKS_AGENTS_MD.strip():
+        return f"# tasks/ convention (task-pipeline + emergent tasks)\n\n{MANAGED_TASKS_AGENTS_BLOCK}"
+    sep = "" if existing_agents.endswith("\n\n") else ("\n" if existing_agents.endswith("\n") else "\n\n")
+    return existing_agents + sep + MANAGED_TASKS_AGENTS_BLOCK
+
+
+def get_project_extension_fields(tasks_dir: pathlib.Path) -> tuple[str, ...]:
+    """Discover per-project allowed header extension fields (placed after handoff).
+    Reads from:
+      1. `[tasks] extension_fields = [...]` in `<project>/orchestration.toml`,
+         `<project>/.ai-orchestration.local.toml`, `<tasks_dir>/orchestration.toml`,
+         or `~/.config/ai-orchestration/projects/<project-name>/orchestration.toml`.
+      2. Fenced `toml` blocks or `Extra header fields:` declarations in `tasks/AGENTS.md`.
+    """
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    found: list[str] = []
+
+    def _add_fields(items: Any) -> None:
+        if isinstance(items, str):
+            items = [x.strip() for x in items.split(",") if x.strip()]
+        if isinstance(items, (list, tuple)):
+            for item in items:
+                if isinstance(item, str):
+                    k = item.strip().strip("`'\"").lower()
+                    if k and re.match(r"^[a-z][a-z0-9_-]*$", k) and k not in CORE_HEADER_FIELDS and k not in found:
+                        found.append(k)
+
+    # 1. Check TOML config files
+    proj_root = tasks_dir.parent if tasks_dir.name == "tasks" else tasks_dir
+    cand_tomls: list[pathlib.Path] = [
+        tasks_dir / "orchestration.toml",
+        proj_root / ".ai-orchestration.local.toml",
+        proj_root / "orchestration.toml",
+    ]
+    if proj_root.parent != proj_root:
+        cand_tomls.extend([
+            proj_root.parent / ".ai-orchestration.local.toml",
+            proj_root.parent / "orchestration.toml",
+        ])
+    env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
+    gdir = pathlib.Path(env_cfg).expanduser().resolve() if env_cfg else (pathlib.Path.home() / ".config" / "ai-orchestration")
+    if gdir.is_file() or gdir.suffix == ".toml":
+        gdir = gdir.parent
+    cand_tomls.append(gdir / "projects" / proj_root.name / "orchestration.toml")
+
+    for cfg_file in cand_tomls:
+        if cfg_file.is_file() and tomllib is not None:
+            try:
+                data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+                tasks_sec = data.get("tasks")
+                if isinstance(tasks_sec, dict) and "extension_fields" in tasks_sec:
+                    _add_fields(tasks_sec["extension_fields"])
+            except Exception:
+                pass
+
+    # 2. Check tasks/AGENTS.md (outside managed block)
+    agents_md = tasks_dir / "AGENTS.md"
+    if agents_md.is_file():
+        try:
+            raw_agents = agents_md.read_text(encoding="utf-8")
+            unmanaged = re.sub(
+                r"<!--\s*ai-orch:managed\s+begin\s*-->.*?<!--\s*ai-orch:managed\s+end\s*-->",
+                "",
+                raw_agents,
+                flags=re.DOTALL,
+            )
+            # Check fenced toml/tasks blocks
+            for m_fence in re.finditer(r"```(?:toml|tasks-config)\s*\n(.*?)```", unmanaged, re.DOTALL):
+                block_body = m_fence.group(1)
+                if tomllib is not None:
+                    try:
+                        bdata = tomllib.loads(block_body)
+                        if isinstance(bdata.get("tasks"), dict) and "extension_fields" in bdata["tasks"]:
+                            _add_fields(bdata["tasks"]["extension_fields"])
+                        elif "extension_fields" in bdata:
+                            _add_fields(bdata["extension_fields"])
+                    except Exception:
+                        pass
+            # Also check inline `extension_fields = [...]` or `Extra header fields: \`area\``
+            for m_inline in re.finditer(r"extension_fields\s*=\s*\[([^\]]*)\]", unmanaged):
+                raw_list = [x.strip().strip("'\"`") for x in m_inline.group(1).split(",") if x.strip()]
+                _add_fields(raw_list)
+        except Exception:
+            pass
+
+    return tuple(found)
+
 
 TASK_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.\d+[a-z]?)*)$")
 TASK_NODE_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.\d+[a-z]?)*)$")
@@ -6730,11 +6842,17 @@ def discover_emergent_tasks(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
             if entry.name.startswith(".") or entry.name in ("README.md", "notes"):
                 continue
             if entry.is_file() and entry.suffix == ".md" and re.match(r"^T\d{3,}-", entry.name):
-                results.append(parse_emergent_task_file(entry, tasks_dir, in_done=in_done))
+                parsed = parse_emergent_task_file(entry, tasks_dir, in_done=in_done)
+                if not parsed.get("header_keys"):
+                    continue
+                results.append(parsed)
             elif entry.is_dir() and re.match(r"^T\d{3,}-", entry.name):
                 readme = entry / "README.md"
                 if readme.is_file():
-                    results.append(parse_emergent_task_file(readme, tasks_dir, in_done=in_done))
+                    parsed = parse_emergent_task_file(readme, tasks_dir, in_done=in_done)
+                    if not parsed.get("header_keys"):
+                        continue
+                    results.append(parsed)
 
     # Active categories
     for child in sorted(tasks_dir.iterdir()):
@@ -6997,6 +7115,15 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
     errors: list[str] = []
     warnings: list[str] = []
 
+    project_ext_fields = get_project_extension_fields(tasks_dir)
+    effective_ext_fields: tuple[str, ...] = OPTIONAL_EXTENSION_FIELDS + tuple(
+        k for k in project_ext_fields if k not in OPTIONAL_EXTENSION_FIELDS
+    )
+    effective_allowed_fields: set[str] = set(CORE_HEADER_FIELDS) | set(effective_ext_fields)
+    effective_micro_fields: tuple[str, ...] = MICRO_HEADER_FIELDS + tuple(
+        k for k in project_ext_fields if k not in MICRO_HEADER_FIELDS
+    )
+
     tree = discover_task_tree(tasks_dir)
     emergent = discover_emergent_tasks(tasks_dir)
     initiatives = discover_initiatives(tasks_dir)
@@ -7209,27 +7336,27 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             if missing_micro:
                 errors.append(f"{rel}: missing mandatory microtask header field(s): {', '.join(missing_micro)}.")
 
-            unknown_keys = [k for k in keys if k not in MICRO_HEADER_FIELDS]
+            unknown_keys = [k for k in keys if k not in effective_micro_fields]
             if unknown_keys:
                 errors.append(f"{rel}: unknown microtask header field(s): {', '.join(unknown_keys)}.")
 
-            present_micro = [k for k in keys if k in MICRO_HEADER_FIELDS]
-            expected_micro = [k for k in MICRO_HEADER_FIELDS if k in present_micro]
+            present_micro = [k for k in keys if k in effective_micro_fields]
+            expected_micro = [k for k in effective_micro_fields if k in present_micro]
             if present_micro != expected_micro:
                 misplaced_m = []
                 seen_m = set()
                 for k in present_micro:
                     if present_micro.index(k) != expected_micro.index(k) and k not in seen_m:
                         seen_m.add(k)
-                        c_idx = MICRO_HEADER_FIELDS.index(k)
-                        prec = MICRO_HEADER_FIELDS[c_idx - 1] if c_idx > 0 else None
-                        succ = MICRO_HEADER_FIELDS[c_idx + 1] if c_idx + 1 < len(MICRO_HEADER_FIELDS) else None
+                        c_idx = effective_micro_fields.index(k)
+                        prec = effective_micro_fields[c_idx - 1] if c_idx > 0 else None
+                        succ = effective_micro_fields[c_idx + 1] if c_idx + 1 < len(effective_micro_fields) else None
                         where_str = (f"after '{prec}'" if prec else "") + (f" and before '{succ}'" if prec and succ else (f"before '{succ}'" if succ else ""))
                         misplaced_m.append(f"field '{k}' belongs {where_str}")
                 where_msg_m = f" ({'; '.join(misplaced_m)})" if misplaced_m else ""
                 errors.append(
                     f"{rel}: microtask header fields out of order: got {present_micro}, expected {expected_micro}. "
-                    f"Canonical sequence: {list(MICRO_HEADER_FIELDS)}.{where_msg_m}"
+                    f"Canonical sequence: {list(effective_micro_fields)}.{where_msg_m}"
                 )
 
             # Check empty values
@@ -7290,7 +7417,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 if missing_core:
                     errors.append(f"{rel}: missing mandatory header field(s): {', '.join(missing_core)}.")
 
-            unknown_keys = [k for k in keys if k not in ALL_ALLOWED_HEADER_FIELDS]
+            unknown_keys = [k for k in keys if k not in effective_allowed_fields]
             if unknown_keys:
                 errors.append(f"{rel}: unknown header field(s): {', '.join(unknown_keys)}.")
 
@@ -7306,7 +7433,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             if "handoff" in keys:
                 handoff_pos = keys.index("handoff")
                 for ext_k in keys:
-                    if ext_k in OPTIONAL_EXTENSION_FIELDS and keys.index(ext_k) < handoff_pos:
+                    if ext_k in effective_ext_fields and keys.index(ext_k) < handoff_pos:
                         errors.append(f"{rel}: optional field '{ext_k}' must appear after 'handoff'.")
                 present_ext = [k for k in keys if k in OPTIONAL_EXTENSION_FIELDS and keys.index(k) > handoff_pos]
                 expected_ext = [k for k in OPTIONAL_EXTENSION_FIELDS if k in present_ext]
@@ -9049,7 +9176,9 @@ def _find_table_range(lines: list[str]) -> tuple[int | None, int | None]:
     return start_idx, end_idx
 
 
-def _extract_existing_table_header(region_text: str | None, expected_col_count: int) -> tuple[str, str] | None:
+def _extract_existing_table_header(
+    region_text: str | None, expected_col_count: int, allow_extra: bool = False
+) -> tuple[str, str] | None:
     if not region_text:
         return None
     lines = region_text.splitlines()
@@ -9059,10 +9188,66 @@ def _extract_existing_table_header(region_text: str | None, expected_col_count: 
         if line1.startswith("|") and line2.startswith("|"):
             cells1 = [c.strip() for c in line1.strip("|").split("|")]
             cells2 = [c.strip() for c in line2.strip("|").split("|")]
-            if len(cells1) == expected_col_count and len(cells2) == expected_col_count:
+            col_ok = (len(cells1) >= expected_col_count and len(cells2) == len(cells1)) if allow_extra else (len(cells1) == expected_col_count and len(cells2) == expected_col_count)
+            if col_ok:
                 if all(c == "---" or (c.startswith("---") and set(c) <= {"-", ":", " "}) for c in cells2):
                     return line1, line2
     return None
+
+
+def _index_uses_bare_id_format(existing_index: str) -> bool:
+    """Return True if existing 00-INDEX.md tables use bare 'T###' in Id cells (no '(short)')."""
+    if not existing_index or not existing_index.strip():
+        return False
+    bare_count = 0
+    short_count = 0
+    for line in existing_index.splitlines():
+        line_s = line.strip()
+        if not line_s.startswith("|"):
+            continue
+        cells = [c.strip() for c in line_s.strip("|").split("|")]
+        if not cells:
+            continue
+        c0 = cells[0]
+        if re.match(r"^T\d{3,}$", c0):
+            bare_count += 1
+        elif re.match(r"^T\d{3,}\s+\([^)]+\)$", c0):
+            short_count += 1
+    return bare_count > 0 and short_count == 0
+
+
+def _format_index_id_cell(task: dict[str, Any], existing_row_id: str | None, prefer_bare: bool) -> str:
+    tid = task["id"]
+    if existing_row_id is not None:
+        rid = existing_row_id.strip()
+        if rid == tid and prefer_bare:
+            return tid
+        if re.match(rf"^{re.escape(tid)}\s+\(.+\)$", rid):
+            st_disp = f" ({task['short_title']})" if task.get("short_title") else ""
+            return f"{tid}{st_disp}" if st_disp else rid
+        if rid.startswith("["):
+            return rid
+    if prefer_bare:
+        return tid
+    st_disp = f" ({task['short_title']})" if task.get("short_title") else ""
+    return f"{tid}{st_disp}"
+
+
+def _format_extra_cells(existing_cells: list[str] | None, base_cols: int, total_cols: int, task: dict[str, Any] | None = None, header_cells: list[str] | None = None) -> str:
+    if total_cols <= base_cols:
+        return ""
+    extra_vals: list[str] = []
+    for idx in range(base_cols, total_cols):
+        if existing_cells is not None and idx < len(existing_cells):
+            extra_vals.append(existing_cells[idx])
+        else:
+            val = ""
+            if task is not None and header_cells is not None and idx < len(header_cells):
+                col_key = header_cells[idx].strip().lower()
+                if col_key in task.get("headers", {}):
+                    val = task["headers"][col_key]
+            extra_vals.append(val)
+    return " " + " | ".join(extra_vals) + " |"
 
 
 def _replace_generated_region(doc: str, section: str, new_content: str) -> str:
@@ -9289,11 +9474,13 @@ def _extract_existing_initiative_next_up_rows(existing_index: str) -> list[str]:
     return rows
 
 
-def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: bool = False) -> str:
+def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: bool = False, reorder: bool = False) -> str:
     has_conflict_markers = bool(re.search(r"^(<{7}|={7}|>{7}|\|{7})\b", existing_index, re.MULTILINE)) or ("<<<<<<<" in existing_index)
     if has_conflict_markers:
         existing_index = _strip_conflict_markers_ours(existing_index)
         adopt = True
+
+    prefer_bare_id = (not has_conflict_markers) and _index_uses_bare_id_format(existing_index)
 
     emergent = discover_emergent_tasks(tasks_dir)
     initiatives = discover_initiatives(tasks_dir)
@@ -9330,10 +9517,19 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         has_init_marker = m_init_marker is not None
         region_to_search = m_init_marker.group(1) if has_init_marker else init_sec_text
 
-        hdr_init, sep_init = _extract_existing_table_header(region_to_search, 6) or (
-            "| Priority | # | Initiative | Status | Depends on | Size |",
-            "| --- | --- | --- | --- | --- | --- |",
+        hdr_init, sep_init = (
+            _extract_existing_table_header(region_to_search, 6, allow_extra=True)
+            or _extract_existing_table_header(region_to_search, 4, allow_extra=True)
+            or (
+                "| Priority | # | Initiative | Status | Depends on | Size |",
+                "| --- | --- | --- | --- | --- | --- |",
+            )
         )
+        init_hdr_cells = [c.strip() for c in hdr_init.strip("|").split("|")]
+        init_col_count = len(init_hdr_cells)
+        id_col_idx = 0 if (init_hdr_cells and init_hdr_cells[0].lower() in ("nn", "#", "id")) else 1
+        status_col_idx = next((idx for idx, c in enumerate(init_hdr_cells) if c.lower() == "status"), 3 if id_col_idx == 1 else 2)
+
         preamble_lines: list[str] = []
         init_rows: dict[str, tuple[list[str], str]] = {}
         for line in region_to_search.splitlines():
@@ -9345,10 +9541,10 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                     preamble_lines.append(line)
                 continue
             cells = [c.strip() for c in line_s.strip("|").split("|")]
-            if not cells or cells[0] in ("Priority", "---") or cells[0].startswith("---"):
+            if not cells or cells[0] in ("Priority", "NN", "#", "Id", "---") or cells[0].startswith("---"):
                 continue
-            if len(cells) >= 6:
-                init_num = cells[1]
+            if len(cells) > max(id_col_idx, status_col_idx):
+                init_num = cells[id_col_idx]
                 if init_num in init_rows:
                     continue
                 if init_num in tree:
@@ -9402,7 +9598,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                                 new_status = f"{derived_st} ({'; '.join(summary_parts)})"
                             else:
                                 new_status = derived_st
-                        cells[3] = new_status
+                        cells[status_col_idx] = new_status
                 new_line = "| " + " | ".join(cells) + " |"
                 init_rows[init_num] = (cells, new_line)
 
@@ -9414,11 +9610,18 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 dep = inode.fields.get("depends_on", {}).get("value") or "-"
                 sz = inode.own_fields.get("size", "-")
                 pri = str(len(init_rows) + 1)
-                new_cells = [pri, inum, f"[{inode.title}]({inode.rel_path})", st, dep, sz]
+                if id_col_idx == 0 and init_col_count == 4:
+                    new_cells = [inum, f"[{inode.title}]({inode.rel_path})", st, dep]
+                else:
+                    new_cells = [pri, inum, f"[{inode.title}]({inode.rel_path})", st, dep, sz]
+                    while len(new_cells) < init_col_count:
+                        new_cells.append("")
                 init_rows[inum] = (new_cells, "| " + " | ".join(new_cells) + " |")
 
         def _init_sort_key(item: tuple[list[str], str]) -> tuple:
             cells = item[0]
+            if id_col_idx == 0:
+                return (0, _natural_sort_key(cells[0]))
             pri_str = cells[0].strip()
             pri_num = int(pri_str) if pri_str.isdigit() else 999
             return (pri_num, _natural_sort_key(cells[1]))
@@ -9496,10 +9699,12 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     if existing_next_region:
         existing_next_region = _strip_conflict_markers_ours(existing_next_region)
 
-    hdr_next, sep_next = _extract_existing_table_header(existing_next_region, 5) or (
+    hdr_next, sep_next = _extract_existing_table_header(existing_next_region, 5, allow_extra=True) or (
         "| Id | Priority | Task | Executor | Handoff |",
         "| --- | --- | --- | --- | --- |",
     )
+    next_hdr_cells = [c.strip() for c in hdr_next.strip("|").split("|")]
+    next_col_count = len(next_hdr_cells)
 
     existing_next_rows: list[tuple[str, list[str], str]] = []
     if existing_next_region:
@@ -9533,8 +9738,9 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         elif base_id in emergent_next_map:
             t = emergent_next_map[base_id]
             seen_next_ids.add(base_id)
-            st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
-            line = f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |"
+            id_cell = _format_index_id_cell(t, row_id, prefer_bare_id)
+            extra_s = _format_extra_cells(cells, 5, next_col_count, t, next_hdr_cells)
+            line = f"| {id_cell} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |{extra_s}"
             next_up_candidates.append((base_id, t.get("priority", "P2"), line))
         elif base_id not in resolved_ids:
             seen_next_ids.add(base_id)
@@ -9544,17 +9750,20 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 task_cell = f"{task_cell} (missing)"
             exc = cells[3] if len(cells) > 3 else "unassigned"
             hnd = cells[4] if len(cells) > 4 else "-"
-            line = f"| {row_id} | {pri} | {task_cell} | {exc} | {hnd} |"
+            extra_s = _format_extra_cells(cells, 5, next_col_count, None, next_hdr_cells)
+            line = f"| {row_id} | {pri} | {task_cell} | {exc} | {hnd} |{extra_s}"
             next_up_candidates.append((base_id, pri, line))
 
     for t in active_tasks:
         if t["next_up"] == "yes" and t.get("canonical_state") != "paused" and t["id"] not in seen_next_ids:
             seen_next_ids.add(t["id"])
-            st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
-            line = f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |"
+            id_cell = _format_index_id_cell(t, None, prefer_bare_id)
+            extra_s = _format_extra_cells(None, 5, next_col_count, t, next_hdr_cells)
+            line = f"| {id_cell} | {t['priority']} | [{t['title']}]({t['rel_path']}) | {t['executor']} | `{t['handoff']}` |{extra_s}"
             next_up_candidates.append((t["id"], t.get("priority", "P2"), line))
 
-    next_up_candidates.sort(key=lambda item: (PRIORITY_SORT_KEY.get(item[1], 99), _natural_sort_key(item[0])))
+    if reorder or not existing_next_rows or has_conflict_markers:
+        next_up_candidates.sort(key=lambda item: (PRIORITY_SORT_KEY.get(item[1], 99), _natural_sort_key(item[0])))
     next_up_lines = [hdr_next, sep_next] + [item[2] for item in next_up_candidates[:5]]
     next_up_content = "\n".join(next_up_lines)
 
@@ -9590,7 +9799,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             start_pos = cm.end()
             end_pos = cat_matches[i + 1].start() if i + 1 < len(cat_matches) else len(existing_cat_region)
             block_text = existing_cat_region[start_pos:end_pos]
-            hdr_pair = _extract_existing_table_header(block_text, 6)
+            hdr_pair = _extract_existing_table_header(block_text, 6, allow_extra=True)
             if hdr_pair:
                 existing_cat_headers[cname] = hdr_pair
             existing_by_cat[cname] = []
@@ -9619,6 +9828,8 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             cat,
             ("| Id | Priority | Task | State | Executor | Depends on |", "| --- | --- | --- | --- | --- | --- |"),
         )
+        cat_hdr_cells = [c.strip() for c in hdr_cat.strip("|").split("|")]
+        cat_col_count = len(cat_hdr_cells)
         cat_lines.extend(
             [
                 f"### {cat}",
@@ -9640,19 +9851,21 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             if base_id in cat_tasks:
                 t = cat_tasks[base_id]
                 seen_cat_ids.add(base_id)
-                st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
+                id_cell = _format_index_id_cell(t, row_id, prefer_bare_id)
                 st_val = t['state']
                 if t.get("canonical_state") == "waiting" and t.get("waiting_on"):
-                    st_val = f"waiting ({t['waiting_on']})"
+                    if "(" not in st_val and ":" not in st_val:
+                        st_val = f"waiting ({t['waiting_on']})"
                 elif t.get("canonical_state") == "delivered":
                     vb = t.get("verify_by") or t.get("verify-by") or t.get("headers", {}).get("verify-by") or t.get("headers", {}).get("verify_by")
-                    if vb and str(vb).strip() and str(vb).strip() != "-":
+                    if vb and str(vb).strip() and str(vb).strip() != "-" and "verify-by:" not in st_val:
                         st_val = f"delivered (verify-by: {str(vb).strip()})"
+                extra_s = _format_extra_cells(cells, 6, cat_col_count, t, cat_hdr_cells)
                 cat_rows.append(
                     (
                         base_id,
-                        f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
-                        f"{st_val} | {t['executor']} | {t['depends_on_raw']} |",
+                        f"| {id_cell} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
+                        f"{st_val} | {t['executor']} | {t['depends_on_raw']} |{extra_s}",
                     )
                 )
             elif base_id not in resolved_ids:
@@ -9664,28 +9877,32 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 st = cells[3] if len(cells) > 3 else "open"
                 exc = cells[4] if len(cells) > 4 else "unassigned"
                 dep = cells[5] if len(cells) > 5 else "-"
-                cat_rows.append((base_id, f"| {row_id} | {pri} | {task_cell} | {st} | {exc} | {dep} |"))
+                extra_s = _format_extra_cells(cells, 6, cat_col_count, None, cat_hdr_cells)
+                cat_rows.append((base_id, f"| {row_id} | {pri} | {task_cell} | {st} | {exc} | {dep} |{extra_s}"))
 
         new_cat_tasks = [t for tid, t in cat_tasks.items() if tid not in seen_cat_ids]
         for t in new_cat_tasks:
             seen_cat_ids.add(t["id"])
-            st_disp = f" ({t['short_title']})" if t.get("short_title") else ""
+            id_cell = _format_index_id_cell(t, None, prefer_bare_id)
             st_val = t['state']
             if t.get("canonical_state") == "waiting" and t.get("waiting_on"):
-                st_val = f"waiting ({t['waiting_on']})"
+                if "(" not in st_val and ":" not in st_val:
+                    st_val = f"waiting ({t['waiting_on']})"
             elif t.get("canonical_state") == "delivered":
                 vb = t.get("verify_by") or t.get("verify-by") or t.get("headers", {}).get("verify-by") or t.get("headers", {}).get("verify_by")
-                if vb and str(vb).strip() and str(vb).strip() != "-":
+                if vb and str(vb).strip() and str(vb).strip() != "-" and "verify-by:" not in st_val:
                     st_val = f"delivered (verify-by: {str(vb).strip()})"
+            extra_s = _format_extra_cells(None, 6, cat_col_count, t, cat_hdr_cells)
             cat_rows.append(
                 (
                     t["id"],
-                    f"| {t['id']}{st_disp} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
-                    f"{st_val} | {t['executor']} | {t['depends_on_raw']} |",
+                    f"| {id_cell} | {t['priority']} | [{t['title']}]({t['rel_path']}) | "
+                    f"{st_val} | {t['executor']} | {t['depends_on_raw']} |{extra_s}",
                 )
             )
 
-        cat_rows.sort(key=lambda r: _natural_sort_key(r[0]))
+        if reorder or not existing_by_cat.get(cat) or has_conflict_markers:
+            cat_rows.sort(key=lambda r: _natural_sort_key(r[0]))
         cat_lines.extend([r[1] for r in cat_rows])
 
     cat_content = "\n".join(cat_lines)
@@ -9700,14 +9917,20 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     open_questions = [q for q in all_questions if q["status"] == "open"]
     open_questions.sort(key=lambda q: _natural_sort_key(q["id"]))
 
-    existing_5_col = _extract_existing_table_header(existing_dec_region, 5) is not None
+    existing_5_col_hdr = _extract_existing_table_header(existing_dec_region, 5)
+    existing_5_col = existing_5_col_hdr is not None
+    dec_hdr_cells_check = [c.strip().lower() for c in existing_5_col_hdr[0].strip("|").split("|")] if existing_5_col_hdr else []
+    is_legacy_5col_priority = len(dec_hdr_cells_check) >= 2 and dec_hdr_cells_check[1] == "priority"
 
-    if open_questions or existing_5_col:
-        hdr_dec, sep_dec = _extract_existing_table_header(existing_dec_region, 5) or (
+    if (open_questions or existing_5_col) and not is_legacy_5col_priority:
+        hdr_dec, sep_dec = existing_5_col_hdr or (
             "| Key | Question | Blocks | Decider | Recommended |",
             "| --- | --- | --- | --- | --- |",
         )
         use_5_cols = True
+    elif is_legacy_5col_priority and existing_5_col_hdr:
+        hdr_dec, sep_dec = existing_5_col_hdr
+        use_5_cols = False
     else:
         hdr_dec, sep_dec = _extract_existing_table_header(existing_dec_region, 4) or (
             "| Task / Initiative | Question (exact) | Decider | Blocks |",
@@ -9765,7 +9988,10 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             m_t = re.match(r"^(T\d+)(?:\s*\(.*\))?$", cells[0])
             if len(cells) >= 4 and m_t:
                 tid, st = m_t.group(1), cells[3]
-                if normalize_state(st) in ("waiting", "blocked") and tid not in [r[0] for r in existing_dec_rows]:
+                if normalize_state(st) in ("waiting", "blocked") and tid not in [
+                    (re.match(r"^\[?(T\d+)", r[0]).group(1) if re.match(r"^\[?(T\d+)", r[0]) else r[0])
+                    for r in existing_dec_rows
+                ]:
                     existing_waiting_ids_without_dec.add(tid)
 
     legacy_dec_rows: list[tuple[str, str]] = []
@@ -9774,25 +10000,31 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     for row_id, cells in existing_dec_rows:
         if row_id.startswith("Q") or row_id.startswith("[Q"):
             continue
-        if row_id in seen_dec_ids:
+        m_rid = re.match(r"^\[?(T\d+)\b", row_id)
+        base_dec_id = m_rid.group(1) if m_rid else row_id
+        if base_dec_id in seen_dec_ids:
             continue
-        if row_id in qualifying_tasks:
-            seen_dec_ids.add(row_id)
-            wt = qualifying_tasks[row_id]
+        if is_legacy_5col_priority and base_dec_id in resolved_ids:
+            seen_dec_ids.add(base_dec_id)
+            legacy_dec_rows.append((base_dec_id, "| " + " | ".join(cells) + " |"))
+            continue
+        if base_dec_id in qualifying_tasks:
+            seen_dec_ids.add(base_dec_id)
+            wt = qualifying_tasks[base_dec_id]
             q_cell = cells[1] if len(cells) > 1 and cells[1] not in ("", "-") else ""
             if not q_cell:
                 raw_dec = wt["decider"]
                 q_cell = raw_dec.split(":", 1)[1].strip() if ":" in raw_dec else raw_dec
             raw_dec = wt["decider"]
             who = raw_dec.split(":", 1)[0].strip() if ":" in raw_dec else raw_dec
-            blocks_str = ", ".join(blocks_map.get(row_id, [])) or "-"
+            blocks_str = ", ".join(blocks_map.get(base_dec_id, [])) or "-"
             if use_5_cols:
                 line = f"| {row_id} | {q_cell} | {blocks_str} | {who} | - |"
             else:
                 line = f"| {row_id} | {q_cell} | {who} | {blocks_str} |"
-            legacy_dec_rows.append((row_id, line))
-        elif row_id not in resolved_ids:
-            seen_dec_ids.add(row_id)
+            legacy_dec_rows.append((base_dec_id, line))
+        elif base_dec_id not in resolved_ids:
+            seen_dec_ids.add(base_dec_id)
             task_cell = f"{row_id} (missing)" if not row_id.endswith("(missing)") else row_id
             q_cell = cells[1] if len(cells) > 1 else "-"
             if len(cells) >= 5:
@@ -9803,9 +10035,11 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 blk_cell = cells[3] if len(cells) > 3 else "-"
             if use_5_cols:
                 line = f"| {task_cell} | {q_cell} | {blk_cell} | {dec_cell} | - |"
+            elif is_legacy_5col_priority:
+                line = f"| {task_cell} | " + " | ".join(cells[1:]) + " |"
             else:
                 line = f"| {task_cell} | {q_cell} | {dec_cell} | {blk_cell} |"
-            legacy_dec_rows.append((row_id, line))
+            legacy_dec_rows.append((base_dec_id, line))
 
     new_dec_tasks = [
         t for tid, t in qualifying_tasks.items()
@@ -9821,16 +10055,19 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         blocks_str = ", ".join(blocks_map.get(wt["id"], [])) or "-"
         if use_5_cols:
             line = f"| {wt['id']} | {question} | {blocks_str} | {who} | - |"
+        elif is_legacy_5col_priority:
+            line = f"| {wt['id']} | {wt.get('priority', 'P2')} | {question} | {who} | {blocks_str} |"
         else:
             line = f"| {wt['id']} | {question} | {who} | {blocks_str} |"
         legacy_dec_rows.append((wt["id"], line))
 
-    legacy_dec_rows.sort(key=lambda r: _natural_sort_key(r[0]))
+    if reorder or not existing_dec_rows or has_conflict_markers:
+        legacy_dec_rows.sort(key=lambda r: _natural_sort_key(r[0]))
     for r in legacy_dec_rows:
         dec_lines.append(r[1])
 
     if len(dec_lines) == 2:
-        if use_5_cols:
+        if use_5_cols or is_legacy_5col_priority:
             dec_lines.append("| - | None. | - | - | - |")
         else:
             dec_lines.append("| - | None. | - | - |")
@@ -9842,16 +10079,18 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
     if existing_done_region:
         existing_done_region = _strip_conflict_markers_ours(existing_done_region)
 
-    hdr_done, sep_done = _extract_existing_table_header(existing_done_region, 4) or (
+    hdr_done, sep_done = _extract_existing_table_header(existing_done_region, 4, allow_extra=True) or (
         "| Id | Task | Result | Closed |",
         "| --- | --- | --- | --- |",
     )
+    done_hdr_cells = [c.strip() for c in hdr_done.strip("|").split("|")]
+    done_col_count = len(done_hdr_cells)
     hdr_cond = "| Id | Task | Result | Closed |"
     sep_cond = "| --- | --- | --- | --- |"
     cond_lines = [hdr_cond, sep_cond]
     stale_entries: list[str] = []
     for ct in sorted(conditional_tasks, key=lambda t: _natural_sort_key(t["id"]), reverse=True):
-        st_disp = f" ({ct['short_title']})" if ct.get("short_title") else ""
+        id_cell = _format_index_id_cell(ct, None, prefer_bare_id)
         task_cell = f"[{ct['title']}]({ct['rel_path']})"
         open_conditions = [c for c in ct.get("conditions", []) if c.get("status") != "answered"]
         cond_list_to_show = open_conditions if open_conditions else ct.get("conditions", [])
@@ -9864,7 +10103,7 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         qids_str = ", ".join(cond_tokens) if cond_tokens else "-"
         res_str = f"done, conditional ({qids_str})"
         closed_val = _git_closed_date(tasks_dir, ct["rel_path"])
-        cond_lines.append(f"| {ct['id']}{st_disp} | {task_cell} | {res_str} | {closed_val} |")
+        cond_lines.append(f"| {id_cell} | {task_cell} | {res_str} | {closed_val} |")
     cond_content = "\n".join(cond_lines)
     if stale_entries:
         cond_content += f"\n\nStale conditions (> 7 days): {', '.join(stale_entries)}"
@@ -9898,11 +10137,12 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
         if base_id in done_tasks_map:
             dt = done_tasks_map[base_id]
             seen_done_ids.add(base_id)
+            id_cell = _format_index_id_cell(dt, row_id, prefer_bare_id)
             task_cell = f"[{dt['title']}]({dt['rel_path']})"
             res_val = cells[2] if len(cells) > 2 and cells[2] not in ("", "-") else dt["state"]
             closed_val = cells[3] if len(cells) > 3 and cells[3] not in ("", "-") else _git_closed_date(tasks_dir, dt["rel_path"])
-            st_disp = f" ({dt['short_title']})" if dt.get("short_title") else ""
-            done_rows.append((base_id, f"| {dt['id']}{st_disp} | {task_cell} | {res_val} | {closed_val} |"))
+            extra_s = _format_extra_cells(cells, 4, done_col_count, dt, done_hdr_cells)
+            done_rows.append((base_id, f"| {id_cell} | {task_cell} | {res_val} | {closed_val} |{extra_s}"))
         elif base_id not in resolved_ids:
             seen_done_ids.add(base_id)
             task_cell = cells[1] if len(cells) > 1 else "-"
@@ -9910,18 +10150,20 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 task_cell = f"{task_cell} (missing)"
             res_val = cells[2] if len(cells) > 2 else "done"
             closed_val = cells[3] if len(cells) > 3 else datetime.date.today().isoformat()
-            done_rows.append((base_id, f"| {row_id} | {task_cell} | {res_val} | {closed_val} |"))
+            extra_s = _format_extra_cells(cells, 4, done_col_count, None, done_hdr_cells)
+            done_rows.append((base_id, f"| {row_id} | {task_cell} | {res_val} | {closed_val} |{extra_s}"))
 
     new_done_tasks = [dt for dt_id, dt in done_tasks_map.items() if dt_id not in seen_done_ids]
     new_done_tasks.sort(key=lambda t: _natural_sort_key(t["id"]), reverse=True)
     for dt in new_done_tasks:
         dt_id = dt["id"]
         seen_done_ids.add(dt_id)
+        id_cell = _format_index_id_cell(dt, None, prefer_bare_id)
         task_cell = f"[{dt['title']}]({dt['rel_path']})"
         res_val = dt["state"]
         closed_val = _git_closed_date(tasks_dir, dt["rel_path"])
-        st_disp = f" ({dt['short_title']})" if dt.get("short_title") else ""
-        done_rows.append((dt_id, f"| {dt_id}{st_disp} | {task_cell} | {res_val} | {closed_val} |"))
+        extra_s = _format_extra_cells(None, 4, done_col_count, dt, done_hdr_cells)
+        done_rows.append((dt_id, f"| {id_cell} | {task_cell} | {res_val} | {closed_val} |{extra_s}"))
 
     if has_conflict_markers:
         done_rows.sort(key=lambda r: _natural_sort_key(r[0]), reverse=True)
@@ -12117,6 +12359,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
     apply_flag = getattr(args, "apply", False)
     check_flag = getattr(args, "check", False)
     expect_hash = getattr(args, "expect_hash", None)
+    reorder = getattr(args, "reorder", False)
 
     # If --apply, run under exclusive task-write lock
     if apply_flag:
@@ -12195,7 +12438,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
 
                 # 4. Render
                 try:
-                    rendered = render_synced_index(tasks_dir, existing, adopt=adopt)
+                    rendered = render_synced_index(tasks_dir, existing, adopt=adopt, reorder=reorder)
                 except ValueError as e:
                     err_msg = str(e)
                     if getattr(args, "json", False):
@@ -12304,7 +12547,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
 
     # 4. Render
     try:
-        rendered = render_synced_index(tasks_dir, existing, adopt=adopt)
+        rendered = render_synced_index(tasks_dir, existing, adopt=adopt, reorder=reorder)
     except ValueError as e:
         err_msg = str(e)
         if getattr(args, "json", False):
@@ -12499,9 +12742,14 @@ def cmd_merge_index(args: argparse.Namespace) -> int:
         return 1
 
 
-def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_plans: bool = False) -> dict[str, Any]:
+def upgrade_tasks_tree(
+    tasks_dir: pathlib.Path,
+    dry_run: bool = False,
+    migrate_plans: bool = False,
+    expect_hash: str | None = None,
+) -> dict[str, Any]:
     """Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention:
-      1. Updates tasks/AGENTS.md with canonical task-pipeline rules and skill names.
+      1. Updates tasks/AGENTS.md with a managed block between markers (never replacing existing rules).
       2. Ensures tasks/.gitignore exists and ignores .ai-orch.lock.
       2.5. Ensures tasks/.gitattributes exists and configures 00-INDEX.md merge=ai-orch-index.
       3. Ensures standard directories exist (_inbox/to-analyze, _inbox/analyzed).
@@ -12518,6 +12766,9 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_p
             "upgraded_files": [],
             "created": [],
             "updated": [],
+            "plan": [],
+            "plan_hash": "",
+            "hash": "",
             "dry_run": dry_run,
             "emergent_count": 0,
             "initiative_count": 0,
@@ -12531,17 +12782,22 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_p
             upgraded_files: list[str] = []
             created: list[str] = []
             updated: list[str] = []
+            operations: list[dict[str, Any]] = []
+            pending_writes: list[tuple[pathlib.Path, str]] = []
+            pending_copies: list[tuple[pathlib.Path, pathlib.Path]] = []
 
-            # 1. Update tasks/AGENTS.md
+            # 1. Update tasks/AGENTS.md (managed block, never overwrite project rules)
             agents_md = tasks_dir / "AGENTS.md"
             existing_agents = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
-            if existing_agents.strip() != CANONICAL_TASKS_AGENTS_MD.strip():
+            new_agents = render_upgraded_agents_md(existing_agents)
+            if existing_agents != new_agents:
                 if not agents_md.is_file():
                     created.append(str(agents_md))
+                    operations.append({"action": "create", "path": "AGENTS.md", "before_hash": ""})
                 else:
                     updated.append(str(agents_md))
-                if not dry_run:
-                    _atomic_write_text(agents_md, CANONICAL_TASKS_AGENTS_MD, encoding="utf-8")
+                    operations.append({"action": "modify", "path": "AGENTS.md", "before_hash": _file_sha256(agents_md)})
+                pending_writes.append((agents_md, new_agents))
                 upgraded_files.append(str(agents_md))
 
             # 2. Ensure tasks/.gitignore exists and contains .ai-orch.lock
@@ -12549,17 +12805,17 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_p
             if not gitignore_path.is_file():
                 created.append(str(gitignore_path))
                 upgraded_files.append(str(gitignore_path))
-                if not dry_run:
-                    _atomic_write_text(gitignore_path, ".ai-orch.lock\n", encoding="utf-8")
+                operations.append({"action": "create", "path": ".gitignore", "before_hash": ""})
+                pending_writes.append((gitignore_path, ".ai-orch.lock\n"))
             else:
                 existing_gi = gitignore_path.read_text(encoding="utf-8")
                 gi_lines = [line.strip() for line in existing_gi.splitlines()]
                 if ".ai-orch.lock" not in gi_lines:
                     updated.append(str(gitignore_path))
                     upgraded_files.append(str(gitignore_path))
+                    operations.append({"action": "modify", "path": ".gitignore", "before_hash": _file_sha256(gitignore_path)})
                     new_gi = existing_gi + ("\n" if existing_gi and not existing_gi.endswith("\n") else "") + ".ai-orch.lock\n"
-                    if not dry_run:
-                        _atomic_write_text(gitignore_path, new_gi, encoding="utf-8")
+                    pending_writes.append((gitignore_path, new_gi))
 
             # 2.5. Ensure tasks/.gitattributes exists and contains 00-INDEX.md merge=ai-orch-index
             gitattributes_path = tasks_dir / ".gitattributes"
@@ -12567,22 +12823,17 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_p
             if not gitattributes_path.is_file():
                 created.append(str(gitattributes_path))
                 upgraded_files.append(str(gitattributes_path))
-                if not dry_run:
-                    _atomic_write_text(gitattributes_path, f"{rule_line}\n", encoding="utf-8")
+                operations.append({"action": "create", "path": ".gitattributes", "before_hash": ""})
+                pending_writes.append((gitattributes_path, f"{rule_line}\n"))
             else:
                 existing_ga = gitattributes_path.read_text(encoding="utf-8")
                 ga_lines = [line.strip() for line in existing_ga.splitlines()]
                 if not any(line == rule_line or line.startswith("00-INDEX.md merge=") for line in ga_lines):
                     updated.append(str(gitattributes_path))
                     upgraded_files.append(str(gitattributes_path))
+                    operations.append({"action": "modify", "path": ".gitattributes", "before_hash": _file_sha256(gitattributes_path)})
                     new_ga = existing_ga + ("\n" if existing_ga and not existing_ga.endswith("\n") else "") + f"{rule_line}\n"
-                    if not dry_run:
-                        _atomic_write_text(gitattributes_path, new_ga, encoding="utf-8")
-
-            # 3. Ensure standard directories
-            if not dry_run:
-                (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
-                (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
+                    pending_writes.append((gitattributes_path, new_ga))
 
             # 3.5. Legacy plans discovery & migration
             legacy_plans: list[dict[str, Any]] = []
@@ -12621,18 +12872,19 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_p
                             else:
                                 should_migrate = bool(migrate_plans or True)  # non-conflicting NN-<slug>
                                 if should_migrate:
-                                    if not dry_run:
-                                        dest_dir.mkdir(parents=True, exist_ok=True)
-                                        for subitem in child.iterdir():
-                                            if subitem.is_file():
-                                                target_sub = dest_dir / subitem.name
-                                                if not target_sub.exists():
-                                                    shutil.copy2(subitem, target_sub)
-                                                    created.append(str(target_sub))
-                                                    upgraded_files.append(str(target_sub))
-                                        action = "migrated"
-                                    else:
-                                        action = "would_migrate"
+                                    for subitem in sorted(child.iterdir()):
+                                        if subitem.is_file():
+                                            target_sub = dest_dir / subitem.name
+                                            if not target_sub.exists():
+                                                created.append(str(target_sub))
+                                                upgraded_files.append(str(target_sub))
+                                                operations.append({
+                                                    "action": "create",
+                                                    "path": target_sub.relative_to(tasks_dir).as_posix(),
+                                                    "before_hash": "",
+                                                })
+                                                pending_copies.append((subitem, target_sub))
+                                    action = "would_migrate" if dry_run else "migrated"
                                 else:
                                     action = "suggested"
 
@@ -12655,14 +12907,15 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_p
                                     action = "conflict"
                                 else:
                                     if migrate_plans:
-                                        if not dry_run:
-                                            (tasks_dir / "specs").mkdir(parents=True, exist_ok=True)
-                                            shutil.copy2(subfile, dest_file)
-                                            created.append(str(dest_file))
-                                            upgraded_files.append(str(dest_file))
-                                            action = "migrated"
-                                        else:
-                                            action = "would_migrate"
+                                        created.append(str(dest_file))
+                                        upgraded_files.append(str(dest_file))
+                                        operations.append({
+                                            "action": "create",
+                                            "path": dest_file.relative_to(tasks_dir).as_posix(),
+                                            "before_hash": "",
+                                        })
+                                        pending_copies.append((subfile, dest_file))
+                                        action = "would_migrate" if dry_run else "migrated"
                                     else:
                                         action = "suggested"
 
@@ -12685,14 +12938,15 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_p
                                 action = "conflict"
                             else:
                                 if migrate_plans:
-                                    if not dry_run:
-                                        dest_dir.mkdir(parents=True, exist_ok=True)
-                                        shutil.copy2(child, dest_file)
-                                        created.append(str(dest_file))
-                                        upgraded_files.append(str(dest_file))
-                                        action = "migrated"
-                                    else:
-                                        action = "would_migrate"
+                                    created.append(str(dest_file))
+                                    upgraded_files.append(str(dest_file))
+                                    operations.append({
+                                        "action": "create",
+                                        "path": dest_file.relative_to(tasks_dir).as_posix(),
+                                        "before_hash": "",
+                                    })
+                                    pending_copies.append((child, dest_file))
+                                    action = "would_migrate" if dry_run else "migrated"
                                 else:
                                     action = "suggested"
                         else:
@@ -12702,14 +12956,15 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_p
                                 action = "conflict"
                             else:
                                 if migrate_plans:
-                                    if not dry_run:
-                                        (tasks_dir / "specs").mkdir(parents=True, exist_ok=True)
-                                        shutil.copy2(child, dest_file)
-                                        created.append(str(dest_file))
-                                        upgraded_files.append(str(dest_file))
-                                        action = "migrated"
-                                    else:
-                                        action = "would_migrate"
+                                    created.append(str(dest_file))
+                                    upgraded_files.append(str(dest_file))
+                                    operations.append({
+                                        "action": "create",
+                                        "path": dest_file.relative_to(tasks_dir).as_posix(),
+                                        "before_hash": "",
+                                    })
+                                    pending_copies.append((child, dest_file))
+                                    action = "would_migrate" if dry_run else "migrated"
                                 else:
                                     action = "suggested"
 
@@ -12725,30 +12980,84 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_p
             # 4. Re-sync 00-INDEX.md
             idx_path = tasks_dir / "00-INDEX.md"
             existing_idx = idx_path.read_text(encoding="utf-8") if idx_path.is_file() else ""
+            if not dry_run:
+                # Apply pending copies before rendering index so migrated plans appear in index
+                (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
+                (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
+
             rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
             if existing_idx.strip() != rendered_idx.strip():
                 if not idx_path.is_file():
                     created.append(str(idx_path))
+                    operations.append({"action": "create", "path": "00-INDEX.md", "before_hash": ""})
                 else:
                     updated.append(str(idx_path))
-                if not dry_run:
-                    _atomic_write_text(idx_path, rendered_idx, encoding="utf-8")
+                    operations.append({"action": "modify", "path": "00-INDEX.md", "before_hash": _file_sha256(idx_path)})
+                pending_writes.append((idx_path, rendered_idx))
                 upgraded_files.append(str(idx_path))
 
-            # 5. Validate
-            errors, warnings, emergent, initiatives = validate_tasks_tree(tasks_dir)
+            plan, plan_hash = compute_operation_plan(operations)
+
+            if expect_hash is not None and not dry_run:
+                if expect_hash.strip().lower() != plan_hash.lower():
+                    return {
+                        "ok": False,
+                        "error": f"Upgrade plan hash mismatch: expected {expect_hash}, got {plan_hash}",
+                        "plan": plan,
+                        "plan_hash": plan_hash,
+                        "hash": plan_hash,
+                        "upgraded_files": [],
+                        "created": [],
+                        "updated": [],
+                        "dry_run": False,
+                        "emergent_count": 0,
+                        "initiative_count": 0,
+                        "legacy_plans": legacy_plans,
+                        "errors": [f"Upgrade plan hash mismatch: expected {expect_hash}, got {plan_hash}"],
+                        "warnings": [],
+                    }
+
+            if not dry_run:
+                for src_item, dst_item in pending_copies:
+                    dst_item.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_item, dst_item)
+                if pending_copies:
+                    # Re-render index if new plans were copied
+                    rendered_idx_post = render_synced_index(tasks_dir, existing_idx, adopt=True)
+                    pending_writes = [
+                        (p, rendered_idx_post if p == idx_path else content)
+                        for p, content in pending_writes
+                    ]
+                    if existing_idx.strip() != rendered_idx_post.strip() and str(idx_path) not in upgraded_files:
+                        if not idx_path.is_file():
+                            created.append(str(idx_path))
+                        else:
+                            updated.append(str(idx_path))
+                        upgraded_files.append(str(idx_path))
+                        pending_writes.append((idx_path, rendered_idx_post))
+                for target_p, target_content in pending_writes:
+                    target_p.parent.mkdir(parents=True, exist_ok=True)
+                    _atomic_write_text(target_p, target_content, encoding="utf-8")
+
+            # 5. Inspect tree for validation summary (pre-existing task errors become warnings so upgrade exits 0)
+            val_errors, val_warnings, emergent, initiatives = validate_tasks_tree(tasks_dir)
+            combined_warnings = list(val_warnings) + list(val_errors)
 
             return {
-                "ok": len(errors) == 0,
+                "ok": True,
                 "upgraded_files": upgraded_files,
                 "created": created,
                 "updated": updated,
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "hash": plan_hash,
                 "dry_run": dry_run,
                 "emergent_count": len(emergent),
                 "initiative_count": len(initiatives),
                 "legacy_plans": legacy_plans,
-                "errors": errors,
-                "warnings": warnings,
+                "errors": [],
+                "validation_errors": val_errors,
+                "warnings": combined_warnings,
             }
     except LockTimeoutError as e:
         return {
@@ -12758,6 +13067,9 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_p
             "upgraded_files": [],
             "created": [],
             "updated": [],
+            "plan": [],
+            "plan_hash": "",
+            "hash": "",
             "dry_run": dry_run,
             "emergent_count": 0,
             "initiative_count": 0,
@@ -12769,20 +13081,33 @@ def upgrade_tasks_tree(tasks_dir: pathlib.Path, dry_run: bool = False, migrate_p
 
 def cmd_upgrade(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
-    dry_run = getattr(args, "dry_run", False)
+    dry_run = bool(getattr(args, "dry_run", False) or getattr(args, "preview", False))
     migrate_plans = getattr(args, "migrate_plans", False)
-    res = upgrade_tasks_tree(tasks_dir, dry_run=dry_run, migrate_plans=migrate_plans)
+    expect_hash = getattr(args, "expect_hash", None) or getattr(args, "expect_plan_hash", None)
+    res = upgrade_tasks_tree(
+        tasks_dir,
+        dry_run=dry_run,
+        migrate_plans=migrate_plans,
+        expect_hash=expect_hash,
+    )
     args._last_result = res
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
+        if not res["ok"]:
+            for e in res.get("errors", []):
+                print(f"[FAIL] {e}", file=sys.stderr)
+            return 1
         prefix = "[dry-run] " if dry_run else ""
         if res["upgraded_files"]:
             print(f"[ok] {prefix}Upgraded {len(res['upgraded_files'])} file(s) in {tasks_dir}:")
             for f in res["upgraded_files"]:
-                print(f"  - {f}")
+                act_tag = "create" if f in res.get("created", []) else "update"
+                print(f"  - [{act_tag}] {f}")
         else:
-            print(f"[ok] {tasks_dir} is already up-to-date with latest task-pipeline convention.")
+            print(f"[ok] {prefix}{tasks_dir} is already up-to-date with latest task-pipeline convention.")
+        if dry_run and res.get("plan_hash"):
+            print(f"[preview] Plan hash: {res['plan_hash']} (apply with: upgrade --tasks-dir {tasks_dir} --apply --expect-hash {res['plan_hash']})")
         if res.get("legacy_plans"):
             print(f"\n[legacy-plans] {prefix}Discovered {len(res['legacy_plans'])} legacy plan(s):")
             for lp in res["legacy_plans"]:
@@ -18332,6 +18657,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--apply", action="store_true", help="Write updated 00-INDEX.md in place")
     p_sync.add_argument("--check", action="store_true", help="Exit non-zero if 00-INDEX.md is out of sync")
     p_sync.add_argument("--adopt", action="store_true", help="Preview wrapping existing generated tables in markers (apply with --adopt --apply --expect-hash <hash>)")
+    p_sync.add_argument("--reorder", action="store_true", help="Re-sort rows in Next up and category tables by priority and ID")
     p_sync.add_argument("--expect-hash", default=None, help="Refuse to apply if current index SHA256 does not match this hash")
     p_sync.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_sync.set_defaults(func=cmd_sync_index)
@@ -18347,6 +18673,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_upg = sub.add_parser("upgrade", help="Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention")
     p_upg.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_upg.add_argument("--dry-run", action="store_true", default=False, help="Preview changes without writing to disk")
+    p_upg.add_argument("--preview", action="store_true", default=False, help="Preview changes without writing to disk (alias for --dry-run)")
+    p_upg.add_argument("--apply", action="store_true", default=False, help="Apply upgrade changes to disk")
+    p_upg.add_argument("--expect-hash", default=None, help="Refuse to apply if current upgrade plan hash does not match this hash")
+    p_upg.add_argument("--expect-plan-hash", default=None, help="Refuse to apply if current upgrade plan hash does not match this hash")
     p_upg.add_argument("--migrate-plans", action="store_true", default=False, help="Migrate discovered legacy plans into tasks/ directory")
     p_upg.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_upg.set_defaults(func=cmd_upgrade)
@@ -18886,6 +19216,8 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
     if cmd == "step":
         step_cmd = getattr(args, "step_cmd", None)
         return step_cmd in ("add", "check", "uncheck")
+    if cmd == "upgrade":
+        return not bool(getattr(args, "dry_run", False) or getattr(args, "preview", False))
     if cmd in (
         "close",
         "transition",
@@ -18909,7 +19241,6 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
         "request-verification",
         "micro",
         "promote",
-        "upgrade",
     ):
         return True
     return False

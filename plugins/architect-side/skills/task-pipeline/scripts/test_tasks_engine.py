@@ -11439,3 +11439,275 @@ def test_reopen_emergent_task_dry_run_prints_plan_hash_and_writes_nothing(tmp_pa
     assert task_file.read_text(encoding="utf-8") == task_content_before
     assert index_file.read_text(encoding="utf-8") == index_content_before
 
+
+# ===========================================================================
+# T050 Non-Destructive Upgrade and Sync-Index; Per-Project Extension Fields
+# ===========================================================================
+
+
+def test_t050_agents_md_project_rules_survive_upgrade_and_idempotent(tmp_path: pathlib.Path) -> None:
+    """T050: An existing tasks/AGENTS.md with project rules survives upgrade byte-for-byte outside markers, and re-running upgrade is idempotent."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    custom_rules = (
+        "# tasks/ - convention for this project\n\n"
+        "## Priority criteria\n\n"
+        "- P0: security exposure\n"
+        "- P1: prod migration\n\n"
+        "## Project-specific rules\n\n"
+        "- **Categories**: `audit-auth`, `porting-lr74`.\n"
+        "- **Redmine**: written in Italian.\n"
+    )
+    agents_path = tasks_dir / "AGENTS.md"
+    agents_path.write_text(custom_rules, encoding="utf-8")
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # 1. Dry-run preview prints plan and writes nothing
+    res_dry = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--dry-run", "--json")
+    assert res_dry.returncode == 0
+    dry_payload = json.loads(res_dry.stdout)
+    assert dry_payload["ok"] is True
+    assert dry_payload["plan_hash"]
+    assert agents_path.read_text(encoding="utf-8") == custom_rules
+
+    # 2. Apply with --expect-hash
+    res_upg = run_cli(
+        "upgrade",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--apply",
+        "--expect-hash",
+        dry_payload["plan_hash"],
+        "--json",
+    )
+    assert res_upg.returncode == 0
+    upg_payload = json.loads(res_upg.stdout)
+    assert upg_payload["ok"] is True
+
+    upgraded_text = agents_path.read_text(encoding="utf-8")
+    assert upgraded_text.startswith(custom_rules)
+    assert "<!-- ai-orch:managed begin -->" in upgraded_text
+    assert "<!-- ai-orch:managed end -->" in upgraded_text
+    assert "task-pipeline" in upgraded_text
+
+    # 3. Re-running upgrade is idempotent (no files updated, bytes identical)
+    res_upg2 = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_upg2.returncode == 0
+    upg2_payload = json.loads(res_upg2.stdout)
+    assert upg2_payload["ok"] is True
+    assert upg2_payload["upgraded_files"] == []
+    assert agents_path.read_text(encoding="utf-8") == upgraded_text
+
+    # 4. Modifying inside markers and re-running refreshes only the managed block
+    tampered = upgraded_text.replace("task-pipeline", "stale-skill-name")
+    agents_path.write_text(tampered, encoding="utf-8")
+    res_upg3 = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_upg3.returncode == 0
+    assert agents_path.read_text(encoding="utf-8") == upgraded_text
+
+
+def test_t050_sync_index_preserves_owner_column_next_up_order_and_id_format(tmp_path: pathlib.Path) -> None:
+    """T050: Extra columns (e.g. Owner), Next up order (without --reorder), and bare Id format survive sync-index."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "audit-auth").mkdir(parents=True)
+
+    _write_sample_task(
+        tasks_dir / "audit-auth" / "T119-first.md",
+        task_id="T119",
+        title="Task 119",
+        category="audit-auth",
+        priority="P0",
+        next_up="yes",
+        state="in progress",
+    )
+    _write_sample_task(
+        tasks_dir / "audit-auth" / "T037-second.md",
+        task_id="T037",
+        title="Task 037",
+        category="audit-auth",
+        priority="P0",
+        next_up="yes",
+        state="open",
+    )
+    _write_sample_task(
+        tasks_dir / "audit-auth" / "T120-new.md",
+        task_id="T120",
+        title="Task 120",
+        category="audit-auth",
+        priority="P1",
+        next_up="no",
+        state="open",
+    )
+
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        """# Task Index
+
+## Next up
+
+<!-- ai-orch:generated next-up -->
+| Id | Priority | Task | Executor | Handoff |
+| --- | --- | --- | --- | --- |
+| T119 | P0 | [Task 119](audit-auth/T119-first.md) | kilo | `Read tasks/audit-auth/T119-first.md and execute.` |
+| T037 | P0 | [Task 037](audit-auth/T037-second.md) | kilo | `Read tasks/audit-auth/T037-second.md and execute.` |
+<!-- /ai-orch:generated next-up -->
+
+## Tasks by category
+
+<!-- ai-orch:generated tasks-by-category -->
+### audit-auth
+
+Auth audit. Owner session: unassigned ([README](audit-auth/README.md)).
+
+| Id | Priority | Task | State | Executor | Depends on | Owner |
+| --- | --- | --- | --- | --- | --- | --- |
+| T119 | P0 | [Task 119](audit-auth/T119-first.md) | open | kilo | - | Alfredo |
+| T037 | P0 | [Task 037](audit-auth/T037-second.md) | open | kilo | - | Alfredo + NetFarm |
+<!-- /ai-orch:generated tasks-by-category -->
+
+## Decisions waiting
+
+<!-- ai-orch:generated decisions -->
+| - | None. | - | - |
+<!-- /ai-orch:generated decisions -->
+
+## Done
+
+<!-- ai-orch:generated done -->
+| Id | Task | Result | Closed |
+| --- | --- | --- | --- |
+<!-- /ai-orch:generated done -->
+""",
+        encoding="utf-8",
+    )
+
+    # 1. Sync without --reorder
+    res = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--json")
+    assert res.returncode == 0
+    synced = index_path.read_text(encoding="utf-8")
+
+    # Owner column header and values preserved; new row T120 gets empty Owner cell
+    assert "| Id | Priority | Task | State | Executor | Depends on | Owner |" in synced
+    assert "| T119 | P0 | [Task 119](audit-auth/T119-first.md) | in progress | kilo | - | Alfredo |" in synced
+    assert "| T037 | P0 | [Task 037](audit-auth/T037-second.md) | open | kilo | - | Alfredo + NetFarm |" in synced
+    assert "| T120 | P1 | [Task 120](audit-auth/T120-new.md) | open | kilo | - |  |" in synced
+
+    # Next up order preserved: T119 appears before T037 even though T037 < T119 naturally
+    next_sec = synced.split("## Tasks by category")[0]
+    assert next_sec.index("| T119 |") < next_sec.index("| T037 |")
+
+    # 2. Sync with --reorder sorts T037 before T119
+    res_reord = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--reorder", "--apply", "--json")
+    assert res_reord.returncode == 0
+    synced_reord = index_path.read_text(encoding="utf-8")
+    next_sec_reord = synced_reord.split("## Tasks by category")[0]
+    assert next_sec_reord.index("| T037 |") < next_sec_reord.index("| T119 |")
+
+
+def test_t050_companion_file_is_not_a_task_row(tmp_path: pathlib.Path) -> None:
+    """T050: Companion files matching T###-*.md without task headers (e.g. T101-answers.md) are ignored."""
+    tasks_dir = tmp_path / "tasks"
+    cat_dir = tasks_dir / "audit-auth"
+    cat_dir.mkdir(parents=True)
+
+    _write_sample_task(
+        cat_dir / "T101-decisions.md",
+        task_id="T101",
+        title="Decisions from triage",
+        category="audit-auth",
+        priority="P1",
+        state="open",
+    )
+    # Companion file without task header lines
+    (cat_dir / "T101-answers.md").write_text(
+        "# T101 – Risposte alle decisioni del triage\n\nCompila direttamente qui:\n\n## 1. Infrastruttura\n- [ ] sì\n",
+        encoding="utf-8",
+    )
+
+    emergent = te.discover_emergent_tasks(tasks_dir)
+    assert [t["id"] for t in emergent] == ["T101"]
+
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0, res_val.stdout
+    assert json.loads(res_val.stdout)["ok"] is True
+
+    rendered = te.render_synced_index(tasks_dir, "", adopt=True)
+    assert "T101-answers.md" not in rendered
+    assert "T101-decisions.md" in rendered
+
+
+def test_t050_extension_fields_per_project_and_upgrade_exit_code(tmp_path: pathlib.Path) -> None:
+    """T050: 'area' is accepted when declared in orchestration.toml or tasks/AGENTS.md and rejected when not; upgrade exits 0."""
+    repo_dir = tmp_path / "project"
+    tasks_dir = repo_dir / "tasks"
+    cat_dir = tasks_dir / "audit-auth"
+    cat_dir.mkdir(parents=True)
+
+    task_file = cat_dir / "T001-auth.md"
+    task_file.write_text(
+        "# T001 Auth check\n\n"
+        "- id: T001\n"
+        "- title: Auth check\n"
+        "- category: audit-auth\n"
+        "- priority: P1\n"
+        "- priority-reason: Needed for audit\n"
+        "- next-up: no\n"
+        "- state: open\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: Read tasks/audit-auth/T001-auth.md and execute.\n"
+        "- area: security audit\n\n"
+        "## Goal\n\nCheck auth.\n\n"
+        "## Steps\n\n- [ ] Run check.\n\n"
+        "## Verification\n\n- Check passes.\n",
+        encoding="utf-8",
+    )
+
+    # 1. Without declaration: validate rejects 'area'
+    res_undeclared = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_undeclared.returncode == 1
+    err_undeclared = "\n".join(json.loads(res_undeclared.stdout)["errors"])
+    assert "unknown header field(s): area" in err_undeclared
+
+    # 2. Even when validate has errors, upgrade exits 0 and surfaces them as warnings
+    res_upg = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_upg.returncode == 0
+    upg_data = json.loads(res_upg.stdout)
+    assert upg_data["ok"] is True
+
+    # 3. Declare [tasks] extension_fields = ["area"] in orchestration.toml -> validate accepts 'area'
+    (repo_dir / "orchestration.toml").write_text(
+        '[tasks]\nextension_fields = ["area"]\n',
+        encoding="utf-8",
+    )
+    res_declared = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_declared.returncode == 0, res_declared.stdout
+    assert json.loads(res_declared.stdout)["ok"] is True
+
+    # Undeclared field ' bogus ' is still rejected
+    task_file.write_text(
+        task_file.read_text(encoding="utf-8").replace("- area: security audit\n", "- area: security audit\n- bogus: nope\n"),
+        encoding="utf-8",
+    )
+    res_bogus = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_bogus.returncode == 1
+    assert "unknown header field(s): bogus" in "\n".join(json.loads(res_bogus.stdout)["errors"])
+
+    # Restore valid task and test declaration via tasks/AGENTS.md fenced block (without orchestration.toml)
+    (repo_dir / "orchestration.toml").unlink()
+    task_file.write_text(
+        task_file.read_text(encoding="utf-8").replace("- bogus: nope\n", ""),
+        encoding="utf-8",
+    )
+    (tasks_dir / "AGENTS.md").write_text(
+        "# Project tasks rules\n\n```toml\n[tasks]\nextension_fields = [\"area\"]\n```\n",
+        encoding="utf-8",
+    )
+    res_agents_decl = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_agents_decl.returncode == 0, res_agents_decl.stdout
+    assert json.loads(res_agents_decl.stdout)["ok"] is True
+
+
