@@ -135,6 +135,9 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T058 (Branch id collisions) | P2 | [Id collisions across branches and a dangling merge driver](engine/T058-id-collisions-across-branches-and-a-dangling-merge.md) | open | kilo | - |
 | T059 (Merge driver opt-in) | P3 | [upgrade explains or gates the local git config write of the index merge driver](engine/T059-upgrade-explains-or-gates-the-local-git-config-wri.md) | open | kilo | - |
 | T060 (Initiative rows added) | P2 | [sync-index adds rows for initiatives missing from the index](engine/T060-sync-index-adds-rows-for-initiatives-missing-from.md) | open | kilo | - |
+| T061 (Ask from task keeps args) | P2 | [questions ask --from-task keeps explicit arguments](engine/T061-questions-ask-from-task-keeps-explicit-arguments.md) | open | kilo | - |
+| T062 (No delivery with placeholders) | P2 | [transition to delivered refuses template placeholder sections](engine/T062-transition-to-delivered-refuses-template-placehold.md) | open | kilo | - |
+| T063 (Reopen to delivered) | P3 | [reopen can target delivered and set verify-by](engine/T063-reopen-can-target-delivered-and-set-verify-by.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
