@@ -6581,12 +6581,25 @@ def discover_use_cases(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
     return use_cases
 
 
+def _next_use_case_id(tasks_dir: pathlib.Path) -> str:
+    """Next free UC### id: one above the highest id found anywhere under tasks/ (use-cases/ and done/)."""
+    highest = 0
+    for f in pathlib.Path(tasks_dir).rglob("UC*.md"):
+        m = re.match(r"^UC(\d{3,})(?:-|\.md$)", f.name)
+        if m:
+            highest = max(highest, int(m.group(1)))
+    return f"UC{highest + 1:03d}"
+
+
 def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    uc_id = data.get("id")
-    if not uc_id or not USE_CASE_ID_RE.match(uc_id):
-        return False, {"error": f"Invalid use case id {uc_id!r}, must match UC###"}
+    uc_id = (data.get("id") or "").strip()
+    if uc_id and not USE_CASE_ID_RE.match(uc_id):
+        return False, {"error": f"Invalid use case id {uc_id!r}, must match UC### (or leave it empty to get the next free one)"}
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     with task_write_lock(tasks_dir):
+        if not uc_id:
+            # Assigned under the write lock so concurrent saves never get the same id.
+            uc_id = _next_use_case_id(tasks_dir)
         title = data.get("title", "Untitled Use Case")
         slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
         fname = f"{uc_id}-{slug}.md"
@@ -16238,7 +16251,7 @@ def cmd_use_cases_create(args: argparse.Namespace) -> int:
         print(json.dumps(res, indent=2))
     else:
         if ok:
-            print(f"[ok] Created use case {args.id} at {res['file_path']}")
+            print(f"[ok] Created use case {res.get('id') or args.id} at {res['file_path']}")
         else:
             print(f"[FAIL] {res.get('error')}")
     return 0 if ok else 1
@@ -20881,7 +20894,7 @@ def build_parser() -> argparse.ArgumentParser:
     uc_show.set_defaults(func=cmd_use_cases_show)
 
     uc_create = uc_sub.add_parser("create", help="Create or update a use case")
-    uc_create.add_argument("--id", required=True, help="Use case ID (e.g. UC001)")
+    uc_create.add_argument("--id", default="", help="Use case ID (e.g. UC001); omit to get the next free UC###")
     uc_create.add_argument("--title", required=True, help="Use case title")
     uc_create.add_argument("--actor", default="End-User", help="Primary actor / persona")
     uc_create.add_argument("--status", choices=list(USE_CASE_STATUSES), default="draft")
