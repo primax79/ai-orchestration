@@ -12384,5 +12384,347 @@ def test_t035_log_records_every_intermediate_step_for_single_and_folder_tasks(tm
     assert "state `verified` -> `done` — walked from open" in prog_text
 
 
+# ===========================================================================
+# T037 (Reopened): git merge driver registration, 3-way row merge, validate
+# warning, and sync-index dry-run footer
+# ===========================================================================
+
+
+def _git_run(repo_dir: pathlib.Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env.setdefault("GIT_AUTHOR_NAME", "Test User")
+    env.setdefault("GIT_AUTHOR_EMAIL", "test@example.com")
+    env.setdefault("GIT_COMMITTER_NAME", "Test User")
+    env.setdefault("GIT_COMMITTER_EMAIL", "test@example.com")
+    env["AI_ORCH_SOURCE_ROOT"] = str(REPO_ROOT)
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(repo_dir),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=check,
+    )
+
+
+def test_t037_real_git_merge_two_branches_adding_tasks_keeps_both_rows(tmp_path: pathlib.Path) -> None:
+    """Real git init repo, two branches adding different tasks and both updating 00-INDEX.md,
+    upgrade has configured the driver, git merge succeeds with zero conflict markers and both rows present."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _git_run(repo_dir, "init", "-b", "main")
+
+    tasks_dir = repo_dir / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    _write_sample_task(
+        tasks_dir / "features" / "T001-base.md",
+        task_id="T001",
+        title="Base feature",
+        short="Base feature",
+        category="features",
+        priority="P1",
+        next_up="yes",
+        state="open",
+    )
+
+    # Preview and apply upgrade to scaffold .gitattributes, 00-INDEX.md, and git config merge driver
+    prev = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert prev.returncode == 0
+    prev_data = json.loads(prev.stdout)
+    app = run_cli(
+        "upgrade",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--apply",
+        "--expect-plan-hash",
+        prev_data["plan_hash"],
+        "--json",
+    )
+    assert app.returncode == 0, app.stdout + app.stderr
+    assert json.loads(app.stdout)["ok"] is True
+
+    _git_run(repo_dir, "add", ".")
+    _git_run(repo_dir, "commit", "-m", "initial base")
+
+    # Branch B adds T003 and updates 00-INDEX.md
+    _git_run(repo_dir, "checkout", "-b", "branch-b")
+    _write_sample_task(
+        tasks_dir / "features" / "T003-branch-b.md",
+        task_id="T003",
+        title="Branch B feature",
+        short="Branch B feature",
+        category="features",
+        priority="P1",
+        next_up="yes",
+        state="open",
+    )
+    res_sync_b = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync_b.returncode == 0
+    _git_run(repo_dir, "add", ".")
+    _git_run(repo_dir, "commit", "-m", "branch-b adds T003")
+
+    # Main branch adds T002 and updates 00-INDEX.md
+    _git_run(repo_dir, "checkout", "main")
+    _write_sample_task(
+        tasks_dir / "features" / "T002-branch-a.md",
+        task_id="T002",
+        title="Branch A feature",
+        short="Branch A feature",
+        category="features",
+        priority="P1",
+        next_up="yes",
+        state="open",
+    )
+    res_sync_a = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync_a.returncode == 0
+    _git_run(repo_dir, "add", ".")
+    _git_run(repo_dir, "commit", "-m", "main adds T002")
+
+    # Merge branch-b into main -> custom merge driver resolves 00-INDEX.md automatically
+    res_merge = _git_run(repo_dir, "merge", "--no-edit", "branch-b", check=False)
+    assert res_merge.returncode == 0, res_merge.stdout + res_merge.stderr
+
+    merged_index = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "<<<<<<<" not in merged_index
+    assert "=======" not in merged_index
+    assert ">>>>>>>" not in merged_index
+
+    # Both branches' new rows (plus base row) are present in Next up and Tasks by category
+    nu_sec = te._extract_index_section_text(merged_index, "Next up", "next-up")
+    cat_sec = te._extract_index_section_text(merged_index, "Tasks by category", "tasks-by-category")
+    for sec in (nu_sec, cat_sec):
+        assert "T001" in sec
+        assert "T002" in sec
+        assert "T003" in sec
+        order, rmap = te._parse_index_table_rows(sec, "task")
+        assert len(order) == 3
+        assert set(order) == {"T001", "T002", "T003"}
+        # Zero duplicate rows
+        raw_table_rows = [
+            ln for ln in sec.splitlines()
+            if ln.strip().startswith("|") and not ln.strip().startswith("| Id") and "---" not in ln
+        ]
+        assert len(raw_table_rows) == 3
+
+
+def test_t037_one_branch_edits_row_state_while_other_adds_row(tmp_path: pathlib.Path) -> None:
+    """One branch edits a row's state while the other adds a row -> both changes kept (tested in both merge directions)."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _git_run(repo_dir, "init", "-b", "main")
+
+    tasks_dir = repo_dir / "tasks"
+    t1_path = tasks_dir / "features" / "T001-existing.md"
+    _write_sample_task(
+        t1_path,
+        task_id="T001",
+        title="Existing feature",
+        short="Existing feature",
+        category="features",
+        priority="P1",
+        next_up="yes",
+        state="open",
+    )
+
+    prev = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    plan_hash = json.loads(prev.stdout)["plan_hash"]
+    run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--apply", "--expect-plan-hash", plan_hash, "--json")
+    _git_run(repo_dir, "add", ".")
+    _git_run(repo_dir, "commit", "-m", "base with T001 open")
+
+    # Branch state-edit transitions T001 to 'in progress' and syncs index
+    _git_run(repo_dir, "checkout", "-b", "state-edit")
+    t1_path.write_text(
+        t1_path.read_text(encoding="utf-8").replace("- state: open", "- state: in progress"),
+        encoding="utf-8",
+    )
+    assert run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply").returncode == 0
+    _git_run(repo_dir, "add", ".")
+    _git_run(repo_dir, "commit", "-m", "transition T001 to in progress")
+
+    # Main adds T002 while T001 is still 'open' on main
+    _git_run(repo_dir, "checkout", "main")
+    _write_sample_task(
+        tasks_dir / "features" / "T002-added.md",
+        task_id="T002",
+        title="Added feature",
+        short="Added feature",
+        category="features",
+        priority="P2",
+        next_up="yes",
+        state="open",
+    )
+    assert run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply").returncode == 0
+    _git_run(repo_dir, "add", ".")
+    _git_run(repo_dir, "commit", "-m", "add T002 on main")
+
+    # Merge state-edit (theirs) into main (ours) where main's working tree still had T001 as open
+    res_merge = _git_run(repo_dir, "merge", "--no-edit", "state-edit", check=False)
+    assert res_merge.returncode == 0, res_merge.stdout + res_merge.stderr
+
+    merged_index = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "<<<<<<<" not in merged_index
+    cat_sec = te._extract_index_section_text(merged_index, "Tasks by category", "tasks-by-category")
+    _, rmap = te._parse_index_table_rows(cat_sec, "category")
+    assert set(rmap.keys()) == {"T001", "T002"}
+    assert "| in progress |" in rmap["T001"]
+    assert "| open |" in rmap["T002"]
+
+
+def test_t037_conflict_outside_generated_regions_surfaces_conflict_markers(tmp_path: pathlib.Path) -> None:
+    """Conflicting edits outside generated regions leave conflict markers and return non-zero while generated tables merge cleanly."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    _write_sample_task(tasks_dir / "features" / "T001-a.md", task_id="T001", title="Task A", short="Task A", category="features")
+    _write_sample_task(tasks_dir / "features" / "T002-b.md", task_id="T002", title="Task B", short="Task B", category="features")
+
+    base_idx = (
+        "# Task Index\n\n"
+        "Owner note: original shared line.\n\n"
+        "## Next up\n\n"
+        "<!-- ai-orch:generated next-up -->\n"
+        "| Id | Priority | Task | Executor | Handoff |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n"
+        "<!-- ai-orch:generated tasks-by-category -->\n"
+        "### features\n\n"
+        "Features.\n\n"
+        "| Id | Priority | Task | State | Executor | Depends on |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n"
+        "<!-- ai-orch:generated decisions -->\n"
+        "| Task / Initiative | Question (exact) | Decider | Blocks |\n"
+        "| --- | --- | --- | --- |\n"
+        "| - | None. | - | - |\n"
+        "<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n"
+        "<!-- ai-orch:generated done -->\n"
+        "| Id | Task | Result | Closed |\n"
+        "| --- | --- | --- | --- |\n"
+        "<!-- /ai-orch:generated done -->\n"
+    )
+    ours_idx = base_idx.replace(
+        "Owner note: original shared line.",
+        "Owner note: edited on HEAD branch.",
+    ).replace(
+        "| Id | Priority | Task | State | Executor | Depends on |\n| --- | --- | --- | --- | --- | --- |",
+        "| Id | Priority | Task | State | Executor | Depends on |\n| --- | --- | --- | --- | --- | --- |\n"
+        "| T001 | P1 | [Task A](features/T001-a.md) | open | kilo | - |",
+    )
+    theirs_idx = base_idx.replace(
+        "Owner note: original shared line.",
+        "Owner note: edited on incoming branch.",
+    ).replace(
+        "| Id | Priority | Task | State | Executor | Depends on |\n| --- | --- | --- | --- | --- | --- |",
+        "| Id | Priority | Task | State | Executor | Depends on |\n| --- | --- | --- | --- | --- | --- |\n"
+        "| T002 | P1 | [Task B](features/T002-b.md) | open | kilo | - |",
+    )
+
+    f_base = tmp_path / "base.md"
+    f_ours = tmp_path / "ours.md"
+    f_theirs = tmp_path / "theirs.md"
+    f_base.write_text(base_idx, encoding="utf-8")
+    f_ours.write_text(ours_idx, encoding="utf-8")
+    f_theirs.write_text(theirs_idx, encoding="utf-8")
+
+    res = run_cli("merge-index", str(f_base), str(f_ours), str(f_theirs), "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 1
+    merged_text = f_ours.read_text(encoding="utf-8")
+    # Conflict markers surfaced around the conflicting outside prose
+    assert "<<<<<<<" in merged_text
+    assert "Owner note: edited on HEAD branch." in merged_text
+    assert "Owner note: edited on incoming branch." in merged_text
+    # Generated table still cleanly merged both rows without conflict markers inside
+    cat_sec = te._extract_index_section_text(merged_text, "Tasks by category", "tasks-by-category")
+    assert "<<<<<<<" not in cat_sec
+    assert "T001" in cat_sec
+    assert "T002" in cat_sec
+
+
+def test_t037_upgrade_registers_git_merge_driver_and_validate_warns_when_missing(tmp_path: pathlib.Path) -> None:
+    """upgrade sets merge.ai-orch-index.driver and merge.ai-orch-index.name in local git config, shows it in plan,
+    is idempotent, and validate warns when .gitattributes has merge=ai-orch-index and git config lacks the driver."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _git_run(repo_dir, "init", "-b", "main")
+
+    tasks_dir = repo_dir / "tasks"
+    _write_sample_task(tasks_dir / "features" / "T001.md", task_id="T001", category="features")
+
+    # 1. Preview upgrade -> plan includes git config merge.ai-orch-index
+    res_prev = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_prev.returncode == 0
+    prev_data = json.loads(res_prev.stdout)
+    plan_paths = {item["path"] for item in prev_data["plan"]}
+    assert "git config merge.ai-orch-index" in plan_paths
+    assert ".gitattributes" in plan_paths
+
+    # Preview did not write to git config yet
+    drv_before, name_before = te._get_git_merge_driver_config(tasks_dir)
+    assert drv_before == ""
+    assert name_before == ""
+
+    # 2. Apply upgrade -> git config has driver and name
+    res_app = run_cli(
+        "upgrade",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--apply",
+        "--expect-plan-hash",
+        prev_data["plan_hash"],
+        "--json",
+    )
+    assert res_app.returncode == 0
+    drv_after, name_after = te._get_git_merge_driver_config(tasks_dir)
+    assert drv_after.endswith("tasks merge-index %O %A %B")
+    assert name_after == "ai-orch conflict-free 00-INDEX.md merge driver"
+
+    # 3. Re-running upgrade is idempotent (plan is empty)
+    res_idem = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_idem.returncode == 0
+    idem_data = json.loads(res_idem.stdout)
+    assert idem_data["plan"] == []
+    assert idem_data["upgraded_files"] == []
+
+    # 4. Validate has no merge-driver warning when driver is configured
+    res_val1 = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val1.returncode == 0
+    val1_data = json.loads(res_val1.stdout)
+    assert not any("merge.ai-orch-index.driver" in w for w in val1_data["warnings"])
+
+    # 5. Unset merge.ai-orch-index.driver -> validate warns with one-line fix
+    _git_run(repo_dir, "config", "--unset", "merge.ai-orch-index.driver")
+    res_val2 = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val2.returncode == 0
+    val2_data = json.loads(res_val2.stdout)
+    drv_warnings = [w for w in val2_data["warnings"] if "merge.ai-orch-index.driver" in w]
+    assert len(drv_warnings) == 1
+    assert "merge=ai-orch-index" in drv_warnings[0]
+    assert 'git config merge.ai-orch-index.driver "' in drv_warnings[0]
+    assert "tasks merge-index %O %A %B" in drv_warnings[0]
+
+
+def test_t037_sync_index_without_apply_prints_dry_run_footer(tmp_path: pathlib.Path) -> None:
+    """sync-index without --apply ends with a one-line footer: 'preview only, nothing written; re-run with --apply'."""
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(tasks_dir / "features" / "T001.md", task_id="T001", category="features")
+
+    # 1. Plain sync-index (no --apply)
+    res_plain = run_cli("sync-index", "--tasks-dir", str(tasks_dir))
+    assert res_plain.returncode == 0
+    lines = res_plain.stdout.strip().splitlines()
+    assert lines[-1] == "preview only, nothing written; re-run with --apply"
+    assert not (tasks_dir / "00-INDEX.md").exists()
+
+    # 2. sync-index --preview (no --apply)
+    res_prev = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--preview")
+    assert res_prev.returncode == 0
+    prev_lines = res_prev.stdout.strip().splitlines()
+    assert prev_lines[-1] == "preview only, nothing written; re-run with --apply"
+
+
+
 
 

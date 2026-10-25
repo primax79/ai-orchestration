@@ -6,12 +6,12 @@
 - priority: P1
 - priority-reason: Top change of gcube-audit: every parallel merge conflicts in 00-INDEX.md, with duplicate rows and once a lost answer
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: feedback round 2026-10-21: inbox N002
-- paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
+- paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py, plugins/architect-side/skills/task-pipeline/SKILL.md
 - handoff: Read tasks/tasks/T037-task-index-without-merge-conflicts-across-parallel.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: owner
 - short: Conflict-free task index
@@ -22,13 +22,18 @@ Merging two branches that each added tasks never needs a hand-resolved 00-INDEX.
 
 ## Steps
 
-- [ ] Implement task steps.
+- [x] Register `merge.ai-orch-index.driver` and `merge.ai-orch-index.name` in local git config during `upgrade` (shown in plan preview and applied with `--apply --expect-plan-hash`), warn in `validate` when `.gitattributes` names `merge=ai-orch-index` without the git config driver, and document the setup in `task-pipeline/SKILL.md`.
+- [x] Implement 3-way row-level table merge + non-generated 3-way text merge in `merge_index_three_way` / `cmd_merge_index` (`%O %A %B`).
+- [x] Print the dry-run footer `"preview only, nothing written; re-run with --apply"` in `sync-index` without `--apply`.
 
 ## Verification
 
-- [ ] Verify task implementation.
+- [x] Unit and integration tests in `test_tasks_engine.py` pass (`209 passed`).
+- [x] Live check in a scratch git repo under the OS temp dir with two branches adding tasks and running `sync-index --apply` merges cleanly with zero conflicts, both rows present, and zero duplicates.
 
 ## Log (newest first)
+
+- 2026-10-25, kilo: state `open` -> `delivered` — Fixed reopen findings: `upgrade` registers `merge.ai-orch-index.driver` and `merge.ai-orch-index.name` in local git config (and shows it in the plan), `validate` warns when `.gitattributes` has `merge=ai-orch-index` without the git config driver, `merge-index %O %A %B` performs a 3-way row-level union merge of generated tables and 3-way text merge outside generated regions, and `sync-index` without `--apply` prints the dry-run footer (209 passed)
 
 - 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
 - 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
