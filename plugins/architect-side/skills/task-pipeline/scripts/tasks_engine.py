@@ -4346,14 +4346,47 @@ def reopen_node(
                 cat = (target.get("category") or "features") if target else "features"
                 target_dir = tasks_dir / cat
                 target_dir.mkdir(parents=True, exist_ok=True)
-                dest_file = target_dir / file_path.name
-                shutil.move(str(file_path), str(dest_file))
+                is_folder = (
+                    node.is_folder
+                    or (target.get("is_folder") if target else False)
+                    or file_path.name == "README.md"
+                )
+                if is_folder:
+                    src_folder = file_path.parent
+                    dest_folder = target_dir / src_folder.name
+                    res = subprocess.run(
+                        ["git", "mv", str(src_folder), str(dest_folder)],
+                        cwd=str(tasks_dir),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if res.returncode != 0:
+                        shutil.move(str(src_folder), str(dest_folder))
+                    dest_file = dest_folder / "README.md"
+                else:
+                    dest_file = target_dir / file_path.name
+                    res = subprocess.run(
+                        ["git", "mv", str(file_path), str(dest_file)],
+                        cwd=str(tasks_dir),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if res.returncode != 0:
+                        shutil.move(str(file_path), str(dest_file))
+
+                old_rel = node.rel_path
                 file_path = dest_file
                 _update_task_file_headers_and_state(file_path, "open")
+                dest_rel = dest_file.relative_to(tasks_dir).as_posix()
+                node.file_path = str(file_path)
+                node.rel_path = dest_rel
+                node.in_done = False
                 if target:
                     target["in_done"] = False
-                    target["rel_path"] = dest_file.relative_to(tasks_dir).as_posix()
-                    _update_index_task_path(tasks_dir, target, old_rel=node.rel_path)
+                    target["rel_path"] = dest_rel
+                _update_index_task_path(tasks_dir, old_rel=old_rel, new_rel=dest_rel)
             else:
                 _update_task_file_headers_and_state(file_path, "open")
             t_dict = node.to_dict() if hasattr(node, "to_dict") else vars(node)
@@ -11033,12 +11066,15 @@ def cmd_reopen(args: argparse.Namespace) -> int:
         dry_run=dry_run,
         expect_plan_hash=expect_plan_hash,
     )
+    args._last_result = res
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
         if res.get("ok"):
             action = "planned reopening of" if dry_run else "reopened"
             print(f"[ok] {action} {args.id}")
+            if dry_run and res.get("plan_hash"):
+                print(f"Plan hash: {res['plan_hash']}")
         else:
             print(f"[FAIL] {res.get('error', 'reopen failed')}", file=sys.stderr)
     return 0 if res.get("ok") else 1
@@ -15570,6 +15606,13 @@ def _update_index_task_path(tasks_dir: pathlib.Path, old_rel: str, new_rel: str)
             new_content = content.replace(f"({old_rel})", f"({new_rel})").replace(f"tasks/{old_rel}", f"tasks/{new_rel}")
             if new_content != content:
                 _atomic_write_text(index_path, new_content, encoding="utf-8")
+                content = new_content
+        if has_generated_markers(content):
+            try:
+                rendered = render_synced_index(tasks_dir, content, adopt=True)
+                _atomic_write_text(index_path, rendered, encoding="utf-8")
+            except Exception:
+                pass
     except Exception:
         pass
 

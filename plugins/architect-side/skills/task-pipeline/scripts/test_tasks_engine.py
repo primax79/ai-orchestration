@@ -11288,3 +11288,154 @@ def test_unpaused_sibling_stays_in_next_up_alongside_paused_task(tmp_path: pathl
     data_next = json.loads(res_next.stdout)
     assert "T002" in data_next["ready_queue"]
     assert "T001" not in data_next["ready_queue"]
+
+
+def test_reopen_single_file_emergent_task_in_done(tmp_path: pathlib.Path) -> None:
+    """T051: Reopening a single-file emergent task in done/ moves file back to category, sets open, updates index, exits 0."""
+    tasks_dir = tmp_path / "tasks"
+    done_features = tasks_dir / "done" / "features"
+    done_features.mkdir(parents=True)
+    task_file = done_features / "T001-implement-scraper.md"
+    _write_sample_task(
+        task_file,
+        task_id="T001",
+        title="Implement scraper",
+        category="features",
+        state="done",
+    )
+    index_file = tasks_dir / "00-INDEX.md"
+    index_file.write_text(
+        "# Task Index\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+    res_sync = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync.returncode == 0, f"sync-index failed: {res_sync.stderr}"
+    assert "done/features/T001-implement-scraper.md" in index_file.read_text(encoding="utf-8")
+
+    # 1. Dry run returns plan hash
+    res_dry = run_cli("reopen", "T001", "--reason", "Found regression", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry.returncode == 0, f"reopen dry-run failed: {res_dry.stderr}"
+    data_dry = json.loads(res_dry.stdout)
+    assert data_dry["ok"] is True
+    plan_hash = data_dry["plan_hash"]
+
+    # 2. Apply reopen
+    res_reopen = run_cli("reopen", "T001", "--reason", "Found regression", "--expect-plan-hash", plan_hash, "--tasks-dir", str(tasks_dir))
+    assert res_reopen.returncode == 0, f"reopen failed: {res_reopen.stderr}"
+
+    # 3. Assertions
+    assert not task_file.exists()
+    restored_file = tasks_dir / "features" / "T001-implement-scraper.md"
+    assert restored_file.is_file()
+    assert "- state: open" in restored_file.read_text(encoding="utf-8")
+
+    index_after = index_file.read_text(encoding="utf-8")
+    assert "(features/T001-implement-scraper.md)" in index_after
+    assert "(done/features/T001-implement-scraper.md)" not in index_after
+
+    res_check = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--check")
+    assert res_check.returncode == 0, f"sync-index --check failed: {res_check.stderr}\n{res_check.stdout}"
+
+
+def test_reopen_folder_emergent_task_in_done(tmp_path: pathlib.Path) -> None:
+    """T051: Reopening a folder emergent task in done/ moves folder back to category, sets open, updates index, exits 0."""
+    tasks_dir = tmp_path / "tasks"
+    done_feat = tasks_dir / "done" / "features" / "T002-payment-gateway"
+    done_feat.mkdir(parents=True)
+    readme_file = done_feat / "README.md"
+    _write_sample_task(
+        readme_file,
+        task_id="T002",
+        title="Payment Gateway",
+        category="features",
+        state="done",
+    )
+    context_file = done_feat / "CONTEXT.md"
+    context_file.write_text("# Context\n\nStripe details.\n", encoding="utf-8")
+
+    index_file = tasks_dir / "00-INDEX.md"
+    index_file.write_text(
+        "# Task Index\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+    res_sync = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync.returncode == 0, f"sync-index failed: {res_sync.stderr}"
+    assert "done/features/T002-payment-gateway/README.md" in index_file.read_text(encoding="utf-8")
+
+    # 1. Dry run returns plan hash
+    res_dry = run_cli("reopen", "T002", "--reason", "Refactoring API", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry.returncode == 0, f"reopen dry-run failed: {res_dry.stderr}"
+    data_dry = json.loads(res_dry.stdout)
+    assert data_dry["ok"] is True
+    plan_hash = data_dry["plan_hash"]
+
+    # 2. Apply reopen
+    res_reopen = run_cli("reopen", "T002", "--reason", "Refactoring API", "--expect-plan-hash", plan_hash, "--tasks-dir", str(tasks_dir))
+    assert res_reopen.returncode == 0, f"reopen failed: {res_reopen.stderr}"
+
+    # 3. Assertions
+    assert not done_feat.exists()
+    restored_folder = tasks_dir / "features" / "T002-payment-gateway"
+    assert restored_folder.is_dir()
+    restored_readme = restored_folder / "README.md"
+    assert restored_readme.is_file()
+    assert "- state: open" in restored_readme.read_text(encoding="utf-8")
+    assert (restored_folder / "CONTEXT.md").is_file()
+
+    index_after = index_file.read_text(encoding="utf-8")
+    assert "(features/T002-payment-gateway/README.md)" in index_after
+    assert "(done/features/T002-payment-gateway/README.md)" not in index_after
+
+    res_check = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--check")
+    assert res_check.returncode == 0, f"sync-index --check failed: {res_check.stderr}\n{res_check.stdout}"
+
+
+def test_reopen_emergent_task_dry_run_prints_plan_hash_and_writes_nothing(tmp_path: pathlib.Path) -> None:
+    """T051: Dry run prints a plan hash and writes nothing."""
+    tasks_dir = tmp_path / "tasks"
+    done_features = tasks_dir / "done" / "features"
+    done_features.mkdir(parents=True)
+    task_file = done_features / "T003-notification-service.md"
+    _write_sample_task(
+        task_file,
+        task_id="T003",
+        title="Notification Service",
+        category="features",
+        state="done",
+    )
+    task_content_before = task_file.read_text(encoding="utf-8")
+
+    index_file = tasks_dir / "00-INDEX.md"
+    index_file.write_text(
+        "# Task Index\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+    run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    index_content_before = index_file.read_text(encoding="utf-8")
+
+    # 1. Dry run with --json prints plan hash in json
+    res_dry_json = run_cli("reopen", "T003", "--reason", "Recheck", "--dry-run", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_dry_json.returncode == 0
+    data_json = json.loads(res_dry_json.stdout)
+    assert data_json["ok"] is True
+    assert data_json["dry_run"] is True
+    plan_hash = data_json["plan_hash"]
+    assert plan_hash and len(plan_hash) == 64
+
+    # 2. Dry run without --json prints plan hash in text output
+    res_dry_text = run_cli("reopen", "T003", "--reason", "Recheck", "--dry-run", "--tasks-dir", str(tasks_dir))
+    assert res_dry_text.returncode == 0
+    assert plan_hash in res_dry_text.stdout
+
+    # 3. Verify nothing written
+    assert task_file.is_file()
+    assert not (tasks_dir / "features" / "T003-notification-service.md").exists()
+    assert task_file.read_text(encoding="utf-8") == task_content_before
+    assert index_file.read_text(encoding="utf-8") == index_content_before
+
