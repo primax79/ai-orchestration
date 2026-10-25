@@ -3,13 +3,12 @@
 - id: N063
 - title: Env doctor flags per-assistant skill copies (~/.claude/skills + ~/.kilo/skills) as duplicates to remove
 - kind: bug
-- status: ready
+- status: processed
 - created: 2026-10-25T17:03:36.216983+00:00
 - author: ai-coding-tools
 - about: -
-- produced: -
-- processed-by: -
-- short: Env doctor flags per-assistant
+- produced: T064
+- processed-by: kilo
 
 Owner report 2026-10-25 (screenshot of the doctor UI): ADVICE 'duplicate-name: orchestration-metrics / orchestration-setup / pdf / task-pipeline / task-spec-authoring ...: duplicate standalone skill across origins (standalone:~/.claude/skills, standalone:~/.kilo/skills): review and remove one manually'. Owner: these are not duplicates.
 
