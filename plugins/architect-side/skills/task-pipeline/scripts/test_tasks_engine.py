@@ -681,7 +681,7 @@ def test_sync_index_refused_without_markers(tmp_path: pathlib.Path) -> None:
 def test_sync_index_missing_id_kept_with_suffix(tmp_path: pathlib.Path) -> None:
     tasks_dir = tmp_path / "tasks"
     (tasks_dir / "features").mkdir(parents=True)
-    _write_sample_task(tasks_dir / "features" / "T001.md", task_id="T001", title="Real task", category="features")
+    _write_sample_task(tasks_dir / "features" / "T001-real.md", task_id="T001", title="Real task", category="features")
 
     index_path = tasks_dir / "00-INDEX.md"
     index_path.write_text(
@@ -702,7 +702,7 @@ def test_sync_index_missing_id_kept_with_suffix(tmp_path: pathlib.Path) -> None:
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T001 | P1 | [Real task](features/T001.md) | open | kilo | - |
+| T001 | P1 | [Real task](features/T001-real.md) | open | kilo | - |
 | T998 | P2 | [Deleted task](features/T998.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
@@ -12833,6 +12833,179 @@ def test_t037_sync_index_without_apply_prints_dry_run_footer(tmp_path: pathlib.P
     assert res_prev.returncode == 0
     prev_lines = res_prev.stdout.strip().splitlines()
     assert prev_lines[-1] == "preview only, nothing written; re-run with --apply"
+
+
+# ===========================================================================
+# Initiative T055: Campaign Reports & Sync-Index Categories Hygiene
+# ===========================================================================
+
+def test_t055_campaign_reports_under_reviews_and_no_reports_category(tmp_path: pathlib.Path) -> None:
+    """Running validation campaign creates report under tasks/_reviews/ and sync-index shows no 'reports' category."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # Create a simple use case
+    res_create = run_cli(
+        "use-cases", "create",
+        "--id", "UC001",
+        "--title", "Basic Scenario",
+        "--actor", "Tester",
+        "--verification-command", "echo 'OK'",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_create.returncode == 0
+
+    # Run full product campaign
+    res_camp = run_cli("use-cases", "campaign", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_camp.returncode == 0
+    camp_data = json.loads(res_camp.stdout)
+    assert camp_data["ok"] is True
+    report_file = pathlib.Path(camp_data["report_file"])
+    assert report_file.is_file()
+    assert report_file.parent.name == "_reviews"
+    assert report_file.parent == (tasks_dir / "_reviews")
+
+    # Adopt and apply sync-index
+    res_adopt = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--json")
+    adopt_data = json.loads(res_adopt.stdout)
+    res_sync = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--apply", "--expect-hash", adopt_data["hash"])
+    assert res_sync.returncode == 0
+
+    idx_text = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "### reports" not in idx_text
+    assert "reports" not in te._extract_existing_category_order(idx_text)
+
+
+def test_t055_preexisting_reports_folder_not_a_category(tmp_path: pathlib.Path) -> None:
+    """A pre-existing tasks/reports/x.md is not treated as a category in 00-INDEX.md."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "reports").mkdir()
+    (tasks_dir / "reports" / "x.md").write_text("# Old Report\nSome report text\n", encoding="utf-8")
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    res_adopt = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--json")
+    adopt_data = json.loads(res_adopt.stdout)
+    res_sync = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--apply", "--expect-hash", adopt_data["hash"])
+    assert res_sync.returncode == 0
+
+    idx_text = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "### reports" not in idx_text
+    assert "reports" not in te._extract_existing_category_order(idx_text)
+
+
+def test_t055_category_removed_when_task_moved_to_done_or_folder_deleted(tmp_path: pathlib.Path) -> None:
+    """A category folder with one task, then task moved to done/ or folder deleted: sync-index removes that category table; other categories untouched."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "feat-a").mkdir(parents=True)
+    (tasks_dir / "feat-b").mkdir(parents=True)
+
+    _write_sample_task(
+        tasks_dir / "feat-a" / "T101-feat-a.md",
+        task_id="T101",
+        title="Feature A",
+        category="feat-a",
+        state="open",
+    )
+    _write_sample_task(
+        tasks_dir / "feat-b" / "T102-feat-b.md",
+        task_id="T102",
+        title="Feature B",
+        category="feat-b",
+        state="open",
+    )
+
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text("# Task Index\n", encoding="utf-8")
+
+    # Initial adopt & sync
+    res_adopt = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--json")
+    adopt_data = json.loads(res_adopt.stdout)
+    run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--apply", "--expect-hash", adopt_data["hash"])
+
+    idx_1 = index_path.read_text(encoding="utf-8")
+    assert "### feat-a" in idx_1
+    assert "### feat-b" in idx_1
+    assert "T101" in idx_1
+    assert "T102" in idx_1
+
+    # Part 1: Move T101 to done/feat-a/
+    done_cat_a = tasks_dir / "done" / "feat-a"
+    done_cat_a.mkdir(parents=True, exist_ok=True)
+    _write_sample_task(
+        done_cat_a / "T101-feat-a.md",
+        task_id="T101",
+        title="Feature A",
+        category="feat-a",
+        state="done",
+    )
+    (tasks_dir / "feat-a" / "T101-feat-a.md").unlink()
+
+    # Re-sync
+    res_sync1 = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync1.returncode == 0
+
+    idx_2 = index_path.read_text(encoding="utf-8")
+    assert "### feat-a" not in idx_2
+    assert "### feat-b" in idx_2
+    assert "T102" in idx_2
+    assert "T101" in idx_2  # now in Done table
+    assert "feat-a" not in te._extract_existing_category_order(idx_2)
+    assert te._extract_existing_category_order(idx_2) == ["feat-b"]
+
+    # Part 2: Delete feat-b folder
+    shutil.rmtree(tasks_dir / "feat-b")
+
+    # Re-sync
+    res_sync2 = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync2.returncode == 0
+
+    idx_3 = index_path.read_text(encoding="utf-8")
+    assert "### feat-b" not in idx_3
+    assert "### feat-a" not in idx_3
+    assert te._extract_existing_category_order(idx_3) == []
+
+
+def test_t055_sync_index_idempotent(tmp_path: pathlib.Path) -> None:
+    """Running sync-index twice is idempotent ('already in sync')."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "engine").mkdir(parents=True)
+    _write_sample_task(
+        tasks_dir / "engine" / "T055-sample.md",
+        task_id="T055",
+        title="Campaign reports hygiene",
+        category="engine",
+        state="open",
+    )
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text("# Task Index\n", encoding="utf-8")
+
+    # First run (adopt + apply)
+    res_adopt = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--json")
+    adopt_data = json.loads(res_adopt.stdout)
+    res_first = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--adopt", "--apply", "--expect-hash", adopt_data["hash"])
+    assert res_first.returncode == 0
+
+    content_first = index_path.read_text(encoding="utf-8")
+
+    # Second run
+    res_second = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_second.returncode == 0
+    assert "already in sync, nothing written" in res_second.stdout
+
+    content_second = index_path.read_text(encoding="utf-8")
+    assert content_first == content_second
+
+    # Also with --json
+    res_json = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--json")
+    assert res_json.returncode == 0
+    payload_json = json.loads(res_json.stdout)
+    assert payload_json["ok"] is True
+    assert payload_json["in_sync"] is True
+    assert payload_json["changed"] is False
+
 
 
 
