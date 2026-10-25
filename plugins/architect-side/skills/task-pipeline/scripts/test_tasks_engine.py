@@ -11077,3 +11077,214 @@ def test_t044_verification_queue_across_workspaces(tmp_path: pathlib.Path) -> No
     assert payload_empty["ok"] is True
     assert payload_empty["count"] == 0
     assert payload_empty["items"] == []
+
+
+# ---------------------------------------------------------------------------
+# Paused task behaviour tests: next-up exclusion, container hierarchy, and transitions
+# ---------------------------------------------------------------------------
+
+def test_paused_emergent_task_with_next_up_excluded_from_next_up(tmp_path: pathlib.Path) -> None:
+    """1. A paused emergent task with next-up yes is not in next-up."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n"
+        "## Next up\n\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+    _write_sample_task(
+        tasks_dir / "features" / "T001-paused.md",
+        task_id="T001",
+        title="Paused Task",
+        category="features",
+        state="paused",
+        next_up="yes",
+    )
+
+    # Deterministic index sync
+    res_sync = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync.returncode == 0, f"sync-index failed: {res_sync.stderr}"
+    index_content = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+
+    # T001 must not appear in the generated Next up table
+    next_up_match = re.search(
+        r"<!-- ai-orch:generated next-up -->(.*?)<!-- /ai-orch:generated next-up -->",
+        index_content,
+        re.DOTALL,
+    )
+    assert next_up_match is not None
+    assert "T001" not in next_up_match.group(1)
+
+    # tasks next CLI also excludes paused tasks from ready queue
+    res_next = run_cli("next", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_next.returncode == 0
+    data_next = json.loads(res_next.stdout)
+    assert "T001" not in data_next.get("ready_queue", [])
+
+
+def test_plan_task_under_paused_parent_excluded_from_open_leaves_columns_and_counts(tmp_path: pathlib.Path) -> None:
+    """2. A plan task under a paused parent is excluded from open leaves, both in columns and in counts."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # Initiative 01 is explicitly paused at initiative level
+    init01_dir = tasks_dir / "01-paused-init"
+    init01_dir.mkdir(parents=True)
+    (init01_dir / "plan.md").write_text(
+        "# 01 - Paused Initiative\n\n"
+        "- **Status:** `paused`\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Leaf task under paused initiative\n\n"
+        "- **Status:** `open` · **Priority:** P1\n"
+        "- **Goal:** Sub-goal\n",
+        encoding="utf-8",
+    )
+
+    # Initiative 02 is active, but contains an expanded container task 02.1 that is paused, plus active sibling 02.2
+    init02_dir = tasks_dir / "02-active-init"
+    init02_dir.mkdir(parents=True)
+    (init02_dir / "plan.md").write_text(
+        "# 02 - Active Initiative\n\n"
+        "## Tasks\n\n"
+        "### 02.1 - Paused container task\n\n"
+        "- **Status:** `paused`\n"
+        "- **Expanded:** [02.1-container/](02.1-container/README.md)\n\n"
+        "### 02.2 - Active sibling task\n\n"
+        "- **Status:** `open` · **Priority:** P1\n"
+        "- **Goal:** Active goal\n",
+        encoding="utf-8",
+    )
+
+    c_dir = init02_dir / "02.1-container"
+    c_dir.mkdir(parents=True)
+    (c_dir / "README.md").write_text(
+        "# 02.1 - Paused container task\n\n"
+        "- **Status:** `paused`\n\n"
+        "## Subtasks\n\n"
+        "### 02.1.1 - Leaf under paused container\n\n"
+        "- **Status:** `open`\n"
+        "- **Goal:** Nested goal\n",
+        encoding="utf-8",
+    )
+
+    res = run_cli("graph", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0, f"graph failed: {res.stderr}"
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+
+    columns = data["columns"]
+    totals = data["totals"]
+
+    # Leaf tasks under paused ancestors (01.1 under 01, and 02.1.1 under 02.1) are excluded from columns
+    assert "01.1" not in columns
+    assert "02.1.1" not in columns
+    # Active unpaused sibling 02.2 is included
+    assert "02.2" in columns
+
+    # Total open leaves and group counts exclude paused leaves
+    assert totals["total_open"] == 1
+    assert totals["by_group"]["01"]["total_open"] == 0
+    assert totals["by_group"]["02"]["total_open"] == 1
+
+    # Ready queue also excludes tasks under paused parents
+    assert data["ready_queue"] == ["02.2"]
+
+
+def test_delivered_to_paused_and_paused_to_in_progress_transitions(tmp_path: pathlib.Path) -> None:
+    """3. delivered -> paused is allowed, and paused -> in progress still works."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    t_path = tasks_dir / "features" / "T001-delivered.md"
+    _write_sample_task(
+        t_path,
+        task_id="T001",
+        title="Delivered Task",
+        category="features",
+        state="delivered",
+    )
+
+    # 1. delivered -> paused transition
+    res_pause = run_cli(
+        "transition", "T001", "paused",
+        "--actor", "owner",
+        "--reason", "putting delivery on hold",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_pause.returncode == 0, f"transition delivered->paused failed: {res_pause.stderr}"
+    payload_pause = json.loads(res_pause.stdout)
+    assert payload_pause["ok"] is True
+    assert payload_pause["new_state"] == "paused"
+    assert "- state: paused" in t_path.read_text(encoding="utf-8")
+
+    # 2. paused -> in progress transition
+    res_resume = run_cli(
+        "transition", "T001", "in progress",
+        "--actor", "kilo",
+        "--reason", "resuming implementation",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_resume.returncode == 0, f"transition paused->in progress failed: {res_resume.stderr}"
+    payload_resume = json.loads(res_resume.stdout)
+    assert payload_resume["ok"] is True
+    assert payload_resume["new_state"] == "in progress"
+    assert "- state: in progress" in t_path.read_text(encoding="utf-8")
+
+
+def test_unpaused_sibling_stays_in_next_up_alongside_paused_task(tmp_path: pathlib.Path) -> None:
+    """4. An unpaused sibling stays in next-up alongside a paused task."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n"
+        "## Next up\n\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+    _write_sample_task(
+        tasks_dir / "features" / "T001-paused.md",
+        task_id="T001",
+        title="Paused sibling",
+        category="features",
+        state="paused",
+        next_up="yes",
+        priority="P1",
+    )
+    _write_sample_task(
+        tasks_dir / "features" / "T002-active.md",
+        task_id="T002",
+        title="Active sibling",
+        category="features",
+        state="open",
+        next_up="yes",
+        priority="P1",
+    )
+
+    res_sync = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync.returncode == 0, f"sync-index failed: {res_sync.stderr}"
+    index_content = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+
+    # In Next up section, T002 must be present and T001 must not be present
+    m = re.search(
+        r"<!-- ai-orch:generated next-up -->(.*?)<!-- /ai-orch:generated next-up -->",
+        index_content,
+        re.DOTALL,
+    )
+    assert m is not None
+    next_up_table = m.group(1)
+    assert "T002" in next_up_table
+    assert "T001" not in next_up_table
+
+    # In tasks next CLI, T002 is in ready_queue and T001 is not
+    res_next = run_cli("next", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_next.returncode == 0
+    data_next = json.loads(res_next.stdout)
+    assert "T002" in data_next["ready_queue"]
+    assert "T001" not in data_next["ready_queue"]
