@@ -91,6 +91,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T070 (Reassign su sessione attuale) | P2 | [orchestrator reassign lega il ruolo a una sessione interattiva esistente](engine/T070-orchestrator-reassign-lega-il-ruolo-a-una-sessione.md) | in progress | kilo | - |
 | T071 (Invito a registrarsi) | P2 | [Le sessioni che orchestrano vengono invitate a registrarsi come orchestratore](engine/T071-le-sessioni-che-orchestrano-vengono-invitate-a-reg.md) | open | kilo | - |
 | T077 (Adozione note vecchie) | P2 | [Le note dell'inbox in formato vecchio vengono adottate con un id](engine/T077-le-note-dell-inbox-in-formato-vecchio-vengono-adot.md) | open | kilo | - |
+| T079 (Workspace da sottocartella) | P2 | [I comandi lanciati da una sottocartella risolvono il workspace che la contiene](engine/T079-i-comandi-lanciati-da-una-sottocartella-risolvono.md) | open | kilo | - |
 
 ### methodology
 
