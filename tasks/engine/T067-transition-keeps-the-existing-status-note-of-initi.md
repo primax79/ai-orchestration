@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: La chiusura di 148 task di ai-swissknife ha cancellato lo sha di merge (l'evidenza) da ogni blocco del piano
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -22,8 +22,19 @@ In ai-swissknife (2026-10-27) i blocchi dei task di iniziativa avevano '- **Stat
 
 ## Steps
 
-- [ ] transition su un blocco di task di iniziativa mantiene la nota esistente e accoda il nuovo evento ('merged <sha> <date>; done 2026-10-27, verifier X'), oppure sposta la vecchia nota nel log del blocco
+- [x] transition su un blocco di task di iniziativa mantiene la nota esistente e accoda il nuovo evento ('merged <sha> <date>; done 2026-10-27, verifier X'), gestendo passaggi intermedi del walk senza duplicazioni ed evitando note > ~200 caratteri preservando primo evento e ultimo
 
 ## Verification
 
-- Test: un blocco con '(merged abc123 2026-10-08)' portato a done tramite transition mantiene abc123 in plan.md
+- Test: un blocco con '(merged abc123 2026-10-08)' portato a done tramite transition mantiene abc123 in plan.md:
+  `test_t067_initiative_task_status_note_evidence_and_closure` eseguito con successo, preserva lo sha e accoda `done <date>, verifier auditor`.
+- Test suite completa: `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider plugins/architect-side/skills/task-pipeline/scripts/` terminata con 237 test passati su 237.
+- Test specifici T067:
+  - `test_t067_initiative_task_status_note_evidence_and_closure`: blocco con nota esistente mantiene sha e accoda evento di chiusura; blocco senza nota riceve solo l'evento di chiusura.
+  - `test_t067_initiative_task_walk_produces_single_event`: walk da `in progress` e da `open` genera un unico evento accodato per lo stato finale senza eventi intermedi.
+  - `test_t067_initiative_task_reopen_keeps_history_note`: riapertura mantiene la cronologia preesistente accodando l'evento di riapertura.
+  - `test_t067_initiative_task_note_truncation_over_200_chars`: se la nota supera ~200 caratteri, mantiene la prima nota (evidenza) e l'ultimo evento, eliminando quelli intermedi su una singola riga.
+
+## Log (newest first)
+
+- 2026-10-27, kilo: state `open` -> `delivered` — preservata l'evidenza delle note Status nei blocchi di iniziativa e aggiunti test T067

@@ -2443,8 +2443,8 @@ def rewrite_block_in_file(
 ) -> tuple[str, str] | tuple[str, str, str]:
     """Rewrite one `### id - title` block in place; every other byte of the file is preserved.
 
-    A new status replaces the Status value (code span kept) and its parenthesised note, which
-    becomes `status_note` when given: `- **Status:** `in progress` (2026-10-17; claude; reason)`.
+    A new status replaces the Status value (code span kept). Any existing parenthesised note
+    is kept and the new event is appended: `- **Status:** `done` (merged 765f5d7 2026-09-07; done 2026-10-27, verifier X)`.
     """
     if new_waiting_on is not None:
         new_waiting_on = normalize_waiting_on(new_waiting_on)
@@ -2516,12 +2516,40 @@ def rewrite_block_in_file(
             if new_status is not None:
                 for seg in segments:
                     if seg.key in ("status", "state"):
+                        clean_head = re.sub(r"^`[^`]+`\s*", "", seg.raw_value.strip())
+                        m_note = re.search(r"^\((.*)\)$", clean_head.strip())
+                        if not m_note:
+                            m_note = re.search(r"\((.*)\)\s*$", seg.raw_value.strip())
+                        existing_note = m_note.group(1).strip() if m_note else None
+
+                        norm_status_note = status_note.strip() if (status_note and status_note.strip()) else None
+
+                        if existing_note and norm_status_note:
+                            if norm_status_note in existing_note:
+                                combined_note = existing_note
+                            else:
+                                combined_note = f"{existing_note}; {norm_status_note}"
+                        elif existing_note:
+                            combined_note = existing_note
+                        elif norm_status_note:
+                            combined_note = norm_status_note
+                        else:
+                            combined_note = None
+
+                        if norm_status_note and combined_note:
+                            combined_note = " ".join(combined_note.splitlines()).strip()
+                            combined_note = re.sub(r"\s+", " ", combined_note)
+                            if len(combined_note) > 200:
+                                events = [e.strip() for e in combined_note.split(";") if e.strip()]
+                                if len(events) > 2:
+                                    combined_note = f"{events[0]}; {events[-1]}"
+
                         if "`" in seg.raw_value:
                             new_raw = f"`{new_status}`"
                         else:
                             new_raw = new_status
-                        if status_note:
-                            new_raw += f" ({status_note})"
+                        if combined_note:
+                            new_raw += f" ({combined_note})"
                         seg.raw_value = new_raw
                         seg.clean_value = new_status
 
@@ -4713,8 +4741,12 @@ def reopen_node(
             }
 
         today = datetime.date.today().isoformat()
-        reason_clean = reason.strip() if reason else "reopened"
-        status_note = f"{today}; {reason_clean}"
+        if reason and reason.strip():
+            reason_clean = reason.strip()
+            status_note = f"reopened {today}, {reason_clean}"
+        else:
+            reason_clean = "reopened"
+            status_note = f"reopened {today}"
 
         # 1. Restore shipped initiative if applicable
         if shipped_init:
@@ -9101,6 +9133,7 @@ def transition_task(
     dry_run: bool = False,
     force_log: bool = False,
     _internal_walk_step: bool = False,
+    _is_last_walk_step: bool = True,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported() and not dry_run:
         return False, {
@@ -9383,18 +9416,45 @@ def transition_task(
                 elif new_canon == "done with a caveat" and ":" not in new_state and vmode == "self":
                     effective_state = "done with a caveat: self-verified only"
 
-                note_parts = [datetime.date.today().isoformat()]
-                if actor and actor.strip():
-                    note_parts.append(actor.strip())
-                if reason and reason.strip() and reason.strip() not in effective_state:
-                    note_parts.append(reason.strip())
+                is_intermediate = _internal_walk_step and not _is_last_walk_step
+                if is_intermediate:
+                    status_note = None
+                else:
+                    today = datetime.date.today().isoformat()
+                    if new_canon in TERMINAL_STATES:
+                        eff_v = verifier.strip() if verifier and verifier.strip() else None
+                        if eff_v:
+                            ver_part = f"verifier {eff_v}"
+                        elif actor and actor.strip():
+                            ver_part = actor.strip()
+                        elif owner_approved:
+                            ver_part = "owner"
+                        else:
+                            ver_part = None
+
+                        if ver_part:
+                            status_note = f"{new_canon} {today}, {ver_part}"
+                        else:
+                            status_note = f"{new_canon} {today}"
+
+                        if reason and reason.strip() and reason.strip() not in effective_state:
+                            status_note += f", {reason.strip()}"
+                    else:
+                        note_parts = [today]
+                        if verifier and verifier.strip():
+                            note_parts.append(f"verifier {verifier.strip()}")
+                        elif actor and actor.strip():
+                            note_parts.append(actor.strip())
+                        if reason and reason.strip() and reason.strip() not in effective_state:
+                            note_parts.append(reason.strip())
+                        status_note = "; ".join(note_parts)
                 file_path = pathlib.Path(node.file_path)
                 if new_canon in TERMINAL_STATES:
                     _, new_h = move_block_to_closed(
                         file_path,
                         task_id,
                         new_status=effective_state,
-                        status_note="; ".join(note_parts),
+                        status_note=status_note,
                         expect_task_hash=expect_task_hash,
                         new_waiting_on=waiting_on,
                         clear_waiting_on=clear_wo,
@@ -9425,7 +9485,7 @@ def transition_task(
                         file_path,
                         task_id,
                         new_status=effective_state,
-                        status_note="; ".join(note_parts),
+                        status_note=status_note,
                         expect_task_hash=expect_task_hash,
                         new_waiting_on=waiting_on,
                         clear_waiting_on=clear_wo,
@@ -9919,6 +9979,7 @@ def close_task(
                     step_verifier = None
                     step_reason = None
 
+                is_last_step = (idx_step == len(steps) - 1)
                 ok, res = transition_task(
                     tasks_dir=tasks_dir,
                     task_id=task_id,
@@ -9930,6 +9991,7 @@ def close_task(
                     force_unblock=force_unblock if idx_step == 0 else False,
                     force_log=True,
                     _internal_walk_step=True,
+                    _is_last_walk_step=is_last_step,
                 )
                 if not ok:
                     return False, {
