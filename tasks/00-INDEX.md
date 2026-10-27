@@ -89,6 +89,14 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T070 (Reassign su sessione attuale) | P2 | [orchestrator reassign lega il ruolo a una sessione interattiva esistente](engine/T070-orchestrator-reassign-lega-il-ruolo-a-una-sessione.md) | in progress | kilo | - |
 | T071 (Invito a registrarsi) | P2 | [Le sessioni che orchestrano vengono invitate a registrarsi come orchestratore](engine/T071-le-sessioni-che-orchestrano-vengono-invitate-a-reg.md) | open | kilo | - |
 | T072 (config show nella cartella) | P3 | [config show usa la cartella corrente; l'anteprima di reassign mostra il percorso reale](engine/T072-config-show-usa-la-cartella-corrente-l-anteprima-d.md) | in progress | kilo | - |
+
+### methodology
+
+Tasks in `methodology`. Owner session: unassigned ([README](methodology/README.md)).
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T073 (Studio pannello orchestratori) | P1 | [Studio: pannello di controllo degli orchestratori di tutti i workspace, handoff e coerenza dei registri](methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
