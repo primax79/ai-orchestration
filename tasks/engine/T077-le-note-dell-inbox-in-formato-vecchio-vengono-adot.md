@@ -24,6 +24,8 @@ I file .md piatti in _inbox (formato precedente alle note con header) diventano 
 - [ ] inbox adopt (anteprima/apply): file piatto -> cartella nota con header (id N### nuovo, title dal primo titolo, kind note, status ready, created dalla data del file); upgrade lo propone; validate segnala le note senza id
 - [ ] UI: nota senza id mostra 'legacy: adopt' e disabilita Process with e Convert finché non è adottata
 
+- [ ] `inbox resolve` accetta anche una nota già in `analyzed/` con status ancora `ready` (oggi rifiuta: caso N062) e ne registra produced/processed-by
+
 ## Verification
 
 - Test: file piatto adottato -> N### con lo stesso corpo; la UI non offre Process su una nota senza id
