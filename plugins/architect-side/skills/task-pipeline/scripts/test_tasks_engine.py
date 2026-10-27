@@ -14127,6 +14127,200 @@ def test_t068_sync_index_initiative_in_done_table(tmp_path: pathlib.Path) -> Non
     assert "| 02 | [Migration Service](done/02-migration/plan.md) | done | 2026-10-16 |" in refreshed
 
 
+def test_17_1_use_case_link_projection_validate_and_show(tmp_path: pathlib.Path) -> None:
+    """Task 17.1: read task<->use case links from emergent headers and initiative blocks,
+    compute derived projection (many-to-many, dropped tasks flagged, cross-workspace raw strings),
+    emit validate warnings (written!=derived, unknown UC, deprecated UC) with 0 errors,
+    and render links in `tasks show` and `use-cases show` (text and --json).
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "done" / "features").mkdir(parents=True)
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "01-search").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # Use cases:
+    # - UC001: active, written linked-tasks = ["T001"] (will differ from derived ["01.1", "T001", "T002"])
+    # - UC002: deprecated, written linked-tasks = ["01.2"] (matches derived ["01.2"])
+    # - UC004: verified, written linked-tasks = ["01.2", "T001"] (matches derived ["01.2", "T001"])
+    run_cli(
+        "use-cases", "create",
+        "--id", "UC001",
+        "--title", "Search by budget",
+        "--actor", "Buyer",
+        "--status", "active",
+        "--linked-tasks", "T001",
+        "--tasks-dir", str(tasks_dir),
+    )
+    (tasks_dir / "use-cases" / "UC002-legacy-filter.md").write_text(
+        "# UC002 - Legacy filter\n\n"
+        "- id: UC002\n"
+        "- title: Legacy filter\n"
+        "- actor: Buyer\n"
+        "- status: deprecated\n"
+        "- priority: P2\n"
+        "- linked-tasks: 01.2\n"
+        "- verification-type: automated-probe\n"
+        "- last-tested: -\n"
+        "- last-verdict: -\n\n"
+        "## Description & Business Value\nDeprecated flow.\n\n"
+        "## Preconditions\n- None.\n\n"
+        "## Scenario / Interaction Steps\n1. Legacy step.\n\n"
+        "## Automated Verification Command\n```bash\necho ok\n```\n\n"
+        "## Acceptance Criteria\n- [ ] Legacy.\n\n"
+        "## AI Validation Log\n",
+        encoding="utf-8",
+    )
+    run_cli(
+        "use-cases", "create",
+        "--id", "UC004",
+        "--title", "Export search results",
+        "--actor", "Buyer",
+        "--status", "verified",
+        "--linked-tasks", "01.2, T001",
+        "--tasks-dir", str(tasks_dir),
+    )
+
+    # Initiative 01 with two task blocks:
+    # - 01.1 links UC001 (segment after Depends on)
+    # - 01.2 links UC004, UC002, and unknown UC999 (segment placed before Depends on)
+    (tasks_dir / "01-search" / "plan.md").write_text(
+        "# 01 — Search Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Index budget field\n\n"
+        "- **Status:** `in progress` · **Short:** Index budget · **Size:** M · **Depends on:** - · **Use cases:** UC001\n"
+        "- **Goal:** Index budget field.\n\n"
+        "### 01.2 - Export and legacy filter\n\n"
+        "- **Status:** `open` · **Use cases:** UC004, UC002, UC999 · **Short:** Export filter · **Size:** S · **Depends on:** 01.1\n"
+        "- **Goal:** Export results.\n",
+        encoding="utf-8",
+    )
+
+    # Emergent tasks:
+    # - T001 links UC001, UC004, and cross-workspace workspace: sibling-ws/UC010 (one task -> multiple UCs)
+    t1_file = tasks_dir / "features" / "T001-search-ui.md"
+    _write_sample_task(t1_file, task_id="T001", state="delivered")
+    t1_file.write_text(
+        t1_file.read_text(encoding="utf-8").replace(
+            "- verifier: -",
+            "- verifier: -\n- use-cases: UC001, UC004, workspace:sibling-ws/UC010",
+        ),
+        encoding="utf-8",
+    )
+
+    # - T002 is dropped and links UC001 (so UC001 has 3 linked tasks: 01.1, T001, T002)
+    t2_file = tasks_dir / "done" / "features" / "T002-old-budget-ui.md"
+    _write_sample_task(t2_file, task_id="T002", state="dropped")
+    t2_file.write_text(
+        t2_file.read_text(encoding="utf-8").replace(
+            "- verifier: -",
+            "- verifier: -\n- use-cases: UC001",
+        ),
+        encoding="utf-8",
+    )
+
+    # - T003 has empty `use-cases: -`
+    t3_file = tasks_dir / "features" / "T003-chore-cleanup.md"
+    _write_sample_task(t3_file, task_id="T003", state="open")
+    t3_file.write_text(
+        t3_file.read_text(encoding="utf-8").replace(
+            "- verifier: -",
+            "- verifier: -\n- use-cases: -",
+        ),
+        encoding="utf-8",
+    )
+
+    # 1. Verify compute_use_case_links (many-to-many, sorted, dropped included & flagged, reverse map, cross-workspace raw)
+    links = te.compute_use_case_links(tasks_dir)
+    assert links["UC001"] == ["01.1", "T001", "T002"]
+    assert links["UC002"] == ["01.2"]
+    assert links["UC004"] == ["01.2", "T001"]
+    assert links["UC999"] == ["01.2"]
+    assert links["workspace:sibling-ws/UC010"] == ["T001"]
+
+    # Reverse map {task_id: [uc ids]}
+    assert links.reverse["01.1"] == ["UC001"]
+    assert links.reverse["01.2"] == ["UC004", "UC002", "UC999"]
+    assert links.reverse["T001"] == ["UC001", "UC004", "workspace:sibling-ws/UC010"]
+    assert links.reverse["T002"] == ["UC001"]
+    assert "T003" not in links.reverse
+    assert te.compute_task_use_case_links(tasks_dir) == links.by_task
+
+    # Dropped tasks included in list and flagged
+    assert "T002" in links.dropped_tasks
+    assert "T001" not in links.dropped_tasks
+    assert links.is_dropped("T002") is True
+    assert links.is_dropped("01.1") is False
+    uc1_details = {d["id"]: d for d in links.details["UC001"]}
+    assert uc1_details["01.1"]["dropped"] is False
+    assert uc1_details["T001"]["dropped"] is False
+    assert uc1_details["T002"]["dropped"] is True
+    assert uc1_details["T002"]["canonical_state"] == "dropped"
+
+    # 2. Verify validate warnings (no errors)
+    res_val = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val.returncode == 0, res_val.stdout + res_val.stderr
+    val_payload = json.loads(res_val.stdout)
+    assert val_payload["ok"] is True
+    assert val_payload["errors"] == []
+    warns = val_payload["warnings"]
+
+    # Warning for UC001 written != derived (shows both)
+    assert any(
+        "UC001" in w and "written linked-tasks" in w and "T001" in w and "01.1, T001, T002" in w
+        for w in warns
+    ), f"Missing written!=derived warning for UC001 in: {warns}"
+    # UC004 written matches derived -> no written!=derived warning for UC004
+    assert not any("UC004" in w and "written linked-tasks" in w for w in warns)
+    # Warning for unknown use case UC999
+    assert any("01.2" in w and "references unknown use case 'UC999'" in w for w in warns)
+    # Cross-workspace ref does NOT trigger unknown use case warning
+    assert not any("workspace:sibling-ws/UC010" in w for w in warns)
+    # Warning for deprecated use case UC002
+    assert any("01.2" in w and "deprecated use case 'UC002'" in w for w in warns)
+
+    # 3. Verify `tasks show <id>` (text and --json)
+    res_tshow_json = run_cli("show", "T001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tshow_json.returncode == 0
+    tshow_data = json.loads(res_tshow_json.stdout)["task"]
+    assert tshow_data["use_cases"] == ["UC001", "UC004", "workspace:sibling-ws/UC010"]
+    uc_det_by_id = {u["id"]: u for u in tshow_data["use_cases_details"]}
+    assert uc_det_by_id["UC001"]["status"] == "active"
+    assert uc_det_by_id["UC004"]["status"] == "verified"
+    assert uc_det_by_id["workspace:sibling-ws/UC010"]["status"] == "external"
+    assert uc_det_by_id["workspace:sibling-ws/UC010"]["external"] is True
+
+    res_tshow_txt = run_cli("show", "T001", "--tasks-dir", str(tasks_dir))
+    assert res_tshow_txt.returncode == 0
+    assert "Use cases:" in res_tshow_txt.stdout
+    assert "UC001 - Search by budget (status: active)" in res_tshow_txt.stdout
+    assert "UC004 - Export search results (status: verified)" in res_tshow_txt.stdout
+
+    # 4. Verify `use-cases show <UC>` (text and --json)
+    res_ucshow_json = run_cli("use-cases", "show", "UC001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_ucshow_json.returncode == 0
+    uc1_show = json.loads(res_ucshow_json.stdout)["use_case"]
+    assert uc1_show["linked_tasks"] == ["01.1", "T001", "T002"]
+    assert uc1_show["derived_linked_tasks"] == ["01.1", "T001", "T002"]
+    assert uc1_show["written_linked_tasks"] == ["T001"]
+    assert uc1_show["linked_tasks_differ"] is True
+    assert uc1_show["written_linked_tasks_note"] == "written, will be replaced by derived in 17.2"
+    assert [d["state"] for d in uc1_show["linked_tasks_details"]] == ["in progress", "delivered", "dropped"]
+
+    res_ucshow_txt = run_cli("use-cases", "show", "UC001", "--tasks-dir", str(tasks_dir))
+    assert res_ucshow_txt.returncode == 0
+    assert "Linked   : 01.1 (in progress), T001 (delivered), T002 (dropped)" in res_ucshow_txt.stdout
+    assert "Written  : T001 (written, will be replaced by derived in 17.2)" in res_ucshow_txt.stdout
+
+    # When written == derived (UC004), no "written, will be replaced by derived in 17.2" line is shown
+    res_uc4_txt = run_cli("use-cases", "show", "UC004", "--tasks-dir", str(tasks_dir))
+    assert res_uc4_txt.returncode == 0
+    assert "Linked   : 01.2 (open), T001 (delivered)" in res_uc4_txt.stdout
+    assert "written, will be replaced by derived in 17.2" not in res_uc4_txt.stdout
+
+
+
 # ===========================================================================
 # Initiative T069: Campaign Skips Draft Use Cases; Untested Is Not Failing
 # ===========================================================================

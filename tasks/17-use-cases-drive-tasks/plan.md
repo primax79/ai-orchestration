@@ -12,8 +12,9 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.1 - Lettura del collegamento e proiezione derivata (sola lettura)
 
-- **Status:** `open` · **Short:** Proiezione collegamenti · **Size:** M · **Depends on:** -
+- **Status:** `delivered` (2026-10-27, kilo, commit `da222a6`: proiezione derivata task↔use case, avvisi validate e output show) · **Short:** Proiezione collegamenti · **Size:** M · **Depends on:** -
 - **Goal:** spec §1: lettura di `use-cases:` (task) e `**Use cases:**` (blocchi di iniziativa), calcolo di `linked-tasks` derivato senza scrivere; `validate` segnala le differenze con quello scritto e gli id sconosciuti; `tasks show` / `use-cases show` mostrano i collegamenti nei due sensi.
+- **Verification:** `compute_use_case_links(tasks_dir)` restituisce `UseCaseLinkProjection` (`{uc_id: [task_id ordinati]}`, task `dropped` inclusi e marcati in `dropped_tasks`/`details`, mappa inversa `reverse`/`by_task` `{task_id: [uc_id]}`); chiavi JSON stabili: in `tasks show --json` (`task.use_cases`, `task.use_cases_details` / `task.linked_use_cases` con `id`, `title`, `short_title`, `status`, `last_verdict`, `deprecated`, `known`, `external`) e in `use-cases show --json` (`use_case.linked_tasks`, `use_case.derived_linked_tasks`, `use_case.linked_tasks_details` / `use_case.derived_linked_tasks_details` con `id`, `title`, `short_title`, `state`, `canonical_state`, `dropped`, `use_case.written_linked_tasks`, `use_case.linked_tasks_differ`, `use_case.written_linked_tasks_note`).
 
 ### 17.2 - Comandi link/unlink e riscrittura derivata in sync-index
 

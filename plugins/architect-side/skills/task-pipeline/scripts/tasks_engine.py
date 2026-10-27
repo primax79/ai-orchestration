@@ -112,6 +112,8 @@ MICRO_HEADER_FIELDS: tuple[str, ...] = (
     "depends-on",
     "size",
     "labels",
+    "use-cases",
+    "use_cases",
     "conditions",
     "waiting-on",
     "waiting_on",
@@ -2253,6 +2255,28 @@ def parse_conditions_field(raw_val: Any) -> list[str]:
     return [p.strip() for p in str(raw_val).split(",") if p.strip() and p.strip() != "-"]
 
 
+def parse_use_cases_field(raw_val: Any) -> list[str]:
+    """Parse comma-separated use case IDs/refs from a `use-cases:` header or `**Use cases:**` segment.
+
+    Preserves cross-workspace refs (`workspace:<name>/<UC>`) as raw strings, ignores `-` and empty entries,
+    and deduplicates while keeping order.
+    """
+    if not raw_val:
+        return []
+    if isinstance(raw_val, (list, tuple)):
+        items = [str(x).strip().strip("`").strip() for x in raw_val]
+    else:
+        s = str(raw_val).strip()
+        if not s or s == "-":
+            return []
+        items = [part.strip().strip("`").strip() for part in s.split(",")]
+    result: list[str] = []
+    for item in items:
+        if item and item != "-" and item not in result:
+            result.append(item)
+    return result
+
+
 def resolve_task_conditions(
     tasks_dir: pathlib.Path,
     cond_ids: list[str],
@@ -2356,6 +2380,7 @@ class TaskNode:
     conditions: list[dict[str, Any]] = field(default_factory=list)
     conditional: bool = False
     own_conditions: list[str] = field(default_factory=list)
+    use_cases: list[str] = field(default_factory=list)
     waiting_on: str | None = None
     verify_by: str | None = None
 
@@ -2370,6 +2395,7 @@ class TaskNode:
             "coordinates": list(self.coordinates),
             "conditions": list(self.conditions),
             "conditional": self.conditional,
+            "use_cases": list(self.use_cases),
             "waiting_on": self.waiting_on,
             "verify_by": self.verify_by,
             "verify-by": self.verify_by,
@@ -3275,6 +3301,9 @@ def parse_child_blocks(
                 clean_bl = bl.lstrip("> ").strip() if bl.strip().startswith(">") else bl.strip()
                 if not clean_bl.startswith("- ") and not clean_bl.startswith("* "):
                     continue
+                m_c_hdr = HEADER_LINE_RE.match(clean_bl)
+                if m_c_hdr and m_c_hdr.group(1).lower() in ("use-cases", "use_cases"):
+                    c_own_fields["use_cases"] = m_c_hdr.group(2).strip()
                 _, segs = parse_bullet_line(clean_bl)
                 for seg in segs:
                     if seg.key:
@@ -3318,6 +3347,7 @@ def parse_child_blocks(
                 short=None,
                 short_title=derive_short_title(ctitle),
                 short_title_source="derived",
+                use_cases=parse_use_cases_field(c_own_fields.get("use_cases") or c_own_fields.get("use-cases")),
             )
             nodes.append(c_node)
             if target_readme.is_file():
@@ -3332,11 +3362,16 @@ def parse_child_blocks(
                     clean_r = r_sl.text.lstrip("> ").strip() if r_sl.text.startswith(">") else r_sl.text
                     if not clean_r.startswith("- ") and not clean_r.startswith("* "):
                         continue
+                    m_r_hdr = HEADER_LINE_RE.match(clean_r)
+                    if m_r_hdr and m_r_hdr.group(1).lower() in ("use-cases", "use_cases"):
+                        sub_own_fields["use_cases"] = m_r_hdr.group(2).strip()
                     _, segs = parse_bullet_line(clean_r)
                     for seg in segs:
                         if seg.key:
                             sub_own_fields[seg.key] = seg.clean_value
                 c_node.own_fields = {**c_own_fields, **sub_own_fields}
+                if "use_cases" in sub_own_fields or "use-cases" in sub_own_fields:
+                    c_node.use_cases = parse_use_cases_field(sub_own_fields.get("use_cases") or sub_own_fields.get("use-cases"))
                 if "short" in sub_own_fields and sub_own_fields["short"] and sub_own_fields["short"] != "-":
                     c_node.short = str(sub_own_fields["short"]).strip()
                     c_node.short_title = c_node.short
@@ -3380,6 +3415,8 @@ def parse_child_blocks(
                     own_fields["waiting_on"] = m_hdr.group(2).strip()
                 elif m_hdr and m_hdr.group(1) in ("verify-by", "verify_by"):
                     own_fields["verify_by"] = m_hdr.group(2).strip()
+                elif m_hdr and m_hdr.group(1).lower() in ("use-cases", "use_cases"):
+                    own_fields["use_cases"] = m_hdr.group(2).strip()
                 _, segs = parse_bullet_line(bl)
                 for seg in segs:
                     if seg.key:
@@ -3433,6 +3470,8 @@ def parse_child_blocks(
             if leaf_vb and (not str(leaf_vb).strip() or str(leaf_vb).strip() == "-"):
                 leaf_vb = None
 
+            leaf_ucs = parse_use_cases_field(own_fields.get("use_cases") or own_fields.get("use-cases"))
+
             leaf_node = TaskNode(
                 id=cid,
                 title=ctitle,
@@ -3479,6 +3518,7 @@ def parse_child_blocks(
                 conditions=cond_list,
                 conditional=is_cond,
                 own_conditions=cond_ids,
+                use_cases=leaf_ucs,
                 waiting_on=leaf_wo,
                 verify_by=str(leaf_vb).strip() if leaf_vb else None,
             )
@@ -3548,6 +3588,8 @@ def propagate_inheritance(tree: dict[str, TaskNode], node_id: str) -> None:
     for f in ("kind", "decider", "status", "verifier", "verification_mode", "verify_by", "verify-by", "goal", "handoff"):
         if f in node.own_fields:
             node.fields[f] = {"value": node.own_fields[f], "source": "own"}
+    if node.use_cases:
+        node.fields["use_cases"] = {"value": list(node.use_cases), "source": "own"}
     if "verify_by" in node.own_fields or "verify-by" in node.own_fields:
         vb_val = node.own_fields.get("verify_by") or node.own_fields.get("verify-by")
         if vb_val and str(vb_val).strip() and str(vb_val).strip() != "-":
@@ -3813,6 +3855,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             short=init_short_val,
             short_title=init_st,
             short_title_source=init_st_src,
+            use_cases=parse_use_cases_field(init_own_fields.get("use_cases") or init_own_fields.get("use-cases")),
         )
         tree[num] = init_node
 
@@ -3914,6 +3957,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             conditions=et.get("conditions", []),
             conditional=et.get("conditional", False),
             own_conditions=et.get("conditions_ids", []),
+            use_cases=list(et.get("use_cases") or parse_use_cases_field(et.get("headers", {}).get("use-cases") or et.get("headers", {}).get("use_cases"))),
             waiting_on=et.get("waiting_on"),
             verify_by=et.get("verify_by") or et.get("headers", {}).get("verify-by") or et.get("headers", {}).get("verify_by") or et.get("verifier"),
         )
@@ -3967,7 +4011,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                             depends_on=list(et_parsed.get("depends_on", [])),
                             expanded_depends_on=list(et_parsed.get("depends_on", [])),
                             own_depends_on=list(et_parsed.get("depends_on", [])),
-            depends_on_free_text=et.get("depends_on_free_text", ""),
+            depends_on_free_text=et_parsed.get("depends_on_free_text", ""),
                             state=et_parsed["state"],
                             canonical_state=et_parsed["canonical_state"],
                             derived_state=None,
@@ -3993,6 +4037,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                             conditions=et_parsed.get("conditions", []),
                             conditional=et_parsed.get("conditional", False),
                             own_conditions=et_parsed.get("conditions_ids", []),
+                            use_cases=list(et_parsed.get("use_cases") or parse_use_cases_field(et_parsed.get("headers", {}).get("use-cases") or et_parsed.get("headers", {}).get("use_cases"))),
                             waiting_on=et_parsed.get("waiting_on"),
                         )
 
@@ -6430,6 +6475,9 @@ def parse_emergent_task_file(
     cond_ids = parse_conditions_field(raw_cond)
     cond_list, is_cond = resolve_task_conditions(tasks_dir, cond_ids, raw_state or ("open" if is_micro else ""))
 
+    raw_uc = headers.get("use-cases") or headers.get("use_cases")
+    use_cases_list = parse_use_cases_field(raw_uc)
+
     raw_wo = headers.get("waiting-on") or headers.get("waiting_on")
     if raw_wo and str(raw_wo).strip() and str(raw_wo).strip() != "-":
         wo_val = normalize_waiting_on(str(raw_wo).strip())
@@ -6463,6 +6511,8 @@ def parse_emergent_task_file(
         "conditional": is_cond,
         "conditions_ids": cond_ids,
         "conditions_raw": raw_cond or "-",
+        "use_cases": use_cases_list,
+        "use_cases_raw": raw_uc or "-",
         "handoff": headers.get("handoff", f"Read {rel_path} and fix it." if is_micro else ""),
         "labels": labels_list,
         "node_type": "microtask" if is_micro else "leaf",
@@ -6946,6 +6996,8 @@ def parse_use_case_file(file_path: pathlib.Path, tasks_dir: pathlib.Path) -> dic
         "status": status,
         "priority": priority,
         "linked_tasks": linked_tasks,
+        "written_linked_tasks": list(linked_tasks),
+        "headers": headers,
         "verification_type": vtype,
         "last_tested": last_tested,
         "last_verdict": last_verdict,
@@ -6976,6 +7028,190 @@ def discover_use_cases(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
                 except Exception:
                     pass
     return use_cases
+
+
+class UseCaseLinkProjection(dict):
+    """Derived use-case <-> task link projection (Spec 17 §1).
+
+    As a dict, maps `{uc_id: [sorted task_ids]}` (dropped tasks included).
+    Also provides attributes and virtual keys:
+      - `.by_use_case` / `.use_case_to_tasks`: `{uc_id: [sorted task_ids]}`
+      - `.by_task` / `.task_to_use_cases` / `.reverse`: `{task_id: [uc_ids]}`
+      - `.dropped_tasks`: `set[str]` of linked task IDs whose canonical_state == 'dropped'
+      - `.details` / `.by_use_case_details`: `{uc_id: [{"id", "title", "short_title", "state", "canonical_state", "dropped"}, ...]}`
+      - `.by_task_details`: `{task_id: [{"id", "title", "short_title", "status", "last_verdict", "deprecated", "known", "external"}, ...]}`
+    """
+
+    _VIRTUAL_ATTRS = {
+        "by_use_case": "by_use_case",
+        "use_case_to_tasks": "by_use_case",
+        "by_task": "by_task",
+        "task_to_use_cases": "by_task",
+        "reverse": "by_task",
+        "dropped_tasks": "dropped_tasks",
+        "dropped": "dropped_tasks",
+        "details": "details",
+        "by_use_case_details": "details",
+        "by_task_details": "by_task_details",
+    }
+
+    def __init__(
+        self,
+        by_use_case: dict[str, list[str]],
+        by_task: dict[str, list[str]],
+        dropped_tasks: set[str],
+        details: dict[str, list[dict[str, Any]]],
+        by_task_details: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        super().__init__(by_use_case)
+        self.by_use_case = dict(by_use_case)
+        self.use_case_to_tasks = self.by_use_case
+        self.by_task = dict(by_task)
+        self.task_to_use_cases = self.by_task
+        self.reverse = self.by_task
+        self.dropped_tasks = set(dropped_tasks)
+        self.details = dict(details)
+        self.by_use_case_details = self.details
+        self.by_task_details = dict(by_task_details)
+
+    def is_dropped(self, task_id: str) -> bool:
+        return task_id in self.dropped_tasks
+
+    def __getitem__(self, key: str) -> Any:
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        if key in self._VIRTUAL_ATTRS:
+            return getattr(self, self._VIRTUAL_ATTRS[key])
+        raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if super().__contains__(key):
+            return super().get(key, default)
+        if key in self._VIRTUAL_ATTRS:
+            return getattr(self, self._VIRTUAL_ATTRS[key])
+        return default
+
+
+def resolve_task_use_cases(
+    uc_refs: list[str],
+    use_cases_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Resolve a task's use-case references into structured status entries."""
+    entries: list[dict[str, Any]] = []
+    for ref in uc_refs:
+        if ref in use_cases_by_id:
+            uc_obj = use_cases_by_id[ref]
+            st = uc_obj.get("status", "draft")
+            entries.append({
+                "id": ref,
+                "title": uc_obj.get("title", ""),
+                "short_title": uc_obj.get("short_title", ref),
+                "status": st,
+                "last_verdict": uc_obj.get("last_verdict"),
+                "deprecated": st == "deprecated" or uc_obj.get("approval") == "deprecated",
+                "known": True,
+                "external": False,
+            })
+        elif ref.startswith("workspace:"):
+            entries.append({
+                "id": ref,
+                "title": ref,
+                "short_title": ref,
+                "status": "external",
+                "last_verdict": None,
+                "deprecated": False,
+                "known": False,
+                "external": True,
+            })
+        else:
+            entries.append({
+                "id": ref,
+                "title": "",
+                "short_title": ref,
+                "status": "unknown",
+                "last_verdict": None,
+                "deprecated": False,
+                "known": False,
+                "external": False,
+            })
+    return entries
+
+
+def compute_use_case_links(
+    tasks_dir: pathlib.Path | str,
+    *,
+    tree: dict[str, TaskNode] | None = None,
+    use_cases: list[dict[str, Any]] | None = None,
+) -> UseCaseLinkProjection:
+    """Compute derived `{uc_id: sorted list of task ids}` (dropped tasks included but flagged)
+    and the reverse `{task_id: [uc ids]}` from the tasks tree (read-only).
+    """
+    tasks_path = pathlib.Path(tasks_dir).resolve()
+    if tree is None:
+        tree = discover_task_tree(tasks_path)
+    if use_cases is None:
+        use_cases = discover_use_cases(tasks_path)
+
+    use_cases_by_id: dict[str, dict[str, Any]] = {uc["id"]: uc for uc in use_cases if uc.get("id")}
+    raw_by_uc: dict[str, list[str]] = {uc_id: [] for uc_id in use_cases_by_id}
+    by_task: dict[str, list[str]] = {}
+    by_task_details: dict[str, list[dict[str, Any]]] = {}
+    dropped_tasks: set[str] = set()
+
+    for tid in sorted(tree.keys(), key=_natural_sort_key):
+        node = tree[tid]
+        if node.canonical_state == "moved":
+            continue
+        uc_refs = list(node.use_cases) if node.use_cases else parse_use_cases_field(
+            node.own_fields.get("use-cases") or node.own_fields.get("use_cases")
+        )
+        if not uc_refs:
+            continue
+        by_task[tid] = list(uc_refs)
+        by_task_details[tid] = resolve_task_use_cases(uc_refs, use_cases_by_id)
+        if node.canonical_state == "dropped":
+            dropped_tasks.add(tid)
+        for uc_ref in uc_refs:
+            bucket = raw_by_uc.setdefault(uc_ref, [])
+            if tid not in bucket:
+                bucket.append(tid)
+
+    by_use_case: dict[str, list[str]] = {}
+    details: dict[str, list[dict[str, Any]]] = {}
+    for uc_id in sorted(raw_by_uc.keys(), key=_natural_sort_key):
+        sorted_tids = sorted(raw_by_uc[uc_id], key=_natural_sort_key)
+        by_use_case[uc_id] = sorted_tids
+        uc_task_entries: list[dict[str, Any]] = []
+        for tid in sorted_tids:
+            node = tree[tid]
+            is_dropped = node.canonical_state == "dropped"
+            uc_task_entries.append({
+                "id": tid,
+                "title": node.title,
+                "short_title": node.short_title,
+                "state": node.state,
+                "canonical_state": node.canonical_state,
+                "dropped": is_dropped,
+            })
+        details[uc_id] = uc_task_entries
+
+    return UseCaseLinkProjection(
+        by_use_case=by_use_case,
+        by_task=by_task,
+        dropped_tasks=dropped_tasks,
+        details=details,
+        by_task_details=by_task_details,
+    )
+
+
+def compute_task_use_case_links(
+    tasks_dir: pathlib.Path | str,
+    *,
+    tree: dict[str, TaskNode] | None = None,
+    use_cases: list[dict[str, Any]] | None = None,
+) -> dict[str, list[str]]:
+    """Return the reverse mapping `{task_id: [uc_ids]}`."""
+    return compute_use_case_links(tasks_dir, tree=tree, use_cases=use_cases).by_task
 
 
 def _next_use_case_id(tasks_dir: pathlib.Path) -> str:
@@ -7630,6 +7866,7 @@ def _node_task_dict(cn: "TaskNode") -> dict[str, Any]:
         "in_closed_section": cn.in_closed_section,
         "conditions": list(cn.conditions),
         "conditional": cn.conditional,
+        "use_cases": list(cn.use_cases),
         "waiting_on": cn.waiting_on,
     }
 
@@ -8606,6 +8843,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
     # Validate use cases
     uc_dir = tasks_dir / "use-cases"
     seen_uc_ids: dict[str, str] = {}
+    parsed_ucs_by_id: dict[str, tuple[str, dict[str, Any]]] = {}
     if uc_dir.is_dir():
         for uc_entry in sorted(uc_dir.iterdir()):
             if uc_entry.name.startswith(".") or not uc_entry.is_file() or uc_entry.suffix != ".md":
@@ -8627,6 +8865,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                     errors.append(f"{uc_rel}: duplicate use case id {ucid!r} (already defined in {seen_uc_ids[ucid]}).")
                 else:
                     seen_uc_ids[ucid] = uc_rel
+                    parsed_ucs_by_id[ucid] = (uc_rel, uc)
 
             st = uc.get("status", "draft")
             if st not in USE_CASE_STATUSES:
@@ -8664,14 +8903,38 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                                 f"{uc_rel}: non-standard heading '{h_name}' (use '{std_name}')"
                             )
 
-    # Warn if a task references an unknown use case
+    uc_link_projection = compute_use_case_links(
+        tasks_dir,
+        tree=tree,
+        use_cases=[u for _, u in parsed_ucs_by_id.values()],
+    )
+    for ucid, (uc_rel, uc) in parsed_ucs_by_id.items():
+        written_lt = list(uc.get("linked_tasks", []))
+        derived_lt = list(uc_link_projection.get(ucid, []))
+        if written_lt != derived_lt:
+            written_fmt = ", ".join(written_lt) or "-"
+            derived_fmt = ", ".join(derived_lt) or "-"
+            warnings.append(
+                f"{uc_rel}: use case {ucid} written linked-tasks [{written_fmt}] ({written_lt}) "
+                f"differs from derived [{derived_fmt}] ({derived_lt})."
+            )
+
+    # Warn if a task references an unknown or deprecated use case
     for nid, node in tree.items():
-        fields = node.own_fields or {}
-        uc_refs = fields.get("use-cases") or fields.get("use_cases")
-        if uc_refs and uc_refs != "-":
-            for ref in [r.strip() for r in str(uc_refs).split(",") if r.strip()]:
-                if ref not in seen_uc_ids:
-                    warnings.append(f"{node.rel_path}: task references unknown use case {ref!r}.")
+        node_ucs = list(node.use_cases) if node.use_cases else parse_use_cases_field(
+            (node.own_fields or {}).get("use-cases") or (node.own_fields or {}).get("use_cases")
+        )
+        for ref in node_ucs:
+            if ref.startswith("workspace:"):
+                continue
+            if ref not in seen_uc_ids:
+                warnings.append(f"{node.rel_path}: task {nid} references unknown use case {ref!r}.")
+            else:
+                _, target_uc = parsed_ucs_by_id[ref]
+                if target_uc.get("status") == "deprecated" or target_uc.get("approval") == "deprecated":
+                    warnings.append(
+                        f"{node.rel_path}: task {nid} references deprecated use case {ref!r} (status: deprecated)."
+                    )
 
     # Placement warnings (Requirement 3)
     is_ws, ws_projects = is_workspace_task_tree(tasks_dir)
@@ -14044,12 +14307,32 @@ def cmd_show(args: argparse.Namespace) -> int:
             "session": executor_val[len("session:"):].strip(),
         }
 
+    all_ucs = discover_use_cases(tasks_dir)
+    ucs_by_id = {u["id"]: u for u in all_ucs if u.get("id")}
+    raw_task_ucs = task_data.get("use_cases")
+    if raw_task_ucs is None:
+        hdrs = task_data.get("headers") or task_data.get("own_fields") or {}
+        raw_task_ucs = parse_use_cases_field(hdrs.get("use-cases") or hdrs.get("use_cases"))
+    else:
+        raw_task_ucs = parse_use_cases_field(raw_task_ucs)
+    uc_details = resolve_task_use_cases(raw_task_ucs, ucs_by_id)
+    task_data["use_cases"] = list(raw_task_ucs)
+    task_data["use_cases_details"] = uc_details
+    task_data["linked_use_cases"] = uc_details
+
     args._last_result = {"ok": True, "task": task_data, "languages": resolve_project_languages(tasks_dir)}
     if getattr(args, "json", False):
         print(json.dumps({"ok": True, "task": task_data, "languages": resolve_project_languages(tasks_dir)}, indent=2))
     else:
         print(f"Task: {task_data.get('id')} - {task_data.get('title')}")
         print(f"State: {task_data.get('state')} (canonical: {task_data.get('canonical_state')})")
+        if uc_details:
+            print("Use cases:")
+            for uc_info in uc_details:
+                t_part = f" - {uc_info['title']}" if uc_info.get("title") and uc_info["title"] != uc_info["id"] else ""
+                print(f"  - {uc_info['id']}{t_part} (status: {uc_info['status']})")
+        else:
+            print("Use cases: -")
         if task_data.get("waiting_on"):
             print(f"Waiting on: {task_data.get('waiting_on')}")
         if task_data.get("external_executor"):
@@ -17308,7 +17591,25 @@ def cmd_use_cases_show(args: argparse.Namespace) -> int:
             print(f"[FAIL] Use case {args.uc_id} not found.")
         return 1
 
+    uc_links = compute_use_case_links(tasks_dir, use_cases=ucs)
+    written_lt = list(target.get("written_linked_tasks", target.get("linked_tasks", [])))
+    derived_lt = list(uc_links.get(target["id"], []))
+    derived_details = list(uc_links.details.get(target["id"], []))
+    links_differ = written_lt != derived_lt
+
+    target = dict(target)
+    target["linked_tasks"] = derived_lt
+    target["derived_linked_tasks"] = derived_lt
+    target["linked_tasks_details"] = derived_details
+    target["derived_linked_tasks_details"] = derived_details
+    target["written_linked_tasks"] = written_lt
+    target["linked_tasks_differ"] = links_differ
+    target["written_linked_tasks_note"] = (
+        "written, will be replaced by derived in 17.2" if links_differ else None
+    )
+
     payload = {"ok": True, "use_case": target}
+    args._last_result = payload
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
     else:
@@ -17316,7 +17617,17 @@ def cmd_use_cases_show(args: argparse.Namespace) -> int:
         print(f"Actor    : {target['actor']}")
         print(f"Status   : {target['status']} (Last tested: {target.get('last_tested') or '-'}, Verdict: {target.get('last_verdict') or '-'})")
         print(f"Priority : {target['priority']}")
-        print(f"Linked   : {', '.join(target['linked_tasks']) or '-'}")
+        if derived_details:
+            linked_str = ", ".join(
+                f"{e['id']} ({e['state']}{', dropped' if e['dropped'] and 'dropped' not in str(e['state']).lower() else ''})"
+                for e in derived_details
+            )
+            print(f"Linked   : {linked_str}")
+        else:
+            print("Linked   : -")
+        if links_differ:
+            written_str = ", ".join(written_lt) or "-"
+            print(f"Written  : {written_str} (written, will be replaced by derived in 17.2)")
         if target.get("verification_command"):
             print(f"Command  : {target['verification_command']}")
     return 0
