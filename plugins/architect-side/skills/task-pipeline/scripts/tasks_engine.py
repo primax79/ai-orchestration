@@ -282,6 +282,7 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
 - **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
 - **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+- **Orchestrator registration & heartbeat:** When orchestrating with `ai-orch` installed, register the session with `ai-orch sessions register --role orchestrator` and heartbeat periodically (`ai-orch sessions heartbeat <session_id>`). Interactive sessions (e.g. Claude Code) do not send heartbeats automatically: emit a heartbeat on each turn or periodic check; a "stale" interactive holder reflects idle time, not absence.
 - **Tooling feedback:** when `ai-orch` is installed, report friction, defects, or improvements at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."` (without `ai-orch`, drop a Markdown note in `tasks/_inbox/to-analyze/`). Do not work around tooling issues silently; maintainers triage notes into tasks.
 """
 
@@ -23358,9 +23359,57 @@ def get_canonical_args(args: argparse.Namespace) -> dict[str, Any]:
     return out
 
 
+def _is_orchestrator_role_missing(workspace: pathlib.Path) -> bool:
+    try:
+        repo_root = _find_repo_root()
+        if repo_root is not None:
+            scripts_dir = repo_root / "scripts"
+            if scripts_dir.is_dir() and str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+        import orchestration_orchestrator
+        st = orchestration_orchestrator.get_orchestrator_status(workspace)
+        return st.get("status") == "missing" or not st.get("session_id")
+    except Exception:
+        orch_file = workspace / ".ai-orchestration" / "orchestrator.json"
+        if not orch_file.is_file():
+            return True
+        try:
+            data = json.loads(orch_file.read_text(encoding="utf-8"))
+            status = data.get("status") or data.get("current", {}).get("status")
+            session_id = data.get("current", {}).get("session_id")
+            if status == "missing" or not session_id:
+                return True
+            return False
+        except Exception:
+            return True
+
+
+def _maybe_print_orchestrator_missing_hint(args: argparse.Namespace) -> None:
+    if os.environ.get("AI_ORCH_RUN_ID"):
+        return
+    ws_arg = getattr(args, "workspace", None)
+    if ws_arg:
+        workspace = pathlib.Path(ws_arg).resolve()
+    else:
+        tasks_dir = pathlib.Path(getattr(args, "tasks_dir", "tasks")).resolve()
+        workspace = _resolve_workspace_from_tasks_dir(tasks_dir)
+
+    if _is_orchestrator_role_missing(workspace):
+        try:
+            print(
+                "[hint] Orchestrator role is missing in this workspace. "
+                "Register with 'ai-orch sessions register --role orchestrator' "
+                "(send heartbeat periodically; interactive sessions send it per turn or check).",
+                file=sys.stderr,
+            )
+        except Exception:
+            pass
+
+
 def dispatch_command(args: argparse.Namespace) -> int:
     is_json = bool(getattr(args, "json", False) or "--json" in sys.argv)
     if is_mutating_command(args):
+        _maybe_print_orchestrator_missing_hint(args)
         # 1. Broker singleton guard (exit 75 if broker holds lock unless AI_ORCH_BROKER_CHILD is set)
         b_status = _get_broker_status()
         if b_status is not None and getattr(b_status, "held", False) and not os.environ.get("AI_ORCH_BROKER_CHILD"):

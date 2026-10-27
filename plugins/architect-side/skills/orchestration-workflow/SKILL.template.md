@@ -75,6 +75,13 @@ handful of lines, or that touches actual logic, goes back to {{TOOL:executor_nam
 {{BLOCK:corrective_call}}a corrective follow-up into the same session{{/BLOCK}}, not a direct edit. When
 in doubt, delegate rather than fix it yourself.
 
+### Register as orchestrator & heartbeat
+
+When orchestrating in a workspace with the `ai-orch` CLI installed:
+- **Register the session:** Run `ai-orch sessions register --role orchestrator` upon starting or resuming an orchestrating session so the role is bound to this session.
+- **Heartbeat:** Interactive sessions (such as Claude Code) do not send heartbeats automatically. Send a heartbeat (`ai-orch sessions heartbeat <session_id>`) on each turn or during periodic checks.
+- **Liveness interpretation:** A "stale" status for an active interactive holder indicates elapsed idle time without a heartbeat turn, but does NOT mean the orchestrator is absent or dead. Do not treat a stale interactive orchestrator as absent without verifying.
+
 {{BLOCK:precedence_note}}### Precedence with Bound Skills
 
 If a bound skill for your executor, e.g. `kilo-mcp-orchestrator`, is also loaded and the execution channel is Kilo via `kilo-mcp`, defer tool-level invocation details (e.g. `kilo_implement`, `kilo_task_wait`, `kilo_rag_search`, `kilo_log_issue`) to `kilo-mcp-orchestrator`. All architectural rules—the 6-phase lifecycle, verification modes (`independent-session`, `cross-agent`, etc.), the Post-Verification Decision Table, formal task states (`open` → `delivered` → `verified` → `done`), and economic rules—remain authoritative as defined here.{{/BLOCK}}
@@ -86,7 +93,7 @@ If a bound skill for your executor, e.g. `kilo-mcp-orchestrator`, is also loaded
   Do not guess filenames. Confirm the Executor's engine, role profile
   mapping, and credentials are ready **once per session or after a dispatch
   failure** (do not re-run health/config checks before every single task).
-  Drain your verification queue at session start (`ai-orch tasks verification-queue --for <workspace-slug>`).{{/BLOCK}}
+  Register this session if not yet registered (`ai-orch sessions register --role orchestrator`) and drain your verification queue at session start (`ai-orch tasks verification-queue --for <workspace-slug>`).{{/BLOCK}}
 - **Phase 2 - Isolation:** {{BLOCK:phase2_body}}delegation typically has **no isolation and no
   locking by default** - it runs directly in the target working directory,
   and nothing stops a second concurrent writer (another delegated task, or

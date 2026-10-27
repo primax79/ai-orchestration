@@ -91,7 +91,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T071 (Invito a registrarsi) | P2 | [Le sessioni che orchestrano vengono invitate a registrarsi come orchestratore](engine/T071-le-sessioni-che-orchestrano-vengono-invitate-a-reg.md) | open | kilo | - |
+| T071 (Invito a registrarsi) | P2 | [Le sessioni che orchestrano vengono invitate a registrarsi come orchestratore](engine/T071-le-sessioni-che-orchestrano-vengono-invitate-a-reg.md) | delivered (verify-by: ai-coding-tools) | kilo | - |
 | T077 (Adozione note vecchie) | P2 | [Le note dell'inbox in formato vecchio vengono adottate con un id](engine/T077-le-note-dell-inbox-in-formato-vecchio-vengono-adot.md) | open | kilo | - |
 | T079 (Workspace da sottocartella) | P2 | [I comandi lanciati da una sottocartella risolvono il workspace che la contiene](engine/T079-i-comandi-lanciati-da-una-sottocartella-risolvono.md) | open | kilo | - |
 | T081 (Branch e sblocco dipendenti) | P2 | [tasks_engine: list --branches, sblocco dei dipendenti e validate --branch](engine/T081-tasks-engine-list-branches-sblocco-dei-dipendenti.md) | open | kilo | - |
