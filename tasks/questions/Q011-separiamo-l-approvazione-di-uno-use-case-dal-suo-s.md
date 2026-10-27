@@ -2,7 +2,7 @@
 
 - id: Q011
 - question: Separiamo l'approvazione di uno use case dal suo stadio derivato dai task?
-- status: open
+- status: answered
 - blocks: 17.5 (open)
 - decider: owner
 - asked-by: ai-coding-tools-d8
@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
+- applied: yes
 - short: Approvazione e stadio use case
 
 ## Context
@@ -24,6 +25,6 @@ Nella nota N072 'draft' indica sia 'nessun task' sia 'non ancora approvato da te
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-27
