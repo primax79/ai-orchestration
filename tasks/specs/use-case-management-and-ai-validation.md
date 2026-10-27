@@ -146,7 +146,7 @@ flowchart TB
     SUITE["Active Use Cases Catalog (tasks/use-cases/UC*.md)"]
     RUNNER["Campaign Runner (ai-orch use-cases campaign)"]
     MATRIX["Product Health & Compliance Matrix<br/>• Readiness Score (% Verified)<br/>• Results by Persona / Actor<br/>• Regression Detection"]
-    REPORT["Campaign Report (tasks/reports/validation-campaign-<ts>.md)"]
+    REPORT["Campaign Report (tasks/_reviews/validation-campaign-<ts>.md)"]
 
     TRIGGER --> RUNNER
     SUITE --> RUNNER
@@ -160,7 +160,7 @@ flowchart TB
 3. **Product Readiness Score:**
    - Calculates the overall percentage of verified Use Cases: e.g. `85% Functional Readiness (12/14 Use Cases Verified)`.
 4. **Artifact:**
-   - Produces a timestamped audit report in `tasks/reports/validation-campaign-<timestamp>.md`.
+   - Produces a timestamped audit report in `tasks/_reviews/validation-campaign-<timestamp>.md`.
 
 ---
 
