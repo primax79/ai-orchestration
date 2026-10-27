@@ -1,24 +1,27 @@
 # Study: Cross-Workspace Orchestrator Control Plane, Feedback, Handoff & Registry Consistency (T073)
 
-- **Status:** draft for review (2026-10-27)
+- **Status:** draft 2 — revised after independent Codex review (2026-10-27)
 - **Task:** `T073 (Studio pannello orchestratori)`
 - **Sources:** `N071`, `N068`, `N069`, `N070`
 - **Related specs:** `ui-multi-project.md`, `orchestration-broker-mcp.md`, `orchestration-extension-spec.md`, `events-and-triggers.md`, `control-plane-safety.md`, `peer-messaging.md` (superseded)
 - **Related use cases:** `UC028`, `UC030`, `UC033`, `UC034`, `UC037`
-- **Open tasks evaluated for absorption:** `T070`, `T071`, `T072`, `16.7`, `16.8`
+- **Related tasks & initiatives:** `T070` (done), `T072` (done), `T083` (same-provider-id rename), `T071` (open), `16.5` (bounced), `16.7` (open), `16.8` (open), `16.9` (done, with read-only all-workspaces overview gap), `17` (`17-use-cases-drive-tasks`, taken)
+- **Pinned sibling-repo commits inspected:** `ai-orchestration-ui` at `3fe9d9e`, `vscode-ai-orchestration` at `dab76d0`
 
 ---
 
 ## Executive Summary & Core Recommendation (10-Line Synthesis)
 
-1. **Identity by Provider Session ID:** Treat `provider_session_id` (UUID/`ses_...`) as the immutable session identity and agent names (`ai-coding-tools-d8`) as mutable `display_name` metadata; re-registering the same `provider_session_id` updates `display_name` and `last_seen` in place without bumping `generation`.
-2. **Unified Liveness Model:** Unify `orchestrator status` and `sessions role` so both compute liveness from a single function combining process-table/transcript mtime probes (for interactive and headless sessions) with explicit heartbeats, eliminating the active-vs-stale contradiction.
-3. **Piggybacked Feedback & Fencing:** Every `ai-orch` CLI command and broker MCP tool response checks the workspace's `orchestrator.json` and appends a one-line notice when the role is `missing`, when the caller is `fenced_out` (superseded by generation `N+1`), or when `unread_mail > 0`.
-4. **First-Class Interactive & Headless Succession:** Extend `orchestrator reassign` and `rotate` (and `UC028`) to support `--kind interactive|headless`, `--provider-session-id <id>`, and `--bind-current` in a single atomic generation bump (`N -> N+1`), never fabricating a `provider_session_id` before a headless turn actually runs.
-5. **Reconciled Registry & macOS APFS Fix:** Keep SQLite (`registry.sqlite`) as the cross-workspace index synced with per-workspace `.ai-orchestration/orchestrator.json`, drop raw `st_dev` comparison on macOS (which invalidates all workspaces after an APFS reboot), forward `--config-dir` into `find_project_config_path()`, and add `ai-orch workspace gc` to purge test leftovers.
-6. **Top-Level "Workspaces Fleet" View:** Add a 5th top-level view (`Workspaces` / Fleet Control Plane) to `ai-orchestration-ui` and the `vscode-ai-orchestration` dashboard (plus a `Workspaces` sidebar TreeView) showing all registered and auto-discovered workspaces, their orchestrator holder/liveness, live consoles, queues, questions, verifications, and mail.
-7. **Fix Multi-Project Orchestrator Scoping:** Fix `ai-orchestration-ui/backend/server.py` and `vscode-ai-orchestration/src/views/dashboard-panel.ts` so `orchestrator` and `sessions` endpoints always bind to the workspace root (`state.workspace`), never to a child project (`state.project_root`).
-8. **Zero Cross-Session Permission Laundering:** Messages or handoff requests from the panel or another workspace never execute shell/file mutations directly; unattended orchestrators receive metadata-only mail until owner acceptance, and nudges to interactive consoles are framed as untrusted data requiring the human operator's turn approval.
+1. **No Prompt Injection into Interactive Sessions, Ever:** Never send text, relay prompts, content-free `SendMessage` nudges, or auto-ingested handoff prompts into a live interactive session; messages and handoff records reach interactive sessions strictly via a **pull-only mailbox / pending-handoff record** read on the session's next turn, paired with a UI/OS notification to the human.
+2. **Strict Authority Matrix & Human Proof (`Q-F`):** Only a self-identifying session may `claim` a `missing` role; only the current holder may initiate a voluntary `hand-off`; `stale` takeover requires the owner (or prior holder declaration); active `reassign` and registry `cleanup`/`unregister` require the owner (or current holder for reassign) — **never** an agent with `--force`. Because `~/.config/ai-orchestration/ui-token` is readable by local agents, owner-only actions require human-bound confirmation (an open design point).
+3. **Provider-Scoped Identity `(tool, provider_session_id)`:** Treat `(tool, provider_session_id)` as the session identity when verified and non-colliding, and agent names (`ai-coding-tools-d8`) as mutable display labels (`T083` renames the record in place without a generation bump), with explicit rules for fork/resume, duplicate live clients, and missing IDs.
+4. **Orthogonal Liveness Dimensions (`Q-D`, `Q-G`):** Separate `heartbeat_valid` (protocol authority), `recent_activity` (transcript mtime hint), `process_observed` (`ps`/`lsof` hint), and `takeover_eligible` (policy state); local file/process probes are **read-only display hints only** and never authorize automatic binding or takeover, nor does a stale interactive holder automatically fall back to a headless worker (`Q-A`).
+5. **Truly Read-Only Status Invariant:** Fix `get_orchestrator_status()` (`scripts/orchestration_orchestrator.py:799-825`), which today acquires `orchestrator_lock` and mutates/migrates `orchestrator.json` via `_migrate_orchestrator_cursors()`, violating the read-only `status` invariant (`T026`).
+6. **Transactional Succession with Rollback:** Fix the non-transactional defect in `reassign_orchestrator()` (`scripts/orchestration_orchestrator.py:2111-2148`, which writes `orchestration.toml` before `rotate_orchestrator()` and leaves mutated config behind when rotation fails) by enforcing CAS on `(expected_generation, expected_config_hash)` with full compensation/rollback on failure.
+7. **Pending Handoff Acceptance for Interactive Targets:** Reassigning or handing off toward an interactive session writes a `pending_handoff` state (carrying the file-derived handoff bundle) that completes transition to `active` only when the target interactive session (prompted by its human operator) explicitly accepts/acknowledges it.
+8. **Report-Only Registry Reconciliation & Safe Quarantine:** Keep `registry.sqlite` and `.ai-orchestration/orchestrator.json` reconciled via report-only diagnostics by default, explicit relink/unregister, and owner-confirmed reversible `.trash/` quarantine — never using filename patterns (`ws`, `test_*`) as deletion evidence or `/tmp` path heuristics instead of explicit `--config-dir` / `AI_ORCHESTRATION_CONFIG`.
+9. **Fix Multi-Project Orchestrator Scoping:** Fix `ai-orchestration-ui/backend/server.py` (`3fe9d9e`) and `vscode-ai-orchestration/src/views/dashboard-panel.ts` (`dab76d0`) so `orchestrator` and `sessions` endpoints always bind to the workspace root (`state.workspace`), never to a child project (`state.project_root`).
+10. **Sequenced Plan in Initiative 18 (Consuming T070, T072, T083):** Consume delivered `T070`/`T072` and `T083`, reconcile bounced `16.5` before `16.7`/`16.8`, classify the missing read-only all-workspaces overview as a `16.9` validation gap vs interactive fleet controls in **Initiative 18** (`18.1`–`18.8`), and resolve owner questions `Q-A`..`Q-G` first.
 
 ---
 
@@ -28,7 +31,7 @@ On 2026-10-27, the owner observed that there is no single place to see which wor
 
 ### 1.1 Workspace Registry (`ai-orch workspace list --json`)
 
-Running `./bin/ai-orch workspace list --json` (under the default non-interactive shell where `/usr/bin/python3` is Python 3.9, and under `/opt/homebrew/bin/python3` 3.11+) returns 6 registered workspaces:
+Running `./bin/ai-orch workspace list --json` (both under default `/usr/bin/python3` 3.9 and under `/opt/homebrew/bin/python3` 3.11+) returns 6 registered workspaces:
 
 ```json
 {
@@ -104,9 +107,9 @@ Running `./bin/ai-orch workspace list --json` (under the default non-interactive
 }
 ```
 
-**Two bugs uncovered in `list_workspaces` (`scripts/orchestration_registry.py:988-1005`):**
-1. **macOS APFS `st_dev` drift across reboots:** `ai-coding-tools` and `d4science-python-library` were registered on Oct 20–21 when the root volume's `st_dev` was `16777231`. After a reboot, macOS assigned `st_dev = 16777234` to the same APFS volume. Even though `canonical_path` exists, `st_ino` matches (`329323713` and `412183655`), and `orchestration.toml`'s `[workspace] uuid` matches, `cur_st.st_dev != d["device"]` permanently marks both workspaces `stale: true`.
-2. **Python 3.9 `tomllib` silent exception:** When invoked without `/opt/homebrew/bin` in `PATH`, `/usr/bin/python3` (3.9) has `tomllib = None`. `load_toml_file()` raises `RuntimeError`, which `list_workspaces()` catches with a bare `except Exception: stale = True`, reporting **all 6 workspaces** as `stale: true`.
+**Two defects uncovered in `list_workspaces` (`scripts/orchestration_registry.py:988-1005`):**
+1. **`st_dev` change observed across a macOS reboot:** `ai-coding-tools` and `d4science-python-library` were registered on Oct 20–21 when `os.stat(cpath).st_dev` was `16777231`. Across a subsequent reboot on this machine, `st_dev` for the same APFS volume became `16777234`. Even though `canonical_path` exists, `st_ino` is unchanged (`329323713` and `412183655`), and `orchestration.toml`'s `[workspace] uuid` matches, `cur_st.st_dev != d["device"]` marks both workspaces `stale: true`.
+2. **Python 3.9 `tomllib` silent exception:** When invoked in a shell where `/usr/bin/python3` (3.9) precedes `/opt/homebrew/bin/python3`, `tomllib` is `None`. `load_toml_file()` raises `RuntimeError`, which `list_workspaces()` catches with a bare `except Exception: stale = True`, reporting **all 6 workspaces** as `stale: true`.
 
 ### 1.2 Project Config Directory (`ls ~/.config/ai-orchestration/projects`)
 
@@ -127,8 +130,8 @@ ws
 ```
 
 - `d4science_kb` has `orchestration.toml` (written by `orchestrator reassign`), `.ai-orchestration/orchestrator.json`, and 3 session records, but **is not registered** in `registry.sqlite`.
-- Four directories (`test_orchestrator_reassign_end0`, `test_ws`, `workspace`, `ws`) are **test leftovers** written to the user's real `~/.config/ai-orchestration/projects/` because:
-  - `plan_workspace_register()` (`scripts/orchestration_registry.py:676`) and `plan_projects_discover()` (`line 1195`) call `find_project_config_path(canonical)` without passing `config_dir` (`--config-dir "$T/cfg"`), so `UC030`/`UC033`/`UC034` probes and unit tests that pass `--config-dir` without setting `AI_ORCHESTRATION_CONFIG` write their `[workspace]` TOML into `~/.config/ai-orchestration/projects/<temp_dir_name>/orchestration.toml`.
+- Four directories (`test_orchestrator_reassign_end0`, `test_ws`, `workspace`, `ws`) are **test leftovers** written into the user's real `~/.config/ai-orchestration/projects/` because:
+  - `plan_workspace_register()` (`scripts/orchestration_registry.py:676`) and `plan_projects_discover()` (`line 1195`) call `find_project_config_path(canonical)` without forwarding `config_dir` (`--config-dir "$T/cfg"`), so probes and unit tests that pass `--config-dir` without setting `AI_ORCHESTRATION_CONFIG` write their `[workspace]` TOML into `~/.config/ai-orchestration/projects/<temp_dir_name>/orchestration.toml`.
   - `test_orchestrator_reassign_end0` was created by a pytest `tmp_path` test calling `orchestrator reassign` without isolating `AI_ORCHESTRATION_CONFIG`.
 
 ### 1.3 Per-Workspace Orchestrator Status, Sessions & Live Claude Code Sessions
@@ -139,7 +142,7 @@ Scanning all 20 folders under `~/works/*` and `~/works/gcube/*` that contain `ta
 | --- | --- | --- | --- | --- | --- |
 | `~/works/ai-coding-tools` | Yes (`stale: true` due to `st_dev`) | `active`, gen 2, `claude`, `session_id: ai-coding-tools-d8`, `provider_session_id: 5865a698-...` | 0 active, 1 `stale` (`ai-coding-tools-d8`, gen 2), 1 `retired` (`ai-coding-tools-c1`, gen 1) | `ai-coding-tools-d8` (orchestrator), `ai-coding-tools-ea` | `orchestrator status` says `active`, `sessions list` says `stale` (>300s since registration); `ai-coding-tools-ea` unknown; rename `c1 -> d8` forced gen 1 -> 2 |
 | `~/works/d4science_kb` | **No** (only in `projects/d4science_kb`) | `active`, gen 3, `claude`, `session_id: f40e1f4e-...`, `provider_session_id: 9063f48c-...` | 0 active, 1 `stale` (gen 3 interactive), 2 `retired` (gen 2 phantom headless `f5f121da`, gen 1 kilo `ses_e9b...`) | `d4science-kb-3d` (orchestrator) | Unregistered in SQLite; `orchestrator status` says `active` while `sessions list` says `stale`; N068 created phantom headless gen 2 |
-| `~/works/smartgears4_migration` | Yes (`active`) | `active`, gen 1, `kilo`, `session_id: cc1dd376-...`, `provider_session_id: ses_e9d0...` | 0 active, 1 `stale` (last seen `2026-10-22T10:22:24Z`, 5 days ago!) | None | `orchestrator status` claims `active` for a session dead for 5 days (`orchestrator.json` never checks staleness) |
+| `~/works/smartgears4_migration` | Yes (`active`) | `active`, gen 1, `kilo`, `session_id: cc1dd376-...`, `provider_session_id: ses_e9d0...` | 0 active, 1 `stale` (last seen `2026-10-22T10:22:24Z`, 5 days ago!) | None | `orchestrator status` claims `active` for a session untouched for 5 days (`orchestrator.json` static status) |
 | `~/works/d4science-python-library` | Yes (`stale: true` due to `st_dev`) | `missing` | `[]` | `d4science-python-library-1b` | Live interactive session is unregistered; workspace has 4 child projects |
 | `~/works/dave_agent` | Yes (`active`) | `missing` | `[]` | `dave-agent-92` | Live interactive session is unregistered (also has 2 worktrees `dave_agent-wt-*`) |
 | `~/works/gcube/porting_liferay` | Yes (`active`) | `missing` | `[]` | `porting-liferay-6d`, `porting-liferay-56` | Two live interactive sessions, neither registered, no orchestrator |
@@ -151,130 +154,162 @@ Scanning all 20 folders under `~/works/*` and `~/works/gcube/*` that contain `ta
 | `~/works/ricerca_auto` | **No** | `missing` | `[]` | None | Has `tasks/` and `.ai-orchestration/events` |
 | `~/works/ansible`, `app-nea`, `audit_project-claude`, `gcube_audit_g4`, `ngx-gcube`, `gcube/liferay62` | **No** | `missing` | `[]` | None | Have `tasks/`, no `.ai-orchestration/` |
 
-### 1.4 The Three Concrete Friction Cases from 2026-10-27
+### 1.4 Concrete Friction Cases Observed on 2026-10-27
 
-1. **Case N068 (`d4science_kb` phantom headless session & double generation bump):**
+1. **Case N068 (`d4science_kb` phantom Claude headless session & double generation bump; addressed in `T070`):**
    - `d4science_kb` had a stale gen 1 interactive Kilo holder (`ses_e9bdf3ba5ffeyIjRCwCFIEeG4M`, last seen 2026-10-22, 0 turns).
-   - To make the current interactive Claude session (`9063f48c-47d4-4079-8d84-bd8e25babd33`, display name `d4science-kb-3d`) the orchestrator, the session ran `ai-orch orchestrator reassign --tool claude --model claude-opus-5-5 --no-handoff --expect-hash <hash>`.
-   - `reassign_orchestrator()` called `rotate_orchestrator()`, which hardcoded `kind="headless"` and generated a random UUID `cand_prov_id = str(uuid.uuid4())` (`a168b9a6-4ffd-4434-972d-2b4588434bfa`). Because `--no-handoff` was used, no `claude` process ever ran with `--session-id a168b9a6-...`, leaving a phantom headless holder at generation 2 pointing to a non-existent Claude transcript.
-   - The session then had to run `ai-orch sessions register --tool claude --kind interactive --role orchestrator --provider-session-id 9063f48c-...`, bumping to generation 3.
-2. **Case N069 (`config show` ignores cwd & `reassign --dry-run` hides target path):**
-   - Running `ai-orch config show` inside `~/works/d4science_kb` printed `Project config: None (exists=False)` because `orchestration_config.py` sets `--workspace` default to `None` instead of `.` (unlike `orchestrator` and `sessions`).
-   - Running `ai-orch orchestrator reassign --dry-run` printed diff headers `--- a/orchestration.toml` / `+++ b/orchestration.toml` (`scripts/orchestration_orchestrator.py:2054-2055` uses `f"a/{target_path.name}"`), hiding that it actually writes `~/.config/ai-orchestration/projects/d4science_kb/orchestration.toml`.
-3. **Case N070 + Session Rename (`ai-coding-tools-c1` -> `ai-coding-tools-d8`):**
-   - The interactive Claude session orchestrating `ai-coding-tools` worked for days without registering because nothing in `AGENTS.md`, `orchestration-workflow`, or CLI outputs prompted it to register (`N070`/`T071`).
-   - Once registered as `--session-id ai-coding-tools-c1 --provider-session-id 5865a698-40a0-4f69-ad79-2e3ace4f7ffa` (gen 1), an account switch caused Claude Code to rename the live session from `ai-coding-tools-c1` to `ai-coding-tools-d8` while keeping the exact same `provider_session_id` (`5865a698-40a0-4f69-ad79-2e3ace4f7ffa`).
-   - Because `register_session()` (`scripts/orchestration_sessions.py:272`) checks `if old_sess_id and old_sess_id != reg_session_id:` instead of checking whether `provider_session_id` is the same session, re-registering with the new name bumped `generation` 1 -> 2 and retired `ai-coding-tools-c1`.
+   - When the session ran `ai-orch orchestrator reassign --tool claude --model claude-opus-5-5 --no-handoff --expect-hash <hash>`, `rotate_orchestrator()` (`scripts/orchestration_orchestrator.py:1862`) executed `cand_prov_id = str(uuid.uuid4()) if target_tool == "claude" else None` (a **Claude-only** pre-allocation meant for `claude -p --session-id <uuid>`). Because `--no-handoff` skipped invoking `claude -p`, generation 2 (`f5f121da`) recorded a fabricated `provider_session_id` (`a168b9a6-4ffd-4434-972d-2b4588434bfa`) with no transcript on disk.
+   - Binding the real interactive session (`9063f48c-47d4-4079-8d84-bd8e25babd33`) required a second manual command (`sessions register --role orchestrator`), bumping to generation 3. (`T070`, now delivered and done, adds interactive binding to `reassign`).
+2. **Case N069 (`config show` ignores cwd & `reassign --dry-run` hides target path; addressed in `T072`):**
+   - `ai-orch config show` defaulted `--workspace` to `None`, printing `Project config: None (exists=False)` from inside `~/works/d4science_kb`, and `orchestrator reassign --dry-run` printed `--- a/orchestration.toml` instead of the real external path `~/.config/ai-orchestration/projects/d4science_kb/orchestration.toml`. (`T072`, now delivered and done, fixes both).
+3. **Case N070 + Session Rename (`ai-coding-tools-c1` -> `ai-coding-tools-d8`; rename addressed in `T083`, registration hint in `T071`):**
+   - The interactive Claude session orchestrating `ai-coding-tools` worked for days without registering because nothing in `AGENTS.md`, skills, or CLI output prompted it (`N070` / `T071`).
+   - After an account switch, Claude Code renamed the live session from `ai-coding-tools-c1` to `ai-coding-tools-d8` while keeping the same `provider_session_id` (`5865a698-40a0-4f69-ad79-2e3ace4f7ffa`). Because `register_session()` checked `old_sess_id != reg_session_id` rather than matching `(tool, provider_session_id)`, re-registering bumped `generation` 1 -> 2 (`T083` now covers renaming the record in place when the same provider session ID re-registers with a new `--session-id`).
 
 ---
 
 ## 2. Existing Pieces and Gaps, Options, and Recommendations (Per Topic of N071)
 
-### Topic 1: Orchestrator Feedback, Liveness & Session Identity
+### Topic 1: Orchestrator Feedback, Liveness Dimensions & Session Identity
 
 #### Existing Pieces
-- `<workspace>/.ai-orchestration/orchestrator.json`: stores `generation`, `cursor`, `delivery_cursor`, `trigger_scan_cursor`, `status`, and `current` (`role_id`, `generation`, `registry_session_id`, `session_id`, `provider_session_id`, `tool`, `model`, `started`, `turns`, `last_usage`, `status`).
+- `<workspace>/.ai-orchestration/orchestrator.json`: stores `generation`, `cursor`, `delivery_cursor`, `trigger_scan_cursor`, `status`, and `current`.
 - `<workspace>/.ai-orchestration/sessions/<session_id>.json`: stores session records; `compute_session_status()` marks a session `stale` when `now - last_seen > 300s` (`DEFAULT_STALE_TIMEOUT_SEC`).
-- `<workspace>/.ai-orchestration/orchestrator/worker.json`: checked by broker `orchestrator.status` (`ai-orchestration-ui/backend/broker/server.py:1455`) for `alive` and `heartbeat_at`.
+- `T083`: updates `register_session` so re-registering with the same `provider_session_id` and a new `session_id` renames the session record in place without a generation bump.
 
 #### Gaps
-1. **Split status calculation:** `get_orchestrator_status()` (`scripts/orchestration_orchestrator.py:840`) returns `orch_doc.get("status", "active")` verbatim without checking the holder session's `last_seen` or process/transcript liveness. Thus `smartgears4_migration` reports `status: "active"` in `orchestrator status` despite its holder session being untouched since 2026-10-22.
-2. **Unstable session names used as primary keys:** Claude Code (`ListAgents`) assigns `<workspace>-<2-hex-chars>` names that change across account switches or restarts while the underlying transcript UUID (`provider_session_id`) stays fixed. Conversely, `register_session` keys files by `reg_session_id`.
-3. **No passive liveness for interactive sessions:** Interactive sessions cannot run a background heartbeat loop while waiting for user input. Relying solely on explicit `sessions heartbeat` calls with a 300s timeout guarantees every interactive orchestrator shows as `stale` while idle between user prompts.
-4. **No provider-session correlation:** The engine does not inspect local provider state (Claude's `~/.claude/projects/<escaped-cwd>/<provider_session_id>.jsonl` mtime, Kilo's session store, Codex's `~/.codex/sessions/`) to verify whether a `provider_session_id` actually exists on disk or when its last turn occurred.
-5. **Silent role loss / missing role:** Sessions running `ai-orch` commands or MCP tools receive no feedback when the workspace has no orchestrator (`T071`) or when their session was superseded by a newer generation.
+1. **Violation of the read-only `status` invariant in `get_orchestrator_status()`:**
+   - Despite the docstring claiming `read-only, Spec §0, T026`, `get_orchestrator_status()` (`scripts/orchestration_orchestrator.py:799-825`) acquires `orchestrator_lock(ws)` and calls `_migrate_orchestrator_cursors(orch_doc, orch_file)`, which writes to `orchestrator.json` and deletes `.ai-orchestration/triggers/cursor.json` during a status read!
+2. **Conflation of protocol liveness with display hints and takeover eligibility:**
+   - `get_orchestrator_status()` reports static `orch_doc["status"]` (`"active"` even after 5 days in `smartgears4_migration`), while `sessions list` reports `"stale"` after 300 seconds because interactive sessions cannot emit background heartbeats while idle at the prompt.
+   - Conflating "process exists or transcript was recently written" with "heartbeat valid" or "eligible for automatic takeover" is unsafe: a transcript mtime or `ps` match is an unverified local hint, not protocol authority.
+3. **Provider-specific identity corner cases (`(tool, provider_session_id)`):**
+   - **Collisions / Resume / Fork:** In Claude Code (`--resume <uuid>` or `--fork-session`), two client invocations over time (or accidentally in two terminals) can reference the same `provider_session_id`, or a forked session may share history before diverging.
+   - **Duplicate live clients:** Two terminals running in the same workspace have distinct `provider_session_id`s; if both claim the same `provider_session_id`, the second must be rejected or flagged as a duplicate client conflict.
+   - **Missing `provider_session_id`:** A headless Kilo/Codex session before its first turn, or an interactive session that registers without passing `--provider-session-id`, has `provider_session_id = null` and can only be identified by its `registry_session_id` until bound.
+4. **Silent role loss / missing role (`T071`):**
+   - Sessions running `ai-orch` commands or MCP tools receive no feedback in tool output when `orchestrator` is `missing` or when their generation was superseded (`fenced_out`).
+
+#### Provider-Specific Identity & Liveness Rules
+
+1. **Identity tuple `(tool, provider_session_id)`:**
+   - `registry_session_id` is the internal primary key; `display_name` (e.g., `ai-coding-tools-d8`) is a mutable human label (`T083`).
+   - **Same `(tool, provider_session_id)` re-registration (`T083`):** Updates `display_name`/`session_id` alias, `last_seen`, and `cwd` in place **without** bumping `generation`, provided `status` is not `retired`/`deregistered`.
+   - **Retired `(tool, provider_session_id)`:** If a session whose `(tool, provider_session_id)` was explicitly `retired` (superseded by generation `N+1`) attempts to re-register as `orchestrator`, it must go through explicit succession (`claim`/`reassign`), never silently resurrecting generation `N`.
+   - **Duplicate live client / fork:** If a caller supplies a `provider_session_id` already bound to a different `workspace` path, or if a `--fork-session` creates a new transcript UUID, it is treated as a distinct session; reusing the same `provider_session_id` concurrently from two different PIDs logs a `duplicate_client_warning`.
+   - **Missing `provider_session_id`:** Allowed for initial registration (`provider_session_id: null`, state `unbound_provider_id`), but cannot use provider-id rename matching until bound.
+
+2. **Four Orthogonal Liveness Dimensions (Replacing Single `active|stale` Conflation):**
+   - `heartbeat_valid` (`bool` + `last_seen` age): `true` iff an explicit `sessions heartbeat` or authenticated CLI/MCP call from this `registry_session_id` occurred within `heartbeat_ttl` (default 300s). **Protocol fact.**
+   - `recent_activity` (`timestamp | null`, hint): most recent mtime of the provider transcript file on disk (when opt-in provider store inspection `Q-C` is enabled). **Display hint only (`Q-D`).**
+   - `process_observed` (`bool`, hint): whether an OS process for `tool` matching the session's `provider_session_id` or workspace `cwd` is currently visible in `ps`/`lsof`. **Display hint only (`Q-D`).**
+   - `takeover_eligible` (`bool` + `reason`): policy state computed for succession (`true` when role is `missing`, holder explicitly declared `hand-off`/`stopped`, or holder has `heartbeat_valid == false` beyond the takeover threshold and owner initiates takeover; see `Q-G`).
 
 #### Options & Trade-offs
 
-- **Option 1A (Explicit Heartbeat Only + Longer Timeout):** Keep liveness purely based on `sessions heartbeat` and piggyback automatic `heartbeat` on every `ai-orch` CLI / MCP call made by that session, raising the interactive stale threshold to e.g. 2 hours.
-  - *Pros:* Zero provider-specific file/process probing; simple.
-  - *Cons:* An interactive session that crashed or closed 5 minutes ago looks `active` for 2 hours; an interactive session open in a terminal while the owner reads docs for 3 hours looks `stale`; cannot detect phantom `provider_session_id`s (`N068`).
-- **Option 1B (Hybrid Liveness: Auto-Heartbeat on CLI/MCP + Provider Transcript & Process Probe — Recommended):**
-  1. **Identity separation:** `registry_session_id` is a stable UUID generated once per `(tool, provider_session_id)` pair; if `register_session` is called with a `provider_session_id` that already matches an existing non-retired session in the workspace (or the current orchestrator holder), it **updates** that session in place (updating `display_name`, `last_seen`, `cwd`, `model`) without bumping `generation`.
-  2. **Three-tier liveness check (`compute_liveness`):**
-     - **Headless worker:** checks `worker.json` PID via `is_process_alive(pid, expected_start_time)` + turn lease.
-     - **Interactive or headless session:** checks (a) `last_seen` updated automatically on any `ai-orch` CLI / MCP call carrying the session's ID/env, (b) provider transcript file existence and mtime on disk (e.g. `~/.claude/projects/*/<provider_session_id>.jsonl` for Claude; Kilo/Codex session files), and (c) OS process table probe (`ps` matching `--resume <id>` or active tool进程 with `cwd` = workspace).
-     - Status values unified across `orchestrator status`, `sessions role`, and UI: `missing` | `active` (seen/transcript < 15m or live process) | `idle` (interactive, process/transcript exists, quiet 15m–24h) | `stale` (no process and quiet > threshold) | `paused` | `rotating` | `retired`.
-  3. **Piggybacked CLI & MCP Role Feedback (absorbs T071):**
-     - Every mutating or task-querying `ai-orch` CLI command and every broker MCP tool response checks `orchestrator.json` (read-only, zero lock).
-     - If `status == "missing"`, prints/appends a one-line hint: `[ai-orch] No orchestrator registered for <ws>. If you are orchestrating, run: ai-orch orchestrator claim --kind interactive --tool <tool> (or ai-orch orchestrator ensure)`.
-     - If the caller identifies itself (via `--actor` / `--session` / `AI_ORCH_SESSION_ID` / MCP console binding) and was previously the orchestrator (`retired` by a newer `generation`), prints/appends a prominent warning: `[ai-orch] ROLE LOST: session <id> was superseded by generation <N> (<holder>, reason: <reason>). Stop orchestrating immediately.`
+- **Option 1A (Single Merged Status from Transcript Probe):** Compute a single `status = active` whenever a transcript file was modified within 15 minutes, and allow automatic takeover when it goes stale.
+  - *Pros:* Simple UI badge.
+  - *Cons:* Uses unauthenticated filesystem hints as protocol authority (`Q-D`), and risks automatic takeover of an idle interactive session while the human owner is reading code (`Q-A`).
+- **Option 1B (Truly Read-Only Status + Four Orthogonal Liveness Dimensions + Piggybacked CLI/MCP Notices — Recommended):**
+  1. Remove `orchestrator_lock` and `_migrate_orchestrator_cursors` from `get_orchestrator_status()` so `status` is 100% lock-free and read-only (`18.2`).
+  2. Report both the **role state** (`missing` | `active` | `pending_handoff` | `rotating` | `paused` | `stopped`) and the **liveness breakdown** (`heartbeat_valid`, `recent_activity`, `process_observed`, `takeover_eligible`) identically in `orchestrator status` and `sessions role`.
+  3. **No automatic fallback from a stale interactive holder (`Q-A`):** If an interactive holder's heartbeat expires (`heartbeat_valid: false`), it is displayed as `idle (heartbeat expired)` / `takeover_eligible`, **never** automatically replaced by a background headless worker without an explicit owner or holder action.
+  4. Piggyback a 1-line notice on `ai-orch` CLI and broker MCP responses when `role == missing` (`T071`) or when the calling session's generation is `< current.generation` (`ROLE LOST / fenced-out`).
 
-**Recommendation:** **Option 1B**. It solves the `c1 -> d8` rename bug, detects phantom session IDs immediately (`transcript_exists: false`), distinguishes `idle` interactive windows from dead/stale ones, and unifies `orchestrator status` with `sessions role`.
+**Recommendation:** **Option 1B**.
 
 ---
 
-### Topic 2: Handoff and Reassignment (Headless & Interactive)
+### Topic 2: Transactional Handoff, Reassignment, Authority & No Prompt Injection
 
 #### Existing Pieces
-- `rotate_orchestrator()` (`scripts/orchestration_orchestrator.py:1803`) and `reassign_orchestrator()` (`line 1991`): implement fenced succession (`active -> rotating -> active`) with `fencing_token`, config update (`routing.default_orchestrator`), and `build_handoff_prompt()` (`line 1183`).
-- `UC028`: specifies headless queue and succession handoff.
+- `T070` (done): `orchestrator reassign` supports binding to an interactive session in one generation bump.
+- `T072` (done): `config show` defaults `--workspace` to `.` and `reassign --dry-run` shows the real config path.
+- `rotate_orchestrator()` (`scripts/orchestration_orchestrator.py:1803`) and `reassign_orchestrator()` (`line 1991`).
 
 #### Gaps
-1. **Hardcoded headless assumption & phantom sessions (`N068`):** `rotate_orchestrator()` always registers a new `kind="headless"` session with a random `cand_prov_id` even when `--no-handoff` is passed or when the owner wants to assign the role to a running interactive session (`T070`).
-2. **Five succession transitions exist in real usage, but only one is supported:**
-   - `missing -> interactive` (claiming an empty workspace from an interactive session)
-   - `headless -> interactive` (owner takes over from headless worker in an interactive Claude/Kilo/Codex window)
-   - `interactive -> interactive` (switching from a stale Kilo interactive session to a live Claude interactive session, as in `d4science_kb` `N068`, or handing off between two windows)
-   - `interactive -> headless` (handing an interactive session's work back to the background worker queue)
-   - `headless -> headless` (context rotation or tool switch, today's `UC028`)
-3. **Fencing for interactive holders:** When an interactive holder is superseded (by another window or by the owner from the UI panel), nothing fences its subsequent `tasks transition` or `run start` calls, and there is no documented protocol for what a fenced-out interactive session must do.
+1. **Non-transactional config write in `reassign_orchestrator()` (Current Code Defect):**
+   - In `scripts/orchestration_orchestrator.py:2111-2148`, `reassign_orchestrator()` writes `routing.default_orchestrator` (and `model`) to `orchestration.toml` and emits `config.changed` **before** calling `rotate_orchestrator()` (`line 2133`).
+   - If `rotate_orchestrator()` fails (e.g., handoff turn fails, tool binary missing, or CAS conflict), `reassign_orchestrator()` returns `{"ok": False, "status": "failed"}` (`line 2142`) **without rolling back `orchestration.toml`**! This leaves `orchestration.toml` pointing to the new tool while `orchestrator.json` stays on the old generation and old tool.
+2. **Danger of prompt injection into interactive sessions:**
+   - Any design that injects text into a live interactive session (via `claude -p` cross-session `SendMessage`, terminal stdin injection, or auto-executed handoff prompts) violates session boundaries and enables cross-session prompt injection / permission laundering.
+3. **Lack of explicit authority rules and CAS preconditions per succession operation:**
+   - `claim`, `hand-off`, `takeover`, and `reassign` have different actors and preconditions, which today are not separated.
+
+#### Strict Rule: Zero Prompt Injection into Interactive Sessions
+
+- **Never inject text into a live interactive session.** `ai-orch`, the broker, and the UI must **never** call `SendMessage`, write to a pty/stdin, or auto-run a prompt inside an interactive Claude, Kilo, or Codex session.
+- **How messages reach an interactive session:** Only via a **pull-only mailbox** (`mail.inbox` / `mail.read` or `ai-orch mail inbox`) that the session reads on its own next turn (cued by a 1-line tool-output notice on its next MCP/CLI call), plus a **UI / OS desktop notification** to the human operator (`"New message / handoff waiting for <workspace> — paste or run '/orch-inbox' in your terminal"`).
+- **How reassignment / handoff toward an interactive session works:**
+  1. Initiating a handoff or reassignment toward an interactive session (`target_kind = "interactive"`) does **not** push a prompt into the target session.
+  2. Instead, it writes a durable **`pending_handoff` record** in `orchestrator.json` (and `.ai-orchestration/orchestrator/handoffs/gen-<N+1>.md`) containing the file-derived handoff summary (`00-INDEX.md`, open/unapplied questions, active runs, pending queue), fences generation `N`, and notifies the human in the UI/OS.
+  3. The target interactive session (when its human operator instructs it or accepts in the UI/CLI via `ai-orch orchestrator accept-handoff --expect-generation <N+1>`) reads the handoff file pull-style and transitions `pending_handoff -> active`.
+
+#### Transactional Succession State Machine, CAS & Rollback
+
+Every succession operation (`claim`, `hand-off`, `takeover`, `reassign`) executes under `orchestrator_lock(ws)` (and `config_lock(target_path)` when config changes) with explicit Compare-And-Swap (`expect_generation`, `expect_config_hash`, `expect_plan_hash`):
+
+```text
+          (claim: gen 0 -> 1)
+missing ----------------------> active (gen 1)
+
+active (gen N)
+  ├── [headless target]  --> rotating (gen N -> N+1, pre-image saved)
+  │                             ├── handoff turn OK  --> commit config + active (gen N+1), retire gen N
+  │                             └── handoff turn ERR --> rollback config pre-image + restore active (gen N)
+  └── [interactive target] -> pending_handoff (gen N -> N+1, gen N fenced, handoff bundle written)
+                                ├── target accepts (`accept-handoff`) --> active (gen N+1), retire gen N
+                                └── owner cancels / expires           --> rollback config pre-image + restore gen N (or stopped)
+```
+
+- **Fixing the `reassign_orchestrator` config-write defect (`scripts/orchestration_orchestrator.py:2111-2148`):**
+  1. Record `config_preimage_bytes` and `orch_preimage_doc` before any mutation.
+  2. Hold `config_lock` + `orchestrator_lock` to validate `expect_hash` and `expect_generation`, and write a staged transition record (`status = "rotating"` or `"pending_handoff"` with `rollback_config_preimage`).
+  3. For headless rotation with handoff: run the candidate session's handoff turn **before** committing the final `orchestration.toml` change (or restore `config_preimage_bytes` atomically and emit `orchestrator.rotation_rolled_back` if the handoff turn fails).
+  4. For Claude headless rotation with `--no-handoff`: do **not** fabricate a random `provider_session_id` before `claude -p` runs; set `provider_session_id: null` (`pending_first_turn`) until the first real turn creates the Claude transcript.
 
 #### Options & Trade-offs
 
-- **Option 2A (Separate Commands: `orchestrator reassign` for Headless, `sessions register --role orchestrator` for Interactive):** Keep `orchestrator reassign` strictly headless and tell interactive sessions to use `sessions register --role orchestrator` plus `config set-routing`.
-  - *Pros:* Minimal change to `orchestration_orchestrator.py`.
-  - *Cons:* Fails the mental model that caused `N068`; requires two separate commands (and two locks/events) to update `orchestration.toml` routing and rotate the role holder; skips fenced succession (`fencing_token`) and handoff prompt generation for interactive sessions.
-- **Option 2B (Unified Fenced Succession in `orchestrator reassign` / `claim` / `hand-off` — Recommended):**
-  Extend `reassign_orchestrator()` and `rotate_orchestrator()` (absorbs `T070` and `T072`) so `kind` (`headless` | `interactive`) is a first-class parameter of the role holder:
-  1. **Target specification flags on `orchestrator reassign` (and new alias `orchestrator claim`):**
-     - `--kind interactive|headless` (default: `interactive` if `--provider-session-id` or `--bind-current` is given; otherwise `headless`).
-     - `--provider-session-id <id>` (or `--bind-current`, which auto-detects the calling session's provider ID from env/transcript in `cwd`).
-     - `--display-name <name>` (e.g., `d4science-kb-3d`, stored in `metadata.display_name` and `current.display_name`).
-  2. **Single generation bump (`N -> N+1`), zero phantom sessions:**
-     - If `kind == "interactive"`: verifies that `--provider-session-id` (if given) corresponds to a real transcript on disk (unless `--force`), updates `orchestration.toml` (with real path in diff headers `a/<full-or-tilde-path>`, fixing `N069`/`T072`), retires generation `N` with `reason`, registers the interactive session as generation `N+1` in a **single atomic transition**, and outputs the generated `handoff_prompt` in the JSON/stdout result so the interactive session immediately ingests the on-disk state summary without spawning a separate headless subprocess.
-     - If `kind == "headless"` and `--no-handoff`: sets `provider_session_id = null` (`pending_first_turn`) instead of fabricating a fake UUID before `claude -p` has ever run. The real `provider_session_id` is recorded only when the first turn actually executes and creates the transcript.
-  3. **Fencing enforcement & fenced-out protocol:**
-     - `orchestrator.json` increments `generation` and records `fencing_token` and `previous_holder: {session_id, provider_session_id, display_name, tool, retired_at, reason}`.
-     - Any mutating command (`tasks`, `questions`, `inbox`, `run`, `orchestrator`) where the caller passes `--orchestrator-gen <g>` (or is matched by `AI_ORCH_SESSION_ID` / `provider_session_id` to a retired orchestrator session) is **refused with error code `fenced-out-orchestrator`** if it attempts an orchestrator-only action, and receives a mandatory banner in stdout/MCP text.
-     - **Contract for a fenced-out session (in `orchestration-workflow` skill & `AGENTS.md`):** Upon seeing `fenced-out-orchestrator` or the `ROLE LOST` notice, the session must (1) stop dispatching/transitioning tasks as orchestrator, (2) finish or cleanly report any in-flight tool call, and (3) inform the user in one line that generation `N+1` now holds the orchestrator role.
+- **Option 2A (Immediate Promotion of Interactive Target + Push Nudge):** Immediately mark the target interactive session `active` on `reassign` and send it a `SendMessage` nudge with the handoff prompt.
+  - *Pros:* One step fewer for the human when switching windows.
+  - *Cons:* Violates the zero-prompt-injection rule; the target interactive session might be mid-turn on unrelated work or unattended, and `reassign` leaves mutated config on failure.
+- **Option 2B (Transactional CAS Succession with Config Rollback + Pull-Only `pending_handoff` Acceptance for Interactive Targets — Recommended):**
+  Implement the transactional state machine above with full config pre-image rollback on failure and pull-only `accept-handoff` for interactive targets (or immediate activation only when the interactive session itself is the caller running `orchestrator claim --bind-current` in its own turn).
 
-**Recommendation:** **Option 2B**. It directly resolves `N068` (`T070`) and `N069` (`T072`), eliminates phantom sessions, supports all 5 succession paths with a single generation bump, and gives interactive sessions the same file-derived handoff context as headless ones.
+**Recommendation:** **Option 2B**.
 
 ---
 
-### Topic 3: Cross-Workspace Panel (State, Messaging, Actions)
+### Topic 3: Cross-Workspace Panel (State, Pull-Only Messaging, Actions & `16.9` Classification)
 
 #### Existing Pieces
-- `ui-multi-project.md` (16.9, delivered): adds a project switcher (`All projects` Common View vs single project) inside **one** bound workspace.
-- `orchestration-broker-mcp.md` §3b & §7b: defines `workspaces.list` (returning `uuid, slug, title, path, orchestrator, unread_mail`), `orchestrator.status`, `orchestrator.ask`, and `mail.*` (16.7 / 16.8), and mentions a read-only "all workspaces" overview.
-- `UC033` (`ai-orch tasks next --workspace <ws> --all-projects`) and `UC037` (`ai-orch tasks verification-queue --all-workspaces`).
+- `ui-multi-project.md` (16.9, delivered in `ai-orchestration-ui` `3fe9d9e` and `vscode-ai-orchestration` `dab76d0`): implements Project View and Common Workspace View for **one** bound workspace.
+- `tasks/16-orchestration-broker/plan.md` line 40 (`16.9` Goal) and `orchestration-broker-mcp.md` §7b line 207: explicitly promised *"infine panoramica in sola lettura di tutti i workspace"* ("a third level, **all workspaces** (read-only overview: orchestrator status, unread mail, open questions per workspace)").
 
-#### Gaps
-1. **No cross-workspace UI or CLI rollup:** The owner has 13+ active/recent workspaces under `~/works/`. Today, checking their state requires running `orchestrator status`, `sessions list`, `tasks next`, `questions list`, `inbox list`, and `tasks verification-queue` across 13 directories by hand.
-2. **Unregistered workspaces are invisible:** `ai-orch workspace list` only queries SQLite (`6` rows), missing `d4science_kb`, `gcube_audit`, `d4science-keycloak`, `d4science-evolution-assurance`, `gcube_atlas`, `ricerca_auto`, `ansible`, etc.
-3. **Interactive sessions (`ListAgents` / consoles) are invisible:** Live interactive sessions (`porting-liferay-6d`, `porting-liferay-56`, `dave-agent-92`, `d4science-python-library-1b`, `ai-coding-tools-ea`) do not appear in any panel.
-4. **No interactive control actions from the overview:** `orchestration-broker-mcp.md` §7b originally envisioned "all workspaces" as a *read-only* overview, but the owner's 2026-10-27 request (`N071`) explicitly asks for **an additional panel listing all existing workspaces, from which you can communicate with them and see their state**, plus handoff/reassignment.
-5. **Bug in current UI backend & VS Code extension (`project_root` vs `workspace`):** In `ai-orchestration-ui/backend/server.py` (lines 4605, 5072–5430) and `vscode-ai-orchestration/src/views/dashboard-panel.ts` (lines 2474, 2901–3210), `sessions` and `orchestrator` commands pass `--workspace state.project_root(request)` instead of `state.workspace`. In a multi-project workspace (`ai-coding-tools`, `d4science-python-library`, `porting_liferay`), switching the UI dropdown to a subproject looks for `.ai-orchestration/orchestrator.json` inside the *subproject* instead of the workspace root!
+#### Classification: `16.9` Validation Defect vs New Scope (`T073` / Initiative 18)
+- **What is a `16.9` validation gap (already in `16.9`'s stated Goal, but missing in `ai-orchestration-ui` `3fe9d9e` and `vscode-ai-orchestration` `dab76d0`):**
+  1. The **read-only all-workspaces overview** (`orchestrator status`, `unread_mail`, `open_questions` per registered workspace) promised in `16.9` Goal (`plan.md:40`) was never built in `ai-orchestration-ui` or `vscode-ai-orchestration` (only `workspaces.list` MCP tool in `backend/broker/server.py:547` exists).
+  2. **Scoping bug in `16.9` (`project_root` vs `workspace`):** In `ai-orchestration-ui/backend/server.py` (`3fe9d9e`, lines 4605, 5072–5430) and `vscode-ai-orchestration/src/views/dashboard-panel.ts` (`dab76d0`, lines 2474, 2901–3210), `sessions` and `orchestrator` endpoints pass `--workspace state.project_root(request)` instead of `state.workspace`. Selecting a child project in a multi-project workspace queries `<project>/.ai-orchestration/orchestrator.json` instead of `<workspace_root>/.ai-orchestration/orchestrator.json`.
+- **What is genuinely new scope (from `N071` / `T073` -> Initiative 18):**
+  1. **Interactive control-plane actions across workspaces:** claiming/reassigning/handing off orchestrators, accepting pending handoffs, registering/relinking/unregistering workspaces, and quarantining orphan project configs from the cross-workspace panel.
+  2. **Richer per-workspace fleet state:** orthogonal liveness dimensions (`heartbeat_valid`, `recent_activity`, `process_observed`, `takeover_eligible`), registered + opt-in discovered sessions, ready-queue counts (`UC033`), inbox triage counts, and cross-workspace `verify-by` queues (`UC037`).
+  3. **Opt-in candidate workspace suggestions** from configured scan roots (`Q-B`) and opt-in read-only provider session hints (`Q-C`, `Q-D`).
 
-#### Options & Trade-offs (Discovery & Live Session Detection)
+#### Options & Trade-offs (Workspace & Session Discovery in the Panel)
 
-- **Option 3A (Strict Registry Only):** Only show workspaces registered in `registry.sqlite` and sessions registered in `.ai-orchestration/sessions/`.
-  - *Pros:* Fast, purely reads SQLite + registered JSON files.
-  - *Cons:* Fails on today's real machine state where 7+ real workspaces (`d4science_kb`, `gcube_audit`, etc.) and 5 of 7 live Claude Code sessions are unregistered.
-- **Option 3B (Registry + Root Scan + Provider Transcript Discovery — Recommended):**
-  Combine three sources into one `ai-orch workspace fleet [--scan-root ~/works] --json` (and `/api/fleet` / broker `workspaces.fleet`) call:
-  1. **Registered workspaces** from `registry.sqlite` (with `st_dev` false-positive fixed).
-  2. **Unregistered workspace candidates** discovered by scanning configured scan roots (default: parent directory of registered workspaces or `~/works`, configurable via `[discovery] workspace_roots = ["~/works", "~/works/gcube"]` in global `orchestration.toml`) up to depth 2 for folders containing `tasks/00-INDEX.md`, `.ai-orchestration/`, or `.ai-orchestration.local.toml` (excluding `.kilo/worktrees`, `*-wt-*` git worktrees, and git-ignored/test dirs). Shown with badge `unregistered` and a 1-click `Register…` action.
-  3. **Live/recent provider sessions** correlated per workspace path:
-     - **Registry sessions:** from `<ws>/.ai-orchestration/sessions/*.json` + `orchestrator.json`.
-     - **Unregistered live/recent provider sessions (read-only local probe):** scans `~/.claude/projects/<escaped-ws-path>/*.jsonl` (reading mtime and the last entry's session UUID / slug if active within the last 24h) and running `claude`/`kilo`/`codex` OS processes by `cwd` (`lsof -a -d cwd` / `ps`). Any live session not yet in `.ai-orchestration/sessions/` appears in the panel as `unregistered console` with a 1-click **"Bind as Orchestrator…"** or **"Register Console"** action!
+- **Option 3A (Implicit Auto-Scan of `~/works` and Implicit Session Binding):** Automatically scan `~/works` on startup and treat any discovered provider transcript as a live session eligible for binding.
+  - *Pros:* Zero configuration on this machine.
+  - *Cons:* Hardcodes directory assumptions, touches unconfigured trees, and confuses filesystem hints with registered state (`Q-B`, `Q-C`, `Q-D`).
+- **Option 3B (Registered Workspaces by Default + Opt-In Configured Scan Roots as Suggestions Only + Read-Only Provider Hints — Recommended):**
+  1. By default, the Fleet view queries **registered workspaces** from `registry.sqlite`.
+  2. **Opt-in workspace scan roots (`Q-B`):** Only when the owner configures `[discovery] workspace_roots = [...]` (off by default) or explicitly clicks **"Scan Directory for Unregistered Workspaces…"** in the UI, scan those roots and display matches strictly as **suggestions** (`candidate_unregistered`) with a preview-then-apply `Register…` action.
+  3. **Opt-in provider store hints (`Q-C`, `Q-D`):** If enabled by the owner, read-only inspect provider transcript stores (`~/.claude/projects/`, etc.) and `ps`/`lsof` to display `recent_activity` and `process_observed` hints in the UI. These hints **never** auto-register a session or authorize takeover.
 
-**Recommendation:** **Option 3B**, plus fixing `server.py` and `dashboard-panel.ts` so `orchestrator` and `sessions` always target the workspace root (`state.workspace`).
+**Recommendation:** **Option 3B**.
 
 ---
 
-### Topic 4: Registry Consistency and Cleanup
+### Topic 4: Registry Consistency, Reconciliation and Safe Cleanup
 
 #### Existing Pieces
 - Global SQLite registry: `~/.config/ai-orchestration/broker/registry.sqlite` (`workspaces`, `projects`).
@@ -283,72 +318,69 @@ Scanning all 20 folders under `~/works/*` and `~/works/gcube/*` that contain `ta
 - Workspace-local runtime state: `<ws>/.ai-orchestration/orchestrator.json` and `<ws>/.ai-orchestration/sessions/*.json`.
 
 #### Gaps
-1. **Four disconnected stores:**
-   - `orchestrator reassign` writes `~/.config/ai-orchestration/projects/d4science_kb/orchestration.toml` and `<ws>/.ai-orchestration/orchestrator.json`, without registering `d4science_kb` in `registry.sqlite` or writing `[workspace] uuid, id`.
-   - `find_project_config_path(ws)` keys `~/.config/ai-orchestration/projects/<ws.name>/` by `ws.resolve().name` (`d4science_local_env`, `porting_liferay`), whereas `registry.sqlite` keys by `slug` (`d4science-local-env`, `porting-liferay`). Worse, any temp folder named `ws` or `workspace` collides in `~/.config/ai-orchestration/projects/ws`!
-   - `gcube_audit` has `<ws>/.ai-orchestration/orchestration.toml`, which `find_project_config_path()` completely ignores.
-2. **Test pollution in `~/.config/ai-orchestration/projects/`:**
-   - `plan_workspace_register()` and `plan_projects_discover()` do not pass `config_dir` to `find_project_config_path()`.
-3. **False `stale: true` on macOS APFS:**
-   - `list_workspaces()` compares `cur_st.st_dev != d["device"]`, which breaks after every macOS reboot.
+1. **Unforwarded `--config-dir` in `orchestration_registry.py` (`lines 676, 950, 995, 1037, 1195`):**
+   - `plan_workspace_register()` and `plan_projects_discover()` call `find_project_config_path(canonical)` without passing `config_dir`. Any CLI call using `--config-dir <dir>` without setting `AI_ORCHESTRATION_CONFIG` writes project configs into the user's real `~/.config/ai-orchestration/projects/`.
+2. **Discrepancies across `registry.sqlite`, `projects/*/orchestration.toml`, and `<ws>/.ai-orchestration/`:**
+   - `d4science_kb` has `projects/d4science_kb/orchestration.toml` and `<ws>/.ai-orchestration/orchestrator.json`, but is missing from `registry.sqlite`.
+   - `gcube_audit` has `<ws>/.ai-orchestration/orchestration.toml`, which `find_project_config_path()` ignores.
+   - `ai-coding-tools` and `d4science-python-library` show `stale: true` in `registry.sqlite` because `st_dev` changed from `16777231` to `16777234` across a reboot on this machine.
+3. **Unsafe cleanup heuristics:**
+   - Deleting or quarantining configs based on filename patterns (`ws`, `workspace`, `test_*`) or path prefixes (`/tmp`, `/var/folders`) is unsafe: a user may legitimately name a folder `ws` or `workspace`, and test isolation must rely strictly on explicit `--config-dir` / `AI_ORCHESTRATION_CONFIG`, never path-prefix guessing.
 
 #### Options & Trade-offs
 
-- **Option 4A (Move Everything into Global SQLite):** Move `orchestrator.json`, `sessions/*.json`, and project configs into `~/.config/ai-orchestration/broker/registry.sqlite`.
-  - *Pros:* Single database file for the broker.
-  - *Cons:* Violates the core architectural rule ("Keep working state inside the project" and self-contained `<ws>/.ai-orchestration/` when the broker is not running).
-- **Option 4B (Federated Authority with Deterministic Reconciliation & `workspace gc` — Recommended):**
-  1. **Clear authority per concern:**
-     - **Per-workspace runtime state (`<ws>/.ai-orchestration/orchestrator.json`, `sessions/`, `events/`, `orchestrator/queue/`):** authoritative on disk inside `<ws>/.ai-orchestration/`.
-     - **Global Workspace Directory (`registry.sqlite`):** authoritative index of known workspace roots (`uuid`, `slug`, `canonical_path`, `inode`).
-     - **Automatic registration bridge:** When `orchestrator start`, `orchestrator reassign`, `orchestrator ensure`, or `sessions register --role orchestrator` runs on a real workspace (not under `/tmp` or `/var/folders`), it automatically ensures the workspace has `[workspace] uuid, id` and is upserted into `registry.sqlite` (or prompts in `--dry-run`).
-  2. **Fix `st_dev` check on macOS:** In `list_workspaces()` and `show_workspace()` (`scripts/orchestration_registry.py`), if `cpath.is_dir()` and `cfg_uuid == d["uuid"]` and `cur_st.st_ino == d["inode"]`, treat a changed `st_dev` as a benign mount-ID update (auto-refresh `device` in SQLite on next write) rather than marking the workspace `stale`. Mark `stale` only if `!cpath.is_dir()`, or `inode` changed (folder replaced), or `cfg_uuid` mismatches.
-  3. **Fix test leakage & path resolution:**
-     - Pass `config_dir` through to `find_project_config_path(ws, global_config_from_dir(config_dir))` in all `orchestration_registry.py` functions.
-     - Support `<ws>/.ai-orchestration/orchestration.toml` as a recognized fallback in `find_project_config_path()` (or migrate `gcube_audit/.ai-orchestration/orchestration.toml` to `.ai-orchestration.local.toml` with a Doctor finding).
-     - Refuse or warn when writing to `~/.config/ai-orchestration/projects/<name>` if `ws` is inside `$TMPDIR`, `/tmp`, `/private/var/folders`, or `pytest-of-*` while `config_dir` is the user's real home config!
-  4. **Add `ai-orch workspace gc` (Preview -> Apply with `plan_hash`):**
-     - Scans `~/.config/ai-orchestration/projects/*` and `registry.sqlite`.
-     - Identifies orphaned project config directories whose workspace path does not exist, has no `[workspace]` link to any existing directory under `~/works`, or matches test patterns (`test_*`, `ws`, `workspace` with `demo-ws`/`test-ws`).
-     - Previews moving them to `~/.config/ai-orchestration/.trash/<timestamp>/` and applies with `--apply --expect-hash`.
+- **Option 4A (Pattern-Based Auto-GC + `/tmp` Heuristics):** Automatically quarantine folders matching `test_*` or `ws` and skip registration when `cwd` is under `/tmp`.
+  - *Pros:* Quick cleanup of the 4 current folders.
+  - *Cons:* Fragile and dangerous; can quarantine a real user workspace named `ws` or break legitimate tests that test registration in temp dirs.
+- **Option 4B (Report-Only Reconciliation, Explicit Relink/Unregister, and Owner-Confirmed Reversible Quarantine — Recommended):**
+  1. **Isolation by explicit configuration only:** Fix `orchestration_registry.py` and `orchestration_orchestrator.py` so every function forwards `--config-dir` / `--global-config` / `AI_ORCHESTRATION_CONFIG` to `find_project_config_path()`. Fix offending tests to always set `AI_ORCHESTRATION_CONFIG` (or `--config-dir`). Never branch on `/tmp` or `/var/folders` path heuristics.
+  2. **Handle `st_dev` change across reboot safely:** In `list_workspaces()` and `show_workspace()`, when `canonical_path` exists, `cur_st.st_ino == d["inode"]`, and the workspace config's `[workspace] uuid == d["uuid"]`, report `status: "active"` (with `device_changed: true` diagnostic) instead of `stale: true`, and allow `workspace reconcile` to update `device` in SQLite.
+  3. **Four-tier registry maintenance (`ai-orch workspace reconcile`):**
+     - **Report-only by default (`ai-orch workspace reconcile --json`):** Lists every discrepancy across `registry.sqlite`, `~/.config/ai-orchestration/projects/*/orchestration.toml`, and known workspace paths without modifying anything:
+       - `unregistered_project_config`: config in `projects/<name>/orchestration.toml` whose `[workspace] uuid` is not in `registry.sqlite` (e.g., `d4science_kb`, `test_ws`, `workspace`, `ws`, `test_orchestrator_reassign_end0`), reporting whether a matching directory or `canonical_path` exists on disk.
+       - `missing_canonical_path`: SQLite entry whose `canonical_path` no longer exists.
+       - `device_shifted`: SQLite entry where `inode` + `uuid` match but `st_dev` changed across a reboot.
+       - `legacy_dot_config`: `<ws>/.ai-orchestration/orchestration.toml` (as in `gcube_audit`).
+     - **Explicit Relink (`ai-orch workspace relink <slug-or-uuid> <new-path> --apply --expect-hash <h>`):** Re-binds a moved workspace or updates `st_dev` after verification of `[workspace] uuid` and `inode`.
+     - **Unregister-Only (`ai-orch workspace unregister <id> --apply --expect-hash <h>`):** Removes the row from `registry.sqlite` without deleting any files in the workspace or `projects/`.
+     - **Reversible Quarantine (`ai-orch workspace quarantine-config <name>... --apply --expect-hash <h>`):** Only for specific project config entries **explicitly selected and confirmed by the owner** after inspecting the reconciliation report (never by filename pattern `ws`/`test_*`!). Moves `~/.config/ai-orchestration/projects/<name>` into `~/.config/ai-orchestration/.trash/<timestamp>/<name>` with a `manifest.json` so it can be restored in one command (`workspace restore-config`).
 
-**Recommendation:** **Option 4B**. It preserves per-workspace portability while eliminating all four sources of registry drift and cleaning up the test leftovers safely.
+**Recommendation:** **Option 4B**.
 
 ---
 
-### Topic 5: Security and Permissions (No Cross-Session Permission Laundering)
+### Topic 5: Authority Matrix, Owner Authentication & Permission Boundaries
 
 #### Existing Pieces
-- `events-and-triggers.md` §0c E3: unattended event-batch turns run with `policy = "reduced_capability"` (read-only + `questions ask` + proposals; no shell, no edits, no delegation).
-- `orchestration-broker-mcp.md` §6: mail to an unattended orchestrator is quarantined (metadata-only) until the owner accepts it; `[mail] isolation = open | restricted | blind`.
-- `control-plane-safety.md`: localhost token auth (`X-AI-Orch-Token`), CSP, preview-then-apply with `plan_hash`.
+- `events-and-triggers.md` §0c E3: unattended event-batch turns run with `policy = "reduced_capability"`.
+- `orchestration-broker-mcp.md` §6: mail to an unattended orchestrator is quarantined (metadata-only) until the owner accepts it.
+- `control-plane-safety.md` §2.3 (line 136): UI backend persists `~/.config/ai-orchestration/ui-token` (mode `0600`) and injects it into `<meta name="ai-orch-token">` for `/api/*` (`X-AI-Orch-Token`).
 
 #### Gaps
-1. **Cross-session permission laundering via interactive consoles or panel messages:**
-   - Suppose Session A in workspace `X` (or an automated script) sends a message to Session B in workspace `Y`, where Session B was launched by the owner with `permission_mode = bypassPermissions` (or `auto`) or has access to production credentials (e.g. `ansible`). If that message is injected directly as an executable prompt turn into Session B without owner confirmation, Session A has laundered its untrusted text into Session B's elevated permissions.
-2. **Ambiguity between Owner actions in the UI vs Agent MCP calls:**
-   - Both the Web UI / VS Code panel (used by the human owner) and agent sessions (via CLI or MCP shim) talk to `ai-orch` / the broker. If an agent session calls `ai-orch orchestrator reassign` or `orchestrator enqueue --type owner_chat`, it could impersonate the owner unless owner-only actions are gated or provenance-tagged.
+1. **`ui-token` is NOT proof of a human owner action:**
+   - Because `~/.config/ai-orchestration/ui-token` is a static file in the user's home directory (and also readable from `http://127.0.0.1:8780/index.html` by any process running as the same OS user), any local agent session with file-read or localhost-fetch capability can read `ui-token` and call `/api/orchestrator/reassign` or `/api/workspace/...`, impersonating the human owner!
+2. **Undefined authority per lifecycle action:**
+   - Today, any caller of the CLI can pass `--force` to `orchestrator start` or run `orchestrator reassign`, allowing an unprivileged agent session to overthrow an active orchestrator.
 
-#### Options & Trade-offs
+#### Normative Authority Matrix (`Q-F`)
 
-- **Option 5A (Hard Block All Cross-Workspace Messaging to Interactive Sessions):** Only allow messages to headless orchestrators under `reduced_capability`; forbid sending messages to interactive sessions or triggering handoff/reassignment from the panel.
-  - *Pros:* Eliminates interactive-session laundering completely.
-  - *Cons:* Contradicts the owner's workflow where most active orchestrators today (`ai-coding-tools-d8`, `d4science-kb-3d`, `porting-liferay-6d`, `dave-agent-92`) **are** interactive sessions!
-- **Option 5B (Provenance-Separated Capabilities: Owner UI Token vs Agent Console Token + Untrusted Envelope — Recommended):**
-  Define a strict three-column permission matrix distinguishing (1) **Autonomous Background / Panel Read**, (2) **Agent Session Actions (CLI/MCP)**, and (3) **Owner Control-Plane Actions (UI/VS Code with Owner Confirmation)**:
+| Action | Allowed Actor(s) | Preconditions & CAS | Explicitly Forbidden |
+| --- | --- | --- | --- |
+| **1. Claim missing role (`orchestrator claim`)** | Any self-identifying session (`(tool, provider_session_id)` or `registry_session_id`) running in the workspace, or Owner | `orchestrator.json` is `missing` or `stopped` (`expect_generation = 0` or current stopped gen) | Claiming when an `active`, `idle`, or `pending_handoff` holder exists |
+| **2. Voluntary handoff (`orchestrator hand-off --to ...`)** | Current role holder (matching `current.registry_session_id` / `provider_session_id` + `fencing_token`), or Owner | `expect_generation == current.generation` | Any other agent session |
+| **3. Stale takeover (`orchestrator takeover`)** | **Owner** (via authenticated control-plane action), or **holder-declared** (when the prior holder marked itself `draining`/`handing_off` or left an explicit takeover lease) | Current holder is `takeover_eligible == true` (`heartbeat_valid == false` past threshold) + `expect_generation == current.generation` | Autonomous takeover by a peer/console agent merely because `heartbeat_valid` expired (`Q-A`, `Q-F`) |
+| **4. Active reassignment (`orchestrator reassign`)** | **Owner** (via authenticated control-plane action) or **Current Holder** (voluntary tool/session switch) | Preview diff + `expect_plan_hash` + `expect_generation`; if target is interactive, enters `pending_handoff` until target accepts | **NEVER** an non-holder agent session (remove/forbid agent `--force` takeover of an active role) |
+| **5. Registry cleanup / quarantine / unregister** | **Owner only** (via authenticated control-plane action) | Explicit item list + `expect_plan_hash`; reversible move to `.trash/` | Any autonomous agent or background job |
+| **6. Peer / Panel Messaging** | Owner or Peer Session (`mail.send`) | Headless recipient: metadata-only quarantine until Owner accepts. Interactive recipient: pull-only mailbox + UI/OS notification to human | Prompt injection, `SendMessage` into live interactive sessions, or auto-executing peer mail |
 
-| Operation | Panel Auto (No Owner Click) | Agent Session (CLI / MCP) | Owner in Panel (Preview -> Confirm) | Security Invariant |
-| --- | --- | --- | --- | --- |
-| Read workspace fleet, liveness, queues, counts | Allowed (read-only) | Allowed (`workspaces.list`, `orchestrator.status`) | Allowed | Zero side effects (`status` never writes or locks) |
-| Heartbeat / update own `display_name` (same `provider_session_id`) | N/A | Allowed for own session | Allowed | Cannot hijack another `provider_session_id` |
-| Claim `missing` orchestrator role | Never auto-claimed by UI | Allowed (`orchestrator claim`) if role is `missing` or `stale` (with audit event) | Allowed (`Assign / Claim`) | Emits `orchestrator.rotated` event visible in UI |
-| Reassign / take over an **active** orchestrator | Forbidden | Requires `--force` + logs high-visibility `orchestrator.reassigned` event (or proposes to owner) | Allowed with diff preview + `expect_hash` | Active holder is fenced via `fencing_token` and notified on next call |
-| Send message from **Owner in Panel** to Headless Orchestrator | Forbidden | N/A | Enqueues `owner_chat` turn (`policy = orchestrate`) | Authenticated by UI `confirm_token` / owner interaction |
-| Send message from **Owner in Panel** to Interactive Console | Forbidden | N/A | Deposits in console mailbox + optional 1-line `SendMessage` nudge | Interactive session still obeys its own human turn/tool approval rules |
-| Send message from **Another Workspace (Peer Agent)** to Workspace/Console | Forbidden | `mail.send`: lands in quarantine (metadata-only for headless; `<untrusted_peer_mail nonce=...>` for console) | Owner clicks **Accept & Deliver** in panel to release body to headless orchestrator | **Never** becomes `owner_chat`; headless runs under `reduced_capability`; console sees explicit untrusted-data banner and never auto-executes |
-| Clean up stale/test configs (`workspace gc`) | Preview only | Preview only (`--dry-run`) | Moves to `.trash/` with `--apply --expect-hash` | Never `rm -rf`; always reversible via `.trash/` |
+#### Distinguishing a Human Owner Action from a Local Agent Caller (Open Design Point `Q-F`)
 
-**Recommendation:** **Option 5B**. It lets the human owner control every workspace and communicate with both headless and interactive sessions from the panel, while guaranteeing that peer agent messages can never escalate privileges across sessions or workspaces.
+Because agents and the UI backend run under the same macOS/Linux user account, a static file token (`~/.config/ai-orchestration/ui-token`) only protects against cross-origin browser attacks (CSRF/DNS rebinding), **not** against a local agent calling the CLI or HTTP API. To distinguish a real human owner confirmation from an agent caller, the control plane needs one of the following mechanisms (flagged as an open design point in `Q-F`):
+1. **Option Auth-1 (OS-Native Confirmation Dialog via `osascript` / VS Code Extension Host Modal — Recommended for High-Impact Actions):**
+   - In the **VS Code Extension**, the Extension Host runs in VS Code's privileged process and can require a native `vscode.window.showInformationMessage(..., { modal: true }, "Confirm")` click before invoking the broker/CLI with a short-lived single-use IPC secret held only in Extension Host memory.
+   - In the **Web UI / Broker**, for owner-only actions (`reassign` active holder, `takeover`, `accept` peer mail body for unattended execution, `quarantine-config`), the broker can trigger a native macOS/Linux confirmation prompt (`osascript -e 'display dialog ...'` on macOS) or require a short human confirmation code displayed only in the native OS notification / VS Code status bar (unreachable via DOM/file reads by a CLI agent).
+2. **Option Auth-2 (In-Memory WebSocket Session Nonce + Disallow CLI/MCP Execution of Owner-Only Actions):**
+   - Owner-only mutations are disabled in the MCP tool surface (already true in `orchestration-broker-mcp.md` §3b line 147) and require a `confirm_token` issued over an established interactive browser/webview WebSocket session where the user clicked "Preview", paired with disallowing `curl`/headless fetches in agent tool allowlists. *(Caveat: an unrestricted `bash` agent could still open a WebSocket unless combined with Option Auth-1).*
 
 ---
 
@@ -356,22 +388,18 @@ Scanning all 20 folders under `~/works/*` and `~/works/gcube/*` that contain `ta
 
 ### 3.1 Architectural Placement: Where Does the Panel Live?
 
-There are two main options for integrating the Cross-Workspace Control Plane into `ai-orchestration-ui` and `vscode-ai-orchestration`:
-
-- **Option P1 (Extend the Workspace Switcher Dropdown in `ui-multi-project.md`):** Add an "All Workspaces" option above "All Projects" inside the existing Task Backlog Manager view.
-  - *Pros:* Reuses the existing Backlog/Kanban table.
-  - *Cons:* The Task Backlog view is task-centric (columns for task ID, state, priority), whereas the owner's cross-workspace need (`N071`) is **orchestrator- and workspace-centric** (who holds the orchestrator role, liveness, live interactive consoles, unread mail, pending verifications across workspaces,inbox triage counts, handoff/reassign/message actions). Cramming 15 workspaces' tasks into one flat table loses the control-plane view.
-- **Option P2 (New 5th Top-Level Macro-View "Workspaces Fleet" + VS Code Sidebar TreeView — Recommended):**
-  Extend `orchestration-extension-spec.md` from 4 to **5 Macro-Responsibilities** by adding **`0. Workspaces Fleet (Cross-Workspace Control Plane)`** as a top-level navigation tab in the Web UI / VS Code Webview Dashboard (alongside *Backlog*, *Runs & Orchestrator*, *Decisions & Inbox*, *Doctor & Config*), plus a dedicated **"Workspaces & Orchestrators"** TreeView in the VS Code sidebar:
-  - Clicking a workspace row in the **Workspaces Fleet** view opens its detail drawer (sessions, handoff prompt preview, message composer, reassign modal) **or** switches the active workspace context of the Backlog/Decisions/Runs views (`?workspace=<slug>&project=_workspace`).
-  - Inside a single workspace, `ui-multi-project.md` (`All projects` vs `<project>`) remains completely unchanged as the second-level hierarchy (`Fleet (All Workspaces) -> Workspace (All Projects) -> Project`).
+- **Option P1 (Extend the Workspace Switcher Dropdown in `ui-multi-project.md`):** Add "All Workspaces" above "All Projects" inside the Task Backlog tab.
+  - *Cons:* Task-centric columns do not fit orchestrator holder state, liveness dimensions, pending handoffs, registry reconciliation reports, or pull-mailbox management.
+- **Option P2 (New 5th Top-Level Macro-View `Workspaces Fleet` + VS Code Sidebar TreeView — Recommended):**
+  - Remediate the `16.9` validation gap by adding the read-only cross-workspace overview (`18.7`), and extend it in `18.8` with owner-confirmed control-plane actions in a dedicated top-level tab **`0. Workspaces Fleet`** (plus a **`Workspaces & Orchestrators`** VS Code sidebar TreeView).
+  - Fix `ai-orchestration-ui/backend/server.py` (`3fe9d9e`) and `vscode-ai-orchestration/src/views/dashboard-panel.ts` (`dab76d0`) so all `/api/orchestrator/*` and `/api/sessions/*` calls use `state.workspace` (the workspace root) rather than `state.project_root(request)`.
 
 ### 3.2 Fleet Control Plane Data Model (`GET /api/fleet` & `ai-orch workspace fleet --json`)
 
 ```json
 {
   "ok": true,
-  "generated_at": "2026-10-27T15:00:00Z",
+  "generated_at": "2026-10-27T16:15:00Z",
   "broker": {
     "running": false,
     "pid": null,
@@ -379,15 +407,12 @@ There are two main options for integrating the Cross-Workspace Control Plane int
   },
   "summary": {
     "registered_workspaces": 6,
-    "unregistered_discovered": 7,
+    "candidate_unregistered_workspaces": 0,
     "active_orchestrators": 2,
-    "idle_or_stale_orchestrators": 1,
-    "missing_orchestrators": 10,
-    "live_interactive_sessions": 7,
-    "open_questions_total": 0,
-    "inbox_to_analyze_total": 3,
-    "pending_verifications_total": 2,
-    "orphan_project_configs": 4
+    "pending_handoffs": 0,
+    "takeover_eligible_orchestrators": 1,
+    "missing_orchestrators": 3,
+    "reconciliation_issues": 7
   },
   "workspaces": [
     {
@@ -396,44 +421,59 @@ There are two main options for integrating the Cross-Workspace Control Plane int
       "title": "AI Coding Tools",
       "path": "/Users/Alfredo/works/ai-coding-tools",
       "registration_state": "registered",
+      "reconciliation": {
+        "status": "device_shifted",
+        "inode_matches": true,
+        "uuid_matches": true
+      },
       "projects_count": 5,
       "orchestrator": {
-        "status": "active",
-        "liveness_source": "transcript_mtime",
+        "role_state": "active",
         "generation": 2,
         "tool": "claude",
-        "model": "claude-opus-5-5",
+        "model": null,
         "kind": "interactive",
         "registry_session_id": "ai-coding-tools-d8",
         "provider_session_id": "5865a698-40a0-4f69-ad79-2e3ace4f7ffa",
         "display_name": "ai-coding-tools-d8",
-        "transcript_exists": true,
-        "last_seen": "2026-10-27T14:58:12Z",
+        "liveness": {
+          "heartbeat_valid": false,
+          "last_seen": "2026-10-27T14:46:29Z",
+          "recent_activity": "2026-10-27T16:10:00Z",
+          "process_observed": true,
+          "takeover_eligible": false,
+          "takeover_reason": "interactive_holder_process_observed_no_auto_fallback"
+        },
         "turns": 0,
         "cursor": 0,
         "queue": {"queued": 0, "running": 0, "total": 0},
-        "worker": {"alive": false, "pid": null}
+        "pending_handoff": null
       },
-      "live_sessions": [
+      "sessions": [
         {
+          "registry_session_id": "ai-coding-tools-d8",
           "display_name": "ai-coding-tools-d8",
           "provider_session_id": "5865a698-40a0-4f69-ad79-2e3ace4f7ffa",
           "tool": "claude",
           "kind": "interactive",
           "role": "orchestrator",
-          "registered": true,
-          "liveness": "active",
-          "last_activity": "2026-10-27T14:58:12Z"
-        },
+          "source": "registered",
+          "liveness": {
+            "heartbeat_valid": false,
+            "recent_activity": "2026-10-27T16:10:00Z",
+            "process_observed": true
+          }
+        }
+      ],
+      "discovered_session_hints": [
         {
-          "display_name": "ai-coding-tools-ea",
+          "display_name_hint": "ai-coding-tools-ea",
           "provider_session_id": "7b21c901-...",
           "tool": "claude",
-          "kind": "interactive",
-          "role": null,
-          "registered": false,
-          "liveness": "active",
-          "last_activity": "2026-10-27T14:40:00Z"
+          "source": "provider_store_hint",
+          "recent_activity": "2026-10-27T15:40:00Z",
+          "process_observed": true,
+          "authority": "hint_only"
         }
       ],
       "kpis": {
@@ -443,17 +483,26 @@ There are two main options for integrating the Cross-Workspace Control Plane int
         "open_questions": 0,
         "unapplied_answers": 0,
         "verify_by_this_workspace": 1,
-        "delivered_awaiting_others": 2,
         "unread_mail": 0
-      },
-      "last_activity": "2026-10-27T14:58:12Z"
+      }
     }
   ],
-  "orphan_configs": [
+  "reconciliation_report": [
     {
-      "name": "test_orchestrator_reassign_end0",
+      "kind": "unregistered_project_config",
+      "config_dir_name": "d4science_kb",
+      "config_path": "/Users/Alfredo/.config/ai-orchestration/projects/d4science_kb/orchestration.toml",
+      "matching_workspace_path": "/Users/Alfredo/works/d4science_kb",
+      "has_orchestrator_json": true,
+      "suggested_action": "register_or_relink"
+    },
+    {
+      "kind": "unregistered_project_config",
+      "config_dir_name": "test_orchestrator_reassign_end0",
       "config_path": "/Users/Alfredo/.config/ai-orchestration/projects/test_orchestrator_reassign_end0/orchestration.toml",
-      "reason": "no_matching_workspace_directory"
+      "matching_workspace_path": null,
+      "has_orchestrator_json": false,
+      "suggested_action": "owner_review_for_quarantine"
     }
   ]
 }
@@ -465,50 +514,39 @@ There are two main options for integrating the Cross-Workspace Control Plane int
 +========================================================================================================================+
 | AI ORCHESTRATION CONTROL PLANE   [0. Workspaces Fleet*] [1. Backlog] [2. Runs & Orch] [3. Decisions/Inbox] [4. Doctor] |
 +------------------------------------------------------------------------------------------------------------------------+
-| Fleet Summary: 6 Registered | 7 Unregistered | 2 Active Orch | 1 Stale Orch | 7 Live Sessions | 2 Verify Q | 4 Orphans |
-| Filter: [All (13) v]  Search: [____________________]  [+ Scan Roots]  [Clean 4 Orphan Configs...]  [Refresh]           |
+| Fleet: 6 Registered | 2 Active Holders | 1 Takeover-Eligible | 3 Missing Orch | 7 Reconciliation Findings              |
+| Filter: [Registered (6) v]  [Reconciliation Report (7)...]  [Scan Configured Roots (Off)...]  [Refresh]                |
 +========================================================================================================================+
-| WORKSPACE (PROJECTS)      | ORCHESTRATOR HOLDER & LIVENESS        | LIVE SESSIONS / CONSOLES   | PIPELINE & QUEUES     |
-+---------------------------+---------------------------------------+----------------------------+-----------------------+
-| * ai-coding-tools (5)     | [ACTIVE] gen 2 · claude (interactive) | * ai-coding-tools-d8 (orch)| Ready: 1 | InProg: 4  |
-|   ~/works/ai-coding-tools | id: 5865a698.. ("ai-coding-tools-d8") | o ai-coding-tools-ea (unreg| Q: 0 | Inbox: 0       |
-|   [Registered]            | seen: 1m ago · Q: 0 · cursor: 0       |   [Bind Orch] [Reg Console]| Verify-for-us: 1 (T071|
-|   Actions: [Open] [Message] [Handoff / Reassign...] [Pause]                                    | Last: 1m ago          |
-+---------------------------+---------------------------------------+----------------------------+-----------------------+
-| ! d4science_kb (1)        | [ACTIVE] gen 3 · claude (interactive) | * d4science-kb-3d (orch)   | Ready: 0 | InProg: 0  |
-|   ~/works/d4science_kb    | id: 9063f48c.. ("d4science-kb-3d")    |   (provider: 9063f48c..)   | Q: 0 | Inbox: 0       |
-|   [Unregistered! -> Reg]  | seen: 4m ago · (gen 2 phantom retired)|                            | Verify-for-us: 2 (T070|
-|   Actions: [Register WS...] [Open] [Message] [Handoff / Reassign...]                           | Last: 4m ago          |
-+---------------------------+---------------------------------------+----------------------------+-----------------------+
-| ~ smartgears4-migration(1)| [STALE 5d] gen 1 · kilo (interactive) | (none live)                | Ready: 3 | InProg: 1  |
-|   ~/works/smartgears4_mig | id: ses_e9d0d360.. · turns: 0         |                            | Q: 0 | Inbox: 1       |
-|   [Registered]            | last seen: 2026-10-22 (5 days ago)    |                            | Verify-for-us: 0      |
-|   Actions: [Open] [Take Over / Reassign...] [Start Headless Worker] [Retire Stale]             | Last: 2026-10-22      |
-+---------------------------+---------------------------------------+----------------------------+-----------------------+
-| o porting-liferay (5)     | [MISSING] no orchestrator registered  | o porting-liferay-6d (unreg| Ready: 4 | InProg: 2  |
-|   ~/works/gcube/porting.. | default_orchestrator: claude          | o porting-liferay-56 (unreg| Q: 0 | Inbox: 2       |
-|   [Registered]            |                                       |   [Bind 6d as Orch...]     | Verify-for-us: 0      |
-|   Actions: [Bind porting-liferay-6d as Orch...] [Start Headless] [Open] [Message 6d]           | Last: 2h ago          |
-+---------------------------+---------------------------------------+----------------------------+-----------------------+
-| o dave-agent (1)          | [MISSING] no orchestrator registered  | o dave-agent-92 (unreg)    | Ready: 2 | InProg: 1  |
-|   ~/works/dave_agent      | default_orchestrator: claude          |   [Bind 92 as Orch...]     | Q: 0 | Inbox: 0       |
-|   [Registered]            |                                       |                            | Verify-for-us: 0      |
-|   Actions: [Bind dave-agent-92 as Orch...] [Start Headless] [Open] [Message 92]                | Last: 25m ago         |
-+---------------------------+---------------------------------------+----------------------------+-----------------------+
-| o d4science-python-lib(11)| [MISSING] no orchestrator registered  | o d4science-python-lib-1b  | Ready: 5 | InProg: 1  |
-|   ~/works/d4science-py... | default_orchestrator: claude          |   [Bind 1b as Orch...]     | Q: 0 | Inbox: 0       |
-|   [Registered]            |                                       |                            | Verify-for-us: 0      |
-|   Actions: [Bind 1b as Orch...] [Start Headless] [Open] [Message 1b]                           | Last: 18m ago         |
-+---------------------------+---------------------------------------+----------------------------+-----------------------+
-| . gcube_audit, d4science-keycloak, gcube_atlas, ricerca_auto, ansible (+6 discovered, unregistered, no live session)   |
-|   Actions: [Register Selected...] [Hide / Ignore in Discovery]                                                         |
+| WORKSPACE (PROJECTS)      | ORCHESTRATOR ROLE & LIVENESS SIGNALS  | SESSIONS & HINTS (READ-ONLY)| PIPELINE & MAIL      |
++---------------------------+---------------------------------------+-----------------------------+----------------------+
+| * ai-coding-tools (5)     | [ACTIVE] gen 2 · claude (interactive) | [Reg] ai-coding-tools-d8    | Ready: 1 | InProg: 4 |
+|   ~/works/ai-coding-tools | id: 5865a698.. ("ai-coding-tools-d8") | [Hint] ai-coding-tools-ea   | Q: 0 | Inbox: 0      |
+|   [Reg · dev-id shifted]  | HB: expired · Act: 1m · Proc: yes     |   (transcript hint only)    | Verify-for-us: 1     |
+|   Owner Actions: [Open] [Deposit Mail to Mailbox] [Request Handoff / Reassign...]               | Unread Mail: 0       |
++---------------------------+---------------------------------------+-----------------------------+----------------------+
+| ! d4science_kb (unreg)    | [ACTIVE] gen 3 · claude (interactive) | [Reg] f40e1f4e ("kb-3d")    | Ready: 0 | InProg: 0 |
+|   ~/works/d4science_kb    | id: 9063f48c.. · (gen 2 retired)      |   provider: 9063f48c..      | Q: 0 | Inbox: 0      |
+|   [Unregistered Config!]  | HB: expired · Act: 4m · Proc: yes     |                             | Verify-for-us: 2     |
+|   Owner Actions: [Register & Relink...] [Open] [Deposit Mail to Mailbox] [Request Handoff...]   | Unread Mail: 0       |
++---------------------------+---------------------------------------+-----------------------------+----------------------+
+| ~ smartgears4-migration(1)| [TAKEOVER ELIGIBLE] gen 1 · kilo (int)| [Reg] cc1dd376 (ses_e9d0..) | Ready: 3 | InProg: 1 |
+|   ~/works/smartgears4_mig | HB: expired (5d) · Act: 5d · Proc: no |   (no live process)         | Q: 0 | Inbox: 1      |
+|   [Registered]            | No auto-fallback (waits for owner)    |                             | Verify-for-us: 0     |
+|   Owner Actions: [Open] [Owner Takeover / Reassign...] [Start Headless Worker]                  | Unread Mail: 0       |
++---------------------------+---------------------------------------+-----------------------------+----------------------+
+| o porting-liferay (5)     | [MISSING] no orchestrator registered  | [Hint] porting-liferay-6d   | Ready: 4 | InProg: 2 |
+|   ~/works/gcube/porting.. | default_orchestrator: claude          | [Hint] porting-liferay-56   | Q: 0 | Inbox: 2      |
+|   [Registered]            |                                       |   (hints; claim from CLI)   | Verify-for-us: 0     |
+|   Owner Actions: [Prepare Pending Handoff for 6d...] [Start Headless] [Open] [Deposit Mail]     | Unread Mail: 0       |
 +========================================================================================================================+
-| SELECTED WORKSPACE DRAWER: porting-liferay  ->  Action: [Bind Interactive Session / Reassign] or [Send Message]        |
+| SELECTED WORKSPACE DRAWER: porting-liferay  ->  Owner Action: [Prepare Pending Handoff / Reassign]                     |
 | +--------------------------------------------------------------------------------------------------------------------+ |
-| | Target: (x) Interactive Session: porting-liferay-6d (claude, provider_id: 3f8a...)  ( ) Headless Worker (claude)   | |
-| | Handoff: [x] Generate on-disk handoff prompt (00-INDEX + 2 inbox notes + 4 ready tasks) -> gen 1 (1 bump, atomic)  | |
-| | Message / Instructions (optional): [Please triage the 2 inbox notes and check the ready queue.___________________] | |
-| | [Preview Plan & Config Diff]  [Apply & Bind Role (expect_hash: 9c4e...)]                                           | |
+| | Target Kind: (x) Interactive Session (creates pull-only pending_handoff; target human/session must accept)         | |
+| |              ( ) Headless Worker (runs transactional handoff turn; rolls back config if bootstrap fails)           | |
+| | Target Tool / Provider ID: [claude v]  Provider Session ID: [3f8a-... (porting-liferay-6d)]                        | |
+| | Preconditions (CAS): expect_generation=0, expect_config_hash=a81f...                                               | |
+| | Delivery: Writes .ai-orchestration/orchestrator/handoffs/gen-001.md + OS/UI notification (NO prompt injection).    | |
+| | [Preview Plan & Config Diff]  [Owner Confirm & Write Pending Handoff (expect_hash: 9c4e...)]                       | |
 | +--------------------------------------------------------------------------------------------------------------------+ |
 +========================================================================================================================+
 ```
@@ -519,91 +557,128 @@ There are two main options for integrating the Cross-Workspace Control Plane int
 
 ### 4.1 Existing Use Cases to Update
 
-1. **`UC028` — Owner manages the orchestrator role, queue, and succession handoff (headless & interactive)** *(update title & criteria)*:
-   - **Actor:** Owner / Orchestrator Session.
-   - **Changes:** Remove the headless-only restriction. Cover all 5 succession paths (`missing -> interactive`, `headless -> interactive`, `interactive -> interactive`, `interactive -> headless`, `headless -> headless`).
-   - **New Acceptance Criteria:**
-     - `ai-orch orchestrator reassign --kind interactive --provider-session-id <id> [--display-name <name>]` binds the role in **one** generation bump (`N -> N+1`), retires generation `N`, writes the real target path in `--dry-run` diff headers, and never creates a phantom headless session.
-     - Re-registering the same `provider_session_id` with a new `--display-name` updates the session record in place without bumping `generation`.
-     - Fenced-out previous holders receive a `ROLE LOST` / `fenced-out-orchestrator` notice on subsequent CLI/MCP calls.
+1. **`UC028` — Owner manages the orchestrator role, queue, and transactional succession handoff (headless & interactive)** *(update title & criteria)*:
+   - **Actor:** Owner / Current Holder Session.
+   - **Changes:** Extend beyond headless-only succession to cover transactional CAS (`expect_generation`, `expect_hash`) across `claim`, `hand-off`, `takeover`, and `reassign`, with automatic rollback of `orchestration.toml` if rotation/bootstrap fails, and pull-only `pending_handoff -> accept-handoff` for interactive targets.
 2. **`UC030` — Operator registers a workspace and discovers nested project task trees** *(update criteria)*:
-   - **Changes:** Pass `--config-dir` through to `find_project_config_path()` so isolated registrations never leak into `~/.config/ai-orchestration/projects/`; ignore macOS APFS `st_dev` changes when `inode` and `[workspace] uuid` match.
+   - **Changes:** Ensure `--config-dir` is forwarded to `find_project_config_path()` so isolated runs never write to `~/.config/ai-orchestration/projects/`; do not mark workspaces `stale` when `st_dev` changes across a reboot if `canonical_path`, `inode`, and `[workspace] uuid` match.
 
 ### 4.2 New Use Cases to Add
 
-3. **`UC038` — Orchestrating session receives role feedback, claims a missing role, and handles fencing upon succession**:
-   - **Actor:** Interactive or Headless Orchestrator Session.
+3. **`UC038` — Session claims a missing role, renames display id in place (`T083`), and receives pull-only fencing/role notices**:
+   - **Actor:** Orchestrator / Console Session.
    - **Acceptance Criteria Outline:**
-     - Running a task-mutating command (`tasks new`, `tasks transition`) in a workspace with `orchestrator: missing` prints a one-line registration hint on stderr/MCP text (`T071`).
-     - Running `ai-orch orchestrator status` and `ai-orch sessions role` returns identical liveness (`active`, `idle`, `stale`, `missing`) computed from heartbeat + provider transcript mtime.
-     - When generation `N` is superseded by generation `N+1`, generation `N`'s next `ai-orch` call reports `ROLE LOST (superseded by gen N+1)`.
-4. **`UC039` — Owner inspects the cross-workspace fleet panel and reassigns or binds an interactive orchestrator**:
+     - `ai-orch orchestrator status` is strictly lock-free and read-only (`18.2`) and returns the four orthogonal liveness fields (`heartbeat_valid`, `recent_activity`, `process_observed`, `takeover_eligible`).
+     - Re-registering the same `(tool, provider_session_id)` with a new `--session-id` updates the record in place without bumping `generation` (`T083`).
+     - Task-mutating commands in a workspace with `role_state == missing` emit a 1-line registration hint (`T071`); calls from a superseded generation emit a `ROLE LOST / fenced-out-orchestrator` notice and refuse orchestrator-only mutations.
+4. **`UC039` — Owner views the cross-workspace fleet panel and performs transactional reassignment or pending handoff**:
    - **Actor:** Owner.
    - **Acceptance Criteria Outline:**
-     - `ai-orch workspace fleet [--scan-root <dir>] --json` (and `GET /api/fleet`) returns all registered workspaces, discovered unregistered workspaces, orchestrator holder + liveness, live/recent provider sessions correlated by workspace `cwd`, and pipeline KPIs (`ready`, `inbox`, `open_questions`, `verify_by`).
-     - From the fleet panel (or CLI), the owner binds a discovered unregistered interactive session (`porting-liferay-6d`) as generation `N+1` orchestrator with preview-then-apply (`plan_hash`).
-5. **`UC040` — Owner or peer orchestrator sends a message to a workspace orchestrator or interactive console without permission laundering**:
+     - `ai-orch workspace fleet --json` (and `GET /api/fleet`) returns all registered workspaces (plus opt-in configured scan-root suggestions), orchestrator role state, orthogonal liveness signals, and pipeline KPIs (`ready`, `inbox`, `open_questions`, `verify_by`, `unread_mail`).
+     - Reassigning toward an interactive session writes a `pending_handoff` record without injecting any prompt into the live session; the target session transitions the role to `active` via `ai-orch orchestrator accept-handoff`.
+     - If a headless reassignment fails during bootstrap, `orchestration.toml` is rolled back to its pre-image.
+5. **`UC040` — Owner or peer workspace sends a pull-only message without prompt injection or permission laundering**:
    - **Actor:** Owner (via UI Panel) or Peer Orchestrator (via Broker MCP / CLI).
    - **Acceptance Criteria Outline:**
-     - Owner message from the UI panel to a headless orchestrator enqueues an `owner_chat` turn; to an interactive console, deposits a message in its console mailbox (with optional `SendMessage` nudge).
-     - Peer message from another workspace lands in metadata-only quarantine for a headless orchestrator until the owner clicks **Accept**, and is wrapped in `<untrusted_peer_mail nonce=...>` with `reduced_capability` policy so it can never execute shell commands or bypass per-session permissions.
-6. **`UC041` — Operator audits and cleans up orphan project configs and stale registry entries (`workspace gc`)**:
-   - **Actor:** Operator / Owner.
+     - Messages to an interactive session are stored in its pull-only mailbox and surfaced via UI/OS notification to the human and a 1-line notice on the session's next CLI/MCP call — **never** pushed via `SendMessage` or stdin injection.
+     - Peer messages to a headless orchestrator remain quarantined (metadata-only) until owner acceptance and run under `reduced_capability`.
+6. **`UC041` — Owner reconciles registry discrepancies and reversibly quarantines selected orphan project configs**:
+   - **Actor:** Owner.
    - **Acceptance Criteria Outline:**
-     - `ai-orch workspace gc` previews orphan directories in `~/.config/ai-orchestration/projects/` (such as `test_orchestrator_reassign_end0`, `test_ws`, `workspace`, `ws`) and stale SQLite entries with a `plan_hash`.
-     - `ai-orch workspace gc --apply --expect-hash <hash>` moves orphan configs to `~/.config/ai-orchestration/.trash/<timestamp>/` and reconciles `registry.sqlite`.
+     - `ai-orch workspace reconcile --json` is 100% read-only and reports `unregistered_project_config`, `missing_canonical_path`, `device_shifted`, and `legacy_dot_config` without using filename heuristics.
+     - Owner-selected orphan configs are moved to `~/.config/ai-orchestration/.trash/<timestamp>/` via `workspace quarantine-config <name>... --apply --expect-hash <hash>` and can be restored via `workspace restore-config`.
 
 ---
 
-## 5. Implementation Plan (Initiatives & Tasks, Absorbing T070, T071, T072, 16.7, 16.8)
+## 5. Implementation Plan (Initiative 18 & Integration with Initiative 16, T070, T071, T072, T083)
 
-We recommend structuring the implementation as **Initiative 17 (`17-orchestrator-control-plane`)** (or completing `16.7`/`16.8` in alignment with it), ordered so that foundational registry and identity fixes land first:
+### 5.1 Integration Rules with In-Flight and Completed Work
+- **Do not absorb completed tasks:**
+  - `T070` (*orchestrator reassign lega il ruolo a una sessione interattiva esistente*) and `T072` (*config show usa la cartella corrente; l'anteprima di reassign mostra il percorso reale*) are **delivered and done**: Initiative 18 consumes their implementation as its baseline.
+  - `T083` (*same provider id with a new session-id renames the record*) covers the `ai-coding-tools-c1 -> ai-coding-tools-d8` rename case: consumed by `18.3`.
+  - `T071` (*sessions invited to register as orchestrator*) is open and is completed in `18.4`.
+- **Initiative 16 alignment:**
+  - `16.5` (*Broker MCP tools*) is currently `bounced` and must be reconciled (`T045`) before `16.7` (*Orchestrator workers in broker*) and `16.8` (*Workspace & console mail*).
+  - `16.8` owns the mailbox storage, quarantine, and pull-only delivery mechanics (`UC040`).
+  - `16.9` (*Project and common workspace views*) is marked `done`, but its Goal (`tasks/16-orchestration-broker/plan.md:40`) included the read-only all-workspaces overview and introduced the `state.project_root(request)` scoping bug on `/api/orchestrator/*` and `/api/sessions/*` in `ai-orchestration-ui` (`3fe9d9e`) and `vscode-ai-orchestration` (`dab76d0`). Task `18.7` remedies that `16.9` validation gap; `18.8` adds the new interactive control-plane actions.
+- **Initiative numbering:** Initiative `17` (`17-use-cases-drive-tasks`) is already taken in `tasks/00-INDEX.md`. This plan uses **Initiative 18 (`18-orchestrator-control-plane`)**, split into one-commit tasks in strict dependency order:
 
-| Task ID | Title | Size | Depends on | Absorbs / Replaces | Repo(s) |
+### 5.2 Ordered One-Commit Tasks for Initiative 18 (`18-orchestrator-control-plane`)
+
+| Task ID | Title (One Task = One Commit) | Size | Depends on | Relation to Existing Tasks | Repo(s) |
 | --- | --- | --- | --- | --- | --- |
-| **17.1** | **Session identity by `provider_session_id`, unified liveness (`compute_liveness`), and `config show` cwd default** — Key sessions by `provider_session_id` so display-name renames (`c1 -> d8`) update in place without bumping generation; unify `orchestrator status` and `sessions role` liveness using heartbeat + provider transcript mtime + PID check; default `config show --workspace` to `.` and show real target path in `reassign --dry-run` diff headers. | M | - | **Absorbs `T072`** (and the rename fix from `N071`) | `ai-orchestration/` |
-| **17.2** | **First-class interactive & headless succession (`orchestrator reassign` / `claim`) and fencing enforcement** — Add `--kind interactive\|headless`, `--provider-session-id`, `--bind-current`, `--display-name` to `reassign` and `rotate`; never fabricate phantom UUIDs when `--no-handoff` is used; single generation bump; return handoff prompt to interactive caller; enforce `fencing_token` and `ROLE LOST` / missing-orchestrator notices on CLI commands and skills. | M | 17.1 | **Absorbs `T070` and `T071`**; updates `UC028`, adds `UC038` | `ai-orchestration/` |
-| **17.3** | **Registry reconciliation, macOS APFS `st_dev` fix, test isolation guard, and `ai-orch workspace gc`** — Forward `--config-dir` into `find_project_config_path()`; auto-register workspace in `registry.sqlite` on `orchestrator start/reassign/claim`; fix `st_dev` false-stale check when `inode` + `uuid` match; recognize/migrate `.ai-orchestration/orchestration.toml`; add `workspace gc` preview-then-apply to move `test_orchestrator_reassign_end0`, `test_ws`, `workspace`, `ws` to `.trash/`. | M | 17.1 | Adds `UC041`, updates `UC030` | `ai-orchestration/` |
-| **17.4** | **Fleet aggregation engine (`ai-orch workspace fleet`) & provider session discovery** — Implement `ai-orch workspace fleet [--scan-root ...] --json` combining registered workspaces, discovered unregistered workspaces, orchestrator holder + liveness, local provider session discovery (`~/.claude/projects/`, Kilo/Codex stores, `cwd` process probe), and workspace KPIs (`ready`, `inbox`, `questions`, `verification-queue`). Also fix `server.py` and `dashboard-panel.ts` so `orchestrator`/`sessions` endpoints use `state.workspace` instead of `state.project_root`. | M | 17.2, 17.3 | Adds `UC039` | `ai-orchestration/` + `ai-orchestration-ui/` + `vscode-ai-orchestration/` |
-| **16.7** *(updated)* | **Orchestrator workers in broker, recovery, `orchestrator.ask` tickets, and role/fencing notices** — Existing 16.7 scope updated to respect `kind: interactive` holders (when a workspace's orchestrator is `kind: interactive`, `orchestrator.ask` queues for or notifies the interactive holder rather than spawning a competing headless process unless `interactive -> headless` handoff is requested). | L | 16.5, 17.2 | Refines **16.7** | `ai-orchestration/` + `ai-orchestration-ui/` |
-| **16.8** *(updated)* | **Workspace & console mail, quarantine, and permission-laundering guards** — Existing 16.8 scope updated with the Option 5B provenance rules (owner panel message vs peer workspace mail quarantine, `<untrusted_peer_mail>` envelope for consoles, optional `SendMessage` nudge using `display_name`). | L | 16.7 | Refines **16.8**, adds `UC040` | `ai-orchestration/` + `ai-orchestration-ui/` + `vscode-ai-orchestration/` |
-| **17.5** | **Cross-Workspace Fleet Control Plane UI (Web UI + VS Code Extension)** — Add the 5th top-level tab `Workspaces Fleet` (and VS Code sidebar TreeView) with workspace cards/table, live session badges, 1-click `Register`, `Bind as Orchestrator / Reassign` modal, `Handoff Prompt` viewer, `Clean Orphans` modal, and `Send Message` drawer. | L | 17.4, 16.8 | Completes `UC039`, `UC040` | `ai-orchestration-ui/` + `vscode-ai-orchestration/` |
+| **18.1** | **Record owner decisions (`Q-A`..`Q-G`) and authority/confirmation contract in spec** — Lock the authority matrix (`claim`, `hand-off`, `takeover`, `reassign`, `quarantine`), the human-owner confirmation mechanism beyond static `ui-token`, and the zero-prompt-injection rule in `orchestrator-control-plane-study.md` / `events-and-triggers.md`. | S | `Q-A`..`Q-G` | Gate before code changes | `ai-orchestration/` |
+| **18.2** | **Strictly read-only `orchestrator status` invariant** — Remove `orchestrator_lock` acquisition and `_migrate_orchestrator_cursors()` file writes from `get_orchestrator_status()` (`scripts/orchestration_orchestrator.py:799-825`); move cursor migration strictly into mutating commands (`start`, `enqueue`, `run-next`, `rotate`, `reassign`). | S | 18.1 | Fixes read-only status defect (`T026` follow-up) | `ai-orchestration/` |
+| **18.3** | **Provider-scoped session identity rules `(tool, provider_session_id)`** — Build on `T083` (in-place rename for same `provider_session_id`): enforce retired-session resurrection refusal, cross-workspace collision refusal, duplicate live PID warning, and `provider_session_id: null` (`pending_first_turn`) on Claude `--no-handoff` rotation (`scripts/orchestration_orchestrator.py:1862`). | M | 18.2, T083 | Consumes **T083** | `ai-orchestration/` |
+| **18.4** | **Transactional succession (`claim`, `hand-off`, `takeover`, `reassign`) with config rollback and pull-only `pending_handoff`** — Build on delivered `T070` and `T072`: save and restore `orchestration.toml` pre-image if `rotate_orchestrator()` fails (`scripts/orchestration_orchestrator.py:2111-2148`); add `pending_handoff -> accept-handoff` for interactive targets; enforce authority checks (forbid agent `--force` takeover of active holder) and piggyback missing-role (`T071`) / `fenced-out` notices. | M | 18.3, T070, T072 | Consumes **T070**, **T072**; completes **T071**; updates `UC028`, adds `UC038` | `ai-orchestration/` |
+| **18.5** | **Orthogonal liveness signals (`heartbeat_valid`, `recent_activity`, `process_observed`, `takeover_eligible`) as read-only hints** — Implement `compute_liveness_signals()` in `orchestration_sessions.py` and surface identical liveness objects in `orchestrator status` and `sessions role`; implement opt-in read-only provider transcript mtime and `ps`/`lsof` adapters strictly as display hints (never takeover/binding authority, no auto-fallback from stale interactive holder). | M | 18.4 | Implements `Q-A`, `Q-C`, `Q-D`, `Q-G` | `ai-orchestration/` |
+| **18.6** | **Registry reconciliation (`workspace reconcile`), explicit config-dir forwarding, and reversible quarantine** — Forward `--config-dir` to `find_project_config_path()` in `orchestration_registry.py`; handle reboot `st_dev` shift (`device_shifted`) without false `stale: true`; add read-only `workspace reconcile`, `workspace relink`, and owner-confirmed `workspace quarantine-config` / `restore-config` (`.trash/`). | M | 18.2 | Updates `UC030`, adds `UC041` | `ai-orchestration/` |
+| **18.7** | **Fleet read-only aggregation (`workspace fleet`) & `16.9` multi-project orchestrator scoping fix** — Fix `ai-orchestration-ui/backend/server.py` (`3fe9d9e`) and `vscode-ai-orchestration/src/views/dashboard-panel.ts` (`dab76d0`) to pass `state.workspace` instead of `state.project_root` to `orchestrator`/`sessions`; implement `ai-orch workspace fleet --json`, `GET /api/fleet`, and the read-only `Workspaces Fleet` overview promised in `16.9`. | M | 18.5, 18.6 | Remedies **16.9** validation gap; adds read-only half of `UC039` | `ai-orchestration/` + `ai-orchestration-ui/` + `vscode-ai-orchestration/` |
+| **18.8** | **Interactive Fleet control-plane actions in Web UI & VS Code** — Add owner-confirmed UI actions in the `Workspaces Fleet` tab and VS Code TreeView: `Prepare Pending Handoff / Reassign` modal, `Accept Handoff` banner, `Register / Relink Workspace`, `Reconciliation & Quarantine` modal, and pull-only `Deposit Mail` composer (integrated with `16.8`). | M | 18.7, 16.8 | Completes `UC039`, `UC040` | `ai-orchestration-ui/` + `vscode-ai-orchestration/` |
 
 ---
 
-## 6. Open Questions for the Owner (To Become `Q###` Items)
+## 6. Open Questions for the Owner (`Q-A`..`Q-G`)
 
-### Q-1 (Proposed `Q011`): Interactive vs Headless Orchestrator Coexistence per Workspace
-- **Context:** `events-and-triggers.md` §0/§0a originally stated "the orchestrator is always headless", while in daily practice on 2026-10-27 the owner runs interactive Claude Code / Kilo sessions as the active orchestrators of `ai-coding-tools` and `d4science_kb` (`N068`, `N071`).
-- **Options:**
-  - **Option A (Either-Or Holder with Seamless Handoff — Recommended):** A workspace's `orchestrator` role is held at any given generation by *either* an `interactive` session *or* a `headless` worker session (`kind: interactive | headless`). While an `interactive` holder is `active`/`idle`, the background headless worker does not run competing turns; the owner (or session) can hand off `interactive -> headless` (when closing the window) or `headless -> interactive` (when opening a window to take over) in one click/command.
-  - **Option B (Always-Headless Role + Interactive Primary Console):** The `orchestrator` role in `orchestrator.json` is strictly headless, and interactive sessions are only registered as `role: primary_console`.
-- **Recommendation:** **Option A**. It matches how the owner actually works today (`d4science_kb`, `ai-coding-tools`), avoids paying double tokens for a headless session when an interactive orchestrator is already open, and still supports unattended headless orchestration whenever no interactive orchestrator holds the role.
+*(Labels `Q-A`..`Q-G` are temporary study handles; the architect will assign canonical `Q###` IDs in `tasks/questions/`.)*
 
-### Q-2 (Proposed `Q012`): Automatic Discovery Scan Roots for Unregistered Workspaces
-- **Context:** 7+ workspaces under `~/works/` (`d4science_kb`, `gcube_audit`, `d4science-keycloak`, `gcube_atlas`, `ricerca_auto`, `d4science-evolution-assurance`, `ansible`) have `tasks/` or `.ai-orchestration/` but are not in `registry.sqlite`.
+### Q-A: Interactive vs Headless Orchestrator Coexistence & Stale Interactive Holder Policy
+- **Context:** `events-and-triggers.md` §0/§0a stated "the orchestrator is always headless", whereas on 2026-10-27 the owner actively uses interactive Claude Code / Kilo sessions as workspace orchestrators (`ai-coding-tools`, `d4science_kb`). Furthermore, interactive sessions cannot emit background heartbeats while idle waiting for the user.
 - **Options:**
-  - **Option A (Configurable Scan Roots with Depth-2 Auto-Discovery — Recommended):** Default `workspace_roots` to the parent directories of already-registered workspaces (e.g. `~/works`, `~/works/gcube`) configurable in global `orchestration.toml` (`[discovery] workspace_roots = [...]`). The Fleet panel lists discovered unregistered workspaces with an `Unregistered` badge and a 1-click `Register…` button (preview -> apply), plus an `Ignore` action.
-  - **Option B (Manual Registration Only):** Only show workspaces explicitly added via `ai-orch workspace register`.
-- **Recommendation:** **Option A**, because unregistered workspaces are the #1 reason the registries disagreed with reality on 2026-10-27.
+  - **Option A (Either-Or Holder + No Automatic Fallback from Stale Interactive Holder — Recommended):** A workspace's `orchestrator` role is held at any generation by either an `interactive` session or a `headless` worker (`kind: interactive | headless`). If an `interactive` holder's heartbeat expires (`heartbeat_valid: false`), it becomes `takeover_eligible` in the UI, but a background headless worker **never** automatically takes over or runs competing turns unless the current holder explicitly hands off (`interactive -> headless`) or the owner explicitly triggers takeover/reassignment.
+  - **Option B (Auto-Fallback to Headless After Timeout):** Automatically rotate an idle interactive holder to a headless worker after `N` minutes without a heartbeat.
+  - **Option C (Strictly Headless Role Only):** Interactive sessions may only register as `role: console`, never `role: orchestrator`.
+- **Recommendation:** **Option A**. It respects the owner's interactive workflow and prevents a background headless worker from hijacking the role while the owner is simply pausing between interactive turns.
 
-### Q-3 (Proposed `Q013`): Local Provider Session Probing (`~/.claude/projects`, Process Table)
-- **Context:** Interactive Claude Code sessions (`porting-liferay-6d`, `dave-agent-92`, etc.) do not appear in `.ai-orchestration/sessions/` until they run an `ai-orch` command.
+### Q-B: Unregistered Workspace Discovery Scan Roots
+- **Context:** 7+ folders under `~/works/` have `tasks/` or `.ai-orchestration/` but are not registered in `registry.sqlite`.
 - **Options:**
-  - **Option A (Read-Only Provider Transcript & Process Probe — Recommended):** Allow `ai-orch workspace fleet` (and `sessions list --discover`) to read-only inspect `~/.claude/projects/<escaped-cwd>/*.jsonl` (mtime + session UUID/slug) and `ps`/`lsof` working directories for the current OS user to display live unregistered sessions in the Fleet panel and offer 1-click binding.
-  - **Option B (Strictly Self-Registered Sessions):** Only show sessions that have explicitly called `ai-orch sessions register` or `whoami`.
-- **Recommendation:** **Option A**, combined with piggybacked auto-registration when any session calls `ai-orch` or the broker MCP shim.
+  - **Option A (Explicit Configured Scan Roots, Off by Default, Suggestions Only — Recommended):** Do not scan arbitrary directories by default. Provide an opt-in setting `[discovery] workspace_roots = [...]` in global `orchestration.toml` (and an explicit **"Scan Directory…"** button in the UI). Discovered folders are shown strictly as read-only **suggestions** (`candidate_unregistered`) that nothing acts on until the owner previews and applies `workspace register`.
+  - **Option B (Always-On Auto-Scan of Parent Directories):** Automatically scan parent folders of registered workspaces on every `workspace fleet` call.
+  - **Option C (No Directory Scanning):** Only ever show workspaces already in `registry.sqlite`.
+- **Recommendation:** **Option A**. It avoids unrequested filesystem walks while giving the owner a 1-click way to discover and register existing workspaces when desired.
 
-### Q-4 (Proposed `Q014`): Placement of the Cross-Workspace View in Web UI & VS Code
-- **Context:** Where should the cross-workspace panel live relative to `ui-multi-project.md` (Project vs Common Workspace view) and `orchestration-extension-spec.md` (4 tabs)?
+### Q-C: Inspecting Local Provider Stores (`~/.claude/projects`, Kilo/Codex Stores, `ps`/`lsof`)
+- **Context:** Live interactive sessions (`porting-liferay-6d`, `dave-agent-92`, etc.) do not appear in `.ai-orchestration/sessions/` until they run an `ai-orch` command.
 - **Options:**
-  - **Option A (5th Top-Level Tab `Workspaces Fleet` + VS Code Sidebar TreeView — Recommended):** Add a dedicated top-level `Workspaces Fleet` tab in the dashboard (and a `Workspaces` TreeView in the VS Code sidebar) focused on orchestrators, live sessions, cross-workspace KPIs, messaging, and handoff; clicking a workspace switches the active workspace context for the other 4 tabs.
-  - **Option B (3rd Level Inside the Existing Project Switcher Dropdown):** Add "All Workspaces" at the top of the project selector dropdown in the Backlog tab.
-- **Recommendation:** **Option A**, because orchestrator management, session liveness, and cross-workspace messaging have a fundamentally different shape from a task backlog table.
+  - **Option A (Opt-In Read-Only Inspection of Provider Stores & Process Table — Recommended):** Allow `ai-orch workspace fleet` (when enabled in config or requested in the UI) to read-only inspect local provider metadata (`~/.claude/projects/<escaped-cwd>/*.jsonl` mtimes/UUIDs, Kilo/Codex session stores) and current-user `ps`/`lsof` working directories to list unregistered session hints in the Fleet panel.
+  - **Option B (Never Inspect Provider Stores or Process Table):** Only show sessions that have explicitly called `ai-orch sessions register` or `ai-orch mcp`.
+- **Recommendation:** **Option A** (strictly read-only and scoped to known workspace paths).
 
-### Q-5 (Proposed `Q015`): Delivery of Messages to Live Interactive Sessions
-- **Context:** When the owner (from the Fleet panel) or another workspace sends a message to a workspace whose orchestrator (or target) is a live interactive session (e.g. Claude Code `d4science-kb-3d`):
+### Q-D: Authority of Provider Store & Process Discoveries over Liveness and Takeover
+- **Context:** If `Q-C` (inspecting transcript mtimes and `ps`/`lsof`) is enabled, should those signals ever automatically bind a role, extend a protocol lease, or trigger/block a takeover?
 - **Options:**
-  - **Option A (Durable Mailbox + CLI/MCP Piggyback Notice + Opt-In Claude `SendMessage` Nudge — Recommended):** Always store the message durably in the workspace/console mailbox and surface a 1-line notice on the session's next `ai-orch` / MCP tool call; when both sender/relay and target are Claude Code and the owner enables `[mail] claude_sendmessage_nudge = true` (or clicks "Nudge Live Session" in the panel), also send a short `claude-mcp` cross-session `SendMessage` notification pointing to the mailbox message ID (never raw unvetted instructions).
-  - **Option B (Pull-Only via Mailbox / MCP Notice, Never `SendMessage`):** Never invoke `claude -p` relay for `SendMessage` nudges; rely strictly on the target session calling `ai-orch` or the human pasting a prompt.
-- **Recommendation:** **Option A** (with `SendMessage` nudge available on owner click in the panel and opt-in for peer mail), because an idle interactive Claude session waiting at the prompt will not call an MCP tool until nudged or spoken to by the owner.
+  - **Option A (Read-Only Display Hints Only, Zero Protocol Authority — Recommended):** Transcript mtime (`recent_activity`) and process observation (`process_observed`) are displayed in the UI as **informational hints only** (`authority: "hint_only"`). They never auto-register a session, never auto-bind an orchestrator role, and never authorize an automatic takeover.
+  - **Option B (Authoritative Liveness):** Treat `process_observed` or `recent_activity` as equivalent to an authenticated `sessions heartbeat`.
+- **Recommendation:** **Option A**, because filesystem mtimes and `ps` matches lack cryptographic/session authentication and can suffer from PID reuse or stale open file descriptors.
+
+### Q-E: Delivery to Interactive Sessions (Pull-Only Mailbox vs Push) & Panel Placement (`16.9` vs New Tab)
+- **Context:** How should messages and handoffs reach an interactive session, and where should the cross-workspace panel live?
+- **Options:**
+  - **Option A (Pull-Only Mailbox + Pending Handoff Record + UI/OS Notification for the Human; Dedicated `Workspaces Fleet` Tab — Recommended):**
+    1. **Zero prompt injection:** Never send `SendMessage` or inject prompts into a live interactive session. Messages land in the pull-only mailbox; reassignments toward an interactive session write a `pending_handoff` record; the human receives a UI/OS notification and the session sees a 1-line notice on its next CLI/MCP call.
+    2. **Panel placement:** Remediate the `16.9` read-only overview gap and add interactive fleet controls in a dedicated top-level **`Workspaces Fleet`** tab in Web UI / VS Code (plus a VS Code sidebar TreeView).
+  - **Option B (Push via Claude `SendMessage` Relay + Dropdown Switcher inside Backlog):** Relay nudges into live Claude sessions via `claude -p` and place "All Workspaces" inside the existing Backlog project switcher.
+- **Recommendation:** **Option A**, eliminating all cross-session prompt injection vectors while giving the owner a dedicated fleet control plane.
+
+### Q-F: Authority Matrix — Who May Claim, Hand Off, Take Over, Reassign, and Clean Up (and Human-Owner Proof)
+- **Context:** Which actors may perform each role/registry mutation, and how should the broker/UI verify that an owner-only action was genuinely clicked by the human owner rather than called by a local agent reading `~/.config/ai-orchestration/ui-token`?
+- **Options:**
+  - **Option A (Strict Role Authority + OS/Extension-Host Human Confirmation for Owner-Only Actions — Recommended):**
+    - *Claim missing role:* self-identifying session in that workspace, or Owner.
+    - *Voluntary handoff:* current role holder (matching `fencing_token`), or Owner.
+    - *Stale takeover:* Owner, or holder-declared lease expiry (never an uninvited agent).
+    - *Active reassignment:* Owner or Current Holder only (forbid agent `--force` takeover).
+    - *Registry cleanup / unregister / quarantine:* Owner only, reversible via `.trash/`.
+    - *Human-owner proof:* In VS Code, gate owner-only actions behind a native Extension Host modal (`vscode.window.showInformationMessage(..., { modal: true })`); in the Web UI / Broker, gate them behind a native OS dialog (`osascript` on macOS) or a one-time human confirmation code not readable via agent API/file tools.
+  - **Option B (Trust Local `ui-token` + Allow Agent `--force` Reassign):** Treat any caller presenting `ui-token` or `--force` as authorized.
+- **Recommendation:** **Option A**.
+
+### Q-G: Liveness Dimensions for Display vs Takeover Eligibility
+- **Context:** Replacing the single `active | stale` status with unambiguous signals so `orchestrator status` and `sessions role` never contradict each other.
+- **Options:**
+  - **Option A (Four Explicit Signals: `heartbeat_valid`, `recent_activity`, `process_observed`, `takeover_eligible` — Recommended):**
+    - Display all four signals clearly in the UI and CLI JSON.
+    - Define `takeover_eligible = true` only when `role_state == missing`, or the current holder explicitly declared `draining`/`stopped`, or `heartbeat_valid == false` for longer than `takeover_threshold_sec` (default 1800s for headless, owner-confirmed only for interactive).
+  - **Option B (Keep Single `active | stale` String with Longer Timeout):** Keep a single status string and simply increase `DEFAULT_STALE_TIMEOUT_SEC` from 300s to 3600s.
+- **Recommendation:** **Option A**, because it separates what the protocol knows (`heartbeat_valid`), what local hints suggest (`recent_activity`, `process_observed`), and what policy permits (`takeover_eligible`).

@@ -32,3 +32,4 @@ Owner request (2026-10-27, verbatim intent): we need a mechanism that gives feed
 ## Log
 
 - 2026-10-27, kilo: bozza dello studio scritta
+- 2026-10-27, kilo: studio rivisto dopo la revisione di Codex
