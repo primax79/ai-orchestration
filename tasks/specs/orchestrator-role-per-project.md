@@ -181,7 +181,7 @@ All five stores move to schema version **2** (`"schema_version": 2`):
           "display_name": "ai-coding-tools-87",
           "tool": "claude",
           "kind": "interactive",
-          "model": "claude-opus-4-6",
+          "model": "claude-opus-5-5",
           "started": "2026-10-28T...",
           "turns": 12
         },
@@ -225,7 +225,7 @@ All five stores move to schema version **2** (`"schema_version": 2`):
   - All readers/writers in v2 check `doc.get("schema_version", 1)`: if a writer encounters `min_writer_version > SUPPORTED`,
     it aborts immediately with `UnsupportedSchemaVersionError` before touching any file.
   - Additionally, v2 removes top-level `"current"` and `"generation"` from `orchestrator.json` and replaces top-level
-    `"status"` with `"status": "schema_v2_multi_key"` and `"legacy_v1_Notice": "Use ai-orch >= v2"`, plus moves the
+    `"status"` with `"status": "schema_v2_multi_key"` and `"legacy_v1_notice": "Use ai-orch >= v2"`, plus moves the
     lock path to `.ai-orchestration/orchestrator/.lock.v2` while leaving a read-only sentinel or advisory lock on `.lock`
     during migration so any un-upgraded v1 process fails closed instead of corrupting v2 state.
   - Rollback command (`ai-orch orchestrator rollback-v1 --apply`) restores `.ai-orchestration/backups/pre-v2-<timestamp>/`
@@ -433,9 +433,12 @@ or `"_workspace"`):
     `key_last_action_at` so an operator can immediately see if a session claimed 3 projects and is actively working in 1
     while ignoring the other 2.
 - **Thresholds (strictly from T073 `orchestrator-control-plane-study.md` Topic 1 & `Q-G`, configurable in `orchestration.toml`):**
-  - `heartbeat_ttl_sec`: default **`300` seconds** (`DEFAULT_STALE_TIMEOUT_SEC = 300.0` in
-    `scripts/orchestration_sessions.py:51`, configurable via `[orchestrator] heartbeat_ttl_sec` or
-    `AI_ORCH_SESSION_STALE_TIMEOUT`). `heartbeat_valid = (now - session.last_seen) <= heartbeat_ttl_sec`.
+  - `heartbeat_ttl_sec`: per session kind. Headless default **`300` seconds** (`DEFAULT_STALE_TIMEOUT_SEC = 300.0` in
+    `scripts/orchestration_sessions.py:51`); interactive default **`7200` seconds** (`[orchestrator]
+    heartbeat_ttl_sec_interactive`), because interactive sessions heartbeat only at their own check-ins (T071) and a
+    300 s TTL would show every interactive holder as stale between turns. Configurable via `[orchestrator]
+    heartbeat_ttl_sec` / `heartbeat_ttl_sec_interactive` or `AI_ORCH_SESSION_STALE_TIMEOUT`.
+    `heartbeat_valid = (now - session.last_seen) <= ttl(kind)`.
   - `takeover_threshold_sec`: default **`1800` seconds** for headless holders (`orchestrator-control-plane-study.md`
     §6 `Q-G` line 682, configurable via `[orchestrator] takeover_threshold_sec`). For interactive holders, expiry of
     `heartbeat_valid` never triggers auto-fallback (`Q-A`); takeover is **owner-confirmed only** (or holder-declared).
@@ -499,7 +502,7 @@ lines 606–618) with realistic sizes (`S`/`M`/`L`) and strict dependency orderi
 
 | Task ID | Title (One Task = One Commit) | Size | Depends on | Relation to Existing Tasks | Repo(s) |
 | --- | --- | --- | --- | --- | --- |
-| **18.1** | **Record owner decisions (`Q-A`..`Q-G` + per-project role v2 decisions) and authority/confirmation contract in specs** — Lock the per-key `(workspace_uuid, project_uuid)` model, authority matrix (`claim`, `hand-off`, `release`, `takeover`, `reassign`, `quarantine`), cutover watermark rules, pointer-task scope rule, `verify-by` grammar, and zero-prompt-injection rule across `orchestrator-role-per-project.md`, `orchestrator-control-plane-study.md`, and `events-and-triggers.md`. | S | `Q-A`..`Q-G` | Gate before code changes | `ai-orchestration/` |
+| **18.1** | **Record owner decisions (`Q-A`..`Q-G` + per-project role v2 decisions) and authority/confirmation contract in specs** — Lock the per-key `(workspace_uuid, project_uuid)` model, authority matrix (`claim`, `hand-off`, `release`, `takeover`, `reassign`, `quarantine`), cutover watermark rules, pointer-task scope rule, `verify-by` grammar, and zero-prompt-injection rule across `orchestrator-role-per-project.md`, `orchestrator-control-plane-study.md`, and `events-and-triggers.md`. | S | Q025-Q031 (T073 `Q-A`..`Q-G`) | Gate before code changes | `ai-orchestration/` |
 | **18.2** | **Strictly read-only `orchestrator status` invariant** — Remove `orchestrator_lock` acquisition and `_migrate_orchestrator_cursors()` file writes from `get_orchestrator_status()` (`scripts/orchestration_orchestrator.py:772-872`); move cursor migration strictly into mutating commands. | S | 18.1 | Fixes read-only status defect (`T026` follow-up) | `ai-orchestration/` |
 | **18.3** | **Provider-scoped session identity `(tool, provider_session_id)` (`T083`) and many-to-many `holdings` model** — Land **T083** first (in-place `display_name` rename for same `(tool, provider_session_id)` with `name_history`); replace scalar session `role`/`generation` (`scripts/orchestration_sessions.py:314, 501, 589`) with `holdings[key] = {project_uuid, generation, fencing_token, state}` so losing/releasing one key never retires the session or its other keys; enforce retired-holding resurrection refusal and `provider_session_id: null` (`pending_first_turn`) on Claude `--no-handoff`. | M | 18.2, T083 | Completes **T083** | `ai-orchestration/` |
 | **18.4a** | **Consistent workspace/project resolver (`T079`), CLI `--project` rules, and workspace-root mutation refusal** — Reuse `resolve_workspace_for_path()` (`scripts/orchestration_registry.py:1507`) across `orchestrator`, `sessions`, `config`, `tasks`, and `triggers`; refuse `sessions register --role orchestrator` and any role mutation from `_workspace` cwd when `--project` is omitted (printing current `holdings` and registered projects); allow repeatable `--project` only on `register` and `status`; make `status` without `--project` list all keys and fallback arrows. | M | 18.3, T079 | Completes **T079** | `ai-orchestration/` |
@@ -556,7 +559,7 @@ lines 606–618) with realistic sizes (`S`/`M`/`L`) and strict dependency orderi
 
 ---
 
-## 9. Open points for the owner
+## 8. Open points for the owner
 
 - Whether the `_workspace` holder may also dispatch into a project whose holder is stale (not released) when the
   owner is away. Recommendation: no automatic dispatch; it mails the project holder and shows the project as
