@@ -335,6 +335,16 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks labels [--tasks-dir <dir>] [--json]",
                     "description": "List all labels currently in use with their occurrence counts.",
                 },
+                "use-cases": {
+                    "usage": "ai-orch tasks use-cases <list|show|create|record-validation|validate|campaign|adopt-links> [options] [--json]",
+                    "description": "Manage use cases, AI validations, and one-time adopt-links migration.",
+                    "subcommands": {
+                        "adopt-links": {
+                            "usage": "ai-orch tasks use-cases adopt-links [--apply --expect-plan-hash <hash>] [--preview] [--skip-unknown] [--tasks-dir <dir>] [--json]",
+                            "description": "Copy written linked-tasks from use cases onto referenced tasks' use-cases (union, fail-closed, snapshot under tasks/_reviews/).",
+                        },
+                    },
+                },
             },
         },
         "inbox": {
