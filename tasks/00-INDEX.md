@@ -23,7 +23,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 13 | 13 | [Rielaborazione del Doctor: rilievi reali, azionabili e risolvibili](done/13-doctor-rework/plan.md) | done with a caveat (done: 13.1–13.7) | 06 | M |
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
-| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | in progress (done: 17.1–17.2; next: 17.3–17.14) | - | M |
+| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | in progress (done: 17.1–17.2; running: 17.4, 17.9, 17.12–17.14) | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -91,7 +91,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T071 (Invito a registrarsi) | P2 | [Le sessioni che orchestrano vengono invitate a registrarsi come orchestratore](engine/T071-le-sessioni-che-orchestrano-vengono-invitate-a-reg.md) | open | kilo | - |
+| T071 (Invito a registrarsi) | P2 | [Le sessioni che orchestrano vengono invitate a registrarsi come orchestratore](engine/T071-le-sessioni-che-orchestrano-vengono-invitate-a-reg.md) | in progress | kilo | - |
 | T077 (Adozione note vecchie) | P2 | [Le note dell'inbox in formato vecchio vengono adottate con un id](engine/T077-le-note-dell-inbox-in-formato-vecchio-vengono-adot.md) | open | kilo | - |
 | T079 (Workspace da sottocartella) | P2 | [I comandi lanciati da una sottocartella risolvono il workspace che la contiene](engine/T079-i-comandi-lanciati-da-una-sottocartella-risolvono.md) | open | kilo | - |
 | T081 (Branch e sblocco dipendenti) | P2 | [tasks_engine: list --branches, sblocco dei dipendenti e validate --branch](engine/T081-tasks-engine-list-branches-sblocco-dei-dipendenti.md) | open | kilo | - |
@@ -115,7 +115,7 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T075 (Valida e chiudi da UI) | P2 | [Pulsante Valida e chiudi sulla colonna Delivered e sul singolo task](ui/T075-pulsante-richiedi-validazione-sulla-colonna-done-e.md) | open | kilo | - |
+| T075 (Valida e chiudi da UI) | P2 | [Pulsante Valida e chiudi sulla colonna Delivered e sul singolo task](ui/T075-pulsante-richiedi-validazione-sulla-colonna-done-e.md) | delivered (verify-by: owner) | kilo | - |
 | T084 (Test backend UI rossi) | P1 | [Test del backend della UI rossi su main](ui/T084-test-del-backend-della-ui-rossi-su-main.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
@@ -130,9 +130,7 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 | [Q024](questions/Q024-come-registriamo-le-azioni-fatte-dalla-ui-e-cosa-a.md) | Come registriamo le azioni fatte dalla UI e cosa apre un clic nella barra laterale di VS Code? | T076 | owner | A |
 | [Q025](questions/Q025-se-l-orchestratore-interattivo-di-un-progetto-ferm.md) | Se l'orchestratore interattivo di un progetto è fermo, subentra da solo un orchestratore headless? | T073 | owner | A |
 | [Q026](questions/Q026-come-scopriamo-i-workspace-non-ancora-registrati.md) | Come scopriamo i workspace non ancora registrati? | T073 | owner | A |
-| [Q027](questions/Q027-lo-strumento-pu-leggere-gli-archivi-locali-dei-pro.md) | Lo strumento può leggere gli archivi locali dei provider (~/.claude/projects, Kilo, Codex) e i processi per trovare sessioni non registrate? | T073 | owner | A |
 | [Q028](questions/Q028-quello-che-si-scopre-dagli-archivi-e-dai-processi.md) | Quello che si scopre dagli archivi e dai processi può decidere presenza o subentri? | T073 | owner | A |
-| [Q029](questions/Q029-come-arrivano-i-messaggi-alle-sessioni-interattive.md) | Come arrivano i messaggi alle sessioni interattive e dove sta il pannello dei workspace? | T073 | owner | A |
 | [Q030](questions/Q030-come-mostriamo-la-presenza-di-un-orchestratore.md) | Come mostriamo la presenza di un orchestratore? | T073 | owner | A |
 | [Q031](questions/Q031-chi-pu-prendere-passare-riassegnare-e-ripulire-il.md) | Chi può prendere, passare, riassegnare e ripulire il ruolo di orchestratore? | T073 | owner | A |
 <!-- /ai-orch:generated decisions -->

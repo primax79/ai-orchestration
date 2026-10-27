@@ -6,14 +6,17 @@
 - priority: P2
 - priority-reason: Richiesta del proprietario 2026-10-27: chiudere da UI i task consegnati che ha validato usandoli
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: owner 2026-10-27: 'mi metti in done il pulsante per richiedere la validazione? sia globale sulla colonna, sia su singolo task'
 - paths: ai-orchestration-ui/backend/server.py, ai-orchestration-ui/frontend/src/components/BacklogManager.tsx, ai-orchestration-ui/frontend/src/components/TaskDetailModal.tsx, vscode-ai-orchestration/src/views/dashboard-panel.ts
 - handoff: Read tasks/ui/T075-pulsante-richiedi-validazione-sulla-colonna-done-e.md, do the open steps, run the Verification, update the task and the registry.
+- verify-by: owner
 - short: Valida e chiudi da UI
+
+verification pending: run Verification checks (verify-by: owner)
 
 ## Goal
 
@@ -33,3 +36,7 @@ Il proprietario è il verificatore indipendente: la UI lo registra come `owner`.
 ## Verification
 
 - Test del backend (singolo e bulk, anteprima senza scritture); prova su un registro di copia: 2 task delivered -> done con verifier owner e riga di Log; il proprietario valida usandola
+
+## Log (newest first)
+
+- 2026-10-28, orchestrator: state `in progress` -> `delivered` — UI (merge precedente) e bridge VS Code (f47da90), estensione 0.6.6 installata; validazione del proprietario con l'uso
