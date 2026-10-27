@@ -315,6 +315,14 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks request-verification <id> --by <target> [--check <what-to-check>] [--dry-run] [--expect-task-hash <hash>] [--tasks-dir <dir>] [--json]",
                     "description": "Request verification from a workspace or session (alias for set-verify-by).",
                 },
+                "link": {
+                    "usage": "ai-orch tasks link <task_id> <UC###[,UC###]...> [--apply --expect-plan-hash <hash>] [--preview] [--tasks-dir <dir>] [--json]",
+                    "description": "Link a task to one or more use cases and transactionally rewrite affected use cases' linked-tasks.",
+                },
+                "unlink": {
+                    "usage": "ai-orch tasks unlink <task_id> <UC###[,UC###]...> [--apply --expect-plan-hash <hash>] [--preview] [--tasks-dir <dir>] [--json]",
+                    "description": "Unlink a task from one or more use cases and transactionally rewrite affected use cases' linked-tasks.",
+                },
                 "verification-queue": {
                     "usage": "ai-orch tasks verification-queue [--for <workspace-or-session>] [--workspace <path-or-slug>] [--all-workspaces] [--tasks-dir <dir>] [--json]",
                     "description": "List delivered tasks pending verification across workspaces or filtered by target.",

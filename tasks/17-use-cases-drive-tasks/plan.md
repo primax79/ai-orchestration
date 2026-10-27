@@ -12,8 +12,9 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.2 - Comandi link/unlink e riscrittura derivata in sync-index
 
-- **Status:** `open` · **Short:** Link e riscrittura derivata · **Size:** M · **Depends on:** 17.1
+- **Status:** `delivered` (2026-10-27, kilo, commit `4cde307`: comandi `tasks link`/`unlink` con anteprima/apply e riscrittura transazionale derivata di `linked-tasks` in `sync-index` con guardia pre-adozione) · **Short:** Link e riscrittura derivata · **Size:** M · **Depends on:** 17.1
 - **Goal:** spec §1: `tasks link`/`unlink` (anteprima/apply), inserimento rispettando l'ordine dei campi e la posizione del segmento nei blocchi; riscrittura mirata di `linked-tasks` dentro il piano di `sync-index` (hash, transazione, rollback, evento `use_case.links_changed`); mai su un albero non valido.
+- **Verification:** `tasks link` e `tasks unlink` (anteprima predefinita, `--apply --expect-plan-hash`) scrivono `use-cases:` dopo `run-id` e prima di `short` sui task emergenti e `**Use cases:**` subito dopo `**Depends on:**` nei blocchi di iniziativa, aggiornando nella stessa transazione i `linked-tasks:` degli use case interessati; `sync-index` include le riscritture mirate di `linked-tasks:` nel piano con hash unico, rollback atomico, rifiuto su albero con errori di `validate`, emissione di `use_case.links_changed` e guardia pre-adozione ("run use-cases adopt-links first" per i 36 use case con `linked-tasks` scritti e non ancora adottati).
 
 ### 17.3 - Migrazione adopt-links
 
