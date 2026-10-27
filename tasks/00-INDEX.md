@@ -85,7 +85,6 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T066 (Project languages) | P2 | [Per-project language for tasks and for questions](engine/T066-per-project-language-for-tasks-and-for-questions.md) | in progress | kilo | - |
 | T067 (Keep status evidence) | P2 | [transition keeps the existing Status note of initiative tasks](engine/T067-transition-keeps-the-existing-status-note-of-initi.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
@@ -167,6 +166,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T063 (Reopen to delivered) | [reopen can target delivered and set verify-by](done/engine/T063-reopen-can-target-delivered-and-set-verify-by.md) | done | 2026-10-25 |
 | T064 (env doctor recognizes identical) | [env doctor recognizes identical per-assistant skill copies across ~/.claude/skills and ~/.kilo/skills as intentional](done/env-doctor/T064-env-doctor-recognizes-identical-per-assistant-skil.md) | done | 2026-10-25 |
 | T065 (Use-case localized Italian section) | [Use-case localized Italian section headings, --criteria option, and Italian stop-word short titles](done/engine/T065-use-case-localized-italian-section-headings-criter.md) | done | 2026-10-25 |
+| T066 (Project languages) | [Per-project language for tasks and for questions](done/engine/T066-per-project-language-for-tasks-and-for-questions.md) | done | 2026-10-27 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

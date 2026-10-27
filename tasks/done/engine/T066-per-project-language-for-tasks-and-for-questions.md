@@ -6,13 +6,14 @@
 - priority: P2
 - priority-reason: Owner request 2026-10-27; projects write tasks in one language and ask the owner in another (dave_agent: Italian tasks)
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: owner 2026-10-27: 'prevediamo una configurazione, per progetto, della lingua da usare per task e domande. potrebbero non coincidere'; builds on T065 (use-case Italian headings, --lang)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py,plugins/architect-side/skills/task-pipeline/SKILL.md
 - handoff: Read tasks/engine/T066-per-project-language-for-tasks-and-for-questions.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: ai-coding-tools-c1
 - short: Project languages
 
 ## Scope change 2026-10-27 (owner)
@@ -42,4 +43,6 @@ A project declares, in its versioned tasks tree, the language of its tasks and, 
 
 ## Log (newest first)
 
+- 2026-10-27, ai-coding-tools-c1: state `verified` -> `done`
+- 2026-10-27, ai-coding-tools-c1: state `delivered` -> `verified`
 - 2026-10-27, kilo: state `open` -> `delivered` — Implemented per-project content language resolver, fixed English keyword rules in AGENTS.md/SKILL.md, English headings on use-cases create with normalization warnings on legacy Italian headings, and `tasks config`/`show-config`.
