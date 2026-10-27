@@ -79,13 +79,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 ## Tasks by category
 
 <!-- ai-orch:generated tasks-by-category -->
-### engine
 
-Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
-
-| Id | Priority | Task | State | Executor | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| T068 (Etichette iniziative aggiornate) | P3 | [sync-index aggiorna le etichette delle iniziative quando cambia il titolo del piano](engine/T068-sync-index-aggiorna-le-etichette-delle-iniziative.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -168,6 +162,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T065 (Sezioni casi d'uso in italiano) | [Intestazioni di sezione dei casi d'uso localizzate in italiano, opzione --criteria e titoli brevi con stop-word italiane](done/engine/T065-use-case-localized-italian-section-headings-criter.md) | done | 2026-10-25 |
 | T066 (Lingue per progetto) | [Lingua per progetto per i task e per le domande](done/engine/T066-per-project-language-for-tasks-and-for-questions.md) | done | 2026-10-27 |
 | T067 (Mantenere evidenza in Status) | [transition mantiene la nota Status esistente dei task di iniziativa](done/engine/T067-transition-keeps-the-existing-status-note-of-initi.md) | done | 2026-10-27 |
+| T068 (Etichette iniziative aggiornate) | [sync-index aggiorna le etichette delle iniziative quando cambia il titolo del piano](done/engine/T068-sync-index-aggiorna-le-etichette-delle-iniziative.md) | done | 2026-10-27 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

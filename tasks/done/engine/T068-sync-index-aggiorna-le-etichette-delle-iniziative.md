@@ -6,13 +6,14 @@
 - priority: P3
 - priority-reason: Dopo la traduzione 65 etichette sono rimaste in inglese; sistemate a mano
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: _inbox/analyzed/20261027-122138-sync-index-keeps-stale-initiative-link-l/note.md
 - paths: -
 - handoff: Read tasks/engine/T068-sync-index-aggiorna-le-etichette-delle-iniziative.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: claude:ai-coding-tools
 - verify-by: ai-coding-tools
 - short: Etichette iniziative aggiornate
 
@@ -38,4 +39,6 @@ After translating plan titles (T036, 2026-10-27) sync-index reported 'already in
 
 ## Log (newest first)
 
+- 2026-10-27, claude:ai-coding-tools: state `verified` -> `done` — verified by ai-coding-tools
+- 2026-10-27, claude:ai-coding-tools: state `delivered` -> `verified` — OK on a scratch clone of ai-swissknife with architect-side 0.8.2: (1) plan.md title of 37 changed + commit -> sync --apply relabels the index row; (2) hand-written label kept by sync ('already in sync'); (3) --refresh-labels preview offers replacing the hand-written label with the plan title
 - 2026-10-27, kilo: state `open` -> `delivered` — etichette delle iniziative allineate ai titoli correnti del piano con fallback git/curated e flag --refresh-labels
