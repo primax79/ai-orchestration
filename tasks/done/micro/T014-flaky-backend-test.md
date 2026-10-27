@@ -1,10 +1,10 @@
-# T014 One backend test failed once in eleven runs
+# T014 Un test del backend è fallito una volta su undici esecuzioni
 
 - id: T014
-- title: One backend test failed once in eleven runs
+- title: Un test del backend è fallito una volta su undici esecuzioni
 - category: micro
 - priority: P2
-- priority-reason: A flaky test hides real regressions and trains people to re-run instead of reading failures
+- priority-reason: Un test instabile nasconde le regressioni reali e abitua a rilanciare i test invece di analizzare i fallimenti
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: architect review of 09.2 (2026-10-17): the first run after rebase reported "1 failed, 34 passed"; ten further runs were green and the failing test name was not captured
 - paths: ../ai-orchestration-ui/backend/test_server.py
-- handoff: Read tasks/micro/T014-flaky-backend-test.md and fix it.
+- handoff: Leggere tasks/micro/T014-flaky-backend-test.md e correggere il problema.
 - verifier: claude:orchestration
-- short: Flaky backend test
+- short: Test backend instabile
 
 ## Goal
 
-Find and fix the timing-dependent test in `backend/test_server.py`. The likely candidates are the watcher broadcast within 2 s, the slow-CLI concurrency test, and the process-group cleanup tests, which ran while four Kilo tasks loaded the machine.
+Individuare e correggere il test dipendente dalle tempistiche in `backend/test_server.py`. I candidati probabili sono il broadcast del watcher entro 2 s, il test di concorrenza della CLI lenta e i test di pulizia del gruppo di processi, eseguiti mentre quattro task di Kilo stavano caricando la macchina.
 
 ## Steps
 
-1. Run the suite in a loop under CPU load (for example 4 parallel `yes > /dev/null`), with `-rf -x`, until it fails. Record which test failed.
-2. Replace fixed sleeps or deadlines with polling up to a generous timeout, or make the code under test deterministic.
+1. Eseguire la suite in ciclo continuo sotto carico CPU (ad esempio 4 `yes > /dev/null` in parallelo), con `-rf -x`, finché non fallisce. Registrare quale test è fallito.
+2. Sostituire le attese fisse o le scadenze rigide con un polling fino a un timeout ampio, oppure rendere deterministico il codice sottoposto a test.
 
 ## Verification
 
-Fifty consecutive runs under load are green.
+Cinquanta esecuzioni consecutive sotto carico risultano verdi.

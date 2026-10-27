@@ -1,7 +1,7 @@
-# Q005 For gcube-jenkins, gcube-security-audit and frontend-design, which copy is canonical: the standalone one or the plugin one
+# Q005 Per gcube-jenkins, gcube-security-audit e frontend-design, quale copia è canonica: quella standalone o quella del plugin
 
 - id: Q005
-- question: For gcube-jenkins, gcube-security-audit and frontend-design, which copy is canonical: the standalone one or the plugin one?
+- question: Per gcube-jenkins, gcube-security-audit e frontend-design, quale copia è canonica: quella standalone o quella del plugin?
 - status: answered
 - blocks: -
 - decider: owner
@@ -11,17 +11,17 @@
 - open-answer: yes
 - recommended: C
 - applied: yes
-- short: Canonical skill copies
+- short: Copie skill canoniche
 
 ## Context
 
-The standalone copies in ~/.claude/skills carry extra content compared with the plugin copies (gcube-ai-toolkit and agentic-coding-kit plugins). Claude loads both. Keeping the plugin copy loses the extras unless they are ported to the source repos. Source: tasks/env-doctor/notes/T016-report.md (Doctor study, 2026-10-17).
+Le copie standalone in ~/.claude/skills contengono file aggiuntivi rispetto alle copie dei plugin (plugin gcube-ai-toolkit e agentic-coding-kit). Claude le carica entrambe. Mantenere la copia del plugin fa perdere i contenuti extra a meno che non vengano portati nei repository sorgente. Fonte: tasks/env-doctor/notes/T016-report.md (studio sul Doctor, 2026-10-17).
 
 ## Options
 
-- **A** — Plugin is canonical, port the extras: port the extra content to gcube-ai-toolkit / agentic-coding-kit, then remove the standalone copies
-- **B** — Standalone is canonical: keep the standalone copies and acknowledge the duplicates
-- **C** — Decide per skill: list the differences per skill and decide one by one
+- **A** — Il plugin è canonico, portare i contenuti extra: portare i contenuti aggiuntivi in gcube-ai-toolkit / agentic-coding-kit, poi rimuovere le copie standalone
+- **B** — La copia standalone è canonica: mantenere le copie standalone e riconoscere i duplicati
+- **C** — Decidere per singola skill: elencare le differenze per ogni skill e decidere una per una
 
 ## Answer
 

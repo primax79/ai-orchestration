@@ -1,44 +1,44 @@
-# T016 report: are the Doctor's persistent findings real?
+# Report T016: le segnalazioni persistenti del Doctor sono reali?
 
-- Date: 2026-10-17. Machine: owner's Mac, real home, read-only (only `env status` and `--dry-run` runs).
-- Code under study: `scripts/orchestration_env.py` (2694 lines at the time of the study), `../ai-orchestration-ui/frontend/src/components/EnvironmentDoctor.tsx`, `../ai-orchestration-ui/frontend/src/components/ConfirmDialog.tsx`, `../ai-orchestration-ui/frontend/src/components/SkillInstaller.tsx`, `../ai-orchestration-ui/backend/server.py`.
-- Spec: `tasks/specs/control-plane-safety.md` (§0 A4–A6, §1 E3–E7, §2.1).
+- Data: 2026-10-17. Macchina: Mac dell'owner, home reale, in sola lettura (solo esecuzioni `env status` e `--dry-run`).
+- Codice esaminato: `scripts/orchestration_env.py` (2694 righe al momento dello studio), `../ai-orchestration-ui/frontend/src/components/EnvironmentDoctor.tsx`, `../ai-orchestration-ui/frontend/src/components/ConfirmDialog.tsx`, `../ai-orchestration-ui/frontend/src/components/SkillInstaller.tsx`, `../ai-orchestration-ui/backend/server.py`.
+- Specifica: `tasks/specs/control-plane-safety.md` (§0 A4–A6, §1 E3–E7, §2.1).
 
-## TL;DR
+## In sintesi
 
-The findings that "never resolve" fall into three groups:
+Le segnalazioni che "non si risolvono mai" ricadono in tre gruppi:
 
-1. **Things that are real but the Doctor cannot fix.** These are shown as red, fixable errors with a "Resolve…" button. The plan behind that button contains only `ADVISE` items, so applying it does nothing. Then the same red banners come back. This is the main cause of the owner's complaint: **all 12 Claude conflicts (24 banners, because the project scope repeats the global ones) sit in a no-op loop.**
-2. **Wrong classifications.** 17 skills are labelled `foreign`. 14 of them are older copies of our own catalog (an exact blob match in the git history of the source repo) and 2 differ only in YAML quoting. 38 `unmanaged` skills (legitimate third-party and toolkit skills) get the same amber badge as real drift.
-3. **Missing checks.** The Doctor misses the actual problems:
-   - the Claude plugin copies are stale against the source repos (ai-orchestration plugin 69 commits behind, kilo-mcp plugin 7 behind) while their version strings are unchanged;
-   - Kilo also loads `~/.claude/skills` and `~/.config/kilo/skills`, which gives 14 real cross-directory duplicates and one trigger conflict that the Doctor never shows.
+1. **Problemi reali che il Doctor non può risolvere.** Vengono mostrati come errori rossi risolvibili con un pulsante "Resolve…". Il piano dietro quel pulsante contiene solo elementi `ADVISE`, quindi applicarlo non fa nulla. Subito dopo ricompaiono gli stessi banner rossi. Questa è la causa principale della segnalazione dell'owner: **tutti i 12 conflitti di Claude (24 banner, poiché lo scope di progetto ripete quelli globali) restano bloccati in un ciclo no-op.**
+2. **Classificazioni errate.** 17 skill sono etichettate come `foreign`. 14 di esse sono copie meno recenti del nostro stesso catalogo (corrispondenza esatta del blob nella cronologia git del repository sorgente) e 2 differiscono solo per la quotatura YAML. 38 skill `unmanaged` (legittime skill di terze parti e del toolkit) ricevono lo stesso badge ambra di un disallineamento reale.
+3. **Controlli mancanti.** Il Doctor non rileva i problemi effettivi:
+   - le copie dei plugin di Claude sono obsolete rispetto ai repository sorgente (plugin ai-orchestration indietro di 69 commit, plugin kilo-mcp indietro di 7) mentre le rispettive stringhe di versione sono invariate;
+   - anche Kilo carica `~/.claude/skills` e `~/.config/kilo/skills`, producendo 14 duplicati reali tra directory diverse e un conflitto di trigger che il Doctor non mostra mai.
 
-What needs to change: the resolution logic, the classification rules **and** the UI presentation. Nothing here is "fine as is".
+Cosa deve cambiare: la logica di risoluzione, le regole di classificazione **e** la presentazione nella UI. Nulla qui va "bene così com'è".
 
-## Summary table
+## Tabella di riepilogo
 
-Counts are for `--workspace /Users/Alfredo/works/ai-coding-tools` unless marked (AO = `--workspace .../ai-orchestration`).
+I conteggi si riferiscono a `--workspace /Users/Alfredo/works/ai-coding-tools` salvo diversa indicazione (AO = `--workspace .../ai-orchestration`).
 
-| # | Kind (as shown) | Count | Verdict | Root cause | Proposed change | Size |
+| # | Tipo (come mostrato) | Conteggio | Verdetto | Causa radice | Modifica proposta | Dimensione |
 |---|---|---|---|---|---|---|
-| 1 | `duplicate-name`, standalone vs Claude plugin (red banner + "Resolve…") | 11 (Claude global), shown twice (global + project) = 22 banners | TRUE (Claude really loads both copies). Wrongly presented as fixable | `resolve_conflicts` trashes a standalone copy only if it is byte-identical, `up-to-date` or matches the catalog hash (`orchestration_env.py:1978-1982`). All 11 differ, so they become `advise` (`:2002-2019`). Apply runs only `conflict_items` (`:2081`), which is a no-op. The UI still shows red + "Resolve…" (`EnvironmentDoctor.tsx:317-358`) and Confirm stays enabled | (a) Resolve button and red colour only when the plan has ≥1 executable action. (b) Smarter equality: frontmatter-normalised, any cached version of the same plugin, git history of the catalog. This makes 5 of 11 auto-resolvable. (c) Advice-only items get "acknowledge" | S + M |
-| 2 | `trigger-conflict` `orchestration-workflow` + `kilo-mcp-orchestrator` (Claude) | 1, shown twice | TRUE BUT NOT ACTIONABLE BY DOCTOR | Policy `claude=bound` removes the generic skill, which exists only as plugin `architect-side@ai-orchestration`, so the plan says ADVISE "disable plugin" (`:1926-1943`). That would also drop 5 unrelated skills. The UI shows it red with "Resolve…" because a standalone `kilo-mcp-orchestrator` is among the entries (`EnvironmentDoctor.tsx:284`) | Info severity + proportional advice text + acknowledge. Long term: the generic skill's description defers to the bound skill when both are present | S |
-| 3 | state `foreign` (amber badge) | kilo 5, claude 7, codex 5 = 17 | Mostly FALSE as "foreign": 14 are older versions of our own skills, 2 differ only in YAML quoting, 1 is outdated + quoting | Spec A4 rule "no receipt and no hash match → foreign" (`:436-454`). None of the 3 home skill dirs has a single `.ai-orch-source.json`, because these were installed before receipts existed or by other tools. They cannot be cleared from the UI: `install-skills` SKIPs `foreign` unless `--overwrite` (`:1602-1610`), and `SkillInstaller.tsx:39,48` never passes `overwrite` | New state `outdated-legacy` (match against the git history of the catalog file, or frontmatter-normalised equality). A per-row "Update (overwrite)" action with diff preview | M |
-| 4 | state `unmanaged` (amber badge) | kilo 21+2, claude 13+2 = 38 | FALSE as a warning | The catalog only covers `ai-orchestration`, `kilo-mcp`, `claude-mcp` (`:339`). Every other skill is `unmanaged`, and the UI paints every state other than up-to-date/plugin/obsolete amber (`EnvironmentDoctor.tsx:455-470`) | Neutral grey "external" badge, collapsed by default, no severity | S |
-| 5 | Claude project scope repeats global conflicts and plugin rows | 12 banners + 34 plugin rows duplicated | FALSE (presentation duplication) | The project view is built as the union of global standalone + plugins (`:1138-1149`, `:1192-1195`). The UI renders it as a separate scope | Show in project scope only the conflicts that involve a project-scope entry. Show "inherited from global" as one line | S |
-| 6 | `duplicate-name` standalone project vs standalone global (AO only) | 5 | TRUE (copies written today 11:13Z into `ai-orchestration/.claude/skills`, untracked in git) but the resolution path is missing | `resolve_conflicts` has branches only for standalone+plugin and plugin-only (`:1949`, `:2021`). Standalone-only duplicates produce **no plan item at all**, yet the UI shows red "Resolve…" | Add a branch: identical → trash the project copy (or follow a configurable rule); different → advise with diff | S |
-| 7 | `stray` `~/.codex/config.json` (amber banner) | 1 | TRUE BUT NOT ACTIONABLE BY DOCTOR | Written 2026-10-15 14:21 by the old `register-mcp` (spec E3). Codex reads `config.toml`. By spec §2.1 it is reported "without deleting", and no action exists | "Move to trash" action with preview, showing whether each server in it is already in `config.toml` | S |
-| 8 | MCP `Overrides:` (amber) on Kilo `playwright` | 1 | TRUE but benign (identical definitions) | `kilo.json` (written at the same second as #7) and `kilo.jsonc` both define `playwright` with the same command. `read_kilo_merged_mcps` flags any redefinition (`:793-799`) without comparing content | Compare configs: "redundant (identical)" = info, "conflicting" = warning. Offer to remove the entry from `kilo.json` | S |
-| 9 | Agent `kilo-mcp-orchestrator-agent.md` `foreign` (Claude) | 1 (JSON only, not rendered) | FALSE (deliberate per-assistant adaptation) | The Claude copy drops the Kilo-only `mode`/`permission` frontmatter. The raw sha differs (`:457-522`). The UI has no agent table at all | Per-assistant agent transform at install time + hash of the transformed output. Render agents in the UI | M |
-| 10 | (not reported) Claude plugin copies stale vs source | 2 plugins | MISSING CHECK (TRUE problem) | Plugin entries always get state `plugin` (`:1136`) with no drift check. Plugin cache `architect-side@ai-orchestration` = `30521e8a`, 69 commits behind HEAD. `architect-side@kilo-mcp` = `1a35cc0`, 7 behind. `plugin.json` versions unchanged (0.3.0 / 0.2.2), so Claude will not update them. Consequence: "keep plugin copy" keeps the **older** copy | Plugin drift state (`plugin-stale`) for plugins whose marketplace is a catalog repo. Advise "bump version and update plugin" | M |
-| 11 | (not reported) Kilo cross-directory duplicates and Kilo trigger conflict | 14 dup names + 1 trigger | MISSING CHECK (TRUE problem) | Kilo loads `~/.claude/skills/**`, `~/.agents/skills/**`, `~/.config/kilo/{skill,skills}`, `~/.kilo/{skill,skills}`. The Doctor scans only `~/.kilo/skills` (`:259-274`) | Effective Kilo view over all roots Kilo reads | M |
-| 12 | (plan, not a finding) `install-skills` creates new conflicts | 5 + 2 | TRUE design flaw (ping-pong) | The install plan ignores plugin coverage and the conflict policy (`:1583-1619`) | Skip names provided by an enabled plugin and names the policy would remove | S |
-| 13 | (plan, not a finding) `register-mcp` not idempotent | 2 | TRUE (minor) | It plans `cli` even when `current_state: registered`, with a different launch command | No-op when registered with an equivalent command. Otherwise a `replace` item showing the old and new command | S |
+| 1 | `duplicate-name`, standalone vs plugin di Claude (banner rosso + "Resolve…") | 11 (Claude globale), mostrati due volte (globale + progetto) = 22 banner | VERO (Claude carica davvero entrambe le copie). Presentato erroneamente come risolvibile | `resolve_conflicts` sposta nel cestino una copia standalone solo se è identica byte per byte, `up-to-date` o corrisponde all'hash del catalogo (`orchestration_env.py:1978-1982`). Tutte e 11 differiscono, quindi diventano `advise` (`:2002-2019`). L'applicazione esegue solo `conflict_items` (`:2081`), che è una no-op. La UI mostra comunque il rosso + "Resolve…" (`EnvironmentDoctor.tsx:317-358`) e Confirm resta abilitato | (a) Pulsante Resolve e colore rosso solo quando il piano ha ≥1 azione eseguibile. (b) Uguaglianza più intelligente: normalizzata sul frontmatter, qualsiasi versione in cache dello stesso plugin, cronologia git del catalogo. Questo rende 5 su 11 risolvibili automaticamente. (c) Gli elementi di solo avviso ricevono "acknowledge" | S + M |
+| 2 | `trigger-conflict` `orchestration-workflow` + `kilo-mcp-orchestrator` (Claude) | 1, mostrato due volte | VERO MA NON RISOLVIBILE DAL DOCTOR | La policy `claude=bound` rimuove la skill generica, che esiste solo come plugin `architect-side@ai-orchestration`, quindi il piano dice ADVISE "disable plugin" (`:1926-1943`). Ciò eliminerebbe anche 5 skill non correlate. La UI lo mostra in rosso con "Resolve…" perché tra le voci c'è una `kilo-mcp-orchestrator` standalone (`EnvironmentDoctor.tsx:284`) | Severità info + testo di avviso proporzionato + acknowledge. A lungo termine: la descrizione della skill generica rimanda alla skill associata quando sono entrambe presenti | S |
+| 3 | stato `foreign` (badge ambra) | kilo 5, claude 7, codex 5 = 17 | Per lo più FALSO come "foreign": 14 sono versioni precedenti delle nostre skill, 2 differiscono solo per la quotatura YAML, 1 è obsoleta + quotatura | Regola A4 della specifica "nessuna ricevuta e nessuna corrispondenza hash → foreign" (`:436-454`). Nessuna delle 3 directory delle skill nella home ha un singolo `.ai-orch-source.json`, perché sono state installate prima che esistessero le ricevute o da altri strumenti. Non possono essere ripulite dalla UI: `install-skills` fa SKIP di `foreign` a meno di `--overwrite` (`:1602-1610`), e `SkillInstaller.tsx:39,48` non passa mai `overwrite` | Nuovo stato `outdated-legacy` (confronto con la cronologia git del file di catalogo, o uguaglianza normalizzata sul frontmatter). Un'azione per riga "Update (overwrite)" con anteprima del diff | M |
+| 4 | stato `unmanaged` (badge ambra) | kilo 21+2, claude 13+2 = 38 | FALSO come avviso | Il catalogo copre solo `ai-orchestration`, `kilo-mcp`, `claude-mcp` (`:339`). Ogni altra skill è `unmanaged`, e la UI colora in ambra ogni stato diverso da up-to-date/plugin/obsolete (`EnvironmentDoctor.tsx:455-470`) | Badge grigio neutro "external", compresso di default, nessuna severità | S |
+| 5 | Lo scope di progetto di Claude ripete i conflitti globali e le righe dei plugin | 12 banner + 34 righe plugin duplicate | FALSO (duplicazione di presentazione) | La vista di progetto è costruita come l'unione di standalone globali + plugin (`:1138-1149`, `:1192-1195`). La UI la renderizza come uno scope separato | Mostrare nello scope di progetto solo i conflitti che coinvolgono una voce a livello di progetto. Mostrare "inherited from global" su una sola riga | S |
+| 6 | `duplicate-name` standalone di progetto vs standalone globale (solo AO) | 5 | VERO (copie scritte oggi alle 11:13Z in `ai-orchestration/.claude/skills`, non tracciate in git) ma manca il percorso di risoluzione | `resolve_conflicts` ha rami solo per standalone+plugin e solo plugin (`:1949`, `:2021`). I duplicati solo standalone non producono **alcun elemento nel piano**, eppure la UI li mostra in rosso con "Resolve…" | Aggiungere un ramo: identiche → cestinare la copia di progetto (o seguire una regola configurabile); diverse → avvisare con diff | S |
+| 7 | `stray` `~/.codex/config.json` (banner ambra) | 1 | VERO MA NON RISOLVIBILE DAL DOCTOR | Scritto il 2026-10-15 alle 14:21 dal vecchio `register-mcp` (spec E3). Codex legge `config.toml`. Secondo la spec §2.1 viene segnalato "senza eliminarlo" e non esiste alcuna azione | Azione "Move to trash" con anteprima, mostrando se ciascun server presente al suo interno è già in `config.toml` | S |
+| 8 | MCP `Overrides:` (ambra) su `playwright` di Kilo | 1 | VERO ma innocuo (definizioni identiche) | `kilo.json` (scritto nello stesso secondo del #7) e `kilo.jsonc` definiscono entrambi `playwright` con lo stesso comando. `read_kilo_merged_mcps` segnala qualsiasi ridefinizione (`:793-799`) senza confrontare il contenuto | Confrontare le configurazioni: "redundant (identical)" = info, "conflicting" = warning. Offrire la rimozione della voce da `kilo.json` | S |
+| 9 | Agente `kilo-mcp-orchestrator-agent.md` `foreign` (Claude) | 1 (solo JSON, non renderizzato) | FALSO (adattamento deliberato per assistente) | La copia di Claude omette il frontmatter `mode`/`permission` specifico di Kilo. Lo sha grezzo differisce (`:457-522`). La UI non ha alcuna tabella degli agenti | Trasformazione dell'agente per assistente al momento dell'installazione + hash dell'output trasformato. Renderizzare gli agenti nella UI | M |
+| 10 | (non segnalato) Copie dei plugin di Claude obsolete rispetto al sorgente | 2 plugin | CONTROLLO MANCANTE (problema VERO) | Le voci dei plugin ricevono sempre lo stato `plugin` (`:1136`) senza controllo di disallineamento. Cache del plugin `architect-side@ai-orchestration` = `30521e8a`, 69 commit indietro rispetto a HEAD. `architect-side@kilo-mcp` = `1a35cc0`, 7 indietro. Versioni in `plugin.json` invariate (0.3.0 / 0.2.2), quindi Claude non li aggiornerà. Conseguenza: "keep plugin copy" mantiene la copia **più vecchia** | Stato di disallineamento del plugin (`plugin-stale`) per i plugin il cui marketplace è un repository del catalogo. Avvisare "bump version and update plugin" | M |
+| 11 | (non segnalato) Duplicati tra directory diverse in Kilo e conflitto di trigger in Kilo | 14 nomi dup + 1 trigger | CONTROLLO MANCANTE (problema VERO) | Kilo carica `~/.claude/skills/**`, `~/.agents/skills/**`, `~/.config/kilo/{skill,skills}`, `~/.kilo/{skill,skills}`. Il Doctor scansiona solo `~/.kilo/skills` (`:259-274`) | Vista effettiva di Kilo su tutte le radici lette da Kilo | M |
+| 12 | (piano, non segnalazione) `install-skills` crea nuovi conflitti | 5 + 2 | VERO difetto di progettazione (ping-pong) | Il piano di installazione ignora la copertura dei plugin e la policy dei conflitti (`:1583-1619`) | Saltare i nomi forniti da un plugin abilitato e i nomi che la policy rimuoverebbe | S |
+| 13 | (piano, non segnalazione) `register-mcp` non idempotente | 2 | VERO (minore) | Pianifica `cli` anche quando `current_state: registered`, con un comando di avvio diverso | No-op quando è già registrato con un comando equivalente. Altrimenti un elemento `replace` che mostri il vecchio e il nuovo comando | S |
 
-## Evidence
+## Evidenze
 
-### 0. Commands run
+### 0. Comandi eseguiti
 
 ```sh
 ./bin/ai-orch env status --workspace /Users/Alfredo/works/ai-coding-tools --json      # rc=0
@@ -48,7 +48,7 @@ Counts are for `--workspace /Users/Alfredo/works/ai-coding-tools` unless marked 
 ./bin/ai-orch env register-mcp kilo-mcp --assistants all --scope global --dry-run [--json]   # rc=0
 ```
 
-Inventory from `env status --json` (counts of `(origin, state)` in `skill_entries`):
+Inventario da `env status --json` (conteggi di `(origin, state)` in `skill_entries`):
 
 ```text
 kilo   global  ~/.kilo/skills        unmanaged 21, up-to-date 7, foreign 5           structured: none
@@ -62,14 +62,14 @@ MCP: kilo global {codex-mcp, playwright(overrides kilo.json), redmine, sequentia
      claude global {codex, codex-mcp, kilo-mcp, playwright, redmine}; codex global {kilo-mcp, playwright, vscode-dap}
 ```
 
-No `modified-or-outdated` and no `obsolete-renamed` entries exist on this machine. Receipts check:
+Non esistono voci `modified-or-outdated` né `obsolete-renamed` su questa macchina. Controllo delle ricevute:
 
 ```text
 $ ls ~/.kilo/skills/*/.ai-orch-source.json ~/.claude/skills/*/.ai-orch-source.json ~/.codex/skills/*/.ai-orch-source.json
 no matches (0 / 0 / 0)
 ```
 
-`resolve-conflicts --dry-run` (the full plan has 12 items, all `ADVISE`, 0 `trash`):
+`resolve-conflicts --dry-run` (il piano completo ha 12 elementi, tutti `ADVISE`, 0 `trash`):
 
 ```text
 ADVISE ~/.claude/plugins/cache/ai-orchestration/architect-side/0.3.0/skills/orchestration-workflow
@@ -80,27 +80,27 @@ ADVISE ~/.claude/skills/frontend-design | gcube-component-release | gcube-jenkin
        liferay62-angular-portlet | task-pipeline   (same "differs ... review and remove one manually")
 ```
 
-### 1. `duplicate-name`: standalone vs plugin (11). TRUE, stuck in a no-op loop
+### 1. `duplicate-name`: standalone vs plugin (11). VERO, bloccato in un ciclo no-op
 
-They are real: Claude Code exposes both copies. In this very session's skill list, `gcube-jenkins` and `gcube-developer-tools:gcube-jenkins` both appear, as do `task-pipeline` and `architect-side:task-pipeline`, and so on.
+Sono reali: Claude Code espone entrambe le copie. Nell'elenco delle skill di questa stessa sessione compaiono sia `gcube-jenkins` sia `gcube-developer-tools:gcube-jenkins`, così come `task-pipeline` e `architect-side:task-pipeline`, e così via.
 
-Content comparison against the **active** plugin install path (from `installed_plugins.json`), excluding `index.json`, `.DS_Store`, `__pycache__` and `.pytest_cache`:
+Confronto del contenuto rispetto al percorso di installazione del plugin **attivo** (da `installed_plugins.json`), escludendo `index.json`, `.DS_Store`, `__pycache__` e `.pytest_cache`:
 
-| Skill | Diff lines vs active plugin | Byte-identical to a cached plugin version | Frontmatter-normalised equal to | Nature of the difference |
+| Skill | Righe di diff vs plugin attivo | Identica byte per byte a una versione in cache del plugin | Uguale dopo normalizzazione del frontmatter a | Natura della differenza |
 |---|---|---|---|---|
-| framework-skillset-generator | 134 (vs 0.2.0) | **0.1.0** | 0.1.0 | Older plugin version. Safe to drop |
-| gcube-component-release | 6 | none | **0.2.0, 0.2.1** | Frontmatter re-serialisation only |
-| gcube-liferay62-release-deploy | 8 | none | **0.2.0, 0.2.1** | Frontmatter only |
-| gcube-repo-standards | 6 | none | **0.2.1** | Frontmatter only |
-| liferay62-angular-portlet | 6 | none | **0.2.0, 0.2.1** | Frontmatter only |
-| gcube-jenkins | 6 + extra `references/` dir | none | none | Standalone has extra files. Real divergence |
-| gcube-security-audit | 267 + extra `assets/`, `references/`, 3 scripts | none | none | Real divergence (standalone is richer) |
-| frontend-design | 93; plugin has `LICENSE`, `local.patch` | none | none | Real divergence (plugin is patched) |
-| task-pipeline | 241 | none | none | Ours. Standalone is **newer** than the plugin (see #10) |
-| kilo-mcp-orchestrator | 88 | none | none | Ours. Standalone is newer than the plugin |
-| kilo-mcp-conflict-resolver | 16 | none | none | Ours. Standalone is newer than the plugin |
+| framework-skillset-generator | 134 (vs 0.2.0) | **0.1.0** | 0.1.0 | Versione precedente del plugin. Sicura da eliminare |
+| gcube-component-release | 6 | nessuna | **0.2.0, 0.2.1** | Solo ri-serializzazione del frontmatter |
+| gcube-liferay62-release-deploy | 8 | nessuna | **0.2.0, 0.2.1** | Solo frontmatter |
+| gcube-repo-standards | 6 | nessuna | **0.2.1** | Solo frontmatter |
+| liferay62-angular-portlet | 6 | nessuna | **0.2.0, 0.2.1** | Solo frontmatter |
+| gcube-jenkins | 6 + dir extra `references/` | nessuna | nessuna | La standalone ha file extra. Divergenza reale |
+| gcube-security-audit | 267 + extra `assets/`, `references/`, 3 script | nessuna | nessuna | Divergenza reale (la standalone è più ricca) |
+| frontend-design | 93; il plugin ha `LICENSE`, `local.patch` | nessuna | nessuna | Divergenza reale (il plugin ha una patch) |
+| task-pipeline | 241 | nessuna | nessuna | Nostra. La standalone è **più recente** del plugin (vedi #10) |
+| kilo-mcp-orchestrator | 88 | nessuna | nessuna | Nostra. La standalone è più recente del plugin |
+| kilo-mcp-conflict-resolver | 16 | nessuna | nessuna | Nostra. La standalone è più recente del plugin |
 
-The "frontmatter only" diff looks like this (standalone vs plugin):
+Il diff di "solo frontmatter" appare così (standalone vs plugin):
 
 ```text
 $ diff ~/.claude/skills/gcube-jenkins/SKILL.md ~/.claude/plugins/cache/gcube-ai-toolkit/gcube-developer-tools/0.2.1/skills/gcube-jenkins/SKILL.md
@@ -114,31 +114,31 @@ $ diff ~/.claude/skills/gcube-jenkins/SKILL.md ~/.claude/plugins/cache/gcube-ai-
 >   version: 1.0.0
 ```
 
-The standalone copies were written by an installer that serialises frontmatter one line per key and flattens the nested `metadata` map. The pattern is consistent with `ai-swissknife/src/adapters/claude.ts:159-171` (`serializeSkillMarkdown`: ``fm += `${key}: ${serializeYamlValue(value)}\n` ``), but the writer was **not proven**. Either way this is a real, if small, corruption of the copy: `metadata` lost its children.
+Le copie standalone sono state scritte da un installer che serializza il frontmatter una riga per chiave e appiattisce la mappa annidata `metadata`. Il pattern è coerente con `ai-swissknife/src/adapters/claude.ts:159-171` (`serializeSkillMarkdown`: ``fm += `${key}: ${serializeYamlValue(value)}\n` ``), but the writer was **not proven**. Either way this is a real, if small, corruption of the copy: `metadata` ha perso i suoi elementi figli.
 
-Why the finding persists:
+Perché la segnalazione persiste:
 
-- `orchestration_env.py:1978-1982`: a standalone copy is trashed only if `state == up-to-date`, or it is byte-identical to a current plugin copy, or its hash is in the catalog. These skills are `unmanaged` or `foreign`, and none is byte-identical to the **active** plugin version. Comparing against older cached versions or normalised content is not attempted.
-- `:2002-2019`: otherwise `advise`, and nothing is added to `c_items`.
-- `:2081-2097`: apply iterates `conflict_items` only, so it moves nothing, returns `ok: true, resolved_count: 0`, and the UI calls `onRefresh()` (`EnvironmentDoctor.tsx:56-58`). The same banners come back.
-- UI: `hasResolvableConflicts` is true whenever any entry is standalone (`EnvironmentDoctor.tsx:30-41`). Each such banner is red with "Resolve…" (`:317-358`). `ConfirmDialog` supports `isApplyDisabled` (`ConfirmDialog.tsx:35,452`), but the Doctor never passes it (`EnvironmentDoctor.tsx:572-585`), so "Confirm & Apply" is enabled on an all-`advise` plan.
+- `orchestration_env.py:1978-1982`: una copia standalone viene cestinata solo se `state == up-to-date`, o se è identica byte per byte a una copia attuale del plugin, o se il suo hash è nel catalogo. Queste skill sono `unmanaged` o `foreign`, e nessuna è identica byte per byte alla versione **attiva** del plugin. Non viene tentato il confronto con versioni precedenti in cache né con il contenuto normalizzato.
+- `:2002-2019`: altrimenti diventa `advise` e non viene aggiunto nulla a `c_items`.
+- `:2081-2097`: l'applicazione itera solo su `conflict_items`, quindi non sposta nulla, restituisce `ok: true, resolved_count: 0` e la UI chiama `onRefresh()` (`EnvironmentDoctor.tsx:56-58`). Ricompaiono gli stessi banner.
+- UI: `hasResolvableConflicts` è vero ogni volta che una voce qualsiasi è standalone (`EnvironmentDoctor.tsx:30-41`). Ciascuno di questi banner è rosso con "Resolve…" (`:317-358`). `ConfirmDialog` supporta `isApplyDisabled` (`ConfirmDialog.tsx:35,452`), ma il Doctor non lo passa mai (`EnvironmentDoctor.tsx:572-585`), quindi "Confirm & Apply" resta abilitato anche su un piano composto interamente da `advise`.
 
-### 2. `trigger-conflict` (Claude). TRUE, not actionable by the Doctor
+### 2. `trigger-conflict` (Claude). VERO, non risolvibile dal Doctor
 
-Entries: `plugin:architect-side@ai-orchestration` `orchestration-workflow`, standalone `~/.claude/skills/kilo-mcp-orchestrator` (`foreign`), and `plugin:architect-side@kilo-mcp` `kilo-mcp-orchestrator`. Both descriptions start with "Orchestrate an Executor agent / Orchestrate Kilo (the Executor) ..." and overlap almost word for word, so the trigger competition is real.
+Voci: `plugin:architect-side@ai-orchestration` `orchestration-workflow`, standalone `~/.claude/skills/kilo-mcp-orchestrator` (`foreign`) e `plugin:architect-side@kilo-mcp` `kilo-mcp-orchestrator`. Entrambe le descrizioni iniziano con "Orchestrate an Executor agent / Orchestrate Kilo (the Executor) ..." e si sovrappongono quasi parola per parola, quindi la competizione sul trigger è reale.
 
-`load_conflict_policy` defaults to `claude = bound` (`:536-540`), so the generic skill must go. It exists only as a plugin, so the plan is `ADVISE disable plugin architect-side@ai-orchestration` (`:1926-1943`). That plugin also provides `task-pipeline`, `task-spec-authoring`, `task-worktree-ops`, `orchestration-metrics` and `conflict-resolver`, so following the advice would remove 5 skills the owner uses. The advice is disproportionate, and in practice the owner keeps both plugins enabled on purpose (`~/.claude/settings.json` `enabledPlugins`: all 7 true).
+`load_conflict_policy` imposta di default `claude = bound` (`:536-540`), perciò la skill generica deve essere rimossa. Esistendo solo come plugin, il piano è `ADVISE disable plugin architect-side@ai-orchestration` (`:1926-1943`). Quel plugin fornisce anche `task-pipeline`, `task-spec-authoring`, `task-worktree-ops`, `orchestration-metrics` e `conflict-resolver`, quindi seguire il consiglio rimuoverebbe 5 skill utilizzate dall'owner. Il consiglio è sproporzionato e in pratica l'owner mantiene intenzionalmente entrambi i plugin abilitati (`~/.claude/settings.json` `enabledPlugins`: tutti e 7 a true).
 
-Because the standalone `kilo-mcp-orchestrator` is in `entries`, `isAllPlugin` is false (`EnvironmentDoctor.tsx:284`) and the banner is red with "Resolve…". It never resolves.
+Poiché `kilo-mcp-orchestrator` standalone è in `entries`, `isAllPlugin` è falso (`EnvironmentDoctor.tsx:284`) e il banner è rosso con "Resolve…". Non si risolve mai.
 
-Two side observations:
+Due osservazioni collaterali:
 
-- The trigger pair is hard-coded (`:1213-1215`). The analogous pair `executor-contract` / `kilo-mcp-executor-contract`, present in all three assistants, is not checked.
-- For Codex and Kilo the hard-coded pair causes a ping-pong with `install-skills` (#12).
+- La coppia di trigger è cablata nel codice (`:1213-1215`). La coppia analoga `executor-contract` / `kilo-mcp-executor-contract`, presente in tutti e tre gli assistenti, non viene controllata.
+- Per Codex e Kilo la coppia cablata causa un effetto ping-pong con `install-skills` (#12).
 
-### 3. `foreign` (17). Mostly misclassified legacy installs
+### 3. `foreign` (17). Per lo più installazioni legacy classificate erroneamente
 
-Method: `git hash-object` of the installed `SKILL.md` (or a script), then `git log --all --find-object=<blob>` on the source file in the catalog repo. Only the sampled file was blob-matched, not every file in the directory.
+Metodo: `git hash-object` del file `SKILL.md` installato (o di uno script), seguito da `git log --all --find-object=<blob>` sul file sorgente nel repository del catalogo. Solo il file campionato è stato confrontato tramite blob, non ogni singolo file della directory.
 
 ```text
 ~/.{kilo,claude,codex}/skills/task-pipeline/SKILL.md          -> ai-orchestration 2e5a6c2 2026-10-16
@@ -152,25 +152,25 @@ Method: `git hash-object` of the installed `SKILL.md` (or a script), then `git l
 ~/.kilo/skills/kilo-mcp-executor-contract/SKILL.md            -> no match; 27 diff lines (quoting + missing "Blocking questions" section = outdated)
 ```
 
-So 14/17 are **outdated copies of our own catalog**, 2/17 are **semantically identical** (only YAML quoting differs), and 1/17 is outdated with a re-serialised frontmatter. None is foreign in the plain sense of "comes from another source".
+Quindi 14 su 17 sono **copie obsolete del nostro stesso catalogo**, 2 su 17 sono **semanticamente identiche** (differisce solo la quotatura YAML) e 1 su 17 è obsoleta con frontmatter ri-serializzato. Nessuna è estranea nel senso comune di "proveniente da un'altra fonte".
 
-The code conforms to spec A4 (`:436-454`, "no receipt and no hash match → foreign"). The rule itself mislabels pre-receipt installs. Spec E4 records that the old installer clobbered these very directories, so they are ours.
+Il codice è conforme alla regola A4 della specifica (`:436-454`, "nessuna ricevuta e nessuna corrispondenza hash → foreign"). È la regola stessa a etichettare erroneamente le installazioni precedenti all'introduzione delle ricevute. La specifica E4 documenta che il vecchio installer sovrascriveva proprio queste directory, quindi sono nostre.
 
-Why they persist:
+Perché persistono:
 
-- `install-skills --dry-run` shows `SKIP ... (Skip foreign skill '<name>': not in --overwrite list)` for 13 of them (`:1602-1610`).
-- The UI installer never sends `overwrite` (`SkillInstaller.tsx:39`, `:48`, only `api.ts:287-319` has the parameter).
-- The only UI path is per-row trash (`EnvironmentDoctor.tsx:476-492`) followed by a reinstall, which nobody discovers. The badge is amber with no explanation.
+- `install-skills --dry-run` mostra `SKIP ... (Skip foreign skill '<name>': not in --overwrite list)` per 13 di esse (`:1602-1610`).
+- L'installer della UI non invia mai `overwrite` (`SkillInstaller.tsx:39`, `:48`, solo `api.ts:287-319` ha il parametro).
+- L'unico percorso nella UI è il cestino sulla singola riga (`EnvironmentDoctor.tsx:476-492`) seguito da una reinstallazione, cosa che nessuno scopre. Il badge è ambra senza alcuna spiegazione.
 
-### 4. `unmanaged` (38). FALSE as a warning
+### 4. `unmanaged` (38). FALSO come avviso
 
-`discover_available_skills` scans only `ai-orchestration`, `kilo-mcp`, `claude-mcp` (`:339`). Everything else is `unmanaged`: the gcube toolkit skills, third-party skills, `impeccable`, the `d4science-*` skills, the project `ai-debugger`, and so on. These are legitimate and not drift. The state badge colour falls through to amber (`#451a03`/`#fbbf24`) for any state that is not `up-to-date`, `plugin` or `obsolete*` (`EnvironmentDoctor.tsx:455-470`), the same colour as `foreign`. So 38 entries look like problems.
+`discover_available_skills` scansiona solo `ai-orchestration`, `kilo-mcp`, `claude-mcp` (`:339`). Tutto il resto è `unmanaged`: le skill del toolkit gcube, le skill di terze parti, `impeccable`, le skill `d4science-*`, `ai-debugger` di progetto e così via. Sono legittime e non rappresentano un disallineamento. Il colore del badge di stato ricade sull'ambra (`#451a03`/`#fbbf24`) per qualsiasi stato diverso da `up-to-date`, `plugin` o `obsolete*` (`EnvironmentDoctor.tsx:455-470`), lo stesso colore di `foreign`. Così 38 voci sembrano problemi.
 
-### 5. Claude project scope duplicates the global view. FALSE (presentation)
+### 5. Lo scope di progetto di Claude duplica la vista globale. FALSO (presentazione)
 
-`inspect_environment` adds all `user`-scope plugin skills to the project entries (`:1138-1149`) and computes project conflicts over project entries + global standalone (`:1192-1195`). The project section therefore repeats the same 12 conflicts and 33 plugin rows (34 in the AO view). The owner sees 24 red banners for 12 problems.
+`inspect_environment` aggiunge tutte le skill dei plugin con scope `user` alle voci di progetto (`:1138-1149`) e calcola i conflitti di progetto sulle voci di progetto + le standalone globali (`:1192-1195`). La sezione di progetto ripete quindi gli stessi 12 conflitti e le 33 righe dei plugin (34 nella vista AO). L'owner vede 24 banner rossi per 12 problemi.
 
-### 6. Project vs global standalone duplicates (AO workspace, 5). TRUE, no resolution path
+### 6. Duplicati standalone di progetto vs globali (workspace AO, 5). VERO, nessun percorso di risoluzione
 
 ```text
 duplicate-name executor-contract          [project up-to-date, global foreign]
@@ -180,24 +180,24 @@ duplicate-name kilo-mcp-rag-explorer      [project up-to-date, global up-to-date
 duplicate-name orchestration-setup        [project up-to-date, global foreign]
 ```
 
-- The project copies carry receipts with `installed_at: 2026-10-17T11:13:24Z`, so they came from an `install-skills --scope project` run today.
-- `git status` shows `?? .claude/`, `?? .codex/`, `?? .kilo/skills/`, `?? .kilo/agents/`, `?? .kilo/kilo.json`: untracked, not ignored.
-- `resolve_conflicts` handles `duplicate-name` only when `standalone_entries and plugin_entries` (`:1949`) or plugins only (`:2021`). Standalone-only duplicates get no plan item, while the UI shows them red with "Resolve…".
-- Owner decision needed (not the Doctor's): keep these project copies (then add them to `.gitignore` or commit them) or remove them.
+- Le copie di progetto hanno ricevute con `installed_at: 2026-10-17T11:13:24Z`, quindi provengono da un'esecuzione di `install-skills --scope project` avvenuta oggi.
+- `git status` mostra `?? .claude/`, `?? .codex/`, `?? .kilo/skills/`, `?? .kilo/agents/`, `?? .kilo/kilo.json`: non tracciati e non ignorati.
+- `resolve_conflicts` gestisce `duplicate-name` solo quando `standalone_entries and plugin_entries` (`:1949`) o solo plugin (`:2021`). I duplicati solo standalone non ricevono alcun elemento nel piano, mentre la UI li mostra in rosso con "Resolve…".
+- Serve una decisione dell'owner (non del Doctor): mantenere queste copie di progetto (aggiungendole a `.gitignore` o committandole) oppure rimuoverle.
 
-### 7. Stray `~/.codex/config.json`. TRUE, not actionable
+### 7. File orfano `~/.codex/config.json`. VERO, non risolvibile automaticamente
 
-- Modification time `Oct 15 14:21:38 2026`, identical to `~/.config/kilo/kilo.json`. This matches spec E3: the old `register-mcp` wrote it.
-- Contents: `mcpServers: {kilo-mcp (.venv/bin/python server.py), codex-mcp}`.
-- Codex reads `config.toml`, which has `kilo-mcp` (via `uv run`), `playwright`, `vscode-dap`. So the JSON's `codex-mcp` entry has never been active for Codex.
-- The detection (`:1298-1301`) is correct. Spec §2.1 says "report ... without deleting them", so there is no action and the banner stays forever. The banner text ("ignored by the assistant's runtime", `EnvironmentDoctor.tsx:165-187`) is accurate but gives no next step.
-- Separately, `ai-swissknife/src/adapters/codex.ts:243` also targets `~/.codex/config.json`. That is a second writer to fix in that repo, or the file will come back.
+- Data di modifica `Oct 15 14:21:38 2026`, identica a `~/.config/kilo/kilo.json`. Questo corrisponde alla specifica E3: lo ha scritto il vecchio `register-mcp`.
+- Contenuto: `mcpServers: {kilo-mcp (.venv/bin/python server.py), codex-mcp}`.
+- Codex legge `config.toml`, che contiene `kilo-mcp` (tramite `uv run`), `playwright`, `vscode-dap`. Quindi la voce `codex-mcp` del JSON non è mai stata attiva per Codex.
+- Il rilevamento (`:1298-1301`) è corretto. La specifica §2.1 dice di "segnalarli ... senza eliminarli", quindi non c'è alcuna azione e il banner resta per sempre. Il testo del banner ("ignored by the assistant's runtime", `EnvironmentDoctor.tsx:165-187`) è accurato ma non indica il passo successivo.
+- Separatamente, anche `ai-swissknife/src/adapters/codex.ts:243` punta a `~/.codex/config.json`. È un secondo componente da correggere in quel repository, altrimenti il file tornerà a comparire.
 
-### 8. Kilo MCP override (`playwright`). TRUE but benign
+### 8. Override MCP di Kilo (`playwright`). VERO ma innocuo
 
-`~/.config/kilo/kilo.json` and `kilo.jsonc` both define `playwright` as `["npx","-y","@playwright/mcp@0.0.38"]`, so the definitions are identical. The merge reader appends to `overrides` on any redefinition (`:793-799`) without comparing content, and the UI shows it in amber (`EnvironmentDoctor.tsx:540-544`). Kilo's own merge precedence makes `kilo.jsonc` win (spec A1), so nothing is broken.
+`~/.config/kilo/kilo.json` e `kilo.jsonc` definiscono entrambi `playwright` come `["npx","-y","@playwright/mcp@0.0.38"]`, quindi le definizioni sono identiche. Il lettore di merge aggiunge una voce a `overrides` a qualsiasi ridefinizione (`:793-799`) senza confrontare il contenuto, e la UI la mostra in ambra (`EnvironmentDoctor.tsx:540-544`). La precedenza di merge propria di Kilo fa vincere `kilo.jsonc` (spec A1), quindi non c'è nulla di rotto.
 
-### 9. Agent `kilo-mcp-orchestrator-agent.md` (Claude, `foreign`). FALSE, not rendered
+### 9. Agente `kilo-mcp-orchestrator-agent.md` (Claude, `foreign`). FALSO, non renderizzato
 
 ```text
 $ diff ~/.claude/agents/kilo-mcp-orchestrator-agent.md kilo-mcp/plugins/architect-side/agents/kilo-mcp-orchestrator-agent.md
@@ -206,11 +206,11 @@ $ diff ~/.claude/agents/kilo-mcp-orchestrator-agent.md kilo-mcp/plugins/architec
 > permission: {read, edit, bash, mcp: allow}
 ```
 
-- The Claude copy is the Kilo agent minus the Kilo-only frontmatter, a deliberate adaptation.
-- `install_skills` copies the same agent file verbatim to Claude and Kilo (`:1523-1580`), so a reinstall would put the Kilo fields into Claude.
-- `EnvironmentDoctor.tsx` never renders `agents` (0 occurrences), so the owner never sees this.
+- La copia di Claude è l'agente di Kilo privato del frontmatter specifico di Kilo, un adattamento deliberato.
+- `install_skills` copia lo stesso file agente identico su Claude e Kilo (`:1523-1580`), quindi una reinstallazione inserirebbe i campi di Kilo in Claude.
+- `EnvironmentDoctor.tsx` non renderizza mai `agents` (0 occorrenze), perciò l'owner non lo vede mai.
 
-### 10. Stale Claude plugin copies. Missing check
+### 10. Copie dei plugin di Claude obsolete. Controllo mancante
 
 ```text
 installed_plugins.json: architect-side@ai-orchestration 0.3.0 gitCommitSha 30521e8a (2026-10-15 12:33) -> 69 commits behind ai-orchestration HEAD
@@ -223,17 +223,17 @@ diff lines vs source repo (excl. index.json, fixtures, caches):
   kilo-mcp-conflict-res.  standalone    2 | plugin   14
 ```
 
-In all three overlaps with our own skills, the standalone copy is closer to the source than the plugin copy. The resolve rule "plugin copy kept" (`:1988`) would therefore keep the staler copy. Plugin entries are always state `plugin` (`:1136`) with no drift check.
+In tutte e tre le sovrapposizioni con le nostre skill, la copia standalone è più vicina al sorgente rispetto alla copia del plugin. La regola di risoluzione "plugin copy kept" (`:1988`) manterrebbe quindi la copia più vecchia. Le voci dei plugin hanno sempre stato `plugin` (`:1136`) senza alcun controllo di disallineamento.
 
-### 11. Kilo's effective skill set. Missing check
+### 11. Insieme effettivo delle skill di Kilo. Controllo mancante
 
-Kilo source (`references/kilocode/kilocode/packages/opencode/src`):
+Sorgente di Kilo (`references/kilocode/kilocode/packages/opencode/src`):
 
-- `skill/index.ts:24-25,29-30`: external dirs `.claude`, `.agents` with pattern `skills/**/SKILL.md`; config dirs with `{skill,skills}/**/SKILL.md`.
-- `skill/index.ts:240-246`: global scan of `~/.claude/skills` and `~/.agents/skills` unless `KILO_DISABLE_CLAUDE_CODE_SKILLS` / `KILO_DISABLE_EXTERNAL_SKILLS` is set. Neither is set, and the config does not disable it.
-- `skill/index.ts:271-282` + `config/paths.ts:23-40`: config dirs = `~/.config/kilo` + `.kilo`/`.kilocode` found walking up from home and the project.
+- `skill/index.ts:24-25,29-30`: directory esterne `.claude`, `.agents` con pattern `skills/**/SKILL.md`; directory di configurazione con `{skill,skills}/**/SKILL.md`.
+- `skill/index.ts:240-246`: scansione globale di `~/.claude/skills` e `~/.agents/skills` a meno che non sia impostato `KILO_DISABLE_CLAUDE_CODE_SKILLS` / `KILO_DISABLE_EXTERNAL_SKILLS`. Nessuno dei due è impostato e la configurazione non lo disabilita.
+- `skill/index.ts:271-282` + `config/paths.ts:23-40`: directory di configurazione = `~/.config/kilo` + `.kilo`/`.kilocode` trovate risalendo dalla home e dal progetto.
 
-The Doctor scans only `~/.kilo/skills` (`assistant_skills_dir`, `:259-274`). Same-name skills Kilo sees from more than one root, excluding Claude-synced account skills:
+Il Doctor scansiona solo `~/.kilo/skills` (`assistant_skills_dir`, `:259-274`). Skill con lo stesso nome che Kilo vede da più di una radice, escludendo le skill sincronizzate dall'account Claude:
 
 ```text
 executor-contract, framework-skillset-generator, frontend-design, gcube-jenkins, gcube-liferay62-release-deploy,
@@ -242,25 +242,25 @@ kilo-mcp-metrics-analyst, kilo-mcp-rag-explorer, orchestration-setup, task-pipel
 toolkit-release-manager                                   (~/.config/kilo/skills + ~/.kilo/skills + ~/.claude/skills)
 ```
 
-That is 14. In addition:
+Sono 14. Inoltre:
 
-- Kilo sees `orchestration-workflow` (`~/.kilo/skills`) **and** `kilo-mcp-orchestrator` (`~/.claude/skills`): a real Kilo trigger conflict that the Doctor reports as "no conflicts".
-- `~/.claude/skills/synced/**` (Claude account-synced skills, up to 4 copies each of `docx`, `pdf`, `pptx`, …) and `~/.claude/skills/.trash/**` (5 `SKILL.md`) are inside Kilo's `skills/**` glob with `dot: true`. This is probably loaded by Kilo too; not verified at runtime.
+- Kilo vede `orchestration-workflow` (`~/.kilo/skills`) **e** `kilo-mcp-orchestrator` (`~/.claude/skills`): un vero conflitto di trigger in Kilo che il Doctor riporta come "no conflicts".
+- `~/.claude/skills/synced/**` (skill sincronizzate dall'account Claude, fino a 4 copie ciascuna di `docx`, `pdf`, `pptx`, …) e `~/.claude/skills/.trash/**` (5 `SKILL.md`) rientrano nel glob `skills/**` di Kilo con `dot: true`. Probabilmente anche queste vengono caricate da Kilo; non verificato a runtime.
 
-### 12. `install-skills` creates the conflicts that `resolve-conflicts` then reports
+### 12. `install-skills` crea i conflitti che `resolve-conflicts` poi segnala
 
-From `install-skills --dry-run --assistants all --scope global`:
+Da `install-skills --dry-run --assistants all --scope global`:
 
 ```text
 CREATE ~/.claude/skills/{conflict-resolver, orchestration-metrics, orchestration-workflow, task-spec-authoring, task-worktree-ops}
 CREATE ~/.codex/skills/orchestration-workflow
 ```
 
-- All 5 Claude names are already provided by the enabled plugin `architect-side@ai-orchestration`, so applying would add 5 new `duplicate-name` conflicts.
-- `orchestration-workflow` in Claude/Codex is exactly what the `bound` policy removes. Install and resolve undo each other.
-- The install plan (`:1583-1619`) looks at neither plugins nor the conflict policy.
+- Tutti e 5 i nomi di Claude sono già forniti dal plugin abilitato `architect-side@ai-orchestration`, quindi applicare il piano aggiungerebbe 5 nuovi conflitti `duplicate-name`.
+- `orchestration-workflow` in Claude/Codex è esattamente ciò che la policy `bound` rimuove. Installazione e risoluzione si annullano a vicenda.
+- Il piano di installazione (`:1583-1619`) non considera né i plugin né la policy dei conflitti.
 
-### 13. `register-mcp` plan
+### 13. Piano di `register-mcp`
 
 ```text
 EDIT ~/.config/kilo/kilo.json   current_state unregistered   (adds kilo-mcp to Kilo itself)
@@ -268,133 +268,133 @@ CLI  claude mcp add --scope user kilo-mcp -- .../kilo-mcp/.venv/bin/python .../s
 CLI  codex mcp add kilo-mcp -- .../kilo-mcp/.venv/bin/python .../server.py                current_state: registered
 ```
 
-- Both CLI items run although the server is registered. The existing registration uses `uv run --no-project --with mcp>=2 python .../server.py`, so the item would replace the owner's chosen launch command, or fail. What `claude mcp add` does with an existing name was not verified.
-- Registering `kilo-mcp` inside Kilo means Kilo delegating to Kilo, which is questionable as a default for `--assistants all`.
-- This is not a Doctor finding, but it is part of "the fixes don't work as I expect".
+- Entrambi gli elementi CLI vengono eseguiti anche se il server è già registrato. La registrazione esistente usa `uv run --no-project --with mcp>=2 python .../server.py`, quindi l'elemento sostituirebbe il comando di avvio scelto dall'owner, oppure fallirebbe. Il comportamento di `claude mcp add` con un nome già esistente non è stato verificato.
+- Registrare `kilo-mcp` dentro Kilo significa che Kilo delega a Kilo, il che è discutibile come impostazione predefinita per `--assistants all`.
+- Questa non è una segnalazione del Doctor, ma fa parte del problema "le correzioni non funzionano come previsto".
 
-## Proposed changes (prioritised, each ready to become a task)
+## Modifiche proposte (in ordine di priorità, ciascuna pronta a diventare un task)
 
-### P1-a. Stop the no-op "Resolve" loop (S)
+### P1-a. Interrompere il ciclo no-op di "Resolve" (S)
 
-- **Goal:** a conflict is shown as fixable only when the plan contains an executable action for it. An all-advise plan cannot be "applied".
-- **Files:**
-  - `scripts/orchestration_env.py`: in `inspect_environment`, attach to each `structured_conflicts` item `actionable: bool` and `advice: str`, computed by the same rules `resolve_conflicts` uses. Factor the per-conflict decision into one function shared by both.
-  - `EnvironmentDoctor.tsx`: red + "Resolve…" only if `actionable`. `hasResolvableConflicts` uses `actionable`. Pass `isApplyDisabled` when the plan has no `trash`/`replace` items and change the button label to "Nothing to apply".
-- **Verification:** on the current home, the Doctor shows no red "Resolve…" for the 12 Claude conflicts (they become info/advice). A test fixture with one byte-identical standalone+plugin pair still shows red and resolves. Unit test: a plan with only `advise` sets `isApplyDisabled`.
+- **Obiettivo:** un conflitto viene mostrato come risolvibile solo quando il piano contiene un'azione eseguibile per esso. Un piano composto solo da avvisi non può essere "applicato".
+- **File:**
+  - `scripts/orchestration_env.py`: in `inspect_environment`, allegare a ciascun elemento di `structured_conflicts` i campi `actionable: bool` e `advice: str`, calcolati con le stesse regole usate da `resolve_conflicts`. Fattorizzare la decisione per singolo conflitto in un'unica funzione condivisa da entrambi.
+  - `EnvironmentDoctor.tsx`: rosso + "Resolve…" solo se `actionable`. `hasResolvableConflicts` usa `actionable`. Passare `isApplyDisabled` quando il piano non ha elementi `trash`/`replace` e cambiare l'etichetta del pulsante in "Nothing to apply".
+- **Verifica:** sulla home attuale, il Doctor non mostra alcun "Resolve…" rosso per i 12 conflitti di Claude (diventano info/avvisi). Una fixture di test con una coppia standalone+plugin identica byte per byte mostra ancora il rosso e risolve il conflitto. Unit test: un piano con soli `advise` imposta `isApplyDisabled`.
 
-### P1-b. Severity model, de-duplication, acknowledge (M)
+### P1-b. Modello di severità, deduplicazione, presa d'atto (M)
 
-- **Goal:** the owner sees only what needs action. Anything known and accepted stays quiet until it changes.
-- **Severity levels:**
-  - `error`: actionable conflict.
-  - `warning`: actionable drift (`outdated-legacy`, `modified-or-outdated`, `plugin-stale`, conflicting MCP override).
-  - `info`: true but not actionable (plugin-only conflicts, trigger conflict with plugins, stray file, redundant MCP override).
-  - `neutral`: `unmanaged`/external, `plugin`.
-- **Grouping:** group by kind across assistants ("11 skills duplicated between ~/.claude/skills and Claude plugins"), expandable per item. In project scope show only conflicts that involve a project entry, plus one line "N conflicts inherited from global".
-- **Acknowledge:** per finding, persisted in `~/.config/ai-orchestration/doctor-ack.json`, written only through a previewed CLI command (`env ack --dry-run/--expect-plan-hash`). The key is `(assistant, scope, kind, names, sorted content hashes of the entries)`, so an acknowledged finding comes back when any copy changes. A "show acknowledged" toggle.
-- **Explanation text per kind:** what it means, why the Doctor cannot fix it, the exact manual step. Examples:
+- **Obiettivo:** l'owner vede solo ciò che richiede un'azione. Tutto ciò che è noto e accettato rimane silenzioso finché non cambia.
+- **Livelli di severità:**
+  - `error`: conflitto risolvibile.
+  - `warning`: disallineamento risolvibile (`outdated-legacy`, `modified-or-outdated`, `plugin-stale`, override MCP in conflitto).
+  - `info`: vero ma non risolvibile automaticamente (conflitti tra soli plugin, conflitto di trigger con plugin, file orfano, override MCP ridondante).
+  - `neutral`: `unmanaged`/esterno, `plugin`.
+- **Raggruppamento:** raggruppare per tipo tra gli assistenti ("11 skills duplicated between ~/.claude/skills and Claude plugins"), espandibile per singolo elemento. Nello scope di progetto mostrare solo i conflitti che coinvolgono una voce di progetto, più una riga "N conflicts inherited from global".
+- **Presa d'atto (Acknowledge):** per singola segnalazione, salvata in modo persistente in `~/.config/ai-orchestration/doctor-ack.json`, scritta solo tramite un comando CLI con anteprima (`env ack --dry-run/--expect-plan-hash`). La chiave è `(assistant, scope, kind, names, sorted content hashes of the entries)`, così una segnalazione riconosciuta ricompare quando una copia qualsiasi cambia. Un interruttore "show acknowledged".
+- **Testo di spiegazione per tipo:** cosa significa, perché il Doctor non può risolverlo, il passo manuale esatto. Esempi:
   - "Claude loads both copies; the plugin is managed by Claude's plugin manager. To remove the standalone copy use the trash icon; to remove the plugin copy disable `<id>` in enabledPlugins."
-  - For the trigger conflict: "disabling `architect-side@ai-orchestration` also removes task-pipeline, task-spec-authoring, …".
-- **Files:** `orchestration_env.py` (severity field, ack store + `env ack` command), `EnvironmentDoctor.tsx`, `server.py` (ack endpoints using preview/apply), types.
-- **Verification:**
-  - On the current home the top of the Doctor shows ≤ 5 groups.
-  - Acknowledging the trigger conflict hides it, and it reappears after touching the standalone `SKILL.md` in a fake home.
-  - The `unmanaged` rows are grey.
+  - Per il conflitto di trigger: "disabling `architect-side@ai-orchestration` also removes task-pipeline, task-spec-authoring, …".
+- **File:** `orchestration_env.py` (campo severità, archivio ack + comando `env ack`), `EnvironmentDoctor.tsx`, `server.py` (endpoint ack con anteprima/applicazione), tipi.
+- **Verifica:**
+  - Sulla home attuale la parte superiore del Doctor mostra ≤ 5 gruppi.
+  - Riconoscere il conflitto di trigger lo nasconde, e ricompare dopo aver modificato il `SKILL.md` standalone in una home fittizia.
+  - Le righe `unmanaged` sono grigie.
 
-### P1-c. Smarter duplicate resolution: equality and history (M)
+### P1-c. Risoluzione più intelligente dei duplicati: uguaglianza e cronologia (M)
 
-- **Goal:** auto-resolve standalone copies that are only older or re-serialised versions of what a plugin or the catalog provides.
-- **Rules**, in order (a standalone entry is safe to trash, with the plugin kept, when any holds):
-  1. byte-identical to the active plugin copy (today's rule);
-  2. byte-identical to **any cached version** of the same plugin under `~/.claude/plugins/cache/<marketplace>/<plugin>/*/skills/<name>`;
-  3. equal after frontmatter normalisation: YAML-parse, merge a flattened `metadata`, drop empty values, compare body + parsed keys;
-  4. for our own skills, every file's blob is in the git history of the catalog source **and** the plugin copy is not older (see P1-d).
+- **Obiettivo:** risolvere automaticamente le copie standalone che sono solo versioni più vecchie o ri-serializzate di ciò che fornisce un plugin o il catalogo.
+- **Regole**, in ordine (una voce standalone è sicura da cestinare, mantenendo il plugin, quando vale una qualsiasi delle seguenti condizioni):
+  1. identica byte per byte alla copia del plugin attivo (regola odierna);
+  2. identica byte per byte a **qualsiasi versione in cache** dello stesso plugin sotto `~/.claude/plugins/cache/<marketplace>/<plugin>/*/skills/<name>`;
+  3. uguale dopo la normalizzazione del frontmatter: parsing YAML, unione di un `metadata` appiattito, rimozione dei valori vuoti, confronto del corpo + chiavi analizzate;
+  4. per le nostre skill, il blob di ogni file è nella cronologia git del sorgente del catalogo **e** la copia del plugin non è più vecchia (vedi P1-d).
 
-  Otherwise advise, with a diff link.
-- **Expected on this machine:** 5/11 become auto-resolvable (framework-skillset-generator, gcube-component-release, gcube-liferay62-release-deploy, gcube-repo-standards, liferay62-angular-portlet). gcube-jenkins, gcube-security-audit and frontend-design stay as advice with a diff. task-pipeline, kilo-mcp-orchestrator and kilo-mcp-conflict-resolver wait for P1-d.
-- **Files:** `orchestration_env.py` (`resolve_conflicts` `:1945-2044`, new helper `skill_equivalent(a, b)`), tests.
-- **Verification:** a fixture home reproducing the gcube-jenkins frontmatter flattening resolves to `trash`. A fixture with an extra file stays `advise`. `resolve-conflicts --dry-run` on the real home lists exactly those 5 `trash` items.
+  Altrimenti avvisare, con un link al diff.
+- **Risultato atteso su questa macchina:** 5 su 11 diventano risolvibili automaticamente (framework-skillset-generator, gcube-component-release, gcube-liferay62-release-deploy, gcube-repo-standards, liferay62-angular-portlet). gcube-jenkins, gcube-security-audit e frontend-design restano come avviso con diff. task-pipeline, kilo-mcp-orchestrator e kilo-mcp-conflict-resolver attendono P1-d.
+- **File:** `orchestration_env.py` (`resolve_conflicts` `:1945-2044`, nuovo helper `skill_equivalent(a, b)`), test.
+- **Verifica:** una home fittizia che riproduce l'appiattimento del frontmatter di gcube-jenkins si risolve in `trash`. Una fixture con un file extra resta `advise`. `resolve-conflicts --dry-run` sulla home reale elenca esattamente quei 5 elementi `trash`.
 
-### P1-d. Detect stale plugin copies (S/M)
+### P1-d. Rilevare le copie obsolete dei plugin (S/M)
 
-- **Goal:** report when a Claude plugin from a catalog marketplace (`ai-orchestration`, `kilo-mcp`) is behind the source repo, and never "keep plugin copy" when the plugin is the older one.
-- **How:**
-  - compare `installed_plugins.json` `gitCommitSha` with the source repo `HEAD`, plus a content hash per skill against the catalog;
-  - new entry state `plugin-stale`, severity warning;
-  - advice "bump `plugin.json` version and run `/plugin update <id>`", or the marketplace update flow.
-- **Files:** `orchestration_env.py` (`discover_claude_plugin_skills`, `inspect_environment`, `resolve_conflicts` keep-rule), UI badge.
-- **Verification:** on the current home both architect-side plugins show `plugin-stale` (69 and 7 commits behind). A fixture where the plugin is current shows `plugin`.
+- **Obiettivo:** segnalare quando un plugin di Claude proveniente da un marketplace del catalogo (`ai-orchestration`, `kilo-mcp`) è indietro rispetto al repository sorgente, e non applicare mai "keep plugin copy" quando il plugin è la copia più vecchia.
+- **Come:**
+  - confrontare in `installed_plugins.json` il campo `gitCommitSha` con `HEAD` del repository sorgente, più un hash del contenuto per ogni skill rispetto al catalogo;
+  - nuovo stato della voce `plugin-stale`, severità warning;
+  - avviso "bump `plugin.json` version and run `/plugin update <id>`", o il flusso di aggiornamento del marketplace.
+- **File:** `orchestration_env.py` (`discover_claude_plugin_skills`, `inspect_environment`, regola di mantenimento in `resolve_conflicts`), badge nella UI.
+- **Verifica:** sulla home attuale entrambi i plugin architect-side mostrano `plugin-stale` (69 e 7 commit indietro). Una fixture in cui il plugin è aggiornato mostra `plugin`.
 
-### P2-a. History-aware classification of legacy installs (M)
+### P2-a. Classificazione consapevole della cronologia per le installazioni legacy (M)
 
-- **Goal:** copies of our own skills installed before receipts existed are shown as `outdated-legacy` (or `up-to-date` when only frontmatter quoting differs), not `foreign`. The owner can update them from the UI.
-- **How:**
-  - in `detect_skill_state` (`:436-454`), before returning `foreign`, check whether every file's blob appears in `git log --all --find-object` of the matching catalog path (cache per run), or whether the content is frontmatter-equal to the catalog;
-  - update spec A4 to add the state;
-  - the UI gets an "Update…" row action calling `install-skills --overwrite <name>` with preview.
-- **Files:** `orchestration_env.py`, `tasks/specs/control-plane-safety.md` (A4 amendment), `SkillInstaller.tsx`/`EnvironmentDoctor.tsx`, `server.py` (pass `overwrite`).
-- **Verification:** on the current home, 0 `foreign` among the 17 (14 `outdated-legacy`, 2 `up-to-date`, 1 `outdated-legacy`). Dry-run "Update" of `~/.codex/skills/task-pipeline` shows `replace` with before/after hashes.
+- **Obiettivo:** le copie delle nostre skill installate prima che esistessero le ricevute vengono mostrate come `outdated-legacy` (o `up-to-date` quando differisce solo la quotatura del frontmatter), non `foreign`. L'owner può aggiornarle dalla UI.
+- **Come:**
+  - in `detect_skill_state` (`:436-454`), prima di restituire `foreign`, verificare se il blob di ogni file compare in `git log --all --find-object` del percorso corrispondente nel catalogo (con cache per singola esecuzione), o se il contenuto è uguale al catalogo a meno del frontmatter;
+  - aggiornare la regola A4 della specifica per aggiungere lo stato;
+  - la UI riceve un'azione di riga "Update…" che invoca `install-skills --overwrite <name>` con anteprima.
+- **File:** `orchestration_env.py`, `tasks/specs/control-plane-safety.md` (emendamento A4), `SkillInstaller.tsx`/`EnvironmentDoctor.tsx`, `server.py` (passaggio di `overwrite`).
+- **Verifica:** sulla home attuale, 0 `foreign` tra le 17 (14 `outdated-legacy`, 2 `up-to-date`, 1 `outdated-legacy`). Il dry-run di "Update" su `~/.codex/skills/task-pipeline` mostra `replace` con gli hash prima/dopo.
 
-### P2-b. Kilo effective view (M)
+### P2-b. Vista effettiva di Kilo (M)
 
-- **Goal:** the Kilo section reflects what Kilo loads: `~/.kilo/{skill,skills}`, `~/.config/kilo/{skill,skills}`, `~/.claude/skills/**` (unless `KILO_DISABLE_CLAUDE_CODE_SKILLS`), `~/.agents/skills/**`, project `.kilo`/`.kilocode`/`.claude`/`.agents`, and `skills.paths` from the merged Kilo config.
-- **How:** entries carry `origin: standalone:<root>`, and conflicts are computed over that union. `install`/`remove` keep targeting `~/.kilo/skills` only.
-- **Files:** `orchestration_env.py` (`inspect_environment`, new `kilo_skill_roots()`), UI origin column.
-- **Verification:** on the current home Kilo shows the 14 cross-root duplicates listed in evidence #11 and the trigger conflict. Setting `KILO_DISABLE_CLAUDE_CODE_SKILLS=1` in the CLI env removes the `~/.claude` ones.
+- **Obiettivo:** la sezione di Kilo riflette ciò che Kilo carica: `~/.kilo/{skill,skills}`, `~/.config/kilo/{skill,skills}`, `~/.claude/skills/**` (a meno di `KILO_DISABLE_CLAUDE_CODE_SKILLS`), `~/.agents/skills/**`, `.kilo`/`.kilocode`/`.claude`/`.agents` di progetto e `skills.paths` dalla configurazione Kilo unificata.
+- **Come:** le voci riportano `origin: standalone:<root>` e i conflitti vengono calcolati su tale unione. `install`/`remove` continuano a puntare solo a `~/.kilo/skills`.
+- **File:** `orchestration_env.py` (`inspect_environment`, nuova `kilo_skill_roots()`), colonna origin nella UI.
+- **Verifica:** sulla home attuale Kilo mostra i 14 duplicati tra radici diverse elencati nell'evidenza #11 e il conflitto di trigger. Impostando `KILO_DISABLE_CLAUDE_CODE_SKILLS=1` nell'ambiente della CLI vengono rimossi quelli di `~/.claude`.
 
-### P2-c. Make install respect plugins and policy (S)
+### P2-c. Fare in modo che l'installazione rispetti i plugin e la policy (S)
 
-- **Goal:** `install-skills` no longer creates the conflicts `resolve-conflicts` reports.
-- **Rules:**
-  - Claude target: skip with reason "provided by enabled plugin `<id>`" when an enabled plugin provides the name;
-  - skip names that `[env.conflicts] keep` would remove in that assistant (e.g. `orchestration-workflow` for Claude/Codex under `bound`);
-  - `--force` overrides both.
-- **Files:** `orchestration_env.py` (`install_skills` `:1583-1619`), tests.
-- **Verification:** `install-skills --dry-run --assistants all --scope global` on the current home shows the 5 Claude `CREATE` items and the Codex `orchestration-workflow` item as `SKIP` with those reasons.
+- **Obiettivo:** `install-skills` non crea più i conflitti che `resolve-conflicts` segnala.
+- **Regole:**
+  - destinazione Claude: saltare con motivo "provided by enabled plugin `<id>`" quando un plugin abilitato fornisce quel nome;
+  - saltare i nomi che `[env.conflicts] keep` rimuoverebbe in quell'assistente (ad es. `orchestration-workflow` per Claude/Codex sotto `bound`);
+  - `--force` ignora entrambe le regole.
+- **File:** `orchestration_env.py` (`install_skills` `:1583-1619`), test.
+- **Verifica:** `install-skills --dry-run --assistants all --scope global` sulla home attuale mostra i 5 elementi `CREATE` di Claude e l'elemento `orchestration-workflow` di Codex come `SKIP` con tali motivazioni.
 
-### P2-d. Standalone-only duplicates (S)
+### P2-d. Duplicati solo standalone (S)
 
-- **Goal:** project-vs-global standalone duplicates get a plan. Identical content → trash the project copy (default; the rule can be configured as `keep_scope = project|global`). Different content → advise with diff.
-- **Files:** `orchestration_env.py` (`resolve_conflicts`).
-- **Verification:** AO workspace dry-run lists `kilo-mcp-rag-explorer` (both up-to-date) as `trash` of one copy, and the other 4 per the chosen rule. No red banner without a plan item.
+- **Obiettivo:** i duplicati standalone di progetto rispetto a quelli globali ricevono un piano. Contenuto identico → cestinare la copia di progetto (default; la regola può essere configurata come `keep_scope = project|global`). Contenuto diverso → avvisare con diff.
+- **File:** `orchestration_env.py` (`resolve_conflicts`).
+- **Verifica:** il dry-run sul workspace AO elenca `kilo-mcp-rag-explorer` (entrambe aggiornate) come `trash` di una copia, e le altre 4 secondo la regola scelta. Nessun banner rosso privo di elemento nel piano.
 
-### P3-a. Stray file and redundant MCP actions (S)
+### P3-a. Azioni per file orfani e override MCP ridondanti (S)
 
-- **Goal:** the stray banner and redundant MCP overrides can be cleared.
-- **How:**
-  - `env clean-stray --dry-run/--expect-plan-hash` moves `~/.codex/config.json` to the ai-orch trash. The preview lists each server in it and whether `config.toml` already has it.
-  - `read_kilo_merged_mcps` marks an override `identical: true|false`. An identical override is info, with a previewed edit removing the entry from `kilo.json`.
-  - Open a follow-up in `ai-swissknife` to stop writing `~/.codex/config.json` (`src/adapters/codex.ts:243`).
-- **Verification:** in a fake home with both files, the dry-run plan lists one `trash` and one `edit`. After apply, `env status` shows no stray and no override.
+- **Obiettivo:** il banner del file orfano e gli override MCP ridondanti possono essere eliminati.
+- **Come:**
+  - `env clean-stray --dry-run/--expect-plan-hash` sposta `~/.codex/config.json` nel cestino di ai-orch. L'anteprima elenca ciascun server contenuto al suo interno e indica se `config.toml` lo possiede già.
+  - `read_kilo_merged_mcps` contrassegna un override con `identical: true|false`. Un override identico è di livello info, con una modifica in anteprima che rimuove la voce da `kilo.json`.
+  - Aprire un follow-up in `ai-swissknife` per smettere di scrivere `~/.codex/config.json` (`src/adapters/codex.ts:243`).
+- **Verifica:** in una home fittizia con entrambi i file, il piano dry-run elenca un `trash` e un `edit`. Dopo l'applicazione, `env status` non mostra alcun file orfano né alcun override.
 
-### P3-b. `register-mcp` idempotency (S)
+### P3-b. Idempotenza di `register-mcp` (S)
 
-- **Goal:** no CLI call when the server is already registered with an equivalent command. Otherwise a `replace` item that shows the old and new command. `--assistants all` does not register `kilo-mcp` into Kilo unless asked explicitly.
-- **Files:** `orchestration_env.py` (`register_mcp_server` `:2124-2427`).
-- **Verification:** on the current home the dry-run shows `noop` for Claude and Codex (or `replace` showing `uv run …` → `.venv/bin/python …`), and nothing for Kilo by default.
+- **Obiettivo:** nessuna chiamata CLI quando il server è già registrato con un comando equivalente. Altrimenti un elemento `replace` che mostri il vecchio e il nuovo comando. `--assistants all` non registra `kilo-mcp` dentro Kilo a meno che non venga richiesto esplicitamente.
+- **File:** `orchestration_env.py` (`register_mcp_server` `:2124-2427`).
+- **Verifica:** sulla home attuale il dry-run mostra `noop` per Claude e Codex (oppure `replace` mostrando `uv run …` → `.venv/bin/python …`), e nulla per Kilo di default.
 
-### P3-c. Agents in the Doctor (M)
+### P3-c. Agenti nel Doctor (M)
 
-- **Goal:**
-  - render agents (state, origin);
-  - install agents through a per-assistant transform: drop Kilo-only `mode`/`permission` for Claude;
-  - receipts hash the transformed output, so a correctly adapted agent is `up-to-date`.
-- **Files:** `orchestration_env.py` (`install_skills` agent branch, `detect_agent_state`), `EnvironmentDoctor.tsx`.
-- **Verification:** `~/.claude/agents/kilo-mcp-orchestrator-agent.md` classifies as `up-to-date` (or `outdated-legacy`) instead of `foreign`.
+- **Obiettivo:**
+  - renderizzare gli agenti (stato, origine);
+  - installare gli agenti tramite una trasformazione per assistente: omettere `mode`/`permission` specifici di Kilo per Claude;
+  - le ricevute calcolano l'hash dell'output trasformato, così un agente adattato correttamente risulta `up-to-date`.
+- **File:** `orchestration_env.py` (ramo agenti di `install_skills`, `detect_agent_state`), `EnvironmentDoctor.tsx`.
+- **Verifica:** `~/.claude/agents/kilo-mcp-orchestrator-agent.md` viene classificato come `up-to-date` (o `outdated-legacy`) invece di `foreign`.
 
-### P3-d. Trigger-conflict generalisation (S)
+### P3-d. Generalizzazione dei conflitti di trigger (S)
 
-- **Goal:** the generic/bound pairs come from the bindings (`kilo-mcp/bindings/*.json`), not a hard-coded pair. That covers `executor-contract`/`kilo-mcp-executor-contract`, `conflict-resolver`/`kilo-mcp-conflict-resolver` and `orchestration-metrics`/`kilo-mcp-metrics-analyst`. Advice names every skill that would disappear with a plugin.
-- **Files:** `orchestration_env.py` (`:1213-1236`, `resolve_conflicts`).
-- **Verification:** the fixture with a plugin-only generic skill shows advice that lists the plugin's other skills.
+- **Obiettivo:** le coppie generica/associata provengono dai binding (`kilo-mcp/bindings/*.json`), non da una coppia cablata nel codice. Ciò copre `executor-contract`/`kilo-mcp-executor-contract`, `conflict-resolver`/`kilo-mcp-conflict-resolver` e `orchestration-metrics`/`kilo-mcp-metrics-analyst`. L'avviso elenca ogni skill che scomparirebbe disabilitando un plugin.
+- **File:** `orchestration_env.py` (`:1213-1236`, `resolve_conflicts`).
+- **Verifica:** la fixture con una skill generica presente solo come plugin mostra un avviso che elenca le altre skill del plugin.
 
-## Owner decisions surfaced (not Doctor work)
+## Decisioni dell'owner emerse (non lavoro sul Doctor)
 
-1. Keep both `architect-side@ai-orchestration` and `architect-side@kilo-mcp` enabled in Claude (then acknowledge the trigger conflict), or change the Claude policy to `generic`.
-2. Bump the plugin versions (`ai-orchestration` architect-side 0.3.0, `kilo-mcp` architect-side 0.2.2) and update the Claude plugins. Today Claude runs plugin copies 69 and 7 commits old.
-3. The untracked `ai-orchestration/.claude/skills`, `.codex/skills`, `.kilo/skills`, `.kilo/agents`, `.kilo/kilo.json` written today at 11:13Z: keep (gitignore or commit) or remove.
-4. `gcube-jenkins`, `gcube-security-audit` and `frontend-design` standalone copies carry real extra content vs the plugin. Decide which copy is canonical, and port the extras to `gcube-ai-toolkit` / `agentic-coding-kit` if they are wanted.
+1. Mantenere abilitati sia `architect-side@ai-orchestration` sia `architect-side@kilo-mcp` in Claude (e quindi riconoscere il conflitto di trigger), oppure cambiare la policy di Claude in `generic`.
+2. Incrementare le versioni dei plugin (`ai-orchestration` architect-side 0.3.0, `kilo-mcp` architect-side 0.2.2) e aggiornare i plugin di Claude. Oggi Claude esegue copie dei plugin vecchie di 69 e 7 commit.
+3. I file non tracciati `ai-orchestration/.claude/skills`, `.codex/skills`, `.kilo/skills`, `.kilo/agents`, `.kilo/kilo.json` scritti oggi alle 11:13Z: mantenerli (in gitignore o committati) oppure rimuoverli.
+4. Le copie standalone di `gcube-jenkins`, `gcube-security-audit` e `frontend-design` contengono contenuti extra reali rispetto al plugin. Decidere quale copia è canonica e portare i contenuti extra in `gcube-ai-toolkit` / `agentic-coding-kit` se si desidera conservarli.
 
-## Home-untouched check
+## Controllo di integrità della home
 
-A marker was created at the start (`tasks/env-doctor/notes/.marker`). The `find` output at the end is recorded in the session's hand-off message, not in this file.
+All'inizio è stato creato un marker (`tasks/env-doctor/notes/.marker`). L'output di `find` al termine è registrato nel messaggio di consegna della sessione, non in questo file.

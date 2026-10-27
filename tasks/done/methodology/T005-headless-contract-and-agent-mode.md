@@ -1,10 +1,10 @@
-# T005 Hardening `headless-executor-contract` and evaluating Kilo agent mode
+# T005 Consolidamento di `headless-executor-contract` e valutazione della modalità agente di Kilo
 
 - id: T005
-- title: Hardening headless-executor-contract and evaluating Kilo agent mode
+- title: Consolidamento di headless-executor-contract e valutazione della modalità agente di Kilo
 - category: methodology
 - priority: P2
-- priority-reason: Executor contract lacks explicit 1-task-1-commit and worktree blast-radius rules; delivery channel via skills_to_load needs verification
+- priority-reason: Al contratto dell'Executor mancano regole esplicite 1-task-1-commit e sul raggio d'impatto nei worktree; il canale di consegna tramite skills_to_load richiede verifica
 - next-up: no
 - state: done
 - executor: self
@@ -12,23 +12,23 @@
 - decider: -
 - sources: ../architect-executor-consolidated-review.md (§2.3, §4.3, §4.4), docs/02-gap-analysis-and-evolution-roadmap.md
 - paths: ../ai-architect-executor/plugins/executor-side/skills/headless-executor-contract/SKILL.template.md, ../kilo-mcp/bindings/headless-executor-contract.json
-- handoff: Read tasks/methodology/T005-headless-contract-and-agent-mode.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/methodology/T005-headless-contract-and-agent-mode.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: orchestrator:deep-reasoning
-- short: Executor contract hardening
+- short: Consolidamento contratto executor
 
 ## Goal
 
-Add the missing commit-scope, isolation blast-radius, exact `Final Report` skeleton, and reproducible verification-command rules to `headless-executor-contract`, and check `metrics.jsonl` / task records to decide whether a dedicated `headless-executor` Kilo agent definition is warranted.
+Aggiungere le regole mancanti sull'ambito del commit, sul raggio d'impatto dell'isolamento, sullo scheletro esatto del `Final Report` e sui comandi di verifica riproducibili a `headless-executor-contract`, e controllare `metrics.jsonl` / i record dei task per decidere se sia giustificata una definizione dedicata di agente Kilo `headless-executor`.
 
 ## Steps
 
-1. Update `../ai-architect-executor/plugins/executor-side/skills/headless-executor-contract/SKILL.template.md` and `../kilo-mcp/bindings/headless-executor-contract.json`:
-   - Add explicit rule: commit at task end, scoped strictly to this task's changes ("one task, one commit").
-   - Add explicit isolation blast-radius rule: never leave `working_directory`, never touch sibling worktrees or the main checkout.
-   - Include the exact Markdown skeleton expected for `Final Report` (`Outcome`, `Files changed`, `Verification` with exact command + output, `Issues`).
-2. Inspect `KILO_MCP_DATA_DIR` (`metrics.jsonl` / task records) to check whether `skills_to_load` is populated in real delegations and decide on the `headless-executor` agent mode (§4.4) and Executor skill authoring guide (§4.3).
-3. Regenerate generic and bound skills and indices.
+1. Aggiornare `../ai-architect-executor/plugins/executor-side/skills/headless-executor-contract/SKILL.template.md` e `../kilo-mcp/bindings/headless-executor-contract.json`:
+   - Aggiungere la regola esplicita: effettuare il commit a fine task, limitato strettamente alle modifiche di questo task ("un task, un commit").
+   - Aggiungere la regola esplicita sul raggio d'impatto dell'isolamento: non uscire mai da `working_directory`, non toccare mai i worktree fratelli né il checkout principale.
+   - Includere lo scheletro Markdown esatto previsto per il `Final Report` (`Outcome`, `Files changed`, `Verification` con comando e output esatti, `Issues`).
+2. Ispezionare `KILO_MCP_DATA_DIR` (`metrics.jsonl` / record dei task) per verificare se `skills_to_load` viene popolato nelle deleghe reali e decidere in merito alla modalità agente `headless-executor` (§4.4) e alla guida di scrittura delle skill per Executor (§4.3).
+3. Rigenerare le skill generiche e associate e gli indici.
 
 ## Verification
 
-- `python3 ../kilo-mcp/scripts/regenerate_bound_skills.py --check` exits 0.
+- `python3 ../kilo-mcp/scripts/regenerate_bound_skills.py --check` termina con codice 0.

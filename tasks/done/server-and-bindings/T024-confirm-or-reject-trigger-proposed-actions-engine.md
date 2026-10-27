@@ -1,10 +1,10 @@
-# T024 Confirm or reject trigger-proposed actions (engine + UI wiring)
+# T024 Confermare o rifiutare le azioni proposte dai trigger (motore + collegamento UI)
 
 - id: T024
-- title: Confirm or reject trigger-proposed actions (engine + UI wiring)
+- title: Confermare o rifiutare le azioni proposte dai trigger (motore + collegamento UI)
 - category: server-and-bindings
 - priority: P2
-- priority-reason: E3 turns unattended mutating actions into proposals; today they can only be listed
+- priority-reason: E3 trasforma le azioni mutanti non presidiate in proposte; oggi possono solo essere elencate
 - next-up: no
 - state: done with a caveat: validated by the architect, no user yet
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: -
 - paths: scripts/orchestration_triggers.py, ../ai-orchestration-ui/backend/server.py
-- handoff: Read tasks/server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: Proposal confirm engine
+- short: Motore conferma proposte
 
 ## Goal
 
-Add ai-orch triggers confirm ACTION_ID --expect-hash H and triggers reject ACTION_ID --reason R: confirm executes the proposed command/run through the same paths as an owner action (run start with plan hash for runs), records the outcome and emits events; reject records the reason. Then wire the UI endpoints (12.6 left them as list-only) and the VS Code handlers.
+Aggiungere ai-orch triggers confirm ACTION_ID --expect-hash H e triggers reject ACTION_ID --reason R: confirm esegue il comando o la run proposta attraverso gli stessi percorsi di un'azione dell'owner (avvio della run con hash del piano per le run), registra l'esito ed emette gli eventi; reject registra la motivazione. Collegare quindi gli endpoint della UI (lasciati in sola lettura da 12.6) e gli handler di VS Code.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

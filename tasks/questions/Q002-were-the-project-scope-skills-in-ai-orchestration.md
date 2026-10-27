@@ -1,7 +1,7 @@
-# Q002 Were the project-scope skills in ai-orchestration (.claude, .codex, .kilo) installed on purpose, and should they stay
+# Q002 Le skill a livello di progetto in ai-orchestration (.claude, .codex, .kilo) sono state installate intenzionalmente e devono rimanere
 
 - id: Q002
-- question: Were the project-scope skills in ai-orchestration (.claude, .codex, .kilo) installed on purpose, and should they stay?
+- question: Le skill a livello di progetto in ai-orchestration (.claude, .codex, .kilo) sono state installate intenzionalmente e devono rimanere?
 - status: answered
 - blocks: -
 - decider: owner
@@ -11,17 +11,17 @@
 - open-answer: yes
 - recommended: A
 - applied: yes
-- short: Project skill copies
+- short: Copie skill di progetto
 
 ## Context
 
-At 13:13 today skill copies and a project MCP config appeared, untracked, in ai-orchestration/: .claude/skills (5), .codex/skills (12), .kilo/skills, .kilo/agents, .kilo/kilo.json. No Kilo task log contains an install command; the UI on port 8780 serves this workspace, so a project-scope install from the Installer tab is the likely origin. Project copies duplicate the global and plugin copies and add Doctor findings. Source: tasks/env-doctor/notes/T016-report.md (Doctor study, 2026-10-17).
+Oggi alle 13:13 sono apparse copie di skill e una configurazione MCP di progetto non tracciate in ai-orchestration/: .claude/skills (5), .codex/skills (12), .kilo/skills, .kilo/agents, .kilo/kilo.json. Nessun log dei task di Kilo contiene un comando di installazione; la UI sulla porta 8780 serve questo workspace, quindi l'origine probabile è un'installazione a livello di progetto dalla scheda Installer. Le copie di progetto duplicano le copie globali e dei plugin e aggiungono segnalazioni nel Doctor. Fonte: tasks/env-doctor/notes/T016-report.md (studio sul Doctor, 2026-10-17).
 
 ## Options
 
-- **A** — Remove them: delete the untracked copies (they are reproducible from the source repo)
-- **B** — Keep and ignore: keep them and add the folders to .gitignore
-- **C** — Keep and commit: version them as the repo's own project skills
+- **A** — Rimuoverle: eliminare le copie non tracciate (sono riproducibili dal repository sorgente)
+- **B** — Mantenerle e ignorarle: mantenerle e aggiungere le cartelle a .gitignore
+- **C** — Mantenerle e committarle: versionarle come skill di progetto proprie del repository
 
 ## Answer
 

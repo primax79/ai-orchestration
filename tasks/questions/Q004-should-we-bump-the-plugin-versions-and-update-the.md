@@ -1,7 +1,7 @@
-# Q004 Should we bump the plugin versions and update the Claude plugins now
+# Q004 Dobbiamo incrementare le versioni dei plugin e aggiornare i plugin di Claude ora
 
 - id: Q004
-- question: Should we bump the plugin versions and update the Claude plugins now?
+- question: Dobbiamo incrementare le versioni dei plugin e aggiornare i plugin di Claude ora?
 - status: answered
 - blocks: -
 - decider: owner
@@ -11,21 +11,21 @@
 - open-answer: yes
 - recommended: A
 - applied: yes
-- short: Plugin version bump
+- short: Bump versione plugin
 
 ## Context
 
-Claude runs architect-side@ai-orchestration 0.3.0 and architect-side@kilo-mcp 0.2.2 from its plugin cache; the sources are 69 and 7 commits ahead with unchanged version strings, so Claude will not update them. Updating requires bumping versions, pushing, and updating the plugins in Claude. The push is outward-facing and waits for your approval anyway. Source: tasks/env-doctor/notes/T016-report.md (Doctor study, 2026-10-17).
+Claude esegue architect-side@ai-orchestration 0.3.0 e architect-side@kilo-mcp 0.2.2 dalla propria cache dei plugin; i sorgenti sono avanti di 69 e 7 commit con stringhe di versione invariate, quindi Claude non li aggiornerà. L'aggiornamento richiede di incrementare le versioni, fare push e aggiornare i plugin in Claude. Il push è visibile esternamente e attende comunque l'approvazione dell'owner. Fonte: tasks/env-doctor/notes/T016-report.md (studio sul Doctor, 2026-10-17).
 
 ## Options
 
-- **A** — Yes, at the end of initiative 06: bump, push, update plugins once the safety work is complete
-- **B** — Yes, now: bump and push now, accepting partial features
-- **C** — No: keep the cached versions until further notice
+- **A** — Sì, alla fine dell'iniziativa 06: incrementare la versione, fare push e aggiornare i plugin una volta completato il lavoro sulla sicurezza
+- **B** — Sì, ora: incrementare la versione e fare push subito, accettando funzionalità parziali
+- **C** — No: mantenere le versioni in cache fino a nuovo avviso
 
 ## Answer
 
 - choice: A
 - answered-by: owner
 - answered: 2026-10-17
-- text: Applied 2026-10-17: initiative 06 closed (06.9 live check rides on this install). Released ai-orchestration architect-side 0.4.0 / shared 0.2.0 / executor-side 0.1.1 and kilo-mcp architect-side 0.2.3 / executor-side 0.1.1; pushed; Claude plugins updated; VS Code extension 0.2.0 reinstalled. From now on significant verified features are released without asking (owner, chat 2026-10-17).
+- text: Applicato il 2026-10-17: iniziativa 06 chiusa (la verifica live 06.9 si appoggia a questa installazione). Rilasciati ai-orchestration architect-side 0.4.0 / shared 0.2.0 / executor-side 0.1.1 e kilo-mcp architect-side 0.2.3 / executor-side 0.1.1; eseguito push; aggiornati i plugin di Claude; reinstallata l'estensione VS Code 0.2.0. D'ora in avanti le funzionalità significative verificate vengono rilasciate senza chiedere (owner, chat 2026-10-17).

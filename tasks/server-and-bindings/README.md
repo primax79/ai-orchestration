@@ -2,17 +2,17 @@
 
 owner-session: unassigned
 
-## Goal and scope
+## Obiettivo e ambito
 
-Server-side evolutions in `../kilo-mcp/server.py` (blocking completion wait `kilo_task_wait`, decision telemetry `kilo_log_decision`, structured verification gate) and new Executor bindings (`../claude-mcp/` Phase 1 spike and server, Pi evaluation). State and priority of its tasks are in `tasks/00-INDEX.md`; working notes are in `notes/` next to this file.
+Evoluzioni lato server in `../kilo-mcp/server.py` (attesa bloccante di completamento `kilo_task_wait`, telemetria delle decisioni `kilo_log_decision`, gate di verifica strutturato) e nuovi binding Executor (spike di Fase 1 e server in `../claude-mcp/`, valutazione di Pi). Stato e priorità dei relativi task si trovano in `tasks/00-INDEX.md`; le note di lavoro sono in `notes/` accanto a questo file.
 
-## Start a session on the whole category
+## Avviare una sessione sull'intera categoria
 
-> Read tasks/server-and-bindings/README.md and its tasks in priority order, set owner-session, work the tasks one at a time (P0 first), and keep the task files, this README and tasks/00-INDEX.md current.
+> Leggere tasks/server-and-bindings/README.md e i relativi task in ordine di priorità, impostare owner-session, lavorare i task uno alla volta (prima i P0) e mantenere aggiornati i file dei task, questo README e tasks/00-INDEX.md.
 
-## Rules
+## Regole
 
-- Only the owner session edits the task files and this README; others add notes below or create new T### tasks.
-- A finished task moves with `git mv` to `tasks/done/server-and-bindings/`, same name.
+- Solo la sessione proprietaria modifica i file dei task e questo README; le altre aggiungono note qui sotto o creano nuovi task T###.
+- Un task completato viene spostato con `git mv` in `tasks/done/server-and-bindings/`, mantenendo lo stesso nome.
 
-## Shared notes
+## Note condivise

@@ -1,10 +1,10 @@
-# T028 Unattended turns: enforce reduced capability on every tool and harden the untrusted-data delimiters
+# T028 Turni non presidiati: applicare capacità ridotte su ogni tool e irrobustire i delimitatori dei dati non attendibili
 
 - id: T028
-- title: Unattended turns: enforce reduced capability on every tool and harden the untrusted-data delimiters
+- title: Turni non presidiati: applicare capacità ridotte su ogni tool e irrobustire i delimitatori dei dati non attendibili
 - category: server-and-bindings
 - priority: P1
-- priority-reason: Gemini review 2026-10-18: Kilo event turns run with full tools; untrusted data can close its own delimiter
+- priority-reason: Revisione di Gemini del 2026-10-18: i turni evento di Kilo girano con tutti i tool abilitati; i dati non attendibili possono chiudere il proprio delimitatore
 - next-up: no
 - state: done with a caveat: validated by the architect, no user yet
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: -
 - paths: -
-- handoff: Read tasks/server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: Unattended turn hardening
+- short: Sicurezza turni non presidiati
 
 ## Goal
 
-Reduced-capability (triage/event_batch) turns are enforced only by Claude's allow-list and Codex's read-only sandbox; the Kilo adapter passes no restriction (orchestration_runs.py:2098-2116), so unattended Kilo turns can edit and run anything. And format_untrusted_event_data wraps data in fixed tags that the data itself can close. Enforce a restricted profile for Kilo unattended turns (verify Kilo's real permission/agent options in references/ or kilo --help before choosing; refuse to run an unattended Kilo turn if no restriction is available), and wrap untrusted data with a per-turn random nonce tag plus escaping, with tests.
+I turni a capacità ridotta (triage/event_batch) vengono limitati solo tramite la allow-list di Claude e la sandbox in sola lettura di Codex; l'adattatore di Kilo non passa alcuna restrizione (orchestration_runs.py:2098-2116), quindi i turni non presidiati di Kilo possono modificare ed eseguire qualsiasi cosa. Inoltre format_untrusted_event_data racchiude i dati in tag fissi che i dati stessi possono chiudere. Imporre un profilo ristretto per i turni non presidiati di Kilo (verificare le opzioni reali di permesso/agente di Kilo in references/ o con kilo --help prima di scegliere; rifiutare l'esecuzione di un turno Kilo non presidiato se non è disponibile alcuna restrizione) e racchiudere i dati non attendibili con un tag nonce casuale per turno più escaping, corredato da test.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

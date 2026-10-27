@@ -1,10 +1,10 @@
-# T012 kilo-mcp: detect `kilo run` processes that hang after finishing
+# T012 kilo-mcp: rilevare i processi `kilo run` che restano bloccati dopo il completamento
 
 - id: T012
-- title: kilo-mcp: detect kilo run processes that hang after finishing
+- title: kilo-mcp: rilevare i processi kilo run che restano bloccati dopo il completamento
 - category: server-and-bindings
 - priority: P2
-- priority-reason: Hung tasks report "running" for hours, hide completed work and keep processes alive; the orchestrator only noticed from log mtimes
+- priority-reason: I task bloccati risultano "running" per ore, nascondono il lavoro completato e mantengono vivi i processi; l'orchestratore se ne è accorto solo dagli mtime dei log
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,21 +12,21 @@
 - decider: -
 - sources: session 2026-10-17: tasks b7d26daa26b6, c7b5f7011bdf, b3cccdf3051e, ae7733625e86 committed and wrote their Final Report around 00:33–00:47, but their `kilo run` processes stayed alive and idle until cancelled at 10:10
 - paths: ../kilo-mcp/server.py
-- handoff: Read tasks/server-and-bindings/T012-kilo-run-hangs-after-completion.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T012-kilo-run-hangs-after-completion.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: claude:orchestration
-- short: Hung kilo runs
+- short: Processi kilo run bloccati
 
 ## Goal
 
-When `kilo run` has finished its work (its JSON event stream emitted the session's final message / idle event) but the process does not exit, kilo-mcp notices, records the outcome, and terminates the process. `kilo_task_progress`/`kilo_task_status` must not report such a task as running.
+Quando `kilo run` ha terminato il proprio lavoro (il suo flusso di eventi JSON ha emesso il messaggio finale / evento di inattività della sessione) ma il processo non termina, kilo-mcp se ne accorge, registra l'esito e termina il processo. `kilo_task_progress`/`kilo_task_status` non devono riportare un task simile come in esecuzione.
 
 ## Steps
 
-1. Reproduce: find what `kilo run --format json` emits at the end of a session (inspect a log of a hung task under `~/.local/share/kilo-mcp/tasks/`), and whether the hang correlates with something specific (an MCP child that never exits, a background shell).
-2. In the task watcher: after a terminal event (or after the Final Report is parsed) plus a grace period (e.g. 60 s) with no new output, mark the task completed and terminate the process group.
-3. `kilo_task_progress` reports `finished, process lingering` instead of "no session found" while in the grace period.
+1. Riprodurre: verificare cosa emette `kilo run --format json` alla fine di una sessione (ispezionare il log di un task bloccato sotto `~/.local/share/kilo-mcp/tasks/`) e se il blocco è correlato a qualcosa di specifico (un processo figlio MCP che non termina mai, una shell in background).
+2. Nel watcher dei task: dopo un evento terminale (o dopo il parsing del Final Report) più un periodo di tolleranza (ad es. 60 s) senza nuovo output, contrassegnare il task come completato e terminare il gruppo di processi.
+3. `kilo_task_progress` riporta `finished, process lingering` invece di "no session found" durante il periodo di tolleranza.
 
 ## Verification
 
-- A unit test with a stub `kilo` that prints a final event and then sleeps forever: the task becomes `completed` within the grace period, and the stub is killed.
-- A live run of a trivial task exits or is reaped within the grace period.
+- Uno unit test con uno stub di `kilo` che stampa un evento finale e poi resta in attesa all'infinito: il task diventa `completed` entro il periodo di tolleranza e lo stub viene terminato.
+- Un'esecuzione live di un task banale termina o viene raccolta entro il periodo di tolleranza.

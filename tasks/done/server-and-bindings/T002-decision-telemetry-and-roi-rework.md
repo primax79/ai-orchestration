@@ -1,10 +1,10 @@
-# T002 Decision telemetry (`kilo_log_decision`) and ROI analysis rework
+# T002 Telemetria delle decisioni (`kilo_log_decision`) e rielaborazione dell'analisi ROI
 
 - id: T002
-- title: Decision telemetry (kilo_log_decision) and ROI analysis rework
+- title: Telemetria delle decisioni (kilo_log_decision) e rielaborazione dell'analisi ROI
 - category: server-and-bindings
 - priority: P1
-- priority-reason: Required to calibrate delegation policy with real observables instead of uncalibrated inline estimates
+- priority-reason: Necessario per calibrare la policy di delega su dati osservabili reali anziché su stime inline non calibrate
 - next-up: no
 - state: done
 - executor: self
@@ -12,22 +12,22 @@
 - decider: -
 - sources: ../architect-executor-consolidated-review.md (§1.5, §2.4, §3.1, §3.4), docs/02-gap-analysis-and-evolution-roadmap.md
 - paths: ../kilo-mcp/server.py, ../kilo-mcp/test_server.py, ../kilo-mcp/kilo-mcp.example.toml, ../ai-architect-executor/plugins/architect-side/skills/delegation-roi-analysis/SKILL.template.md, ../kilo-mcp/bindings/delegation-roi-analysis.json
-- handoff: Read tasks/server-and-bindings/T002-decision-telemetry-and-roi-rework.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T002-decision-telemetry-and-roi-rework.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: orchestrator:deep-reasoning
-- short: Decision telemetry rework
+- short: Rielaborazione telemetria decisioni
 
 ## Goal
 
-Record the actual orchestration branch taken (`delegate` | `inline` | `escalate` | `discarded`), surface observable quality/cost metrics in `kilo_metrics`, tighten the default `delegation_policy`, and update `delegation-roi-analysis` / `mcp-metrics-analyst`.
+Registrare il ramo decisionale di orchestrazione effettivamente intrapreso (`delegate` | `inline` | `escalate` | `discarded`), esporre metriche osservabili di qualità e costo in `kilo_metrics`, affinare la `delegation_policy` di default e aggiornare `delegation-roi-analysis` / `mcp-metrics-analyst`.
 
 ## Steps
 
-1. Add `kilo_log_decision(branch, reason, task_ref="", followup_needed=False, run_id="")` to `../kilo-mcp/server.py` persisting to `decisions.jsonl` under `DATA_DIR`.
-2. Extend `kilo_metrics` in `../kilo-mcp/server.py` to report decision counts by branch, inline follow-up rate, cancellation rate, and discarded-completed-run rate alongside cost per completed task.
-3. Update `delegation_policy` default in `../kilo-mcp/kilo-mcp.example.toml` (explicit inline criteria: single file, <10 lines, no logic/signature change, already in context; plus 2-failure escalation clause).
-4. Update `../ai-architect-executor/plugins/architect-side/skills/delegation-roi-analysis/SKILL.template.md` and `../kilo-mcp/bindings/delegation-roi-analysis.json` to include discarded runs, context/quota framing for zero-marginal-cost setups, and observable metrics. Regenerate skills and indices.
+1. Aggiungere `kilo_log_decision(branch, reason, task_ref="", followup_needed=False, run_id="")` a `../kilo-mcp/server.py` con persistenza su `decisions.jsonl` sotto `DATA_DIR`.
+2. Estendere `kilo_metrics` in `../kilo-mcp/server.py` per riportare i conteggi delle decisioni per ramo, il tasso di follow-up inline, il tasso di annullamento e il tasso di run completate ma scartate insieme al costo per task completato.
+3. Aggiornare il default di `delegation_policy` in `../kilo-mcp/kilo-mcp.example.toml` (criteri inline espliciti: file singolo, <10 righe, nessuna modifica di logica/firma, già nel contesto; più clausola di escalation dopo 2 fallimenti).
+4. Aggiornare `../ai-architect-executor/plugins/architect-side/skills/delegation-roi-analysis/SKILL.template.md` e `../kilo-mcp/bindings/delegation-roi-analysis.json` per includere le run scartate, l'inquadramento contesto/quota per configurazioni a costo marginale zero e le metriche osservabili. Rigenerare le skill e gli indici.
 
 ## Verification
 
-- `../kilo-mcp/.venv/bin/pytest ../kilo-mcp/test_server.py` passes with tests for `kilo_log_decision` and `kilo_metrics`.
-- `python3 ../kilo-mcp/scripts/regenerate_bound_skills.py --check` exits 0.
+- `../kilo-mcp/.venv/bin/pytest ../kilo-mcp/test_server.py` passa con i test per `kilo_log_decision` e `kilo_metrics`.
+- `python3 ../kilo-mcp/scripts/regenerate_bound_skills.py --check` termina con codice 0.

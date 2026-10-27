@@ -1,10 +1,10 @@
-# T007 Structured verification gate tool in `kilo-mcp`
+# T007 Tool strutturato per il gate di verifica in `kilo-mcp`
 
 - id: T007
-- title: Structured verification gate tool in kilo-mcp
+- title: Tool strutturato per il gate di verifica in kilo-mcp
 - category: server-and-bindings
 - priority: P2
-- priority-reason: Reduces Phase 5 Architect context consumption by returning structured pass/fail check verdicts instead of full log dumps
+- priority-reason: Riduce il consumo di contesto dell'Architect nella Fase 5 restituendo verdetti strutturati pass/fail invece dei dump completi dei log
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,20 +12,20 @@
 - decider: -
 - sources: ../architect-executor-consolidated-review.md (§3.2), docs/02-gap-analysis-and-evolution-roadmap.md
 - paths: ../kilo-mcp/server.py, ../kilo-mcp/test_server.py
-- handoff: Read tasks/server-and-bindings/T007-verification-gate-tool.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T007-verification-gate-tool.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: orchestrator:deep-reasoning
-- short: Verification gate tool
+- short: Tool gate di verifica
 
 ## Goal
 
-Add a verification gate capability to `kilo-mcp/server.py` that runs project check commands (lint, test, build) in a target `working_directory`/worktree and returns a compact structured verdict (pass/fail per command + failing output tail only).
+Aggiungere a `kilo-mcp/server.py` una funzionalità di gate di verifica che esegua i comandi di controllo del progetto (lint, test, build) in una `working_directory`/worktree di destinazione e restituisca un verdetto strutturato compatto (pass/fail per comando + solo la coda dell'output in caso di fallimento).
 
 ## Steps
 
-1. Design whether this is a dedicated `@mcp.tool() kilo_verify_worktree` or a structured check mode, supporting explicit commands or TOML-configured project checks.
-2. Implement in `../kilo-mcp/server.py` with timeout protection and output truncation on passing checks.
-3. Add unit tests in `../kilo-mcp/test_server.py` and document in `../kilo-mcp/README.md`.
+1. Progettare se realizzarlo come `@mcp.tool() kilo_verify_worktree` dedicato o come modalità di controllo strutturata, supportando comandi espliciti o controlli di progetto configurati via TOML.
+2. Implementare in `../kilo-mcp/server.py` con protezione da timeout e troncamento dell'output per i controlli superati.
+3. Aggiungere unit test in `../kilo-mcp/test_server.py` e documentare in `../kilo-mcp/README.md`.
 
 ## Verification
 
-- `../kilo-mcp/.venv/bin/pytest ../kilo-mcp/test_server.py` passes.
+- `../kilo-mcp/.venv/bin/pytest ../kilo-mcp/test_server.py` passa.

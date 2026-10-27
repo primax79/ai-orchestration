@@ -1,10 +1,10 @@
-# T026 Trigger enqueue races the orchestrator queue and advances the role cursor too early
+# T026 L'accodamento dei trigger entra in race condition con la coda dell'orchestratore e avanza troppo presto il cursore di ruolo
 
 - id: T026
-- title: Trigger enqueue races the orchestrator queue and advances the role cursor too early
+- title: L'accodamento dei trigger entra in race condition con la coda dell'orchestratore e avanza troppo presto il cursore di ruolo
 - category: server-and-bindings
 - priority: P1
-- priority-reason: Found by the Codex review of 2026-10-18: a trigger can overwrite a queued turn and events can be lost
+- priority-reason: Rilevato dalla revisione di Codex del 2026-10-18: un trigger può sovrascrivere un turno in coda e alcuni eventi possono andare persi
 - next-up: no
 - state: done with a caveat: validated by the architect, no user yet
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: -
 - paths: -
-- handoff: Read tasks/server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: Trigger enqueue race
+- short: Race accodamento trigger
 
 ## Goal
 
-orchestration_triggers.py allocates <seq>.json for event_batch turns without the orchestrator lock (it should call the canonical enqueue_turn) and advances the shared role cursor when it merely enqueues a turn, while spec events-and-triggers.md 0c says the cursor advances only after the turn's transcript is persisted. Make triggers enqueue through enqueue_turn under the lock, give trigger scanning its own cursor separate from the role delivery cursor, advance the delivery cursor only after durable turn completion, with tests reproducing the race (concurrent owner enqueue + trigger enqueue) and the lost-event case (turn crashes after the trigger advanced the cursor). Evidence from the review: orchestration_triggers.py:938, :947, :1762; orchestration_orchestrator.py:627, :1372.
+orchestration_triggers.py alloca <seq>.json per i turni event_batch senza il lock dell'orchestratore (dovrebbe chiamare la funzione canonica enqueue_turn) e avanza il cursore di ruolo condiviso nel momento stesso in cui accoda un turno, mentre la specifica events-and-triggers.md 0c stabilisce che il cursore avanza solo dopo il salvataggio persistente della trascrizione del turno. Fare in modo che i trigger accodino tramite enqueue_turn sotto lock, dotare la scansione dei trigger di un proprio cursore separato dal cursore di consegna del ruolo, avanzare il cursore di consegna solo dopo il completamento durevole del turno, aggiungendo test che riproducano la race condition (accodamento concorrente dell'owner + accodamento del trigger) e il caso di perdita di eventi (crash del turno dopo che il trigger ha avanzato il cursore). Evidenze dalla revisione: orchestration_triggers.py:938, :947, :1762; orchestration_orchestrator.py:627, :1372.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

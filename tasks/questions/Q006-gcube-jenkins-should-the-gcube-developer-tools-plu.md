@@ -1,7 +1,7 @@
-# Q006 gcube-jenkins: should the gcube-developer-tools plugin become the canonical copy, with the env examples ported into it
+# Q006 gcube-jenkins: il plugin gcube-developer-tools deve diventare la copia canonica, portandovi gli esempi env
 
 - id: Q006
-- question: gcube-jenkins: should the gcube-developer-tools plugin become the canonical copy, with the env examples ported into it?
+- question: gcube-jenkins: il plugin gcube-developer-tools deve diventare la copia canonica, portandovi gli esempi env?
 - status: answered
 - blocks: T019 (in progress)
 - decider: owner
@@ -10,17 +10,17 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
-- short: Jenkins env examples
+- short: Esempi env Jenkins
 
 ## Context
 
-Two copies exist. The standalone ~/.kilo/skills/gcube-jenkins has references/env/{java17,java8}.env.example, used by gcube_credentials_check.sh; the plugin copy (gcube-developer-tools@gcube-ai-toolkit 0.2.1) lacks them because gcube-ai-toolkit/.gitignore line 254 'ENV/' also ignores references/env on macOS. SKILL.md and scripts are otherwise identical. Details: tasks/env-doctor/notes/T019-skill-diffs.md section 1.
+Esistono due copie. La copia standalone ~/.kilo/skills/gcube-jenkins contiene references/env/{java17,java8}.env.example, usati da gcube_credentials_check.sh; la copia del plugin (gcube-developer-tools@gcube-ai-toolkit 0.2.1) ne è priva perché la riga 254 'ENV/' di gcube-ai-toolkit/.gitignore ignora anche references/env su macOS. SKILL.md e gli script sono per il resto identici. Dettagli: tasks/env-doctor/notes/T019-skill-diffs.md sezione 1.
 
 ## Options
 
-- **A** — Plugin canonical, port the env examples: whitelist references/env in gcube-ai-toolkit/.gitignore, commit, bump and update the plugin, retire the standalone copy
-- **B** — Standalone canonical: keep ~/.kilo/skills/gcube-jenkins and mark the duplicate as acknowledged in the Doctor
-- **C** — Plugin canonical as it is: drop the env examples and remove the standalone copy
+- **A** — Plugin canonico, portare gli esempi env: aggiungere references/env in whitelist in gcube-ai-toolkit/.gitignore, fare commit, incrementare la versione e aggiornare il plugin, ritirare la copia standalone
+- **B** — Standalone canonica: mantenere ~/.kilo/skills/gcube-jenkins e segnare il duplicato come riconosciuto nel Doctor
+- **C** — Plugin canonico così com'è: scartare gli esempi env e rimuovere la copia standalone
 
 ## Answer
 

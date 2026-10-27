@@ -1,10 +1,10 @@
-# T020 Flaky run-engine tests under load
+# T020 Test del motore di esecuzione instabili sotto carico
 
 - id: T020
-- title: Flaky run-engine tests under load
+- title: Test del motore di esecuzione instabili sotto carico
 - category: micro
 - priority: P2
-- priority-reason: Red runs mask real regressions; seen during 07.12, 09.4 and the 11.1 merge
+- priority-reason: Le esecuzioni rosse mascherano regressioni reali; osservato durante 07.12, 09.4 e il merge di 11.1
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,14 +12,14 @@
 - decider: -
 - sources: -
 - paths: scripts/test_orchestration_runs.py, scripts/orchestration_runs.py
-- handoff: Read tasks/micro/T020-flaky-run-engine-tests-under-load.md, do the open steps, run the Verification, update the task and the registry.
-- short: Flaky run tests
+- handoff: Leggere tasks/micro/T020-flaky-run-engine-tests-under-load.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
+- short: Test run instabili
 
 ## Goal
 
-test_preview_side_effect_free (hash mismatch) and test_reconcile_pid_reuse_simulated_does_not_kill (process not alive) fail about once in two full runs of scripts/test_orchestration_runs.py, never in isolation. Find the root cause (shared state, timing, real PIDs) and make them deterministic without weakening what they check.
+test_preview_side_effect_free (mancata corrispondenza dell'hash) e test_reconcile_pid_reuse_simulated_does_not_kill (processo non attivo) falliscono circa una volta ogni due esecuzioni complete di scripts/test_orchestration_runs.py, mai in isolamento. Individuare la causa radice (stato condiviso, tempistiche, PID reali) e renderli deterministici senza indebolire i controlli effettuati.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.

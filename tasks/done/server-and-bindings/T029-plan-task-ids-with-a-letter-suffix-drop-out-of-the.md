@@ -1,10 +1,10 @@
-# T029 Plan task ids with a letter suffix drop out of the index
+# T029 Gli ID dei task di piano con suffisso alfabetico scompaiono dall'indice
 
 - id: T029
-- title: Plan task ids with a letter suffix drop out of the index
+- title: Gli ID dei task di piano con suffisso alfabetico scompaiono dall'indice
 - category: server-and-bindings
 - priority: P2
-- priority-reason: Forwarded by the Evolution Assurance central session (its T021): ### 06.1b tasks silently vanish from the index and the initiative count
+- priority-reason: Inoltrato dalla sessione centrale di Evolution Assurance (suo T021): i task ### 06.1b spariscono silenziosamente dall'indice e dal conteggio dell'iniziativa
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: -
 - paths: -
-- handoff: Read tasks/server-and-bindings/T029-plan-task-ids-with-a-letter-suffix-drop-out-of-the.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T029-plan-task-ids-with-a-letter-suffix-drop-out-of-the.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: Letter-suffix plan ids
+- short: ID piano con suffisso lettera
 
 ## Goal
 
-tasks_engine.py does not parse plan tasks with a letter suffix (### 06.1b - ...); validate only warns about a missing ' - ' separator while the task drops out of the index and the initiative count. Accept NN.Tx ids everywhere ids are parsed (plan blocks, depends-on, transitions, qualified refs) or refuse them with a validate ERROR that names the cause; never drop a block silently.
+tasks_engine.py non effettua il parsing dei task di piano con suffisso alfabetico (### 06.1b - ...); validate emette solo un avviso sulla mancanza del separatore ' - ' mentre il task scompare dall'indice e dal conteggio dell'iniziativa. Accettare gli ID NN.Tx ovunque vengano analizzati gli ID (blocchi di piano, depends-on, transizioni, riferimenti qualificati) oppure rifiutarli con un ERROR di validate che ne indichi la causa; non scartare mai un blocco silenziosamente.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

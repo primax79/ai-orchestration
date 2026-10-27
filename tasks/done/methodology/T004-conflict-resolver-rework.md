@@ -1,10 +1,10 @@
-# T004 Rework `conflict-resolver` for Architect audience and incompatible designs
+# T004 Rielaborare `conflict-resolver` per il ruolo Architect e i design incompatibili
 
 - id: T004
-- title: Rework conflict-resolver for Architect audience and incompatible designs
+- title: Rielaborare conflict-resolver per il ruolo Architect e i design incompatibili
 - category: methodology
 - priority: P2
-- priority-reason: Current stub targets the wrong role and tells the agent to preserve both sides even when designs are incompatible
+- priority-reason: Lo stub attuale si rivolge al ruolo sbagliato e istruisce l'agente a preservare entrambi i lati anche quando i design sono incompatibili
 - next-up: no
 - state: done
 - executor: self
@@ -12,23 +12,23 @@
 - decider: -
 - sources: ../architect-executor-consolidated-review.md (§2.5), docs/02-gap-analysis-and-evolution-roadmap.md
 - paths: ../ai-architect-executor/plugins/architect-side/skills/conflict-resolver/SKILL.template.md, ../kilo-mcp/bindings/conflict-resolver.json
-- handoff: Read tasks/methodology/T004-conflict-resolver-rework.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/methodology/T004-conflict-resolver-rework.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: orchestrator:deep-reasoning
-- short: Conflict-resolver rework
+- short: Rielaborazione conflict-resolver
 
 ## Goal
 
-Rewrite `conflict-resolver` (`SKILL.template.md` + `kilo-mcp` binding) so it addresses the Architect at Phase 6 merge time, separates mechanical conflicts from incompatible-design conflicts, and requires running the test suites of both features plus logging recurring conflicts as decomposition telemetry.
+Riscrivere `conflict-resolver` (`SKILL.template.md` + binding `kilo-mcp`) in modo che si rivolga all'Architect al momento del merge nella Fase 6, separi i conflitti meccanici da quelli di design incompatibili e richieda l'esecuzione delle suite di test di entrambe le funzionalità oltre alla registrazione dei conflitti ricorrenti nella telemetria di decomposizione.
 
 ## Steps
 
-1. Update `../ai-architect-executor/plugins/architect-side/skills/conflict-resolver/SKILL.template.md` and `../kilo-mcp/bindings/conflict-resolver.json`:
-   - Re-target prose to the Architect performing Phase 6 integration.
-   - Add the primary fork: **mechanical conflict** (imports, barrel exports, adjacent registrations → combine both) vs. **incompatible design/signature conflict** (stop, choose one design, bounce the other task back to its session or ask the user).
-   - Require running the test suites of **both** involved features plus consuming-app build after resolution.
-   - Instruct logging non-trivial conflicts as decomposition telemetry (`kilo_log_issue`).
-2. Regenerate generic and bound skills and indices.
+1. Aggiornare `../ai-architect-executor/plugins/architect-side/skills/conflict-resolver/SKILL.template.md` e `../kilo-mcp/bindings/conflict-resolver.json`:
+   - Riorientare il testo verso l'Architect che esegue l'integrazione di Fase 6.
+   - Aggiungere la biforcazione principale: **conflitto meccanico** (import, barrel export, registrazioni adiacenti → combinare entrambi) rispetto a **conflitto di design/firma incompatibile** (fermarsi, scegliere un design, rimandare l'altro task alla sua sessione o chiedere all'utente).
+   - Richiedere l'esecuzione delle suite di test di **entrambe** le funzionalità coinvolte più la build dell'applicazione consumatrice dopo la risoluzione.
+   - Istruire a registrare i conflitti non banali come telemetria di decomposizione (`kilo_log_issue`).
+2. Rigenerare le skill generiche e associate e gli indici.
 
 ## Verification
 
-- `python3 ../kilo-mcp/scripts/regenerate_bound_skills.py --check` exits 0.
+- `python3 ../kilo-mcp/scripts/regenerate_bound_skills.py --check` termina con codice 0.

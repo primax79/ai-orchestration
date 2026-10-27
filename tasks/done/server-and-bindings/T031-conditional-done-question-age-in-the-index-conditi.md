@@ -1,10 +1,10 @@
-# T031 Conditional done: question age in the index; conditions: header position
+# T031 Completamento condizionato: età della domanda nell'indice; posizione dell'header conditions:
 
 - id: T031
-- title: Conditional done: question age in the index; conditions: header position
+- title: Completamento condizionato: età della domanda nell'indice; posizione dell'header conditions:
 - category: server-and-bindings
 - priority: P3
-- priority-reason: Follow-up of T030 reported by the Evolution Assurance central session (docs/08 §7.15)
+- priority-reason: Follow-up di T030 segnalato dalla sessione centrale di Evolution Assurance (docs/08 §7.15)
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,15 +12,15 @@
 - decider: -
 - sources: -
 - paths: -
-- handoff: Read tasks/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: d4science-evolution-assurance-37
-- short: Conditional done follow-ups
+- short: Follow-up done condizionato
 
 ## Goal
 
-(1) The Conditional section of 00-INDEX.md shows, per task, each condition question with its age in days and its decider (e.g. 'Q003 (9 d, owner)'); conditions older than 7 days are listed in a short 'stale conditions' line with their decider; the same data is in the JSON (conditions: [{id, status, age_days, decider}]). (2) A header with conditions: in a non-canonical position is rejected without saying why: either accept optional fields in any position, or make the ordering error name the expected order (what the engine does for other optional fields must stay consistent).
+(1) La sezione Conditional di 00-INDEX.md mostra, per ciascun task, ogni domanda condizione con la sua età in giorni e il relativo decisore (ad es. 'Q003 (9 d, owner)'); le condizioni più vecchie di 7 giorni sono elencate in una riga sintetica 'stale conditions' con il rispettivo decisore; gli stessi dati sono presenti nel JSON (conditions: [{id, status, age_days, decider}]). (2) Un header con conditions: in una posizione non canonica viene rifiutato senza spiegarne il motivo: accettare i campi opzionali in qualsiasi posizione, oppure fare in modo che l'errore di ordinamento indichi l'ordine atteso (mantenendo la coerenza con il comportamento del motore per gli altri campi opzionali).
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
