@@ -14499,3 +14499,359 @@ def test_t069_probe_missing_test_file_and_timeout_recorded_as_untested(tmp_path:
     assert uc11["last_verdict"] == "untested"
 
 
+# ===========================================================================
+# Task 17.2: link/unlink commands and derived rewrite of linked-tasks in sync-index
+# ===========================================================================
+
+def test_17_2_tasks_link_and_unlink_emergent_and_initiative_header_and_segment_order(tmp_path: pathlib.Path) -> None:
+    """Task 17.2 (items 1, 3, 4):
+    - `tasks link <id> UC001[,UC004]` and `tasks unlink <id> UC001`: preview by default, `--apply --expect-plan-hash`.
+    - Emergent tasks: write/update `use-cases:` header respecting extension order (after `run-id`, before `short`).
+    - Initiative tasks: write/update `**Use cases:**` segment right after `**Depends on:**` in the block's status line
+      (and block rewriter preserves that position when adding/updating `Depends on` or other segments).
+    - Unknown UC ids refused; deprecated UC warned.
+    - Affected use cases' `linked-tasks:` rewritten in the same transaction on apply, preserving validation logs.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "01-search").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    run_cli(
+        "use-cases", "create",
+        "--id", "UC001",
+        "--title", "Search by budget",
+        "--actor", "Buyer",
+        "--status", "active",
+        "--tasks-dir", str(tasks_dir),
+    )
+    run_cli(
+        "use-cases", "create",
+        "--id", "UC004",
+        "--title", "Export search results",
+        "--actor", "Buyer",
+        "--status", "active",
+        "--tasks-dir", str(tasks_dir),
+    )
+    (tasks_dir / "use-cases" / "UC002-deprecated.md").write_text(
+        "# UC002 - Deprecated flow\n\n"
+        "- id: UC002\n"
+        "- title: Deprecated flow\n"
+        "- actor: Buyer\n"
+        "- status: deprecated\n"
+        "- priority: P2\n"
+        "- linked-tasks: -\n"
+        "- verification-type: automated-probe\n"
+        "- last-tested: -\n"
+        "- last-verdict: -\n\n"
+        "## Description & Business Value\nDeprecated.\n\n"
+        "## Preconditions\n- None.\n\n"
+        "## Scenario / Interaction Steps\n1. Step.\n\n"
+        "## Automated Verification Command\n```bash\necho ok\n```\n\n"
+        "## Acceptance Criteria\n- [ ] Ok.\n\n"
+        "## AI Validation Log\n",
+        encoding="utf-8",
+    )
+
+    # Record a validation log entry on UC001 so we can verify it is preserved byte-for-byte
+    run_cli(
+        "use-cases", "record-validation", "UC001",
+        "--verdict", "pass",
+        "--summary", "Initial validation pass",
+        "--evidence", "All assertions green",
+        "--tasks-dir", str(tasks_dir),
+    )
+    uc1_path = next((tasks_dir / "use-cases").glob("UC001-*.md"))
+    uc1_log_before = uc1_path.read_text(encoding="utf-8").split("## AI Validation Log", 1)[1]
+    assert "Initial validation pass" in uc1_log_before
+
+    # Emergent task T001 with both `run-id` and `short` headers so `use-cases` must land between them
+    t1_file = tasks_dir / "features" / "T001-search-ui.md"
+    t1_file.write_text(
+        "# T001 Search UI\n\n"
+        "- id: T001\n"
+        "- title: Search UI\n"
+        "- category: features\n"
+        "- priority: P1\n"
+        "- priority-reason: core\n"
+        "- next-up: yes\n"
+        "- state: open\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: src/ui.py\n"
+        "- handoff: Implement UI.\n"
+        "- size: M\n"
+        "- kind: feature\n"
+        "- run-id: run-123\n"
+        "- short: Search UI\n\n"
+        "## Goal\n\nBuild search UI.\n\n"
+        "## Steps\n\n- [ ] Build UI component.\n\n"
+        "## Verification\n\n- pytest tests/test_ui.py\n",
+        encoding="utf-8",
+    )
+
+    # Initiative 01 with 01.1 (has Depends on, Labels after it) and 01.2 (no Depends on yet)
+    plan_file = tasks_dir / "01-search" / "plan.md"
+    plan_file.write_text(
+        "# 01 — Search Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Index budget field\n\n"
+        "- **Status:** `open` · **Short:** Index budget · **Size:** M · **Depends on:** - · **Labels:** backend\n"
+        "- **Goal:** Index budget field.\n\n"
+        "### 01.2 - Export results\n\n"
+        "- **Status:** `open` · **Short:** Export results · **Size:** S\n"
+        "- **Goal:** Export results.\n",
+        encoding="utf-8",
+    )
+
+    # 1. Unknown UC id is refused
+    res_unk = run_cli("link", "T001", "UC999", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_unk.returncode != 0
+    assert "Unknown use case 'UC999'" in json.loads(res_unk.stdout)["error"]
+
+    # 2. Preview by default on emergent task T001 (writes nothing)
+    t1_bytes_before = t1_file.read_bytes()
+    res_prev = run_cli("link", "T001", "UC001,UC004", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_prev.returncode == 0
+    prev_data = json.loads(res_prev.stdout)
+    assert prev_data["ok"] is True
+    assert prev_data["applied"] is False
+    assert prev_data["dry_run"] is True
+    assert prev_data["use_cases"] == ["UC001", "UC004"]
+    assert t1_file.read_bytes() == t1_bytes_before
+
+    # Apply without --expect-plan-hash is refused
+    res_no_hash = run_cli("link", "T001", "UC001,UC004", "--apply", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_no_hash.returncode != 0
+    assert "requires --expect-plan-hash" in json.loads(res_no_hash.stdout)["error"]
+
+    # Apply with --expect-plan-hash writes T001 and updates UC001 and UC004 in the same transaction
+    res_app = run_cli(
+        "link", "T001", "UC001,UC004",
+        "--apply", "--expect-plan-hash", prev_data["plan_hash"],
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_app.returncode == 0, res_app.stdout + res_app.stderr
+    app_data = json.loads(res_app.stdout)
+    assert app_data["ok"] is True
+    assert app_data["applied"] is True
+
+    t1_text = t1_file.read_text(encoding="utf-8")
+    assert "- use-cases: UC001, UC004" in t1_text
+    # Check header order: after run-id, before short
+    assert t1_text.index("- run-id: run-123") < t1_text.index("- use-cases: UC001, UC004") < t1_text.index("- short: Search UI")
+
+    # Verify UC001 and UC004 linked-tasks were rewritten in the same transaction and UC001 log preserved byte-for-byte
+    uc1_after = uc1_path.read_text(encoding="utf-8")
+    assert "- linked-tasks: T001\n" in uc1_after
+    assert uc1_after.split("## AI Validation Log", 1)[1] == uc1_log_before
+    uc4_path = next((tasks_dir / "use-cases").glob("UC004-*.md"))
+    assert "- linked-tasks: T001\n" in uc4_path.read_text(encoding="utf-8")
+
+    # 3. Link initiative task 01.1 to UC001 and deprecated UC002 (warns on deprecated, places **Use cases:** right after **Depends on:**)
+    res_prev_init = run_cli("link", "01.1", "UC001,UC002", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_prev_init.returncode == 0
+    prev_init_data = json.loads(res_prev_init.stdout)
+    assert any("deprecated" in w.lower() and "UC002" in w for w in prev_init_data["warnings"])
+
+    res_app_init = run_cli(
+        "link", "01.1", "UC001,UC002",
+        "--apply", "--expect-plan-hash", prev_init_data["plan_hash"],
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_app_init.returncode == 0
+    plan_text = plan_file.read_text(encoding="utf-8")
+    assert "**Depends on:** - · **Use cases:** UC001, UC002 · **Labels:** backend" in plan_text
+
+    # Verify UC001 now lists sorted ["01.1", "T001"]
+    assert "- linked-tasks: 01.1, T001\n" in uc1_path.read_text(encoding="utf-8")
+
+    # Verify block rewriter keeps **Use cases:** right after **Depends on:** even when Depends on is added later (on 01.2)
+    prev_12 = json.loads(run_cli("link", "01.2", "UC004", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    run_cli("link", "01.2", "UC004", "--apply", "--expect-plan-hash", prev_12["plan_hash"], "--tasks-dir", str(tasks_dir))
+    # Now set-deps on 01.2 (which had no **Depends on:** segment before)
+    run_cli("set-deps", "01.2", "01.1", "--tasks-dir", str(tasks_dir))
+    plan_text_after_deps = plan_file.read_text(encoding="utf-8")
+    assert "**Depends on:** 01.1 · **Use cases:** UC004" in plan_text_after_deps
+
+    # 4. Unlink UC004 from T001 and UC002 from 01.1
+    prev_un = json.loads(run_cli("unlink", "T001", "UC004", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    res_un = run_cli(
+        "unlink", "T001", "UC004",
+        "--apply", "--expect-plan-hash", prev_un["plan_hash"],
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_un.returncode == 0
+    assert "- use-cases: UC001\n" in t1_file.read_text(encoding="utf-8")
+    # UC004 now only has 01.2
+    assert "- linked-tasks: 01.2\n" in uc4_path.read_text(encoding="utf-8")
+
+    # Validate tree is completely clean (0 errors)
+    val_res = json.loads(run_cli("validate", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    assert val_res["ok"] is True
+    assert val_res["errors"] == []
+
+
+def test_17_2_sync_index_derived_rewrite_events_rollback_and_invalid_tree_refusal(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 17.2 (items 2, 4, 5):
+    - `sync-index` includes targeted rewrite of each use case's `linked-tasks:` in its plan (never losing validation log).
+    - Pre-adoption guard: skips rewriting `linked-tasks` to empty when written links are not yet adopted on tasks,
+      printing 'run use-cases adopt-links first'.
+    - Emits one `use_case.links_changed` event per changed use case.
+    - Rolls back all touched files if an error occurs mid-transaction.
+    - Refuses to run if `validate` has errors.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        "# Task Index\n\n"
+        "## Next up\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+
+    _write_sample_task(tasks_dir / "features" / "T001-feat.md", task_id="T001", title="Feat 1", category="features")
+    _write_sample_task(tasks_dir / "features" / "T002-feat.md", task_id="T002", title="Feat 2", category="features")
+    # T001 and T002 both link UC001 on the task side
+    for tf in (tasks_dir / "features" / "T001-feat.md", tasks_dir / "features" / "T002-feat.md"):
+        tf.write_text(
+            tf.read_text(encoding="utf-8").replace("- handoff:", "- handoff:") + "",
+            encoding="utf-8",
+        )
+        tf.write_text(
+            te._rewrite_emergent_use_cases_in_text(tf.read_text(encoding="utf-8"), ["UC001"]),
+            encoding="utf-8",
+        )
+
+    # UC001 has stale written linked-tasks: T001 (derived is T001, T002) and a custom AI Validation Log
+    uc1_file = tasks_dir / "use-cases" / "UC001-search.md"
+    uc1_log = (
+        "## AI Validation Log\n\n"
+        "### [2026-10-27 10:00 UTC] AI Validation by verifier-1\n"
+        "- **Verdict:** `PASS`\n"
+        "- **Summary:** Exact bytes preserved.\n"
+        "- **Evidence:**\n  line 1\n  line 2\n"
+    )
+    uc1_file.write_text(
+        "# UC001 - Search\n\n"
+        "- id: UC001\n"
+        "- title: Search\n"
+        "- actor: User\n"
+        "- status: active\n"
+        "- priority: P1\n"
+        "- linked-tasks: T001\n"
+        "- verification-type: automated-probe\n"
+        "- last-tested: 2026-10-27\n"
+        "- last-verdict: pass\n\n"
+        "## Description & Business Value\nSearch.\n\n"
+        "## Preconditions\n- None.\n\n"
+        "## Scenario / Interaction Steps\n1. Run search.\n\n"
+        "## Automated Verification Command\n```bash\necho ok\n```\n\n"
+        "## Acceptance Criteria\n- [ ] Works.\n\n"
+        + uc1_log,
+        encoding="utf-8",
+    )
+
+    # UC002 has written linked-tasks: T001, but NO task links to UC002 (unadopted! Must be guarded, not wiped to empty)
+    uc2_file = tasks_dir / "use-cases" / "UC002-unadopted.md"
+    uc2_file.write_text(
+        "# UC002 - Unadopted\n\n"
+        "- id: UC002\n"
+        "- title: Unadopted\n"
+        "- actor: User\n"
+        "- status: draft\n"
+        "- priority: P2\n"
+        "- linked-tasks: T001\n"
+        "- verification-type: automated-probe\n"
+        "- last-tested: -\n"
+        "- last-verdict: -\n\n"
+        "## Description & Business Value\nUnadopted.\n\n"
+        "## Preconditions\n- None.\n\n"
+        "## Scenario / Interaction Steps\n1. Step.\n\n"
+        "## Automated Verification Command\n```bash\necho ok\n```\n\n"
+        "## Acceptance Criteria\n- [ ] Ok.\n\n"
+        "## AI Validation Log\n",
+        encoding="utf-8",
+    )
+
+    # 1. Preview sync-index: shows per-file change for UC001, skips UC002 with "run use-cases adopt-links first"
+    res_prev = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--preview")
+    assert res_prev.returncode == 0
+    assert "run use-cases adopt-links first" in res_prev.stdout
+    assert "UC002" in res_prev.stdout
+    assert "use-cases/UC001-search.md (linked-tasks: [T001] -> [T001, T002])" in res_prev.stdout
+
+    res_prev_json = json.loads(run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--preview", "--json").stdout)
+    assert res_prev_json["ok"] is True
+    assert res_prev_json["applied"] is False
+    assert len(res_prev_json["use_case_rewrites"]) == 1
+    assert res_prev_json["use_case_rewrites"][0]["id"] == "UC001"
+    assert len(res_prev_json["skipped_unadopted_use_cases"]) == 1
+    assert res_prev_json["skipped_unadopted_use_cases"][0]["id"] == "UC002"
+    plan_hash = res_prev_json["plan_hash"]
+
+    # 2. Test rollback on injected failure during apply
+    orig_idx_bytes = index_path.read_bytes()
+    orig_uc1_bytes = uc1_file.read_bytes()
+    real_atomic_write = te._atomic_write_text
+    call_count = {"n": 0}
+
+    def _failing_write(path: pathlib.Path, content: str, encoding: str = "utf-8") -> None:
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise OSError("Simulated disk failure on second file")
+        real_atomic_write(path, content, encoding=encoding)
+
+    monkeypatch.setattr(te, "_atomic_write_text", _failing_write)
+    args_apply = te.build_parser().parse_args([
+        "sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--expect-plan-hash", plan_hash
+    ])
+    with pytest.raises(OSError, match="Simulated disk failure"):
+        te.cmd_sync_index(args_apply)
+    monkeypatch.setattr(te, "_atomic_write_text", real_atomic_write)
+
+    # Both 00-INDEX.md and UC001 must be rolled back byte-for-byte
+    assert index_path.read_bytes() == orig_idx_bytes
+    assert uc1_file.read_bytes() == orig_uc1_bytes
+
+    # 3. Apply sync-index succeeds, preserves validation log byte-for-byte, and emits `use_case.links_changed`
+    res_app = run_cli(
+        "sync-index", "--tasks-dir", str(tasks_dir),
+        "--apply", "--expect-plan-hash", plan_hash, "--json",
+    )
+    assert res_app.returncode == 0, res_app.stdout + res_app.stderr
+    app_payload = json.loads(res_app.stdout)
+    assert app_payload["ok"] is True
+    assert app_payload["applied"] is True
+    assert "- linked-tasks: T001, T002\n" in uc1_file.read_text(encoding="utf-8")
+    assert uc1_file.read_text(encoding="utf-8").endswith(uc1_log)
+    # UC002 untouched because of pre-adoption guard
+    assert "- linked-tasks: T001\n" in uc2_file.read_text(encoding="utf-8")
+
+    events = _read_ws_events(tmp_path)
+    uc_events = [e for e in events if e["type"] == "use_case.links_changed"]
+    assert len(uc_events) == 1
+    assert uc_events[0]["subject"] == "UC001"
+    assert uc_events[0]["data"]["old_linked_tasks"] == ["T001"]
+    assert uc_events[0]["data"]["new_linked_tasks"] == ["T001", "T002"]
+
+    # 4. Refuse to run if validate has errors
+    bad_task = tasks_dir / "features" / "T003-broken.md"
+    bad_task.write_text("# T003 Broken\n\n- id: T003\n- state: invalid-state\n", encoding="utf-8")
+    res_invalid = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply", "--json")
+    assert res_invalid.returncode == 1
+    inv_payload = json.loads(res_invalid.stdout)
+    assert inv_payload["ok"] is False
+    assert "invalid tasks tree" in inv_payload["error"]
+
+
+

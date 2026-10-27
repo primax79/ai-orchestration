@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import datetime
 import difflib
 import hashlib
@@ -2264,7 +2265,10 @@ def parse_use_cases_field(raw_val: Any) -> list[str]:
     if not raw_val:
         return []
     if isinstance(raw_val, (list, tuple)):
-        items = [str(x).strip().strip("`").strip() for x in raw_val]
+        items: list[str] = []
+        for x in raw_val:
+            for part in str(x).split(","):
+                items.append(part.strip().strip("`").strip())
     else:
         s = str(raw_val).strip()
         if not s or s == "-":
@@ -2466,6 +2470,8 @@ def rewrite_block_in_file(
     clear_waiting_on: bool = False,
     new_verify_by: str | None = None,
     clear_verify_by: bool = False,
+    new_use_cases: list[str] | None = None,
+    clear_use_cases: bool = False,
 ) -> tuple[str, str] | tuple[str, str, str]:
     """Rewrite one `### id - title` block in place; every other byte of the file is preserved.
 
@@ -2525,6 +2531,7 @@ def rewrite_block_in_file(
     short_updated = False
     waiting_on_updated = False
     verify_by_updated = False
+    use_cases_updated = False
     status_line_idx: int | None = None
 
     parsed_lines: list[tuple[str, list[BulletSegment], str, bool, str]] = []
@@ -2679,6 +2686,30 @@ def rewrite_block_in_file(
                 for s_idx in reversed(to_remove):
                     segments.pop(s_idx)
 
+            if new_use_cases is not None or clear_use_cases:
+                uc_val_str = ", ".join(new_use_cases) if (new_use_cases and not clear_use_cases) else ""
+                to_remove = []
+                for s_idx, seg in enumerate(segments):
+                    if seg.key in ("use_cases", "use-cases"):
+                        if not uc_val_str:
+                            to_remove.append(s_idx)
+                        else:
+                            seg.raw_value = uc_val_str
+                            seg.clean_value = uc_val_str
+                        use_cases_updated = True
+                for s_idx in reversed(to_remove):
+                    segments.pop(s_idx)
+
+            if re.match(r"^\s*[-*]\s+use[-_]cases:\s*", line_clean, re.IGNORECASE):
+                if clear_use_cases or (new_use_cases is not None and not new_use_cases):
+                    use_cases_updated = True
+                    continue
+                elif new_use_cases is not None:
+                    uc_val_str = ", ".join(new_use_cases)
+                    parsed_lines.append(("", [], line_ending, False, f"{prefix}use-cases: {uc_val_str}" + line_ending))
+                    use_cases_updated = True
+                    continue
+
             if re.match(r"^\s*[-*]\s+waiting[-_]on:\s*", line_clean, re.IGNORECASE):
                 if clear_waiting_on or (new_waiting_on is not None and (new_waiting_on == "-" or not new_waiting_on.strip())):
                     continue
@@ -2749,8 +2780,30 @@ def rewrite_block_in_file(
         if new_deps is not None and not deps_updated:
             deps_val = update_depends_on_field("", new_deps)
             new_seg = BulletSegment(raw_key="Depends on", key="depends_on", raw_value=deps_val, clean_value=deps_val)
-            segments.append(new_seg)
+            uc_seg_idx = next((i for i, s in enumerate(segments) if s.key in ("use_cases", "use-cases")), None)
+            if uc_seg_idx is not None:
+                segments.insert(uc_seg_idx, new_seg)
+            else:
+                segments.append(new_seg)
             deps_updated = True
+
+        if new_use_cases is not None and not use_cases_updated and not clear_use_cases and new_use_cases:
+            uc_val_str = ", ".join(new_use_cases)
+            new_seg = BulletSegment(raw_key="Use cases", key="use_cases", raw_value=uc_val_str, clean_value=uc_val_str)
+            deps_seg_idx = next((i for i, s in enumerate(segments) if s.key in ("depends_on", "depends")), None)
+            if deps_seg_idx is not None:
+                segments.insert(deps_seg_idx + 1, new_seg)
+            else:
+                segments.append(new_seg)
+            use_cases_updated = True
+
+        # Ensure **Use cases:** sits immediately after **Depends on:** when both are present on the Status bullet
+        deps_pos = next((i for i, s in enumerate(segments) if s.key in ("depends_on", "depends")), None)
+        uc_pos = next((i for i, s in enumerate(segments) if s.key in ("use_cases", "use-cases")), None)
+        if deps_pos is not None and uc_pos is not None and uc_pos != deps_pos + 1:
+            uc_seg = segments.pop(uc_pos)
+            new_deps_pos = next(i for i, s in enumerate(segments) if s.key in ("depends_on", "depends"))
+            segments.insert(new_deps_pos + 1, uc_seg)
 
         if new_labels is not None and not labels_updated:
             lbl_val = ", ".join(new_labels) if new_labels else "-"
@@ -6341,6 +6394,554 @@ def set_verify_by(
                 "dry_run": dry_run,
                 "diff": diff_str,
             }
+
+
+def _rewrite_use_case_linked_tasks_in_text(text: str, linked_tasks: list[str]) -> tuple[str, list[str], bool]:
+    """Targeted header rewrite of `linked-tasks:` on a use case markdown text.
+
+    Never touches the body or the `## AI Validation Log` section.
+    Returns `(new_text, old_linked_tasks, changed)`.
+    """
+    new_val = ", ".join(linked_tasks) if linked_tasks else "-"
+    lines = text.splitlines(keepends=True)
+    h1_seen = False
+    in_header = False
+    replaced = False
+    old_linked_tasks: list[str] = []
+    last_header_idx = -1
+    priority_idx = -1
+
+    for idx, line in enumerate(lines):
+        clean = line.rstrip("\r\n")
+        ending = line[len(clean):] or "\n"
+        if not h1_seen:
+            if clean.startswith("# "):
+                h1_seen = True
+            continue
+        if clean.startswith("## "):
+            break
+        m = re.match(r"^(\s*-\s+)([a-zA-Z0-9_-]+)(:\s*)(.*)$", clean)
+        if m:
+            in_header = True
+            last_header_idx = idx
+            k_low = m.group(2).strip().lower()
+            if k_low == "priority":
+                priority_idx = idx
+            if k_low in ("linked-tasks", "linked_tasks") and not replaced:
+                raw_old = m.group(4).strip()
+                old_linked_tasks = [t.strip() for t in raw_old.split(",") if t.strip() and t.strip() != "-"]
+                lines[idx] = f"{m.group(1)}linked-tasks: {new_val}{ending}"
+                replaced = True
+        elif in_header and not clean.strip():
+            break
+
+    if not replaced:
+        ins_idx = (priority_idx + 1) if priority_idx >= 0 else (last_header_idx + 1 if last_header_idx >= 0 else len(lines))
+        lines.insert(ins_idx, f"- linked-tasks: {new_val}\n")
+
+    new_text = "".join(lines)
+    return new_text, old_linked_tasks, (new_text != text)
+
+
+def _rewrite_emergent_use_cases_in_text(
+    text: str,
+    use_cases: list[str],
+    *,
+    is_micro: bool = False,
+) -> str:
+    """Targeted header insertion/update of `- use-cases:` in an emergent or microtask file,
+    preserving the canonical extension order (after `run-id`, before `short`).
+    """
+    val_str = ", ".join(use_cases) if use_cases else "-"
+    lines = text.splitlines(keepends=True)
+    scanned_lines, _ = scan_markdown_blocks(text)
+
+    h1_idx: int | None = None
+    for idx, sline in enumerate(scanned_lines):
+        if not sline.is_fenced and sline.text.startswith("# "):
+            h1_idx = idx
+            break
+
+    if h1_idx is None:
+        if re.search(r"^-\s+use[-_]cases:\s*.*$", text, flags=re.MULTILINE):
+            return re.sub(r"^-\s+use[-_]cases:\s*.*$", f"- use-cases: {val_str}", text, count=1, flags=re.MULTILINE)
+        return text.rstrip("\n") + f"\n- use-cases: {val_str}\n"
+
+    idx = h1_idx + 1
+    while idx < len(scanned_lines) and not scanned_lines[idx].text.strip():
+        idx += 1
+    header_start = idx
+    header_fields: list[tuple[int, str]] = []
+    while idx < len(scanned_lines):
+        sline = scanned_lines[idx]
+        if sline.is_fenced:
+            break
+        m = HEADER_LINE_RE.match(sline.text)
+        if not m:
+            break
+        header_fields.append((idx, m.group(1)))
+        idx += 1
+    header_end = idx
+
+    # Check if use-cases or use_cases already exists in header
+    existing_uc_indices = [line_i for line_i, k in header_fields if k in ("use-cases", "use_cases")]
+    if existing_uc_indices:
+        first_i = existing_uc_indices[0]
+        clean = lines[first_i].rstrip("\r\n")
+        ending = lines[first_i][len(clean):] or "\n"
+        lines[first_i] = f"- use-cases: {val_str}{ending}"
+        for extra_i in reversed(existing_uc_indices[1:]):
+            lines.pop(extra_i)
+        return "".join(lines)
+
+    # Insert in canonical order
+    seq = MICRO_HEADER_FIELDS if is_micro else (CORE_HEADER_FIELDS + OPTIONAL_EXTENSION_FIELDS)
+    uc_rank = seq.index("use-cases") if "use-cases" in seq else len(seq)
+
+    insert_line_idx = header_end
+    handoff_line_idx = next((line_i for line_i, k in header_fields if k == "handoff"), None)
+    start_search = (handoff_line_idx + 1) if (handoff_line_idx is not None and not is_micro) else header_start
+
+    for line_i, k in header_fields:
+        if line_i < start_search:
+            continue
+        k_norm = "use-cases" if k == "use_cases" else ("verify-by" if k == "verify_by" else ("waiting-on" if k == "waiting_on" else k))
+        if k_norm in seq:
+            rank = seq.index(k_norm)
+            if rank > uc_rank:
+                insert_line_idx = line_i
+                break
+        elif not is_micro and handoff_line_idx is not None and line_i > handoff_line_idx:
+            # Project-specific custom extension fields sit after OPTIONAL_EXTENSION_FIELDS
+            insert_line_idx = line_i
+            break
+
+    ending = "\n"
+    if insert_line_idx > 0 and insert_line_idx <= len(lines):
+        prev_line = lines[insert_line_idx - 1]
+        prev_clean = prev_line.rstrip("\r\n")
+        ending = prev_line[len(prev_clean):] or "\n"
+    lines.insert(insert_line_idx, f"- use-cases: {val_str}{ending}")
+    return "".join(lines)
+
+
+def _apply_file_writes_atomically(writes: list[tuple[pathlib.Path, str]]) -> None:
+    """Write multiple `(path, new_content)` pairs atomically with rollback on any failure."""
+    backups: list[tuple[pathlib.Path, bytes | None]] = []
+    try:
+        for target_path, new_content in writes:
+            old_bytes = target_path.read_bytes() if target_path.exists() else None
+            backups.append((target_path, old_bytes))
+            _atomic_write_text(target_path, new_content, encoding="utf-8")
+    except Exception:
+        for target_path, old_bytes in reversed(backups):
+            try:
+                if old_bytes is None:
+                    if target_path.exists():
+                        target_path.unlink()
+                else:
+                    _atomic_write_text(target_path, old_bytes.decode("utf-8"), encoding="utf-8")
+            except Exception:
+                pass
+        raise
+
+
+def _plan_derived_use_case_rewrites(
+    tasks_dir: pathlib.Path,
+    *,
+    tree: dict[str, TaskNode] | None = None,
+    use_cases: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compute targeted `linked-tasks:` rewrites for all use cases in `tasks_dir`.
+
+    Includes the pre-adoption guard (Spec 17.2 item 5): if a use case has written `linked-tasks`
+    that are not yet adopted on the referenced tasks and its derived `linked-tasks` would become
+    empty, skip rewriting that use case to empty and record a guard notice ('run use-cases adopt-links first').
+    """
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if tree is None:
+        tree = discover_task_tree(tasks_dir)
+    if use_cases is None:
+        use_cases = discover_use_cases(tasks_dir)
+
+    projection = compute_use_case_links(tasks_dir, tree=tree, use_cases=use_cases)
+    rewrites: list[dict[str, Any]] = []
+    skipped_unadopted: list[dict[str, Any]] = []
+
+    for uc in sorted(use_cases, key=lambda u: _natural_sort_key(u.get("id", ""))):
+        uc_id = uc.get("id", "")
+        if not uc_id:
+            continue
+        uc_path = pathlib.Path(uc["file_path"])
+        rel_path = uc.get("rel_path") or uc_path.relative_to(tasks_dir).as_posix()
+        old_text = uc.get("content") if uc.get("content") is not None else uc_path.read_text(encoding="utf-8")
+        written_lt = list(uc.get("written_linked_tasks", uc.get("linked_tasks", [])))
+        derived_lt = list(projection.get(uc_id, []))
+
+        if written_lt == derived_lt:
+            continue
+
+        # Pre-adoption safety guard: do not wipe written linked-tasks to empty while written links are not yet adopted
+        if written_lt and not derived_lt:
+            skipped_unadopted.append({
+                "id": uc_id,
+                "path": rel_path,
+                "file_path": str(uc_path),
+                "written_linked_tasks": written_lt,
+                "derived_linked_tasks": derived_lt,
+                "reason": "run use-cases adopt-links first",
+            })
+            continue
+
+        new_text, old_parsed, changed = _rewrite_use_case_linked_tasks_in_text(old_text, derived_lt)
+        if not changed:
+            continue
+
+        diff_lines = list(
+            difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=str(uc_path),
+                tofile=f"{uc_path} (derived)",
+            )
+        )
+        old_fmt = ", ".join(written_lt) or "-"
+        new_fmt = ", ".join(derived_lt) or "-"
+        rewrites.append({
+            "id": uc_id,
+            "path": rel_path,
+            "file_path": str(uc_path),
+            "before_hash": _file_sha256(uc_path),
+            "old_text": old_text,
+            "new_text": new_text,
+            "old_linked_tasks": written_lt,
+            "new_linked_tasks": derived_lt,
+            "summary": f"linked-tasks: [{old_fmt}] -> [{new_fmt}]",
+            "diff": "".join(diff_lines),
+        })
+
+    return {
+        "projection": projection,
+        "rewrites": rewrites,
+        "skipped_unadopted": skipped_unadopted,
+    }
+
+
+def _mutate_task_use_cases(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    uc_ids: list[str] | str,
+    *,
+    mode: str,
+    dry_run: bool = True,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    """Shared implementation for `tasks link` (mode='link') and `tasks unlink` (mode='unlink').
+
+    Previews by default (`dry_run=True`), and on apply (`dry_run=False`, requires `expect_plan_hash`)
+    rewrites the task and any affected use cases' `linked-tasks:` in a single atomic transaction
+    with rollback on failure and `use_case.links_changed` events.
+    """
+    if not is_platform_supported() and not dry_run:
+        return {
+            "ok": False,
+            "applied": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    req_ucs = parse_use_cases_field(uc_ids)
+    if not req_ucs:
+        return {"ok": False, "applied": False, "error": "No use case IDs provided."}
+
+    lock_ctx = contextlib.nullcontext() if dry_run else task_write_lock(tasks_dir)
+    with lock_ctx:
+        tree = discover_task_tree(tasks_dir)
+        if node_id not in tree:
+            return {"ok": False, "applied": False, "error": f"Task '{node_id}' not found."}
+        node = tree[node_id]
+
+        all_ucs = discover_use_cases(tasks_dir)
+        ucs_by_id = {u["id"]: u for u in all_ucs if u.get("id")}
+
+        warnings: list[str] = []
+        for ref in req_ucs:
+            if ref.startswith("workspace:"):
+                continue
+            if not USE_CASE_ID_RE.match(ref) or ref not in ucs_by_id:
+                if mode == "link":
+                    return {
+                        "ok": False,
+                        "applied": False,
+                        "error": f"Unknown use case '{ref}'.",
+                    }
+                elif ref not in (node.use_cases or []):
+                    return {
+                        "ok": False,
+                        "applied": False,
+                        "error": f"Unknown use case '{ref}'.",
+                    }
+            else:
+                target_uc = ucs_by_id[ref]
+                if target_uc.get("status") == "deprecated" or target_uc.get("approval") == "deprecated":
+                    warnings.append(
+                        f"Use case '{ref}' is deprecated (status: deprecated)."
+                    )
+
+        curr_ucs = list(node.use_cases) if node.use_cases else parse_use_cases_field(
+            (node.own_fields or {}).get("use-cases") or (node.own_fields or {}).get("use_cases")
+        )
+        if mode == "link":
+            new_ucs = list(curr_ucs)
+            for ref in req_ucs:
+                if ref not in new_ucs:
+                    new_ucs.append(ref)
+        else:
+            new_ucs = [u for u in curr_ucs if u not in req_ucs]
+
+        task_file = pathlib.Path(node.file_path)
+        task_rel = task_file.relative_to(tasks_dir).as_posix() if task_file.is_relative_to(tasks_dir) else node.rel_path
+        old_task_text = task_file.read_text(encoding="utf-8")
+
+        if node.block_text is not None:
+            new_block_text, _, task_diff = rewrite_block_in_file(
+                task_file,
+                node_id,
+                new_use_cases=new_ucs,
+                clear_use_cases=(len(new_ucs) == 0),
+                dry_run=True,
+                return_diff=True,
+            )
+            # Reconstruct full file text with new block
+            heading_re = re.compile(rf"^###\s+{re.escape(node_id)}\s+[—–-]\s+.*$", re.MULTILINE)
+            m_h = heading_re.search(old_task_text)
+            assert m_h is not None
+            start_pos = m_h.start()
+            scanned_lines, _ = scan_markdown_blocks(old_task_text)
+            heading_line_num = old_task_text[:start_pos].count("\n") + 1
+            heading_sline_idx = next(
+                (i for i, sl in enumerate(scanned_lines) if sl.line_number == heading_line_num),
+                None,
+            )
+            end_pos = len(old_task_text)
+            if heading_sline_idx is not None:
+                for idx in range(heading_sline_idx + 1, len(scanned_lines)):
+                    sl = scanned_lines[idx]
+                    if not sl.is_fenced and (sl.text.startswith("### ") or sl.text.startswith("## ")):
+                        end_pos = sum(len(sl2.text) + 1 for sl2 in scanned_lines[:idx])
+                        break
+            new_task_text = old_task_text[:start_pos] + new_block_text + old_task_text[end_pos:]
+        else:
+            is_micro = node.node_type == "microtask" or node.category == "micro"
+            new_task_text = _rewrite_emergent_use_cases_in_text(old_task_text, new_ucs, is_micro=is_micro)
+            task_diff_lines = list(
+                difflib.unified_diff(
+                    old_task_text.splitlines(keepends=True),
+                    new_task_text.splitlines(keepends=True),
+                    fromfile=str(task_file),
+                    tofile=f"{task_file} (dry-run)" if dry_run else str(task_file),
+                )
+            )
+            task_diff = "".join(task_diff_lines)
+
+        task_changed = new_task_text != old_task_text
+
+        # Simulate updated tree to compute derived linked-tasks for affected use cases
+        sim_tree = dict(tree)
+        sim_node = copy.copy(node)
+        sim_node.use_cases = list(new_ucs)
+        sim_own = dict(node.own_fields or {})
+        sim_own["use-cases"] = ", ".join(new_ucs) if new_ucs else "-"
+        sim_own["use_cases"] = sim_own["use-cases"]
+        sim_node.own_fields = sim_own
+        sim_tree[node_id] = sim_node
+
+        sim_projection = compute_use_case_links(tasks_dir, tree=sim_tree, use_cases=all_ucs)
+        affected_uc_ids = sorted(
+            {u for u in (set(curr_ucs) | set(new_ucs) | set(req_ucs)) if u in ucs_by_id},
+            key=_natural_sort_key,
+        )
+
+        uc_rewrites: list[dict[str, Any]] = []
+        for ucid in affected_uc_ids:
+            uc_obj = ucs_by_id[ucid]
+            uc_path = pathlib.Path(uc_obj["file_path"])
+            uc_rel = uc_obj.get("rel_path") or uc_path.relative_to(tasks_dir).as_posix()
+            old_uc_text = uc_obj.get("content") if uc_obj.get("content") is not None else uc_path.read_text(encoding="utf-8")
+            written_lt = list(uc_obj.get("written_linked_tasks", uc_obj.get("linked_tasks", [])))
+            derived_lt = list(sim_projection.get(ucid, []))
+            new_uc_text, _, uc_changed = _rewrite_use_case_linked_tasks_in_text(old_uc_text, derived_lt)
+            if uc_changed:
+                uc_diff = "".join(
+                    difflib.unified_diff(
+                        old_uc_text.splitlines(keepends=True),
+                        new_uc_text.splitlines(keepends=True),
+                        fromfile=str(uc_path),
+                        tofile=f"{uc_path} (dry-run)" if dry_run else str(uc_path),
+                    )
+                )
+                old_fmt = ", ".join(written_lt) or "-"
+                new_fmt = ", ".join(derived_lt) or "-"
+                uc_rewrites.append({
+                    "id": ucid,
+                    "path": uc_rel,
+                    "file_path": str(uc_path),
+                    "before_hash": _file_sha256(uc_path),
+                    "old_text": old_uc_text,
+                    "new_text": new_uc_text,
+                    "old_linked_tasks": written_lt,
+                    "new_linked_tasks": derived_lt,
+                    "summary": f"linked-tasks: [{old_fmt}] -> [{new_fmt}]",
+                    "diff": uc_diff,
+                })
+
+        operations: list[dict[str, Any]] = []
+        if task_changed:
+            old_uc_fmt = ", ".join(curr_ucs) or "-"
+            new_uc_fmt = ", ".join(new_ucs) or "-"
+            operations.append({
+                "action": "modify",
+                "path": task_rel,
+                "before_hash": _file_sha256(task_file),
+                "summary": f"use-cases: [{old_uc_fmt}] -> [{new_uc_fmt}]",
+            })
+        for ucr in uc_rewrites:
+            operations.append({
+                "action": "modify",
+                "path": ucr["path"],
+                "before_hash": ucr["before_hash"],
+                "summary": ucr["summary"],
+            })
+
+        plan, plan_hash = compute_operation_plan(operations)
+        combined_diff = "\n".join(d for d in [task_diff, *[u["diff"] for u in uc_rewrites]] if d)
+
+        if dry_run:
+            return {
+                "ok": True,
+                "applied": False,
+                "dry_run": True,
+                "task_id": node_id,
+                "old_use_cases": curr_ucs,
+                "use_cases": new_ucs,
+                "affected_use_cases": [
+                    {"id": u["id"], "path": u["path"], "old_linked_tasks": u["old_linked_tasks"], "new_linked_tasks": u["new_linked_tasks"]}
+                    for u in uc_rewrites
+                ],
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "diff": combined_diff,
+                "warnings": warnings,
+            }
+
+        if not expect_plan_hash:
+            return {
+                "ok": False,
+                "applied": False,
+                "dry_run": False,
+                "error": f"Applying {mode} requires --expect-plan-hash <hash>. Run without --apply to preview and obtain the plan hash.",
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "warnings": warnings,
+            }
+
+        if expect_plan_hash.strip().lower() != plan_hash.lower():
+            return {
+                "ok": False,
+                "applied": False,
+                "dry_run": False,
+                "error": f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}",
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "warnings": warnings,
+            }
+
+        writes: list[tuple[pathlib.Path, str]] = []
+        if task_changed:
+            writes.append((task_file, new_task_text))
+        for ucr in uc_rewrites:
+            writes.append((pathlib.Path(ucr["file_path"]), ucr["new_text"]))
+
+        if writes:
+            _apply_file_writes_atomically(writes)
+
+        if task_changed:
+            _emit_event(
+                tasks_dir,
+                "task.updated",
+                {
+                    "field": "use_cases",
+                    "value": ", ".join(new_ucs) if new_ucs else "-",
+                    "old_use_cases": curr_ucs,
+                    "use_cases": new_ucs,
+                },
+                subject=node_id,
+            )
+
+        for ucr in uc_rewrites:
+            _emit_event(
+                tasks_dir,
+                "use_case.links_changed",
+                {
+                    "use_case_id": ucr["id"],
+                    "old_linked_tasks": ucr["old_linked_tasks"],
+                    "new_linked_tasks": ucr["new_linked_tasks"],
+                    "linked_tasks": ucr["new_linked_tasks"],
+                },
+                subject=ucr["id"],
+            )
+
+        return {
+            "ok": True,
+            "applied": True,
+            "dry_run": False,
+            "task_id": node_id,
+            "old_use_cases": curr_ucs,
+            "use_cases": new_ucs,
+            "affected_use_cases": [
+                {"id": u["id"], "path": u["path"], "old_linked_tasks": u["old_linked_tasks"], "new_linked_tasks": u["new_linked_tasks"]}
+                for u in uc_rewrites
+            ],
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "diff": combined_diff,
+            "warnings": warnings,
+        }
+
+
+def link_task_use_cases(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    uc_ids: list[str] | str,
+    dry_run: bool = True,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    return _mutate_task_use_cases(
+        tasks_dir,
+        node_id,
+        uc_ids,
+        mode="link",
+        dry_run=dry_run,
+        expect_plan_hash=expect_plan_hash,
+    )
+
+
+def unlink_task_use_cases(
+    tasks_dir: pathlib.Path,
+    node_id: str,
+    uc_ids: list[str] | str,
+    dry_run: bool = True,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    return _mutate_task_use_cases(
+        tasks_dir,
+        node_id,
+        uc_ids,
+        mode="unlink",
+        dry_run=dry_run,
+        expect_plan_hash=expect_plan_hash,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -13971,6 +14572,70 @@ def cmd_set_verify_by(args: argparse.Namespace) -> int:
     return 0 if res.get("ok") else 1
 
 
+def _run_cmd_link_or_unlink(args: argparse.Namespace, mode: str) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    apply_flag = bool(getattr(args, "apply", False))
+    preview_flag = bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
+    effective_dry_run = not (apply_flag and not preview_flag)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    is_json = bool(getattr(args, "json", False))
+    uc_arg = getattr(args, "use_cases", [])
+
+    fn = link_task_use_cases if mode == "link" else unlink_task_use_cases
+    res = fn(
+        tasks_dir=tasks_dir,
+        node_id=args.task_id,
+        uc_ids=uc_arg,
+        dry_run=effective_dry_run,
+        expect_plan_hash=expect_plan_hash,
+    )
+    args._last_result = res
+    if is_json:
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
+    for w in res.get("warnings", []):
+        print(f"[WARN] {w}", file=sys.stderr)
+
+    if not res.get("ok"):
+        print(f"[FAIL] {res.get('error', f'{mode} failed')}", file=sys.stderr)
+        if res.get("plan_hash"):
+            print(f"Plan hash: {res['plan_hash']}", file=sys.stderr)
+        return 1
+
+    if effective_dry_run:
+        ucs_str = ", ".join(res.get("use_cases", [])) or "-"
+        print(f"[preview] {mode} {args.task_id} -> use-cases: {ucs_str} (plan hash: {res.get('plan_hash', '')})")
+        for item in res.get("plan", []):
+            summary_str = f" ({item['summary']})" if item.get("summary") else ""
+            print(f"  - [{item.get('action', 'modify')}] {item.get('path', '')}{summary_str}")
+        if res.get("diff"):
+            sys.stdout.write(res["diff"])
+            if not res["diff"].endswith("\n"):
+                print()
+        print(f"Plan hash: {res.get('plan_hash', '')}")
+        print(
+            f"[preview] apply with: --apply --expect-plan-hash {res.get('plan_hash', '')}",
+            file=sys.stderr,
+        )
+        print("[preview] nothing written; re-run with --apply to write these changes")
+    else:
+        ucs_str = ", ".join(res.get("use_cases", [])) or "-"
+        print(f"[ok] {mode}ed {args.task_id}: use-cases = {ucs_str}")
+        for u in res.get("affected_use_cases", []):
+            lt_str = ", ".join(u.get("new_linked_tasks", [])) or "-"
+            print(f"  - updated {u['id']} ({u['path']}): linked-tasks = {lt_str}")
+    return 0
+
+
+def cmd_tasks_link(args: argparse.Namespace) -> int:
+    return _run_cmd_link_or_unlink(args, "link")
+
+
+def cmd_tasks_unlink(args: argparse.Namespace) -> int:
+    return _run_cmd_link_or_unlink(args, "unlink")
+
+
 def match_verify_by(task_verify_by: str | None, target: str | None) -> bool:
     if not task_verify_by or not str(task_verify_by).strip() or str(task_verify_by).strip() == "-":
         return False
@@ -14628,6 +15293,95 @@ def _build_index_sync_data(tasks_dir: pathlib.Path) -> dict[str, Any]:
     }
 
 
+def _compute_sync_index_plan_and_state(
+    tasks_dir: pathlib.Path,
+    *,
+    adopt: bool = False,
+    reorder: bool = False,
+    refresh_labels: bool = False,
+) -> dict[str, Any]:
+    """Compute the full `sync-index` plan (00-INDEX.md + derived use-case `linked-tasks:` rewrites)."""
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    index_path = tasks_dir / "00-INDEX.md"
+    existing = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
+    current_hash = _file_sha256(index_path)
+
+    has_conflict = ("<<<<<<<" in existing) or bool(
+        re.search(r"^(<{7}|={7}|>{7}|\|{7})\b", existing, re.MULTILINE)
+    )
+    eff_adopt = adopt or has_conflict
+    has_markers = has_generated_markers(existing) if existing.strip() else True
+
+    val_errors, val_warnings, _, _ = validate_tasks_tree(tasks_dir)
+    # Exclude 00-INDEX.md conflict marker error when healing conflict markers via sync-index
+    blocking_val_errors = [
+        e for e in val_errors
+        if not (has_conflict and "00-INDEX.md contains unresolved git conflict markers" in e)
+    ]
+
+    rendered = render_synced_index(
+        tasks_dir, existing, adopt=eff_adopt, reorder=reorder, refresh_labels=refresh_labels
+    )
+    idx_summary = summarize_index_changes(existing, rendered)
+    idx_diff_lines = list(
+        difflib.unified_diff(
+            existing.splitlines(keepends=True),
+            rendered.splitlines(keepends=True),
+            fromfile=str(index_path),
+            tofile=f"{index_path} (rendered)",
+        )
+    )
+    idx_diff_str = "".join(idx_diff_lines)
+    index_changed = (existing != rendered) or (not index_path.exists())
+
+    uc_plan_info = _plan_derived_use_case_rewrites(tasks_dir)
+    uc_rewrites: list[dict[str, Any]] = uc_plan_info["rewrites"]
+    skipped_unadopted: list[dict[str, Any]] = uc_plan_info["skipped_unadopted"]
+
+    operations: list[dict[str, Any]] = []
+    if index_changed:
+        operations.append({
+            "action": "create" if not index_path.exists() else "modify",
+            "path": "00-INDEX.md",
+            "before_hash": current_hash if index_path.exists() else "",
+            "summary": idx_summary.get("inline", "sync index"),
+            "sections": idx_summary.get("sections", {}),
+            "summary_lines": idx_summary.get("lines", []),
+        })
+    for ucr in uc_rewrites:
+        operations.append({
+            "action": "modify",
+            "path": ucr["path"],
+            "before_hash": ucr["before_hash"],
+            "summary": ucr["summary"],
+        })
+
+    plan, plan_hash = compute_operation_plan(operations)
+    combined_diff = "\n".join(d for d in [idx_diff_str, *[u["diff"] for u in uc_rewrites]] if d)
+    in_sync = (not index_changed) and (len(uc_rewrites) == 0)
+
+    return {
+        "index_path": index_path,
+        "existing": existing,
+        "current_hash": current_hash,
+        "has_conflict": has_conflict,
+        "eff_adopt": eff_adopt,
+        "has_markers": has_markers,
+        "blocking_val_errors": blocking_val_errors,
+        "val_warnings": val_warnings,
+        "rendered": rendered,
+        "idx_summary": idx_summary,
+        "idx_diff_str": idx_diff_str,
+        "combined_diff": combined_diff,
+        "index_changed": index_changed,
+        "uc_rewrites": uc_rewrites,
+        "skipped_unadopted": skipped_unadopted,
+        "plan": plan,
+        "plan_hash": plan_hash,
+        "in_sync": in_sync,
+    }
+
+
 def cmd_sync_index(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     index_path = tasks_dir / "00-INDEX.md"
@@ -14637,14 +15391,29 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
     check_flag = getattr(args, "check", False)
     preview_flag = bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
     expect_hash = getattr(args, "expect_hash", None)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    effective_expect = expect_plan_hash or expect_hash
     reorder = getattr(args, "reorder", False)
     refresh_labels = bool(getattr(args, "refresh_labels", False))
+    is_json = bool(getattr(args, "json", False))
+
+    def _format_uc_rewrites_meta(uc_rewrites: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": u["id"],
+                "path": u["path"],
+                "old_linked_tasks": u["old_linked_tasks"],
+                "new_linked_tasks": u["new_linked_tasks"],
+                "summary": u["summary"],
+            }
+            for u in uc_rewrites
+        ]
 
     # If --apply, run under exclusive task-write lock
     if apply_flag and not preview_flag:
         if not is_platform_supported():
             err_msg = "Mutating commands are unsupported on Windows (requires fcntl for flock)."
-            if getattr(args, "json", False):
+            if is_json:
                 print(
                     json.dumps(
                         {"ok": False, "applied": False, "error": "unsupported-platform", "message": err_msg, "path": str(index_path)},
@@ -14657,23 +15426,75 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
 
         try:
             with task_write_lock(tasks_dir):
-                existing = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
-                current_hash = _file_sha256(index_path)
+                try:
+                    st = _compute_sync_index_plan_and_state(
+                        tasks_dir, adopt=adopt, reorder=reorder, refresh_labels=refresh_labels
+                    )
+                except ValueError as e:
+                    err_msg = str(e)
+                    cur_h = _file_sha256(index_path)
+                    if is_json:
+                        print(
+                            json.dumps(
+                                {"ok": False, "applied": False, "error": err_msg, "hash": cur_h, "path": str(index_path)},
+                                indent=2,
+                            )
+                        )
+                    else:
+                        print(f"[FAIL] {err_msg}", file=sys.stderr)
+                    return 1
 
-                has_conflict = ("<<<<<<<" in existing) or bool(
-                    re.search(r"^(<{7}|={7}|>{7}|\|{7})\b", existing, re.MULTILINE)
-                )
-                if has_conflict:
-                    adopt = True
+                current_hash = st["current_hash"]
+                plan = st["plan"]
+                plan_hash = st["plan_hash"]
+                has_conflict = st["has_conflict"]
+                eff_adopt = st["eff_adopt"]
+                has_markers = st["has_markers"]
+                existing = st["existing"]
+                rendered = st["rendered"]
+                idx_summary = st["idx_summary"]
+                uc_rewrites = st["uc_rewrites"]
+                skipped_unadopted = st["skipped_unadopted"]
 
-                # 1. Hash verification if expect_hash is given
-                if expect_hash is not None:
-                    if current_hash.lower() != expect_hash.lower():
-                        err_msg = f"Index hash mismatch: expected {expect_hash}, got {current_hash}"
-                        if getattr(args, "json", False):
+                # 0. Refuse if validate has errors
+                if st["blocking_val_errors"]:
+                    err_msg = f"Cannot sync-index on an invalid tasks tree ({len(st['blocking_val_errors'])} validation error(s)): {st['blocking_val_errors'][0]}"
+                    if is_json:
+                        print(
+                            json.dumps(
+                                {
+                                    "ok": False,
+                                    "applied": False,
+                                    "error": err_msg,
+                                    "validation_errors": st["blocking_val_errors"],
+                                    "hash": current_hash,
+                                    "plan_hash": plan_hash,
+                                    "path": str(index_path),
+                                },
+                                indent=2,
+                            )
+                        )
+                    else:
+                        print(f"[FAIL] {err_msg}", file=sys.stderr)
+                    return 1
+
+                # 1. Hash verification if expect_hash / expect_plan_hash is given
+                if effective_expect is not None:
+                    exp_low = effective_expect.strip().lower()
+                    if exp_low not in (current_hash.lower(), plan_hash.lower()):
+                        err_msg = f"Index/plan hash mismatch: expected {effective_expect}, got index hash {current_hash} (plan hash {plan_hash})"
+                        if is_json:
                             print(
                                 json.dumps(
-                                    {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
+                                    {
+                                        "ok": False,
+                                        "applied": False,
+                                        "error": err_msg,
+                                        "hash": current_hash,
+                                        "plan_hash": plan_hash,
+                                        "plan": plan,
+                                        "path": str(index_path),
+                                    },
                                     indent=2,
                                 )
                             )
@@ -14681,16 +15502,14 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                             print(f"[FAIL] {err_msg}", file=sys.stderr)
                         return 1
 
-                has_markers = has_generated_markers(existing) if existing.strip() else True
-
                 # 2. Check adopt + apply requires --expect-hash (unless auto-adopted due to conflict markers)
-                if adopt and apply_flag and not has_conflict:
-                    if expect_hash is None:
+                if eff_adopt and apply_flag and not has_conflict:
+                    if effective_expect is None:
                         err_msg = "Adopting markers with --apply requires --expect-hash <sha256>."
-                        if getattr(args, "json", False):
+                        if is_json:
                             print(
                                 json.dumps(
-                                    {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
+                                    {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "plan_hash": plan_hash, "path": str(index_path)},
                                     indent=2,
                                 )
                             )
@@ -14699,15 +15518,15 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         return 1
 
                 # 3. Check plain --apply on an index without markers
-                if existing.strip() and not has_markers and not adopt and apply_flag and not has_conflict:
+                if existing.strip() and not has_markers and not eff_adopt and apply_flag and not has_conflict:
                     err_msg = (
                         f"Index {index_path} has no generated-region markers "
                         "(<!-- ai-orch:generated <section> -->). Run with --adopt to preview, then --adopt --apply --expect-hash <hash>."
                     )
-                    if getattr(args, "json", False):
+                    if is_json:
                         print(
                             json.dumps(
-                                {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
+                                {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "plan_hash": plan_hash, "path": str(index_path)},
                                 indent=2,
                             )
                         )
@@ -14715,29 +15534,15 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         print(f"[FAIL] {err_msg}", file=sys.stderr)
                     return 1
 
-                # 4. Render
-                try:
-                    rendered = render_synced_index(
-                        tasks_dir, existing, adopt=adopt, reorder=reorder, refresh_labels=refresh_labels
+                if skipped_unadopted and not is_json:
+                    skipped_ids = ", ".join(s["id"] for s in skipped_unadopted)
+                    print(
+                        f"[guard] Skipped derived linked-tasks rewrite for {len(skipped_unadopted)} use case(s) ({skipped_ids}): run use-cases adopt-links first"
                     )
-                except ValueError as e:
-                    err_msg = str(e)
-                    if getattr(args, "json", False):
-                        print(
-                            json.dumps(
-                                {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
-                                indent=2,
-                            )
-                        )
-                    else:
-                        print(f"[FAIL] {err_msg}", file=sys.stderr)
-                    return 1
-
-                idx_summary = summarize_index_changes(existing, rendered)
 
                 # 5. Apply (skip writing when already in sync)
-                if existing == rendered and index_path.exists():
-                    if getattr(args, "json", False):
+                if st["in_sync"] and index_path.exists():
+                    if is_json:
                         print(
                             json.dumps(
                                 {
@@ -14745,9 +15550,13 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                                     "applied": True,
                                     "changed": False,
                                     "in_sync": True,
-                                    "adopted": adopt,
+                                    "adopted": eff_adopt,
                                     "path": str(index_path),
                                     "hash": current_hash,
+                                    "plan_hash": plan_hash,
+                                    "plan": plan,
+                                    "use_case_rewrites": [],
+                                    "skipped_unadopted_use_cases": skipped_unadopted,
                                     "section_summary": idx_summary,
                                     "sync_data": _build_index_sync_data(tasks_dir),
                                 },
@@ -14758,9 +15567,29 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         print(f"[ok] already in sync, nothing written ({index_path})")
                     return 0
 
-                _atomic_write_text(index_path, rendered, encoding="utf-8")
+                writes: list[tuple[pathlib.Path, str]] = []
+                if st["index_changed"]:
+                    writes.append((index_path, rendered))
+                for ucr in uc_rewrites:
+                    writes.append((pathlib.Path(ucr["file_path"]), ucr["new_text"]))
+
+                _apply_file_writes_atomically(writes)
                 new_hash = _file_sha256(index_path)
-                if getattr(args, "json", False):
+
+                for ucr in uc_rewrites:
+                    _emit_event(
+                        tasks_dir,
+                        "use_case.links_changed",
+                        {
+                            "use_case_id": ucr["id"],
+                            "old_linked_tasks": ucr["old_linked_tasks"],
+                            "new_linked_tasks": ucr["new_linked_tasks"],
+                            "linked_tasks": ucr["new_linked_tasks"],
+                        },
+                        subject=ucr["id"],
+                    )
+
+                if is_json:
                     print(
                         json.dumps(
                             {
@@ -14768,9 +15597,13 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                                 "applied": True,
                                 "changed": True,
                                 "in_sync": False,
-                                "adopted": adopt,
+                                "adopted": eff_adopt,
                                 "path": str(index_path),
                                 "hash": new_hash,
+                                "plan_hash": plan_hash,
+                                "plan": plan,
+                                "use_case_rewrites": _format_uc_rewrites_meta(uc_rewrites),
+                                "skipped_unadopted_use_cases": skipped_unadopted,
                                 "section_summary": idx_summary,
                                 "sync_data": _build_index_sync_data(tasks_dir),
                             },
@@ -14778,12 +15611,14 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         )
                     )
                 else:
-                    action = "adopted and updated" if adopt else "updated"
+                    action = "adopted and updated" if eff_adopt else "updated"
                     print(f"[ok] {action} {index_path}")
+                    for ucr in uc_rewrites:
+                        print(f"[ok] updated {ucr['path']} ({ucr['summary']})")
                 return 0
         except LockTimeoutError as e:
             err_msg = str(e)
-            if getattr(args, "json", False):
+            if is_json:
                 print(
                     json.dumps(
                         {"ok": False, "applied": False, "error": "lock-timeout", "message": err_msg, "path": str(index_path)},
@@ -14795,75 +15630,17 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
             return 1
 
     # Read-only modes (check, preview, adopt preview)
-    existing = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
-    current_hash = _file_sha256(index_path)
-
-    # 1. Hash verification if expect_hash is given
-    if expect_hash is not None:
-        if current_hash.lower() != expect_hash.lower():
-            err_msg = f"Index hash mismatch: expected {expect_hash}, got {current_hash}"
-            if getattr(args, "json", False):
-                print(
-                    json.dumps(
-                        {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
-                        indent=2,
-                    )
-                )
-            else:
-                print(f"[FAIL] {err_msg}", file=sys.stderr)
-            return 1
-
-    has_conflict = ("<<<<<<<" in existing) or bool(
-        re.search(r"^(<{7}|={7}|>{7}|\|{7})\b", existing, re.MULTILINE)
-    )
-    if has_conflict:
-        adopt = True
-
-    has_markers = has_generated_markers(existing) if existing.strip() else True
-
-    # 2. Check adopt + apply requires --expect-hash
-    if adopt and apply_flag and not has_conflict:
-        if expect_hash is None:
-            err_msg = "Adopting markers with --apply requires --expect-hash <sha256>."
-            if getattr(args, "json", False):
-                print(
-                    json.dumps(
-                        {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
-                        indent=2,
-                    )
-                )
-            else:
-                print(f"[FAIL] {err_msg}", file=sys.stderr)
-            return 1
-
-    # 3. Check plain --apply on an index without markers
-    if existing.strip() and not has_markers and not adopt and apply_flag and not has_conflict:
-        err_msg = (
-            f"Index {index_path} has no generated-region markers "
-            "(<!-- ai-orch:generated <section> -->). Run with --adopt to preview, then --adopt --apply --expect-hash <hash>."
-        )
-        if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
-                    indent=2,
-                )
-            )
-        else:
-            print(f"[FAIL] {err_msg}", file=sys.stderr)
-        return 1
-
-    # 4. Render
     try:
-        rendered = render_synced_index(
-            tasks_dir, existing, adopt=adopt, reorder=reorder, refresh_labels=refresh_labels
+        st = _compute_sync_index_plan_and_state(
+            tasks_dir, adopt=adopt, reorder=reorder, refresh_labels=refresh_labels
         )
     except ValueError as e:
         err_msg = str(e)
-        if getattr(args, "json", False):
+        cur_h = _file_sha256(index_path)
+        if is_json:
             print(
                 json.dumps(
-                    {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "path": str(index_path)},
+                    {"ok": False, "applied": False, "error": err_msg, "hash": cur_h, "path": str(index_path)},
                     indent=2,
                 )
             )
@@ -14871,22 +15648,57 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
             print(f"[FAIL] {err_msg}", file=sys.stderr)
         return 1
 
-    in_sync = existing == rendered
-    idx_summary = summarize_index_changes(existing, rendered)
+    current_hash = st["current_hash"]
+    plan = st["plan"]
+    plan_hash = st["plan_hash"]
+    eff_adopt = st["eff_adopt"]
+    rendered = st["rendered"]
+    idx_summary = st["idx_summary"]
+    diff_str = st["combined_diff"]
+    in_sync = st["in_sync"]
+    uc_rewrites = st["uc_rewrites"]
+    skipped_unadopted = st["skipped_unadopted"]
 
-    diff_lines = list(
-        difflib.unified_diff(
-            existing.splitlines(keepends=True),
-            rendered.splitlines(keepends=True),
-            fromfile=str(index_path),
-            tofile=f"{index_path} (rendered)",
-        )
-    )
-    diff_str = "".join(diff_lines)
+    if st["blocking_val_errors"]:
+        err_msg = f"Cannot sync-index on an invalid tasks tree ({len(st['blocking_val_errors'])} validation error(s)): {st['blocking_val_errors'][0]}"
+        if is_json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "applied": False,
+                        "error": err_msg,
+                        "validation_errors": st["blocking_val_errors"],
+                        "hash": current_hash,
+                        "plan_hash": plan_hash,
+                        "path": str(index_path),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"[FAIL] {err_msg}", file=sys.stderr)
+        return 1
+
+    # 1. Hash verification if expect_hash / expect_plan_hash is given
+    if effective_expect is not None:
+        exp_low = effective_expect.strip().lower()
+        if exp_low not in (current_hash.lower(), plan_hash.lower()):
+            err_msg = f"Index/plan hash mismatch: expected {effective_expect}, got index hash {current_hash} (plan hash {plan_hash})"
+            if is_json:
+                print(
+                    json.dumps(
+                        {"ok": False, "applied": False, "error": err_msg, "hash": current_hash, "plan_hash": plan_hash, "path": str(index_path)},
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"[FAIL] {err_msg}", file=sys.stderr)
+            return 1
 
     # 5. Adopt alone or --preview / --dry-run (without --apply) is PREVIEW only: prints summary + diff and writes nothing
-    if (adopt or preview_flag) and not (apply_flag and not preview_flag):
-        if getattr(args, "json", False):
+    if (eff_adopt or preview_flag) and not (apply_flag and not preview_flag):
+        if is_json:
             print(
                 json.dumps(
                     {
@@ -14896,6 +15708,10 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         "in_sync": in_sync,
                         "diff": diff_str,
                         "hash": current_hash,
+                        "plan_hash": plan_hash,
+                        "plan": plan,
+                        "use_case_rewrites": _format_uc_rewrites_meta(uc_rewrites),
+                        "skipped_unadopted_use_cases": skipped_unadopted,
                         "path": str(index_path),
                         "section_summary": idx_summary,
                         "sync_data": _build_index_sync_data(tasks_dir),
@@ -14904,29 +15720,39 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                 )
             )
         else:
+            if skipped_unadopted:
+                skipped_ids = ", ".join(s["id"] for s in skipped_unadopted)
+                print(
+                    f"[guard] Skipped derived linked-tasks rewrite for {len(skipped_unadopted)} use case(s) ({skipped_ids}): run use-cases adopt-links first"
+                )
             if diff_str or not index_path.exists():
                 print("[preview] Section summary:")
                 for sline in idx_summary.get("lines", []):
                     print(f"  - {sline}")
+                for ucr in uc_rewrites:
+                    print(f"  - [modify] {ucr['path']} ({ucr['summary']})")
                 if diff_str:
                     sys.stdout.write(diff_str)
-                adopt_hint = "--adopt " if adopt else ""
+                adopt_hint = "--adopt " if eff_adopt else ""
                 refresh_hint = "--refresh-labels " if refresh_labels else ""
+                print(f"Plan hash: {plan_hash}", file=sys.stderr)
                 print(
-                    f"[preview] apply with: {adopt_hint}{refresh_hint}--apply --expect-hash {current_hash}",
+                    f"[preview] apply with: {adopt_hint}{refresh_hint}--apply --expect-plan-hash {plan_hash} (or --expect-hash {current_hash})",
                     file=sys.stderr,
                 )
                 print("[preview] nothing written; re-run with --apply to write these changes")
             else:
-                if adopt:
+                if eff_adopt:
                     print(f"[ok] {index_path} already has markers and is in sync")
                 else:
                     print(f"[ok] already in sync, nothing written ({index_path})")
+                if preview_flag:
+                    print("[preview] nothing written; re-run with --apply to write these changes")
         return 0
 
     # 6. Check mode (--check without adopt)
     if check_flag:
-        if getattr(args, "json", False):
+        if is_json:
             print(
                 json.dumps(
                     {
@@ -14934,6 +15760,10 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                         "in_sync": in_sync,
                         "diff": diff_str,
                         "hash": current_hash,
+                        "plan_hash": plan_hash,
+                        "plan": plan,
+                        "use_case_rewrites": _format_uc_rewrites_meta(uc_rewrites),
+                        "skipped_unadopted_use_cases": skipped_unadopted,
                         "path": str(index_path),
                         "section_summary": idx_summary,
                         "sync_data": _build_index_sync_data(tasks_dir),
@@ -14942,65 +15772,25 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                 )
             )
         else:
+            if skipped_unadopted:
+                skipped_ids = ", ".join(s["id"] for s in skipped_unadopted)
+                print(
+                    f"[guard] Skipped derived linked-tasks rewrite for {len(skipped_unadopted)} use case(s) ({skipped_ids}): run use-cases adopt-links first"
+                )
             if in_sync:
                 print(f"[ok] {index_path} is in sync with task headers")
             else:
                 print("[preview] Section summary:")
                 for sline in idx_summary.get("lines", []):
                     print(f"  - {sline}")
+                for ucr in uc_rewrites:
+                    print(f"  - [modify] {ucr['path']} ({ucr['summary']})")
                 if diff_str:
                     sys.stdout.write(diff_str)
                 print(f"[FAIL] {index_path} is out of sync with task headers", file=sys.stderr)
         return 0 if in_sync else 1
 
-    # 7. Apply mode: either normal --apply (on marked index) or --adopt --apply --expect-hash
-    if apply_flag:
-        if in_sync and index_path.exists():
-            if getattr(args, "json", False):
-                print(
-                    json.dumps(
-                        {
-                            "ok": True,
-                            "applied": True,
-                            "changed": False,
-                            "in_sync": True,
-                            "adopted": adopt,
-                            "path": str(index_path),
-                            "hash": current_hash,
-                            "section_summary": idx_summary,
-                            "sync_data": _build_index_sync_data(tasks_dir),
-                        },
-                        indent=2,
-                    )
-                )
-            else:
-                print(f"[ok] already in sync, nothing written ({index_path})")
-            return 0
-        _atomic_write_text(index_path, rendered, encoding="utf-8")
-        new_hash = _file_sha256(index_path)
-        if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "applied": True,
-                        "changed": True,
-                        "in_sync": False,
-                        "adopted": adopt,
-                        "path": str(index_path),
-                        "hash": new_hash,
-                        "section_summary": idx_summary,
-                        "sync_data": _build_index_sync_data(tasks_dir),
-                    },
-                    indent=2,
-                )
-            )
-        else:
-            action = "adopted and updated" if adopt else "updated"
-            print(f"[ok] {action} {index_path}")
-        return 0
-
-    if getattr(args, "json", False):
+    if is_json:
         print(
             json.dumps(
                 {
@@ -15009,6 +15799,10 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                     "in_sync": in_sync,
                     "diff": diff_str,
                     "hash": current_hash,
+                    "plan_hash": plan_hash,
+                    "plan": plan,
+                    "use_case_rewrites": _format_uc_rewrites_meta(uc_rewrites),
+                    "skipped_unadopted_use_cases": skipped_unadopted,
                     "path": str(index_path),
                     "rendered": rendered,
                     "section_summary": idx_summary,
@@ -15018,18 +15812,26 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
             )
         )
     else:
+        if skipped_unadopted:
+            skipped_ids = ", ".join(s["id"] for s in skipped_unadopted)
+            print(
+                f"[guard] Skipped derived linked-tasks rewrite for {len(skipped_unadopted)} use case(s) ({skipped_ids}): run use-cases adopt-links first"
+            )
         if in_sync and index_path.exists():
             print(f"[ok] already in sync, nothing written ({index_path})")
         else:
             print("[preview] Section summary:")
             for sline in idx_summary.get("lines", []):
                 print(f"  - {sline}")
+            for ucr in uc_rewrites:
+                print(f"  - [modify] {ucr['path']} ({ucr['summary']})")
             if diff_str:
                 sys.stdout.write(diff_str)
-            adopt_hint = "--adopt " if adopt else ""
+            adopt_hint = "--adopt " if eff_adopt else ""
             refresh_hint = "--refresh-labels " if refresh_labels else ""
+            print(f"Plan hash: {plan_hash}", file=sys.stderr)
             print(
-                f"[preview] apply with: {adopt_hint}{refresh_hint}--apply --expect-hash {current_hash}",
+                f"[preview] apply with: {adopt_hint}{refresh_hint}--apply --expect-plan-hash {plan_hash} (or --expect-hash {current_hash})",
                 file=sys.stderr,
             )
             print("[preview] nothing written; re-run with --apply to write these changes")
@@ -21902,16 +22704,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_qapp.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_qapp.set_defaults(func=cmd_questions_apply)
 
-    p_sync = sub.add_parser("sync-index", help="Deterministically synchronize tasks/00-INDEX.md tables from task headers")
+    p_sync = sub.add_parser("sync-index", help="Deterministically synchronize tasks/00-INDEX.md tables and derived use-case linked-tasks from task headers")
     p_sync.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
-    p_sync.add_argument("--apply", action="store_true", help="Write updated 00-INDEX.md in place")
-    p_sync.add_argument("--check", action="store_true", help="Exit non-zero if 00-INDEX.md is out of sync")
+    p_sync.add_argument("--apply", action="store_true", help="Write updated 00-INDEX.md and derived use-case linked-tasks in place")
+    p_sync.add_argument("--check", action="store_true", help="Exit non-zero if 00-INDEX.md or derived use-case linked-tasks are out of sync")
     p_sync.add_argument("--preview", action="store_true", default=False, help="Preview per-section summary and diff without writing")
     p_sync.add_argument("--dry-run", action="store_true", default=False, help="Alias for --preview")
     p_sync.add_argument("--adopt", action="store_true", help="Preview wrapping existing generated tables in markers (apply with --adopt --apply --expect-hash <hash>)")
     p_sync.add_argument("--reorder", action="store_true", help="Re-sort rows in Next up and category tables by priority and ID")
     p_sync.add_argument("--refresh-labels", action="store_true", default=False, help="Force labels of initiative rows to current plan titles")
-    p_sync.add_argument("--expect-hash", default=None, help="Refuse to apply if current index SHA256 does not match this hash")
+    p_sync.add_argument("--expect-plan-hash", default=None, help="Refuse to apply if current sync plan hash does not match this hash")
+    p_sync.add_argument("--expect-hash", default=None, help="Refuse to apply if current index SHA256 (or plan hash) does not match this hash")
     p_sync.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_sync.set_defaults(func=cmd_sync_index)
 
@@ -22282,6 +23085,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_req.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_req.set_defaults(func=cmd_set_verify_by)
 
+    # tasks link
+    p_link = sub.add_parser("link", help="Link a task to one or more use cases (previews by default; writes with --apply --expect-plan-hash)")
+    p_link.add_argument("task_id", help="Task ID (e.g. T001, 01.1)")
+    p_link.add_argument("use_cases", nargs="+", help="Use case ID(s), comma- or space-separated (e.g. UC001,UC004)")
+    p_link.add_argument("--apply", action="store_true", default=False, help="Apply link changes and rewrite affected use cases' linked-tasks")
+    p_link.add_argument("--preview", "--dry-run", dest="preview", action="store_true", default=False, help="Preview changes without writing (default)")
+    p_link.add_argument("--expect-plan-hash", "--expect-hash", dest="expect_plan_hash", default=None, help="Expected plan hash from preview")
+    p_link.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_link.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_link.set_defaults(func=cmd_tasks_link)
+
+    # tasks unlink
+    p_unlink = sub.add_parser("unlink", help="Unlink a task from one or more use cases (previews by default; writes with --apply --expect-plan-hash)")
+    p_unlink.add_argument("task_id", help="Task ID (e.g. T001, 01.1)")
+    p_unlink.add_argument("use_cases", nargs="+", help="Use case ID(s) to unlink, comma- or space-separated (e.g. UC001)")
+    p_unlink.add_argument("--apply", action="store_true", default=False, help="Apply unlink changes and rewrite affected use cases' linked-tasks")
+    p_unlink.add_argument("--preview", "--dry-run", dest="preview", action="store_true", default=False, help="Preview changes without writing (default)")
+    p_unlink.add_argument("--expect-plan-hash", "--expect-hash", dest="expect_plan_hash", default=None, help="Expected plan hash from preview")
+    p_unlink.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    p_unlink.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    p_unlink.set_defaults(func=cmd_tasks_unlink)
+
     # tasks verification-queue
     p_vq = sub.add_parser("verification-queue", help="List delivered tasks pending verification across workspaces or filtered by target")
     p_vq.add_argument("--for", dest="for_target", default=None, help="Filter to items whose verify_by matches target (e.g. gcube_atlas, workspace:gcube_atlas, session:...)")
@@ -22484,6 +23309,8 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
         return step_cmd in ("add", "check", "uncheck")
     if cmd == "upgrade":
         return bool(getattr(args, "apply", False)) and not bool(getattr(args, "dry_run", False) or getattr(args, "preview", False))
+    if cmd in ("link", "unlink"):
+        return bool(getattr(args, "apply", False)) and not bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
     if cmd in ("close", "transition"):
         if bool(getattr(args, "dry_run", False)):
             return False
