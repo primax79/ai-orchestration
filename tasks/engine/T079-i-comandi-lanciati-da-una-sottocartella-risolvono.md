@@ -25,6 +25,8 @@ Quando --workspace manca, config, sessions, orchestrator (e gli altri gruppi che
 - [ ] Una funzione comune di risoluzione del workspace dalla cartella corrente, usata da tutti i gruppi
 - [ ] Test: da una sottocartella i tre comandi vedono il workspace giusto
 
+- [ ] Test anche per T072: l'anteprima di reassign con config invariata non mostra diff (nessuna intestazione da controllare): caso coperto
+
 ## Verification
 
 - Da ~/works/d4science_kb/iam: config show, sessions role, orchestrator status mostrano d4science_kb
