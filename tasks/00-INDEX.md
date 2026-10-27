@@ -79,7 +79,16 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 ## Tasks by category
 
 <!-- ai-orch:generated tasks-by-category -->
+### engine
 
+Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T069 (Campagna senza bozze) | P2 | [La campagna di validazione esclude gli use case in bozza](engine/T069-la-campagna-di-validazione-esclude-gli-use-case-in.md) | open | kilo | - |
+| T070 (Reassign su sessione attuale) | P2 | [orchestrator reassign lega il ruolo a una sessione interattiva esistente](engine/T070-orchestrator-reassign-lega-il-ruolo-a-una-sessione.md) | open | kilo | - |
+| T071 (Invito a registrarsi) | P2 | [Le sessioni che orchestrano vengono invitate a registrarsi come orchestratore](engine/T071-le-sessioni-che-orchestrano-vengono-invitate-a-reg.md) | open | kilo | - |
+| T072 (config show nella cartella) | P3 | [config show usa la cartella corrente; l'anteprima di reassign mostra il percorso reale](engine/T072-config-show-usa-la-cartella-corrente-l-anteprima-d.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting

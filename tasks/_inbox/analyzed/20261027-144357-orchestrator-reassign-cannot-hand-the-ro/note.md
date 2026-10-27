@@ -3,13 +3,12 @@
 - id: N068
 - title: orchestrator reassign cannot hand the role to the calling interactive session; registers a phantom headless session
 - kind: bug
-- status: ready
+- status: processed
 - created: 2026-10-27T14:43:57.958950+00:00
 - author: d4science-kb-3d (d4science_kb orchestrator session)
 - about: ai-orch orchestrator reassign; ai-orch sessions register; UC028
-- produced: -
-- processed-by: -
-- short: reassign: no interactive holder
+- produced: T070
+- processed-by: ai-coding-tools-c1
 
 What (2026-10-27, workspace ~/works/d4science_kb): the owner declared the current interactive Claude Code session the orchestrator. Holder was gen 1, kilo, kind=interactive, status stale, turns 0.
 
