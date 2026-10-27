@@ -107,7 +107,7 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T075 (Richiedi validazione da UI) | P2 | [Pulsante Richiedi validazione sulla colonna Done e sul singolo task](ui/T075-pulsante-richiedi-validazione-sulla-colonna-done-e.md) | open | kilo | - |
+| T075 (Valida e chiudi da UI) | P2 | [Pulsante Valida e chiudi sulla colonna Delivered e sul singolo task](ui/T075-pulsante-richiedi-validazione-sulla-colonna-done-e.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
