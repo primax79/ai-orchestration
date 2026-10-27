@@ -15,6 +15,15 @@
 - handoff: Read tasks/engine/T066-per-project-language-for-tasks-and-for-questions.md, do the open steps, run the Verification, update the task and the registry.
 - short: Project languages
 
+## Scope change 2026-10-27 (owner)
+
+"le keyword possono restare in inglese, anzi, formalizziamole in inglese; poi eventualmente si fa interfaccia localizzabile".
+Section headings (Goal, Steps, Verification, Log; question Context/Options/Recommendation/Answer; use-case sections) and
+header field names are a formal ENGLISH vocabulary of the format, never translated. The language settings govern only
+the CONTENT (prose of titles, goals, steps, questions) that sessions write. Localized display is a future UI concern.
+Consequence for T065: use cases are generated with English headings again; the Italian heading aliases stay readable
+for files already written that way (compatibility), and validate warns to normalize them.
+
 ## Goal
 
 A project declares, in its versioned tasks tree, the language of its tasks and, separately, of its questions to the owner (they may differ), e.g. tasks in English and questions in Italian. Declared in the same place as extension fields (fenced toml in tasks/AGENTS.md, as T050): [tasks] language = "en", [questions] language = "it"; use cases follow the tasks language unless [use_cases] language is set; default en. One resolver replaces the regex in _detect_use_case_language (keep reading the old keys for compatibility, with a deprecation warning). Effects: the managed AGENTS.md block states both languages so every session writes accordingly; tasks new, questions ask and use-cases create use localized templates/headings where the engine has them (it, en); validate accepts the localized heading aliases; tasks show/config report the effective languages. Not machine-local config: languages are a project convention, versioned with tasks/.
