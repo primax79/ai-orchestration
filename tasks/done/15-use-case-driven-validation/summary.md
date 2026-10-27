@@ -1,25 +1,25 @@
-# Summary: 15 - Use-Case Driven Specification, Task Definition & Product Validation
+# Riepilogo: 15 - Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto
 
-- **Shipped:** 2026-10-17 (moved to `done/` on 2026-10-21)
-- **Spec:** [`../../specs/use-case-management-and-ai-validation.md`](../../specs/use-case-management-and-ai-validation.md)
-- **Plan:** [`plan.md`](plan.md)
+- **Rilasciato:** 2026-10-17 (spostato in `done/` il 2026-10-21)
+- **Specifica:** [`../../specs/use-case-management-and-ai-validation.md`](../../specs/use-case-management-and-ai-validation.md)
+- **Piano:** [`plan.md`](plan.md)
 
-## Outcome
+## Esito
 
-Use cases became a first-class part of the task model, with AI-driven validation:
+I casi d'uso sono diventati un elemento di prima classe del modello dei task, con validazione guidata da AI:
 
-- **15.1** — Engine & Data Model (`tasks/use-cases/`, parser, validator, `- use-cases:` task header): done
-- **15.2** — Top-Down Skill Integration (`task-spec-authoring` & `task-pipeline`): done
-- **15.3** — Autonomous AI Validation Runner (`ai-orch use-cases validate UC###`): done
-- **15.4** — Product-Level Validation Campaign Runner (`ai-orch use-cases campaign`): done
-- **15.5** — Backend REST & WebSocket API Endpoints: done
-- **15.6** — Web UI & VS Code Webview: Use Cases Dashboard & AI Runner: done
-- **15.7** — VS Code Sidebar TreeView (`aiOrchestration.useCasesView`): done
+- **15.1** — Motore e modello dei dati (`tasks/use-cases/`, parser, validatore, intestazione dei task `- use-cases:`): done
+- **15.2** — Integrazione top-down nelle skill (`task-spec-authoring` e `task-pipeline`): done
+- **15.3** — Esecutore di validazione AI autonoma (`ai-orch use-cases validate UC###`): done
+- **15.4** — Esecutore della campagna di validazione a livello di prodotto (`ai-orch use-cases campaign`): done
+- **15.5** — Endpoint API REST e WebSocket del backend: done
+- **15.6** — Web UI e Webview VS Code: dashboard dei casi d'uso ed esecutore AI: done
+- **15.7** — TreeView nella barra laterale di VS Code (`aiOrchestration.useCasesView`): done
 
-## Deviations
+## Deviazioni
 
-None recorded in the plan.
+Nessuna registrata nel piano.
 
-## Follow-ups
+## Follow-up
 
-- Written retroactively from `plan.md` when the initiative, done since 2026-10-17, was shipped to `done/`.
+- Scritto retroattivamente a partire da `plan.md` quando l'iniziativa, completata dal 2026-10-17, è stata archiviata in `done/`.

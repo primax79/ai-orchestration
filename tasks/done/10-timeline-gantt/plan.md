@@ -1,82 +1,82 @@
-# 10 - Abstract timeline: dependencies and priorities
+# 10 - Timeline astratta: dipendenze e priorità
 
-- **Short:** Abstract timeline
+- **Short:** Timeline astratta
 
-> **Derived from:** [`../specs/timeline-gantt.md`](../../specs/timeline-gantt.md). Lane order: see `../06-control-plane-safety/plan.md`.
+> **Derived from:** [`../specs/timeline-gantt.md`](../../specs/timeline-gantt.md). Ordine delle corsie: vedere `../06-control-plane-safety/plan.md`.
 
 ## Tasks (One Task = One Commit)
 
 ## Closed
 
-### 10.1 - Engine: `tasks graph` (columns, ready queue, heaviest chain, Mermaid), `size` field, `tasks set-priority`, `tasks set-size`, `tasks set-deps`, cycle check
+### 10.1 - Motore: `tasks graph` (colonne, coda pronta, catena più pesante, Mermaid), campo `size`, `tasks set-priority`, `tasks set-size`, `tasks set-deps`, controllo dei cicli
 
-- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Task graph engine · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (child parser; same file, `tasks_engine.py` lane) · **Repo:** `ai-orchestration/`
-- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md` (the `size` extension field)
-- **Goal:** Spec §2. Also add `**Size:**` to the open tasks of the plans 06–10, using these estimates: 06.8 L, 06.9 M, 07.4 L, 07.5 M, 07.6 M, 07.7 L, 07.8 M, 07.9 S, 07.10 S, 08.3 S, 08.4 M, 08.5 S, 08.6 S, 09.1 M, 09.2 M, 09.3 L, 09.4 M, 09.5 M, 09.6 S, 10.1 M, 10.2 L, 10.3 S.
+- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Motore del grafo task · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (parser dei nodi figli; stesso file, corsia `tasks_engine.py`) · **Repo:** `ai-orchestration/`
+- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md` (il campo di estensione `size`)
+- **Goal:** Specifica §2. Aggiungere inoltre `**Size:**` ai task aperti dei piani 06–10, usando queste stime: 06.8 L, 06.9 M, 07.4 L, 07.5 M, 07.6 M, 07.7 L, 07.8 M, 07.9 S, 07.10 S, 08.3 S, 08.4 M, 08.5 S, 08.6 S, 09.1 M, 09.2 M, 09.3 L, 09.4 M, 09.5 M, 09.6 S, 10.1 M, 10.2 L, 10.3 S.
 - **Verification:**
-  - Tests:
-    - every form of the `NN.T` bullets is parsed, with inherited priorities;
-    - columns and the ready queue are computed correctly;
-    - `set-deps` refuses a cycle and names it;
-    - `set-deps` keeps the free text of a `**Depends on:**` bullet;
-    - `set-priority` and `set-size` work on `T###` (header) and on `NN.T` (bullet created or updated);
-    - the heaviest chain and the totals follow the sizes;
-    - a stale hash is refused;
-    - `--dry-run` writes nothing.
-  - Live: `tasks graph --json` on this repo shows 06–10 in coherent columns, and `--mermaid` renders in VS Code.
+  - Test:
+    - ogni forma dei punti elenco `NN.T` viene analizzata, con priorità ereditate;
+    - le colonne e la coda pronta vengono calcolate correttamente;
+    - `set-deps` rifiuta un ciclo e lo nomina;
+    - `set-deps` mantiene il testo libero di un punto elenco `**Depends on:**`;
+    - `set-priority` e `set-size` funzionano su `T###` (intestazione) e su `NN.T` (punto elenco creato o aggiornato);
+    - la catena più pesante e i totali seguono le dimensioni;
+    - un hash obsoleto viene rifiutato;
+    - `--dry-run` non scrive nulla.
+  - Dal vivo: `tasks graph --json` su questo repository mostra 06–10 in colonne coerenti e `--mermaid` viene renderizzato in VS Code.
 
-### 10.4 - Engine: microtasks (`micro` category, reduced schema, `tasks micro`, `tasks promote`, XS size), kind and labels
+### 10.4 - Motore: microtask (categoria `micro`, schema ridotto, `tasks micro`, `tasks promote`, dimensione XS), tipo ed etichette
 
-- **Status:** `done` (2026-10-18; claude; merged) · **Short:** Microtasks engine · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 10.1 (same file) · **Repo:** `ai-orchestration/`
-- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md`, `plugins/architect-side/skills/task-pipeline/SKILL.md` (document the microtask form)
-- **Goal:** Spec §5 (everything except batch runs and UI) and spec §6 engine part:
-  - `kind` and `labels` fields (`T###` header extensions, `NN.T` bullets);
-  - `set-kind` and `set-labels`;
-  - `--kind`/`--label` filters;
+- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Motore dei microtask · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 10.1 (stesso file) · **Repo:** `ai-orchestration/`
+- **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md`, `plugins/architect-side/skills/task-pipeline/SKILL.md` (documentare la forma dei microtask)
+- **Goal:** Specifica §5 (tutto tranne le esecuzioni batch e la UI) e parte motore della specifica §6:
+  - campi `kind` e `labels` (estensioni dell'intestazione `T###`, punti elenco `NN.T`);
+  - `set-kind` e `set-labels`;
+  - filtri `--kind`/`--label`;
   - `tasks labels`;
-  - validation.
+  - validazione.
 - **Verification:**
-  - Tests: label format and kind set are validated; `set-labels --add/--remove` round-trips; filters combine with AND across fields and OR within one field; a microtask validates with the reduced header and `## What` only; it appears in `tasks graph` with size `XS`; `promote` produces a full task that validates and keeps its id and the dependencies that point to it; `tasks micro` allocates ids concurrently without clashes.
+  - Test: il formato delle etichette e l'insieme dei tipi sono validati; `set-labels --add/--remove` completa il ciclo andata e ritorno; i filtri si combinano con AND tra campi diversi e OR all'interno dello stesso campo; un microtask passa la validazione con l'intestazione ridotta e solo `## What`; compare in `tasks graph` con dimensione `XS`; `promote` produce un task completo che passa la validazione e mantiene il proprio id e le dipendenze che puntano ad esso; `tasks micro` alloca gli id in concorrenza senza collisioni.
 
-### 10.6 - Backlog views: compact "Next up", separate view switcher (Queue, Kanban, Tree, Timeline)
+### 10.6 - Viste del Backlog: "Next up" compatto, selettore di vista separato (Queue, Kanban, Tree, Timeline)
 
-- **Status:** `done` (2026-10-21; Verified by d4science-python-library-2e) · **Short:** Backlog view switcher · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 06.8 (frontend lane; can run before 10.1 and enhance once 10.1 and 11.3 land) · **Repo:** `ai-orchestration-ui/`
-- **Origin:** owner feedback (2026-10-17). "Next Up Focus" was unclear and huge: it listed every `NN.T`, because initiative tasks inherited the initiative state, and it sat on the same page as the Kanban.
+- **Status:** `done` (2026-10-21; Verificato da d4science-python-library-2e) · **Short:** Selettore vista Backlog · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 06.8 (corsia frontend; può girare prima di 10.1 ed essere arricchito una volta atterrati 10.1 e 11.3) · **Repo:** `ai-orchestration-ui/`
+- **Origin:** feedback dell'owner (2026-10-17). "Next Up Focus" era poco chiaro ed enorme: elencava ogni `NN.T`, poiché i task di iniziativa ereditavano lo stato dell'iniziativa, e si trovava nella stessa pagina della Kanban.
 - **Goal:**
-  - The Backlog tab gets a view switcher: **Queue**, **Kanban**, **Tree** (11.3), **Timeline** (10.2). The last chosen view is remembered (localStorage).
-  - **Queue** = "what to start next": at most 5 compact rows with id, title, priority, size and kind, plus a one-line explanation ("tasks marked next-up, or the first ready tasks by priority once the timeline engine lands"). There are no cards.
-  - The KPI counters become a single compact strip.
-  - **Kanban (owner feedback, 2026-10-17):**
-    - the Done column is hidden by default, with a toggle button ("Show done") whose state is remembered;
-    - Delivered and Verified share one column: Delivered cards on top, Verified cards below, with a thin divider and a sub-heading for each;
-    - same for the column-toggle of Dropped, if present.
-  - Until 10.1 lands, Queue uses `next-up: yes` emergent tasks only, never `NN.T`; after 10.1 it uses the `ready_queue`.
-- **Verification:** Live with Playwright on this repo's `tasks/`: the Queue view shows at most 5 rows; switching views keeps the filters; at 1000 px every view fits without horizontal scroll.
+  - La scheda Backlog riceve un selettore di vista: **Queue**, **Kanban**, **Tree** (11.3), **Timeline** (10.2). L'ultima vista scelta viene memorizzata (localStorage).
+  - **Queue** = "cosa iniziare dopo": al massimo 5 righe compatte con id, titolo, priorità, dimensione e tipo, più una riga di spiegazione ("tasks marked next-up, or the first ready tasks by priority once the timeline engine lands"). Non ci sono schede.
+  - I contatori KPI diventano un'unica striscia compatta.
+  - **Kanban (feedback dell'owner, 2026-10-17):**
+    - la colonna Done è nascosta per impostazione predefinita, con un pulsante di attivazione/disattivazione ("Show done") il cui stato viene memorizzato;
+    - Delivered e Verified condividono una sola colonna: schede Delivered in alto, schede Verified in basso, con un divisore sottile e un sottotitolo per ciascuna;
+    - lo stesso vale per il pulsante della colonna Dropped, se presente.
+  - Finché non atterra 10.1, Queue usa solo i task emergenti `next-up: yes`, mai `NN.T`; dopo 10.1 usa la `ready_queue`.
+- **Verification:** Dal vivo con Playwright su `tasks/` di questo repository: la vista Queue mostra al massimo 5 righe; il cambio di vista mantiene i filtri; a 1000 px ogni vista entra senza scorrimento orizzontale.
 
-### 10.2 - UI: graph and edit endpoints and the Timeline tab (arrows, ready queue, priority and dependency editing)
+### 10.2 - UI: endpoint del grafo e di modifica e scheda Timeline (frecce, coda pronta, modifica di priorità e dipendenze)
 
-- **Status:** `done` (2026-10-23; owner; Validated by automated test suites and approved by owner for cleanup) · **Short:** Timeline tab · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 10.1, 06.8 (frontend lane; can run before 08.4 when 08.3 is late) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Scheda Timeline · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 10.1, 06.8 (corsia frontend; può girare prima di 08.4 quando 08.3 è in ritardo) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`, `frontend/src/**`
-- **Goal:** Spec §3. Endpoints: `GET /api/tasks/graph`, and `POST /api/tasks/{id}/priority`, `/size` and `/deps`, each with a `/preview` variant.
-- **Verification:** Live with the Playwright MCP on a scratch copy of this repo's `tasks/`:
-  - the columns and arrows are visible;
-  - changing a priority reorders the column and the ready queue;
-  - changing a size changes the card width and the totals;
-  - adding a dependency moves the card one column to the right;
-  - a cycle is refused in the picker;
-  - removing an arrow works;
-  - a screenshot is attached to the Final Report.
+- **Goal:** Specifica §3. Endpoint: `GET /api/tasks/graph`, e `POST /api/tasks/{id}/priority`, `/size` e `/deps`, ciascuno con una variante `/preview`.
+- **Verification:** Dal vivo con il server MCP Playwright su una copia temporanea di `tasks/` di questo repository:
+  - le colonne e le frecce sono visibili;
+  - la modifica di una priorità riordina la colonna e la coda pronta;
+  - la modifica di una dimensione cambia la larghezza della scheda e i totali;
+  - l'aggiunta di una dipendenza sposta la scheda di una colonna a destra;
+  - un ciclo viene rifiutato nel selettore;
+  - la rimozione di una freccia funziona;
+  - uno screenshot viene allegato al Final Report.
 
-### 10.3 - VS Code: Timeline in the webview
+### 10.3 - VS Code: Timeline nella webview
 
-- **Status:** `done` (2026-10-23; owner; Validated by automated test suites and approved by owner for cleanup) · **Short:** VS Code Timeline · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 10.2, 06.9 (VS Code lane) · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Timeline in VS Code · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 10.2, 06.9 (corsia VS Code) · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/views/dashboard-panel.ts`, `src/cli-client.ts`, `dist-webview/**`
-- **Goal:** Spec §3 "VS Code".
-- **Verification:** Live in an Extension Development Host.
+- **Goal:** Specifica §3 "VS Code".
+- **Verification:** Dal vivo in un Extension Development Host.
 
-### 10.5 - UI: microtask quick-add, XS pills, "Promote", kind and labels, shared filter bar
+### 10.5 - UI: aggiunta rapida di microtask, pillole XS, "Promote", tipo ed etichette, barra dei filtri condivisa
 
-- **Status:** `done` (2026-10-23; owner; Validated by automated test suites and approved by owner for cleanup) · **Short:** Microtask UI · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 10.4, 10.2 (frontend lane) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** UI dei microtask · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 10.4, 10.2 (corsia frontend) · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `frontend/src/**`
-- **Goal:** Spec §5 "Creation" (UI) and the timeline pill, plus spec §6 UI: kind icons, label chips, the shared filter bar, the label editor with autocomplete, group by label. Also: in the inbox tab (09.3), "Convert to microtask" for `bug` notes, when 09.3 has landed.
-- **Verification:** Live with Playwright: quick-add a bug microtask → it appears as an XS pill in the ready queue → Promote → it becomes a full card.
+- **Goal:** Specifica §5 "Creation" (UI) e la pillola nella timeline, più la UI della specifica §6: icone di tipo, chip delle etichette, barra dei filtri condivisa, editor delle etichette con completamento automatico, raggruppamento per etichetta. Inoltre: nella scheda inbox (09.3), "Convert to microtask" per le note `bug`, una volta atterrato 09.3.
+- **Verification:** Dal vivo con Playwright: aggiungere rapidamente un microtask di tipo bug → compare come pillola XS nella coda pronta → Promote → diventa una scheda completa.

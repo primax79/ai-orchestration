@@ -1,25 +1,25 @@
-# Summary: 08 - Blocking questions (format, engine, pending-answers UI)
+# Riepilogo: 08 - Domande bloccanti (formato, motore, UI delle risposte in sospeso)
 
-- **Shipped:** 2026-10-23
-- **Plan:** [`plan.md`](plan.md)
-- **Validation:** closed in bulk on 2026-10-23 (verifier: owner; "Validated by automated test suites and approved by owner for cleanup"); items marked "done with a caveat" had no user session to validate them.
+- **Rilasciato:** 2026-10-23
+- **Piano:** [`plan.md`](plan.md)
+- **Validazione:** chiuso in blocco il 2026-10-23 (verificatore: owner; "Validated by automated test suites and approved by owner for cleanup"); gli elementi contrassegnati "done with a caveat" non avevano una sessione utente per validarli.
 
-## Outcome
+## Esito
 
-Structured blocking questions were introduced to allow autonomous agents and developers to pause execution until human architectural decisions are made. The initiative delivered question file formats and validation in the engine, CLI commands (`ai-orch questions`), UI and VS Code dashboard integrations, and notification badge toasts.
+Sono state introdotte le domande bloccanti strutturate per consentire agli agenti autonomi e agli sviluppatori di mettere in pausa l'esecuzione fino a quando non vengono prese decisioni architetturali umane. L'iniziativa ha fornito il formato dei file delle domande e la relativa validazione nel motore, i comandi CLI (`ai-orch questions`), le integrazioni nella dashboard della UI e di VS Code e le notifiche toast con badge.
 
-- **08.1** — Engine: question files, validator, `ai-orch questions list|show|ask|answer|withdraw`, Decisions region from open questions: done
-- **08.2** — Skills: agents file blocking questions in the format: done
-- **08.3** — UI backend: question endpoints: done
-- **08.4** — Frontend: Decisions tab, navbar badge, task-modal Questions section, ask form: done
-- **08.5** — VS Code: "Decisions Waiting" tree from question files: done
-- **08.6** — "Answer and resume run": done
-- **08.7** — VS Code: toast for new questions and a status-bar badge: done
+- **08.1** — Motore: file delle domande, validatore, `ai-orch questions list|show|ask|answer|withdraw`, regione Decisions dalle domande aperte: done
+- **08.2** — Skill: gli agenti registrano le domande bloccanti nel formato previsto: done
+- **08.3** — Backend UI: endpoint delle domande: done
+- **08.4** — Frontend: scheda Decisions, badge nella navbar, sezione Questions nella modale del task, modulo di invio domanda: done
+- **08.5** — VS Code: albero "Decisions Waiting" dai file delle domande: done
+- **08.6** — "Rispondi e riprendi l'esecuzione": done
+- **08.7** — VS Code: notifica toast per le nuove domande e badge nella barra di stato: done
 
-## Deviations
+## Deviazioni
 
-Amendments after review 2 (Q1–Q10) refined requirements and dependencies across tasks 08.1–08.6. Supervisor question filing in 08.6 was moved to task 07.10, while run resumption was coordinated with initiative 12 (task 12.4). Task 08.7 was added following an owner request for VS Code toast notifications and status-bar badging.
+Le modifiche successive alla revisione 2 (Q1–Q10) hanno affinato i requisiti e le dipendenze nei task 08.1–08.6. La registrazione delle domande da parte del supervisore in 08.6 è stata spostata al task 07.10, mentre la ripresa delle esecuzioni è stata coordinata con l'iniziativa 12 (task 12.4). Il task 08.7 è stato aggiunto in seguito a una richiesta dell'owner per le notifiche toast e il badge nella barra di stato di VS Code.
 
-## Follow-ups
+## Follow-up
 
-None recorded in the plan.
+Nessuno registrato nel piano.
