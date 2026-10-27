@@ -25,7 +25,7 @@ Dalla vista di un elemento (use case, task, domanda) il proprietario scrive un m
 "così gli dico ad es. una modifica al volo, o ci ragiono sopra":
 
 - **Modifica al volo:** chiedo un cambiamento all'elemento (titolo, passi, criteri, priorità, collegamenti); l'IA lo propone come diff dell'elemento e io lo applico con un clic dopo averlo visto (anteprima + hash, come le altre modifiche). Deve essere rapido: pochi secondi, senza aprire altro.
-- **Ragionamento:** discuto l'elemento (dubbi, alternative, rischi, impatto su altri task o use case) senza che nulla venga modificato; dal filo posso poi trasformare una conclusione in modifica, in nuovo task o in domanda.
+- **Ragionamento:** discuto l'elemento (dubbi, alternative, rischi, impatto su altri task o use case). La discussione può generare modifiche in qualsiasi momento (proprietario: "ovviamente può generare modifiche"): l'IA le propone nel filo come diff dell'elemento, o come nuovo task, nuovo use case o domanda, e io le applico con un clic come nella modifica al volo. Niente viene scritto senza la mia conferma.
 
 ## Steps
 
