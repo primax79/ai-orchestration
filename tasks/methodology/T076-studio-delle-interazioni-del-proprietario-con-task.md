@@ -19,6 +19,13 @@
 
 Uno studio che inventaria e progetta le interazioni del proprietario con gli elementi del registro (task, iniziative, use case, domande, note dell'inbox) dalla UI web e dall'estensione: per ogni stato, quali azioni servono (validare e chiudere, rimandare indietro, chiedere validazione, riaprire, rispondere, approvare uno use case, collegare, cambiare priorità, chattare sull'elemento), dove stanno (colonna, scheda, dettaglio, menu, scorciatoie), singole o di gruppo, quale conferma, quale comando del motore le esegue, cosa c'è già e cosa manca. Include le interazioni con l'IA (T074) e la coerenza tra UI web ed estensione.
 
+## Criterio guida (proprietario, 2026-10-27)
+
+"roba del genere per interagire velocemente": la velocità è il criterio principale. Le azioni frequenti costano un
+clic (o un tasto) dal punto in cui si guarda l'elemento: modifica sul posto, menu contestuali, azioni rapide sulla
+scheda, scorciatoie da tastiera, nessun cambio di vista. Conferme solo per azioni distruttive o di gruppo; per il resto
+applicazione immediata con annullamento rapido. Lo studio misura ogni azione in clic/passi oggi e dopo.
+
 ## Esempi del proprietario
 
 - **Modifica sul posto** (2026-10-27): "es. interfaccia per cambiare priorità: click sulla priorità corrente apre un menu
