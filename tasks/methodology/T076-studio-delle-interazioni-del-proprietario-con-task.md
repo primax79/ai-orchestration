@@ -6,13 +6,14 @@
 - priority: P1
 - priority-reason: Richiesta del proprietario 2026-10-27 dopo T074 e T075: le azioni sugli elementi vanno progettate insieme, non una alla volta
 - next-up: no
-- state: open
+- state: waiting
 - executor: kilo
 - depends-on: -
-- decider: owner
+- decider: Q018, Q019, Q020, Q021, Q022, Q023, Q024
 - sources: owner 2026-10-27: 'mi servirebbe uno studio su questo tipo di interazioni' (dopo la richiesta di Valida e chiudi, T075, e della chat contestuale, T074)
 - paths: tasks/specs/owner-interactions-study.md
 - handoff: Read tasks/methodology/T076-studio-delle-interazioni-del-proprietario-con-task.md, do the open steps, run the Verification, update the task and the registry.
+- waiting-on: question:Q024
 - short: Studio interazioni UI
 
 ## Goal
@@ -51,5 +52,12 @@ applicazione immediata con annullamento rapido. Lo studio misura ogni azione in 
 
 ## Log (newest first)
 
+- 2026-10-27, ai-coding-tools-d8: state `waiting` -> `waiting` — Blocked by question Q024
+- 2026-10-27, ai-coding-tools-d8: state `waiting` -> `waiting` — Blocked by question Q023
+- 2026-10-27, ai-coding-tools-d8: state `waiting` -> `waiting` — Blocked by question Q022
+- 2026-10-27, ai-coding-tools-d8: state `waiting` -> `waiting` — Blocked by question Q021
+- 2026-10-27, ai-coding-tools-d8: state `waiting` -> `waiting` — Blocked by question Q020
+- 2026-10-27, ai-coding-tools-d8: state `waiting` -> `waiting` — Blocked by question Q019
+- 2026-10-27, ai-coding-tools-d8: state `open` -> `waiting` — Blocked by question Q018
 - 2026-10-27, kilo: studio rivisto dopo la revisione di Codex
 - 2026-10-27, kilo: bozza dello studio scritta
