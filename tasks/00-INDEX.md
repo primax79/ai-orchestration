@@ -8,21 +8,21 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 <!-- ai-orch:generated initiatives -->
 | Priority | # | Initiative | Status | Depends on | Size |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 01 | [Consolidate Orchestration & Task Skills into `ai-orchestration`](done/01-repo-consolidation/plan.md) | done | - | M |
-| 2 | 02 | [Formal Task Model, State Machine & `orchestration.toml` Specification](done/02-task-and-config-spec/plan.md) | done | 01 | M |
-| 3 | 03 | [Configuration & Task Management Skill + Python Scripts (`orchestration_config.py`, `tasks_engine.py`)](done/03-skill-and-script-engine/plan.md) | done | 02 | M |
-| 4 | 04 | [Orchestration Methodology & Skill Refinements (Review Tier 2)](done/04-methodology-refinements/plan.md) | done | 01 | M |
-| 5 | 05 | [Standalone CLI (`ai-orch`), From-Scratch Installer & Extension Control Plane](done/05-cli-and-ui-handoff/plan.md) | done | 02, 03 | L |
-| 6 | 06 | [Control-plane safety (Doctor, index, UI backend, VS Code bridge)](done/06-control-plane-safety/plan.md) | done | 05 | L |
-| 7 | 07 | [Agent runs from the control plane (choose who does the work)](done/07-agent-runs-from-ui/plan.md) | done with a caveat (done: 07.1–07.12) | 05, 06 | L |
-| 8 | 08 | [Blocking questions (format, engine, pending-answers UI)](done/08-blocking-questions/plan.md) | done | 06 | M |
-| 9 | 09 | [Inbox: draft notes, reports and screenshots, processed into tasks](done/09-inbox-notes/plan.md) | done with a caveat (done: 09.1–09.11) | 06 (07 for agent triage) | M |
-| 10 | 10 | [Abstract timeline: dependencies and priorities](done/10-timeline-gantt/plan.md) | done | 06, 09.1 | S |
-| 11 | 11 | [First-class task hierarchy (N levels)](done/11-subtasks/plan.md) | done | 06, 09.1 | M |
-| 12 | 12 | [Events, orchestration sessions and triggers](done/12-events-and-triggers/plan.md) | done with a caveat (done: 12.1, 12.3–12.17) | 07, 08, 11 | L |
-| 13 | 13 | [Doctor rework: findings that are true, actionable and resolvable](done/13-doctor-rework/plan.md) | done with a caveat (done: 13.1–13.7) | 06 | M |
-| 15 | 15 | [Use-Case Driven Specification, Task Definition & Product Validation](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
-| 16 | 16 | [Orchestration broker: one MCP server per user, workspaces, projects, mail](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
+| 1 | 01 | [Consolidare le skill di orchestrazione e dei task in `ai-orchestration`](done/01-repo-consolidation/plan.md) | done | - | M |
+| 2 | 02 | [Modello formale dei task, macchina a stati e specifica di `orchestration.toml`](done/02-task-and-config-spec/plan.md) | done | 01 | M |
+| 3 | 03 | [Skill di configurazione e gestione dei task + script Python](done/03-skill-and-script-engine/plan.md) | done | 02 | M |
+| 4 | 04 | [Affinamenti della metodologia di orchestrazione e delle skill (Revisione Tier 2)](done/04-methodology-refinements/plan.md) | done | 01 | M |
+| 5 | 05 | [CLI standalone (`ai-orch`), installatore da zero e piano di controllo per l'estensione](done/05-cli-and-ui-handoff/plan.md) | done | 02, 03 | L |
+| 6 | 06 | [Sicurezza del piano di controllo (Doctor, indice, backend UI, bridge VS Code)](done/06-control-plane-safety/plan.md) | done | 05 | L |
+| 7 | 07 | [Esecuzioni degli agenti dal piano di controllo (scegliere chi svolge il lavoro)](done/07-agent-runs-from-ui/plan.md) | done with a caveat (done: 07.1–07.12) | 05, 06 | L |
+| 8 | 08 | [Domande bloccanti (formato, motore, UI delle risposte in sospeso)](done/08-blocking-questions/plan.md) | done | 06 | M |
+| 9 | 09 | [Inbox: note in bozza, report e screenshot, elaborati in task](done/09-inbox-notes/plan.md) | done with a caveat (done: 09.1–09.11) | 06 (07 for agent triage) | M |
+| 10 | 10 | [Timeline astratta: dipendenze e priorità](done/10-timeline-gantt/plan.md) | done | 06, 09.1 | S |
+| 11 | 11 | [Gerarchia di task di prima classe (N livelli)](done/11-subtasks/plan.md) | done | 06, 09.1 | M |
+| 12 | 12 | [Eventi, sessioni di orchestrazione e trigger](done/12-events-and-triggers/plan.md) | done with a caveat (done: 12.1, 12.3–12.17) | 07, 08, 11 | L |
+| 13 | 13 | [Rielaborazione del Doctor: rilievi reali, azionabili e risolvibili](done/13-doctor-rework/plan.md) | done with a caveat (done: 13.1–13.7) | 06 | M |
+| 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
+| 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
