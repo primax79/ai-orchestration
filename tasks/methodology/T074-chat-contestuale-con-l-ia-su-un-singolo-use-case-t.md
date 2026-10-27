@@ -46,3 +46,4 @@ l'IA ha tutti i tool a disposizione per interagire con gli elementi, cambia solo
 ## Log
 
 - 2026-10-27, kilo: bozza della spec scritta
+- 2026-10-27, kilo: spec rivista dopo la revisione di Codex
