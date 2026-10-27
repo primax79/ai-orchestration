@@ -1,13 +1,13 @@
-# Summary: 03 - Configuration & Task Management Skill + Python Scripts
+# Riepilogo: 03 - Skill di configurazione e gestione dei task + script Python
 
-- **Shipped:** 2026-10-15 (moved to `done/` on 2026-10-17, when closed initiatives were separated from open ones).
-- **Plan:** [`plan.md`](plan.md), the per-task record of goals and verification.
+- **Rilasciato:** 2026-10-15 (spostato in `done/` il 2026-10-17, quando le iniziative chiuse sono state separate da quelle aperte).
+- **Piano:** [`plan.md`](plan.md), il registro per-task degli obiettivi e delle verifiche.
 
 ## Tasks
 
-- **03.1** — Complete `orchestration_config.py`, Unit Tests, and `interactive-role-setup` Skill Update: done
-- **03.2** — Implement `tasks_engine.py` (Deterministic Task Parser, Validator, State Transitions & `00-INDEX.md` Sync): done
+- **03.1** — Completare `orchestration_config.py`, gli unit test e l'aggiornamento della skill `interactive-role-setup`: done
+- **03.2** — Implementare `tasks_engine.py` (parser deterministico dei task, validatore, transizioni di stato e sincronizzazione di `00-INDEX.md`): done
 
 ## Notes
 
-- Written retroactively from `plan.md` when the ship step (summary + `git mv` into `done/`) was applied to initiatives that had been completed without it.
+- Scritto retroattivamente a partire da `plan.md` quando il passo di chiusura (riepilogo + `git mv` in `done/`) è stato applicato alle iniziative completate in precedenza senza di esso.

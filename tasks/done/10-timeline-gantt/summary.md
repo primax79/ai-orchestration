@@ -1,24 +1,24 @@
-# Summary: 10 - Abstract timeline: dependencies and priorities
+# Riepilogo: 10 - Timeline astratta: dipendenze e priorità
 
-- **Shipped:** 2026-10-23
-- **Plan:** [`plan.md`](plan.md)
-- **Validation:** closed in bulk on 2026-10-23 (verifier: owner; "Validated by automated test suites and approved by owner for cleanup"); items marked "done with a caveat" had no user session to validate them.
+- **Rilasciato:** 2026-10-23
+- **Piano:** [`plan.md`](plan.md)
+- **Validazione:** chiuso in blocco il 2026-10-23 (verificatore: owner; "Validated by automated test suites and approved by owner for cleanup"); gli elementi contrassegnati "done with a caveat" non avevano una sessione utente per validarli.
 
-## Outcome
+## Esito
 
-Dependency tracking, topological column ordering, and priority-driven execution pipelines were implemented for the task graph. The system added cycle detection, critical path calculation, microtasks with reduced headers, and multiple backlog views (Queue, Kanban, Tree, and Timeline) across Web UI and VS Code.
+Sono stati implementati il tracciamento delle dipendenze, l'ordinamento topologico in colonne e le pipeline di esecuzione guidate dalla priorità per il grafo dei task. Il sistema ha aggiunto il rilevamento dei cicli, il calcolo del percorso critico, i microtask con intestazioni ridotte e molteplici viste del backlog (Queue, Kanban, Tree e Timeline) nella Web UI e in VS Code.
 
-- **10.1** — Engine: `tasks graph` (columns, ready queue, heaviest chain, Mermaid), `size` field, `tasks set-priority`, `tasks set-size`, `tasks set-deps`, cycle check: done
-- **10.2** — UI: graph and edit endpoints and the Timeline tab (arrows, ready queue, priority and dependency editing): done
-- **10.3** — VS Code: Timeline in the webview: done
-- **10.4** — Engine: microtasks (`micro` category, reduced schema, `tasks micro`, `tasks promote`, XS size), kind and labels: done
-- **10.5** — UI: microtask quick-add, XS pills, "Promote", kind and labels, shared filter bar: done
-- **10.6** — Backlog views: compact "Next up", separate view switcher (Queue, Kanban, Tree, Timeline): done
+- **10.1** — Motore: `tasks graph` (colonne, coda pronta, catena più pesante, Mermaid), campo `size`, `tasks set-priority`, `tasks set-size`, `tasks set-deps`, controllo dei cicli: done
+- **10.2** — UI: endpoint del grafo e di modifica e scheda Timeline (frecce, coda pronta, modifica di priorità e dipendenze): done
+- **10.3** — VS Code: Timeline nella webview: done
+- **10.4** — Motore: microtask (categoria `micro`, schema ridotto, `tasks micro`, `tasks promote`, dimensione XS), tipo ed etichette: done
+- **10.5** — UI: aggiunta rapida di microtask, pillole XS, "Promote", tipo ed etichette, barra dei filtri condivisa: done
+- **10.6** — Viste del Backlog: "Next up" compatto, selettore di vista separato (Queue, Kanban, Tree, Timeline): done
 
-## Deviations
+## Deviazioni
 
-Task 10.6 was introduced based on owner feedback to replace the monolithic Next Up view with a compact Queue and a persistent multi-view switcher.
+Il task 10.6 è stato introdotto sulla base del feedback dell'owner per sostituire la vista monolitica Next Up con una coda compatta (Queue) e un selettore persistente multi-vista.
 
-## Follow-ups
+## Follow-up
 
-None recorded in the plan.
+Nessuno registrato nel piano.
