@@ -23,6 +23,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 13 | 13 | [Rielaborazione del Doctor: rilievi reali, azionabili e risolvibili](done/13-doctor-rework/plan.md) | done with a caveat (done: 13.1–13.7) | 06 | M |
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
+| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | open | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -45,6 +46,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [tracker-links](specs/tracker-links.md) | - |
 | [ui-multi-project](specs/ui-multi-project.md) | - |
 | [use-case-management-and-ai-validation](specs/use-case-management-and-ai-validation.md) | - |
+| [use-cases-drive-tasks](specs/use-cases-drive-tasks.md) | - |
 <!-- /ai-orch:generated specs -->
 
 ## Specs
@@ -89,6 +91,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T070 (Reassign su sessione attuale) | P2 | [orchestrator reassign lega il ruolo a una sessione interattiva esistente](engine/T070-orchestrator-reassign-lega-il-ruolo-a-una-sessione.md) | in progress | kilo | - |
 | T071 (Invito a registrarsi) | P2 | [Le sessioni che orchestrano vengono invitate a registrarsi come orchestratore](engine/T071-le-sessioni-che-orchestrano-vengono-invitate-a-reg.md) | open | kilo | - |
 | T072 (config show nella cartella) | P3 | [config show usa la cartella corrente; l'anteprima di reassign mostra il percorso reale](engine/T072-config-show-usa-la-cartella-corrente-l-anteprima-d.md) | in progress | kilo | - |
+| T077 (Adozione note vecchie) | P2 | [Le note dell'inbox in formato vecchio vengono adottate con un id](engine/T077-le-note-dell-inbox-in-formato-vecchio-vengono-adot.md) | open | kilo | - |
 
 ### methodology
 
@@ -97,6 +100,17 @@ Tasks in `methodology`. Owner session: unassigned ([README](methodology/README.m
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T073 (Studio pannello orchestratori) | P1 | [Studio: pannello di controllo degli orchestratori di tutti i workspace, handoff e coerenza dei registri](methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md) | open | kilo | - |
+| T074 (Chat contestuale per elemento) | P1 | [Chat contestuale con l'IA su un singolo use case, task o domanda](methodology/T074-chat-contestuale-con-l-ia-su-un-singolo-use-case-t.md) | open | kilo | T073 |
+| T076 (Studio interazioni UI) | P1 | [Studio delle interazioni del proprietario con task, use case e domande dalla UI](methodology/T076-studio-delle-interazioni-del-proprietario-con-task.md) | open | kilo | - |
+| T078 (Lezioni ricerca_auto) | P2 | [Smistare le lezioni di ricerca_auto del 2026-10-17 contro lo stato attuale](methodology/T078-smistare-le-lezioni-di-ricerca-auto-del-2026-10-17.md) | open | kilo | - |
+
+### ui
+
+Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T075 (Valida e chiudi da UI) | P2 | [Pulsante Valida e chiudi sulla colonna Delivered e sul singolo task](ui/T075-pulsante-richiedi-validazione-sulla-colonna-done-e.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
