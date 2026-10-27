@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Owner request 2026-10-27; projects write tasks in one language and ask the owner in another (dave_agent: Italian tasks)
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
