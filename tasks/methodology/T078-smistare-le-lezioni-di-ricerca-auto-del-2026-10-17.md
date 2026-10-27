@@ -21,10 +21,14 @@ Ogni richiesta della nota (sezioni A-I) è confrontata con lo stato attuale del 
 
 ## Steps
 
-- [ ] Verifica nel codice per ogni richiesta A-I
-- [ ] Proposta di task per ciò che resta, per repo e priorità
+- [x] Verifica nel codice per ogni richiesta A-I (23 punti analizzati: 9 done, 9 partial, 5 not done in `tasks/_reviews/2026-10-27-ricerca-auto-lessons-triage.md`)
+- [x] Proposta di task per ciò che resta, per repo e priorità (6 task proposti: 3 in `kilo-mcp` e 3 in `ai-orchestration`, più rimando all'iniziativa 17)
 - [ ] L'architetto crea i task e smista la nota
 
 ## Verification
 
 - Tabella richiesta -> stato -> evidenza; task creati; nota in analyzed
+
+## Log (newest first)
+
+- 2026-10-27, kilo: analisi scritta in tasks/_reviews/2026-10-27-ricerca-auto-lessons-triage.md
