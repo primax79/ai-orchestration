@@ -33,6 +33,10 @@ applicazione immediata con annullamento rapido. Lo studio misura ogni azione in 
   verify-by, collegamenti agli use case, etichette): il valore è cliccabile ovunque compaia (scheda, riga della coda,
   dettaglio), il menu mostra solo i valori validi, la modifica si applica subito con l'anteprima/hash del motore e un
   annullamento rapido; se il campo richiede una motivazione (priority-reason) il menu la chiede.
+- **Processa l'inbox** (2026-10-27): "mi processi tutti gli inbox? anche per questo servirebbe un comando
+  sull'interfaccia, che eventualmente apre una chat". Un comando "Process inbox" (di workspace, di progetto e sulla
+  singola nota) che fa lo smistamento con l'IA (proposte: task, use case, domanda, già coperta, scarta) e, quando serve
+  ragionarci, apre la chat contestuale sulla nota (T074).
 - **Valida e chiudi** (T075) e **chat contestuale** (T074).
 
 ## Steps

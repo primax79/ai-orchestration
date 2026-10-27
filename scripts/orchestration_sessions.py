@@ -220,6 +220,26 @@ def matches_subscription(event: dict[str, Any], subscriptions: list[str]) -> boo
 # Core Registry Functions
 # ---------------------------------------------------------------------------
 
+def find_session_by_provider_id(
+    workspace: pathlib.Path | str,
+    provider_session_id: str,
+    tool: str | None = None,
+    stale_timeout_sec: float = DEFAULT_STALE_TIMEOUT_SEC,
+) -> dict[str, Any] | None:
+    """Find an existing registered session by provider_session_id."""
+    if not provider_session_id:
+        return None
+    sessions = list_sessions(workspace, tool=tool, stale_timeout_sec=stale_timeout_sec)
+    # Prefer non-deregistered/non-retired sessions first
+    for s in sessions:
+        if s.get("provider_session_id") == provider_session_id and s.get("status") not in ("retired", "deregistered"):
+            return s
+    for s in sessions:
+        if s.get("provider_session_id") == provider_session_id:
+            return s
+    return None
+
+
 def register_session(
     workspace: pathlib.Path | str,
     tool: str = "claude",
@@ -245,15 +265,37 @@ def register_session(
     ensure_git_exclude(ws)
 
     prov_sess_id = provider_session_id or resume_id
-    reg_session_id = session_id or str(uuid.uuid4())
     now_iso = _now_iso()
 
     with session_lock(ws):
         sessions_dir = ws / ".ai-orchestration" / "sessions"
         sessions_dir.mkdir(parents=True, exist_ok=True)
 
+        existing_sess: dict[str, Any] | None = None
+        if session_id:
+            reg_session_id = session_id
+            cand_path = sessions_dir / f"{reg_session_id}.json"
+            if cand_path.is_file():
+                try:
+                    existing_sess = _read_json_safe(cand_path)
+                except Exception:
+                    existing_sess = None
+        elif prov_sess_id:
+            found = find_session_by_provider_id(ws, prov_sess_id, tool=tool)
+            if found:
+                existing_sess = found
+                reg_session_id = str(found["session_id"])
+            else:
+                reg_session_id = str(uuid.uuid4())
+        else:
+            reg_session_id = str(uuid.uuid4())
+
+        if existing_sess and not prov_sess_id:
+            prov_sess_id = existing_sess.get("provider_session_id")
+
         final_generation: int | None = None
-        final_cursor: int = cursor if cursor is not None else 0
+        base_cursor = int(existing_sess.get("cursor", 0)) if existing_sess else 0
+        final_cursor: int = cursor if cursor is not None else base_cursor
 
         # Handle role tracking and succession
         if role == "orchestrator":
@@ -296,6 +338,7 @@ def register_session(
                         "session_id": reg_session_id,
                         "provider_session_id": prov_sess_id,
                         "tool": tool,
+                        "kind": kind,
                         "started": now_iso,
                         "turns": 0,
                         "last_usage": None,
@@ -336,6 +379,7 @@ def register_session(
                         "session_id": reg_session_id,
                         "provider_session_id": prov_sess_id,
                         "tool": tool,
+                        "kind": kind,
                         "started": now_iso,
                         "turns": cur_info.get("turns", 0),
                         "last_usage": cur_info.get("last_usage"),
@@ -356,6 +400,7 @@ def register_session(
                         "session_id": reg_session_id,
                         "provider_session_id": prov_sess_id,
                         "tool": tool,
+                        "kind": kind,
                         "started": now_iso,
                         "turns": 0,
                         "last_usage": None,
@@ -442,6 +487,17 @@ def register_session(
                 "cwd": cwd or str(ws),
             }
 
+        created_at = (existing_sess.get("created_at") if existing_sess else None) or now_iso
+        if subscriptions:
+            eff_subs = list(subscriptions)
+        elif existing_sess:
+            eff_subs = list(existing_sess.get("subscriptions") or [])
+        else:
+            eff_subs = []
+        eff_meta: dict[str, Any] = dict(existing_sess.get("metadata") or {}) if existing_sess else {}
+        if metadata:
+            eff_meta.update(metadata)
+
         session_record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "session_id": reg_session_id,
@@ -453,13 +509,13 @@ def register_session(
             "kind": kind,
             "provider_session_id": prov_sess_id,
             "resume": resume_block,
-            "created_at": now_iso,
+            "created_at": created_at,
             "last_seen": now_iso,
             "cursor": final_cursor,
-            "subscriptions": list(subscriptions or []),
+            "subscriptions": eff_subs,
             "status": "active",
             "retired": None,
-            "metadata": metadata or {},
+            "metadata": eff_meta,
         }
 
         sess_path = sessions_dir / f"{reg_session_id}.json"

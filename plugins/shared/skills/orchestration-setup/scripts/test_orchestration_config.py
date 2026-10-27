@@ -2412,3 +2412,89 @@ def test_setup_concurrent_applies_on_same_base_exactly_one_succeeds(tmp_path: pa
     fail_data = json.loads(failures[0].stdout)
     assert fail_data["ok"] is False
     assert "hash mismatch" in fail_data["error"]
+
+
+def test_format_diff_path(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """T072: format_diff_path names real path (home-relative, absolute, or ws-relative)."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
+
+    # 1. Path under home
+    target_home = fake_home / ".config" / "ai-orchestration" / "projects" / "d4science_kb" / "orchestration.toml"
+    assert (
+        oc.format_diff_path(target_home, "a")
+        == "a/~/.config/ai-orchestration/projects/d4science_kb/orchestration.toml"
+    )
+    assert (
+        oc.format_diff_path(target_home, "b")
+        == "b/~/.config/ai-orchestration/projects/d4science_kb/orchestration.toml"
+    )
+
+    # 2. Path outside home (absolute)
+    outside = tmp_path / "outside_dir" / "projects" / "sample" / "orchestration.toml"
+    outside_a = oc.format_diff_path(outside, "a")
+    assert outside_a != "a/orchestration.toml"
+    assert "sample" in outside_a
+    assert str(outside.resolve()) in outside_a or outside_a.startswith(f"a{outside.resolve()}")
+
+    # 3. Path inside workspace (relative to ws)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    local_dot = ws / ".ai-orchestration.local.toml"
+    assert oc.format_diff_path(local_dot, "a", ws) == "a/.ai-orchestration.local.toml"
+    assert oc.format_diff_path(local_dot, "b", ws) == "b/.ai-orchestration.local.toml"
+
+
+def test_config_show_defaults_to_cwd(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """T072: ai-orch config show without --workspace defaults to current directory."""
+    ws_dir = tmp_path / "d4science_kb"
+    ws_dir.mkdir()
+
+    gpath = oc.default_global_config_path()
+    proj_cfg = gpath.parent / "projects" / ws_dir.name / "orchestration.toml"
+    proj_cfg.parent.mkdir(parents=True, exist_ok=True)
+    proj_cfg.write_text(
+        '[routing]\ndefault_orchestrator = "codex"\ndefault_executor = "kilo"\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(ws_dir)
+
+    # 1. CLI show --json from cwd without --workspace finds project config
+    res_json = run_cli("show", "--json")
+    assert res_json.returncode == 0, res_json.stdout + res_json.stderr
+    data = json.loads(res_json.stdout)
+    assert data["meta"]["project_config_path"] == str(proj_cfg.resolve())
+    assert data["meta"]["project_config_exists"] is True
+    assert data["config"]["routing"]["default_orchestrator"] == "codex"
+    assert data["config"]["routing"]["default_executor"] == "kilo"
+
+    # 2. CLI show text format prints the found project config
+    res_text = run_cli("show")
+    assert res_text.returncode == 0, res_text.stdout + res_text.stderr
+    assert f"Project config: {proj_cfg.resolve()} (exists=True)" in res_text.stdout
+    assert "Orchestrator  : codex" in res_text.stdout
+
+    # 3. Via bin/ai-orch entrypoint directly from cwd
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    res_ai_orch = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "config", "show", "--json"],
+        cwd=str(ws_dir),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data_orch = json.loads(res_ai_orch.stdout)
+    assert data_orch["meta"]["project_config_path"] == str(proj_cfg.resolve())
+    assert data_orch["meta"]["project_config_exists"] is True
+    assert data_orch["config"]["routing"]["default_orchestrator"] == "codex"
+
+    # 4. Explicit --workspace overrides current working directory
+    other_dir = tmp_path / "other_project"
+    other_dir.mkdir()
+    res_other = run_cli("show", "--workspace", str(other_dir), "--json")
+    assert res_other.returncode == 0, res_other.stdout + res_other.stderr
+    data_other = json.loads(res_other.stdout)
+    assert "other_project" in data_other["meta"]["project_config_path"]
+    assert data_other["meta"]["project_config_exists"] is False
