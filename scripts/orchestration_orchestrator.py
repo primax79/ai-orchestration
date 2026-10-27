@@ -79,6 +79,7 @@ from orchestration_sessions import (
     session_lock,
     advance_cursor,
     heartbeat_session,
+    find_session_by_provider_id,
 )
 from orchestration_events import (
     emit,
@@ -780,6 +781,7 @@ def get_orchestrator_status(workspace: pathlib.Path | str) -> dict[str, Any]:
             "session_id": None,
             "provider_session_id": None,
             "tool": None,
+            "kind": None,
             "model": None,
             "cursor": 0,
             "delivery_cursor": 0,
@@ -805,6 +807,7 @@ def get_orchestrator_status(workspace: pathlib.Path | str) -> dict[str, Any]:
                 "session_id": None,
                 "provider_session_id": None,
                 "tool": None,
+                "kind": None,
                 "model": None,
                 "cursor": 0,
                 "delivery_cursor": 0,
@@ -833,14 +836,23 @@ def get_orchestrator_status(workspace: pathlib.Path | str) -> dict[str, Any]:
         cur = orch_doc.get("current", {})
         deliv_cur = int(orch_doc.get("delivery_cursor", orch_doc.get("cursor", 0)))
         scan_cur = int(orch_doc.get("trigger_scan_cursor", orch_doc.get("cursor", 0)))
+        sess_id = cur.get("session_id")
+        sess_kind = cur.get("kind")
+        if not sess_kind and sess_id:
+            try:
+                sess_obj = get_session(ws, sess_id)
+                sess_kind = sess_obj.get("kind")
+            except Exception:
+                pass
 
         return {
             "role": "orchestrator",
             "generation": orch_doc.get("generation", 1),
             "status": orch_doc.get("status", cur.get("status", "active")),
-            "session_id": cur.get("session_id"),
+            "session_id": sess_id,
             "provider_session_id": cur.get("provider_session_id"),
             "tool": cur.get("tool"),
+            "kind": sess_kind or "headless",
             "model": cur.get("model"),
             "cursor": deliv_cur,
             "delivery_cursor": deliv_cur,
@@ -1808,14 +1820,95 @@ def rotate_orchestrator(
     reason: str = "rotation",
     handoff: bool = True,
     timeout: float = 300.0,
+    kind: str = "headless",
+    provider_session_id: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute fenced succession: active -> rotating -> active (Spec §0c E9).
 
     The new session is created and its handoff completed before it becomes current;
     if bootstrap fails, the rotation rolls back.
+    When kind == 'interactive', binds the role directly to the specified interactive
+    session (reusing an existing registered session if present) in one generation bump
+    without spawning a headless candidate session.
     """
     ws = pathlib.Path(workspace).resolve()
     orch_file = get_orchestrator_file(ws)
+
+    if kind == "interactive":
+        with orchestrator_lock(ws):
+            if not orch_file.is_file():
+                ensure_orchestrator(ws)
+            orch_doc = _read_json_safe(orch_file)
+
+            if orch_doc.get("status") == "rotating":
+                return {"status": "already_rotating", "generation": orch_doc.get("generation")}
+
+            cur = orch_doc.get("current", {})
+            old_gen = orch_doc.get("generation", 1)
+            target_gen = old_gen + 1
+            target_tool = new_tool or cur.get("tool", "claude")
+            target_model = (
+                new_model
+                or (cur.get("model") if target_tool == cur.get("tool", "claude") else None)
+                or load_orchestrator_tool_config(ws, target_tool)[1]
+            )
+            fencing_token = f"gen-{target_gen}-{uuid.uuid4().hex[:8]}"
+
+            # Transition role state: active -> rotating
+            orch_doc["status"] = "rotating"
+            orch_doc["target_generation"] = target_gen
+            orch_doc["fencing_token"] = fencing_token
+            _write_json_atomic(orch_file, orch_doc)
+
+            emit(
+                ws,
+                "orchestrator.rotating",
+                payload={
+                    "role": "orchestrator",
+                    "old_generation": old_gen,
+                    "target_generation": target_gen,
+                    "fencing_token": fencing_token,
+                    "reason": reason,
+                    "new_tool": target_tool,
+                    "kind": "interactive",
+                },
+                subject="orchestrator",
+                origin_session="orchestrator",
+            )
+
+            sess = register_session(
+                ws,
+                session_id=session_id,
+                tool=target_tool,
+                role="orchestrator",
+                kind="interactive",
+                provider_session_id=provider_session_id,
+                reason=reason,
+            )
+            bound_sess_id = sess["session_id"]
+
+            fresh_orch = _read_json_safe(orch_file)
+            fresh_orch["status"] = "active"
+            fresh_orch["consecutive_owner_turns"] = 0
+            fresh_orch["consecutive_turn_failures"] = 0
+            fresh_orch.pop("target_generation", None)
+            fresh_orch.pop("fencing_token", None)
+            if "current" in fresh_orch and isinstance(fresh_orch["current"], dict):
+                fresh_orch["current"]["model"] = target_model
+                fresh_orch["current"]["kind"] = "interactive"
+                fresh_orch["current"]["status"] = "active"
+            _write_json_atomic(orch_file, fresh_orch)
+
+            return {
+                "status": "rotated",
+                "generation": fresh_orch.get("generation"),
+                "session_id": bound_sess_id,
+                "provider_session_id": sess.get("provider_session_id"),
+                "kind": "interactive",
+                "tool": target_tool,
+                "model": target_model,
+            }
 
     with orchestrator_lock(ws):
         if not orch_file.is_file():
@@ -1988,6 +2081,23 @@ def rotate_orchestrator(
         }
 
 
+_CURRENT_PROVIDER_SESSION_ENV_VARS: tuple[str, ...] = (
+    "CLAUDE_SESSION_ID",
+    "AI_ORCH_PROVIDER_SESSION_ID",
+    "KILO_SESSION_ID",
+    "CODEX_SESSION_ID",
+)
+
+
+def _resolve_current_provider_session_id() -> str | None:
+    """Resolve current provider session ID from environment variables if set."""
+    for env_var in _CURRENT_PROVIDER_SESSION_ENV_VARS:
+        val = (os.environ.get(env_var) or "").strip()
+        if val:
+            return val
+    return None
+
+
 def reassign_orchestrator(
     workspace: pathlib.Path | str,
     tool: str,
@@ -1999,6 +2109,10 @@ def reassign_orchestrator(
     no_handoff: bool = False,
     timeout: float = 300.0,
     global_config: str | pathlib.Path | None = None,
+    kind: str | None = None,
+    provider_session_id: str | None = None,
+    session_id: str | None = None,
+    bind_current: bool = False,
 ) -> dict[str, Any]:
     """Reassign orchestrator role to another tool/model via fenced succession (Spec §0b).
 
@@ -2006,9 +2120,41 @@ def reassign_orchestrator(
     In apply mode, writes config under lock (emitting config.changed) and executes
     fenced succession with reason 'reassigned' (generation N -> N+1, handoff turn,
     retires old session, carries queue and cursor).
+    When kind == 'interactive' or bind_current is True, binds the role directly to
+    the target interactive session in one generation bump without creating a headless
+    session.
     """
     ws = pathlib.Path(workspace).resolve()
     ensure_git_exclude(ws)
+
+    eff_prov_id = (provider_session_id or "").strip() or None
+    if bind_current and not eff_prov_id:
+        eff_prov_id = _resolve_current_provider_session_id()
+        if not eff_prov_id:
+            return {
+                "ok": False,
+                "error": (
+                    "--bind-current requires a session ID in the environment "
+                    "(e.g. CLAUDE_SESSION_ID or AI_ORCH_PROVIDER_SESSION_ID); "
+                    "pass --provider-session-id <uuid> explicitly."
+                ),
+            }
+
+    eff_kind = kind or ("interactive" if (bind_current or eff_prov_id) else "headless")
+    if eff_kind not in ("headless", "interactive"):
+        return {
+            "ok": False,
+            "error": f"Invalid --kind '{eff_kind}': must be 'headless' or 'interactive'.",
+        }
+
+    if eff_kind == "interactive" and not eff_prov_id and not session_id:
+        return {
+            "ok": False,
+            "error": (
+                "--kind interactive requires --provider-session-id <uuid> "
+                "(or --bind-current with CLAUDE_SESSION_ID set)."
+            ),
+        }
 
     orch_file = get_orchestrator_file(ws)
     if not orch_file.is_file():
@@ -2019,7 +2165,26 @@ def reassign_orchestrator(
     cur_tool = cur.get("tool", "claude")
     target_gen = old_gen + 1
 
-    plan_desc = f"generation {old_gen} ({cur_tool}) → {target_gen} ({tool}), with a handoff turn"
+    eff_sess_id = session_id
+    if eff_kind == "interactive":
+        if not eff_sess_id and eff_prov_id:
+            existing = find_session_by_provider_id(ws, eff_prov_id, tool=tool)
+            if existing:
+                eff_sess_id = existing.get("session_id")
+                if not eff_prov_id:
+                    eff_prov_id = existing.get("provider_session_id")
+        elif eff_sess_id and not eff_prov_id:
+            try:
+                existing = get_session(ws, eff_sess_id)
+                eff_prov_id = existing.get("provider_session_id")
+            except Exception:
+                pass
+        target_label = eff_sess_id or eff_prov_id or "interactive"
+        plan_desc = (
+            f"generation {old_gen} ({cur_tool}) → {target_gen} ({tool}, interactive session {target_label})"
+        )
+    else:
+        plan_desc = f"generation {old_gen} ({cur_tool}) → {target_gen} ({tool}), with a handoff turn"
 
     # Resolve target config path
     gpath = pathlib.Path(global_config).resolve() if global_config else None
@@ -2056,12 +2221,14 @@ def reassign_orchestrator(
         )
     )
 
-    plan_hash = hashlib.sha256(
-        f"{target_path}:{current_hash}:{old_gen}:{target_gen}:{tool}:{diff_str}".encode("utf-8")
-    ).hexdigest()
+    if eff_kind == "interactive":
+        hash_payload = f"{target_path}:{current_hash}:{old_gen}:{target_gen}:{tool}:interactive:{eff_prov_id or ''}:{eff_sess_id or ''}:{diff_str}"
+    else:
+        hash_payload = f"{target_path}:{current_hash}:{old_gen}:{target_gen}:{tool}:{diff_str}"
+    plan_hash = hashlib.sha256(hash_payload.encode("utf-8")).hexdigest()
 
     if dry_run:
-        return {
+        res_dry: dict[str, Any] = {
             "ok": True,
             "dry_run": True,
             "plan": plan_desc,
@@ -2072,9 +2239,14 @@ def reassign_orchestrator(
             "path": str(target_path),
             "from_tool": cur_tool,
             "to_tool": tool,
+            "kind": eff_kind,
             "generation": old_gen,
             "target_generation": target_gen,
         }
+        if eff_kind == "interactive":
+            res_dry["target_session_id"] = eff_sess_id
+            res_dry["provider_session_id"] = eff_prov_id
+        return res_dry
 
     # Verify expect_hash if provided
     if expect_hash is not None:
@@ -2135,8 +2307,11 @@ def reassign_orchestrator(
         new_tool=tool,
         new_model=model,
         reason="reassigned",
-        handoff=not no_handoff,
+        handoff=False if eff_kind == "interactive" else (not no_handoff),
         timeout=timeout,
+        kind=eff_kind,
+        provider_session_id=eff_prov_id,
+        session_id=eff_sess_id,
     )
 
     if rot_res.get("status") == "failed":
@@ -2154,6 +2329,8 @@ def reassign_orchestrator(
         "plan_hash": plan_hash,
         "generation": rot_res.get("generation"),
         "session_id": rot_res.get("session_id"),
+        "provider_session_id": rot_res.get("provider_session_id") if eff_kind == "interactive" else None,
+        "kind": eff_kind,
         "tool": tool,
         "model": rot_res.get("model"),
         "path": str(target_path),
@@ -2226,6 +2403,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_reass.add_argument("--tool", "-t", required=True, help="Target orchestrator tool (e.g. kilo, claude, codex)")
     p_reass.add_argument("--model", "-m", help="Target model identifier")
     p_reass.add_argument("--scope", choices=["global", "project"], default="project", help="Config scope (default: project)")
+    p_reass.add_argument("--kind", "-k", choices=["headless", "interactive"], help="Target session kind (default: headless, or interactive when binding to a session)")
+    p_reass.add_argument("--provider-session-id", "--resume-id", dest="provider_session_id", help="Existing provider session UUID to bind when kind is interactive")
+    p_reass.add_argument("--session-id", "--id", dest="session_id", help="Registry session ID/name to bind or reuse")
+    p_reass.add_argument("--bind-current", action="store_true", help="Bind the role to the calling interactive session using CLAUDE_SESSION_ID (or AI_ORCH_PROVIDER_SESSION_ID)")
     p_reass.add_argument("--dry-run", action="store_true", help="Preview plan and config diff without applying")
     p_reass.add_argument("--expect-hash", help="Expected config or plan hash for optimistic concurrency")
     p_reass.add_argument("--no-handoff", action="store_true", help="Skip handoff turn execution")
@@ -2363,6 +2544,10 @@ def main(argv: list[str] | None = None) -> int:
                 no_handoff=args.no_handoff,
                 timeout=args.timeout,
                 global_config=args.global_config,
+                kind=args.kind,
+                provider_session_id=args.provider_session_id,
+                session_id=args.session_id,
+                bind_current=args.bind_current,
             )
             if not res.get("ok", True):
                 if args.json:
@@ -2375,6 +2560,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 if args.dry_run:
                     print(f"[dry-run] Plan: {res['plan']}")
+                    if res.get("kind") == "interactive":
+                        print(f"Target kind: {res.get('kind')}")
+                        if res.get("target_session_id"):
+                            print(f"Target session: {res.get('target_session_id')}")
+                        if res.get("provider_session_id"):
+                            print(f"Provider session: {res.get('provider_session_id')}")
                     print(f"Plan hash: {res['plan_hash']}")
                     print(f"Config hash: {res['config_hash']}")
                     if res.get("diff"):
