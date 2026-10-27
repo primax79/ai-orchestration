@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Una campagna ha segnato 39/41 use case come failing in git-code-rag, letto dal proprietario come prodotto rotto
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -22,9 +22,16 @@ run_validation_campaign (tasks_engine.py ~7265) says 'Execute all active use cas
 
 ## Steps
 
-- [ ] run_validation_campaign esegue solo gli use case active; le bozze compaiono nel report come 'fuori ambito' senza cambiare stato
-- [ ] Un probe che non può girare (test non ancora esistenti) è UNTESTED, non failing
+- [x] run_validation_campaign esegue solo gli use case active (e verified/failing/partial, cioè non draft o deprecated); le bozze compaiono nel report sotto 'Out of scope (draft)' senza che stato e last-verdict vengano toccati
+- [x] Un probe che non può girare per cause esterne al prodotto (exit 127 command not found, file o directory di test inesistenti, timeout) è registrato come UNTESTED con la motivazione, e NON imposta lo stato a failing
 
 ## Verification
 
-- Test: campagna su 2 active + 2 draft: solo le active cambiano last-verdict; report con sezione 'fuori ambito'
+- Test specifici T069 eseguiti con successo in `test_tasks_engine.py`:
+  - `test_t069_campaign_skips_drafts_and_untested_is_not_failing`: campagna con 2 active (1 pass, 1 fail) + 2 draft + 1 active con comando inesistente (`nonexistent-cmd`). Risultato: solo le active vengono eseguite (totale testati 3, 1 pass, 1 fail, 1 untested, 2 out of scope). Lo use case con comando inesistente rimane con status `active` e `last-verdict: untested`. I due draft rimangono con status `draft` e last-verdict invariato; compaiono nel report sotto la sezione 'Out of scope (draft)'.
+  - `test_t069_probe_missing_test_file_and_timeout_recorded_as_untested`: verifica diretta che probe con file di test mancante (es. pytest su file inesistente) o probe andato in timeout vengano registrati con verdetto `untested` mantenendo lo stato `active` (senza passare a `failing`).
+- Test suite completa passata: `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider plugins/architect-side/skills/task-pipeline/scripts/` (243 superati su 243).
+
+## Log
+
+- 2026-10-27, kilo: state `open` -> `delivered` — la campagna esclude gli use case draft e deprecated; i probe falliti per cause esterne registrano untested senza impostare failing
