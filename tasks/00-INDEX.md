@@ -79,7 +79,13 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 ## Tasks by category
 
 <!-- ai-orch:generated tasks-by-category -->
+### engine
 
+Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T066 (Project languages) | P2 | [Per-project language for tasks and for questions](engine/T066-per-project-language-for-tasks-and-for-questions.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
