@@ -13636,3 +13636,194 @@ def test_t066_project_languages_and_english_headings_keywords(tmp_path: pathlib.
     assert cfg_bad["languages"] == {"tasks": "en", "questions": "en", "use_cases": "en"}
 
 
+# ===========================================================================
+# T067: Initiative task Status note evidence preservation and walk single event
+# ===========================================================================
+
+
+def test_t067_initiative_task_status_note_evidence_and_closure(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    init_dir = tasks_dir / "26-evidence"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        "# 26 Evidence Initiative\n\n"
+        "- **Goal:** Test evidence preservation.\n\n"
+        "## Tasks\n\n"
+        "### 26.1 - Task with evidence\n"
+        "- **Status:** `delivered` (merged 765f5d7 2026-09-07) · **Short:** Evidence test\n"
+        "- **Goal:** Ensure merge sha is kept.\n\n"
+        "### 26.2 - Task without note\n"
+        "- **Status:** `delivered` · **Short:** Clean test\n"
+        "- **Goal:** Ensure closure event without prior note.\n\n"
+        "### 26.3 - Verification task\n"
+        "- **Status:** `delivered` (merged abc123 2026-10-08) · **Short:** Target verification\n"
+        "- **Goal:** Verification criteria check.\n\n"
+        "## Closed\n",
+        encoding="utf-8",
+    )
+
+    today = datetime.date.today().isoformat()
+
+    # 1. Block with existing note keeps the sha and appends the closure event
+    res1 = run_cli("transition", "26.1", "done", "--verifier", "X", "--tasks-dir", str(tasks_dir), "--json")
+    assert res1.returncode == 0
+    d1 = json.loads(res1.stdout)
+    assert d1["ok"] is True
+    assert d1["new_state"] == "done"
+
+    plan_text = plan_file.read_text(encoding="utf-8")
+    closed_part = plan_text.split("## Closed", 1)[1]
+    assert "### 26.1 - Task with evidence" in closed_part
+    assert f"- **Status:** `done` (merged 765f5d7 2026-09-07; done {today}, verifier X) · **Short:** Evidence test" in closed_part
+    assert "765f5d7" in closed_part
+
+    # 2. Block without a note gets just the closure event (current behaviour)
+    res2 = run_cli("transition", "26.2", "done", "--verifier", "reviewer", "--tasks-dir", str(tasks_dir), "--json")
+    assert res2.returncode == 0
+    d2 = json.loads(res2.stdout)
+    assert d2["ok"] is True
+    assert d2["new_state"] == "done"
+
+    plan_text = plan_file.read_text(encoding="utf-8")
+    closed_part = plan_text.split("## Closed", 1)[1]
+    assert "### 26.2 - Task without note" in closed_part
+    assert f"- **Status:** `done` (done {today}, verifier reviewer) · **Short:** Clean test" in closed_part
+
+    # 3. Verification criteria check: (merged abc123 2026-10-08) brought to done keeps abc123
+    res3 = run_cli("transition", "26.3", "done", "--verifier", "auditor", "--tasks-dir", str(tasks_dir), "--json")
+    assert res3.returncode == 0
+    plan_text = plan_file.read_text(encoding="utf-8")
+    closed_part = plan_text.split("## Closed", 1)[1]
+    assert "abc123" in closed_part
+    assert f"- **Status:** `done` (merged abc123 2026-10-08; done {today}, verifier auditor) · **Short:** Target verification" in closed_part
+
+
+def test_t067_initiative_task_walk_produces_single_event(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    init_dir = tasks_dir / "27-walk"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        "# 27 Walk Initiative\n\n"
+        "- **Goal:** Test single event walk.\n\n"
+        "## Tasks\n\n"
+        "### 27.1 - Walk from in progress with note\n"
+        "- **Status:** `in progress` (started 2026-09-01) · **Short:** Walk test\n"
+        "- **Goal:** Verify single appended event from in progress.\n\n"
+        "### 27.2 - Walk from open with note\n"
+        "- **Status:** `open` (queued 2026-08-15) · **Short:** Open walk test\n"
+        "- **Goal:** Verify single appended event from open.\n\n"
+        "## Closed\n",
+        encoding="utf-8",
+    )
+
+    today = datetime.date.today().isoformat()
+
+    # Walk 27.1 from in progress to done in one command
+    res1 = run_cli("transition", "27.1", "done", "--verifier", "reviewer", "--tasks-dir", str(tasks_dir), "--json")
+    assert res1.returncode == 0
+    d1 = json.loads(res1.stdout)
+    assert d1["ok"] is True
+    assert len(d1["transitions"]) == 3  # delivered -> verified -> done (from in progress)
+
+    plan_text = plan_file.read_text(encoding="utf-8")
+    closed_part = plan_text.split("## Closed", 1)[1]
+    assert "### 27.1 - Walk from in progress with note" in closed_part
+    # Single event appended for the final state, not intermediate delivered/verified events
+    assert f"- **Status:** `done` (started 2026-09-01; done {today}, verifier reviewer) · **Short:** Walk test" in closed_part
+    assert "delivered" not in closed_part.split("### 27.1")[1].split("\n")[1]
+    assert "verified" not in closed_part.split("### 27.1")[1].split("\n")[1].split("done")[0]
+
+    # Walk 27.2 from open to done in one command
+    res2 = run_cli("transition", "27.2", "done", "--verifier", "reviewer", "--tasks-dir", str(tasks_dir), "--json")
+    assert res2.returncode == 0
+    d2 = json.loads(res2.stdout)
+    assert d2["ok"] is True
+
+    plan_text = plan_file.read_text(encoding="utf-8")
+    closed_part = plan_text.split("## Closed", 1)[1]
+    assert f"- **Status:** `done` (queued 2026-08-15; done {today}, verifier reviewer) · **Short:** Open walk test" in closed_part
+
+
+def test_t067_initiative_task_reopen_keeps_history_note(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    init_dir = tasks_dir / "28-reopen"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        "# 28 Reopen Initiative\n\n"
+        "- **Goal:** Test reopen history.\n\n"
+        "## Tasks\n\n"
+        "## Closed\n\n"
+        "### 28.1 - Closed task with history\n"
+        "- **Status:** `done` (merged 765f5d7 2026-09-07; done 2026-10-27, verifier X) · **Short:** Reopen test\n"
+        "- **Goal:** Keep history on reopen.\n",
+        encoding="utf-8",
+    )
+
+    today = datetime.date.today().isoformat()
+
+    # Reopen 28.1
+    res_dry = te.reopen_node(tasks_dir, "28.1", reason="Need regression check", dry_run=True)
+    assert res_dry["ok"] is True
+    plan_hash = res_dry["plan_hash"]
+
+    res_app = te.reopen_node(tasks_dir, "28.1", reason="Need regression check", expect_plan_hash=plan_hash)
+    assert res_app["ok"] is True
+
+    plan_text = plan_file.read_text(encoding="utf-8")
+    assert "## Closed" not in plan_text  # empty Closed section is removed
+    assert "### 28.1 - Closed task with history" in plan_text
+    expected_status = f"- **Status:** `open` (merged 765f5d7 2026-09-07; done 2026-10-27, verifier X; reopened {today}, Need regression check) · **Short:** Reopen test"
+    assert expected_status in plan_text
+    assert "765f5d7" in plan_text
+    assert "verifier X" in plan_text
+    assert "Need regression check" in plan_text
+
+
+def test_t067_initiative_task_note_truncation_over_200_chars(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    init_dir = tasks_dir / "29-trunc"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+
+    # Note with multiple intermediate events exceeding 200 characters
+    long_mid_1 = "event1 " + ("x" * 80)
+    long_mid_2 = "event2 " + ("y" * 80)
+    plan_file.write_text(
+        f"# 29 Trunc Initiative\n\n"
+        f"## Tasks\n\n"
+        f"### 29.1 - Long note task\n"
+        f"- **Status:** `delivered` (merged 765f5d7 2026-09-07; {long_mid_1}; {long_mid_2}) · **Short:** Trunc test\n"
+        f"- **Goal:** Truncate middle events when exceeding 200 chars.\n\n"
+        f"## Closed\n",
+        encoding="utf-8",
+    )
+
+    today = datetime.date.today().isoformat()
+
+    res = run_cli("transition", "29.1", "done", "--verifier", "X", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0
+    d = json.loads(res.stdout)
+    assert d["ok"] is True
+
+    plan_text = plan_file.read_text(encoding="utf-8")
+    closed_part = plan_text.split("## Closed", 1)[1]
+    status_line = next(line for line in closed_part.splitlines() if line.startswith("- **Status:**"))
+
+    # The note must be on a single line
+    assert "\n" not in status_line
+    # The first note and the latest event must be kept
+    assert "merged 765f5d7 2026-09-07" in status_line
+    assert f"done {today}, verifier X" in status_line
+    # The middle events must be dropped
+    assert long_mid_1 not in status_line
+    assert long_mid_2 not in status_line
+    assert f"- **Status:** `done` (merged 765f5d7 2026-09-07; done {today}, verifier X) · **Short:** Trunc test" == status_line
+
+
