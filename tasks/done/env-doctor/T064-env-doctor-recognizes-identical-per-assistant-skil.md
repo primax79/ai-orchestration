@@ -1,10 +1,10 @@
-# T064 env doctor recognizes identical per-assistant skill copies across ~/.claude/skills and ~/.kilo/skills as intentional
+# T064 env doctor riconosce come intenzionali le copie identiche delle skill per assistente tra ~/.claude/skills e ~/.kilo/skills
 
 - id: T064
-- title: env doctor recognizes identical per-assistant skill copies across ~/.claude/skills and ~/.kilo/skills as intentional
+- title: env doctor riconosce come intenzionali le copie identiche delle skill per assistente tra ~/.claude/skills e ~/.kilo/skills
 - category: env-doctor
 - priority: P2
-- priority-reason: 6 false-positive duplicate findings on paired Claude/Kilo standalone skills
+- priority-reason: 6 falsi positivi di duplicazione sulle skill standalone accoppiate Claude/Kilo
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,17 +12,17 @@
 - decider: -
 - sources: _inbox/analyzed/20261025-170336-env-doctor-flags-per-assistant-skill-cop/note.md
 - paths: -
-- handoff: Read tasks/env-doctor/T064-env-doctor-recognizes-identical-per-assistant-skil.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/env-doctor/T064-env-doctor-recognizes-identical-per-assistant-skil.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: env doctor recognizes identical
+- short: Copie skill identiche nel Doctor
 
 ## Goal
 
-Owner report 2026-10-25 (screenshot of the doctor UI): ADVICE 'duplicate-name: orchestration-metrics / orchestration-setup / pdf / task-pipeline / task-spec-authoring ...: duplicate standalone skill across origins (standalone:~/.claude/skills, standalone:~/.kilo/skills): review and remove one manually'. Owner: these are not duplicates.
+Segnalazione dell'owner del 2026-10-25 (screenshot della UI del Doctor): ADVICE 'duplicate-name: orchestration-metrics / orchestration-setup / pdf / task-pipeline / task-spec-authoring ...: duplicate standalone skill across origins (standalone:~/.claude/skills, standalone:~/.kilo/skills): review and remove one manually'. Owner: questi non sono duplicati.
 
 ## Steps
 
-- [x] Skip `duplicate-name` in `orchestration_env.py` when standalone entries in the same scope have at most one copy per assistant root family and equivalent content.
+- [x] Saltare `duplicate-name` in `orchestration_env.py` quando le voci standalone nello stesso scope hanno al massimo una copia per famiglia di root dell'assistente e contenuto equivalente.
 
 ## Verification
 
@@ -30,7 +30,7 @@ Owner report 2026-10-25 (screenshot of the doctor UI): ADVICE 'duplicate-name: o
 
 ## Log (newest first)
 
-- 2026-10-25, owner: state `verified` -> `done` — Implemented and verified with automated pytest regression tests
-- 2026-10-25, owner: state `delivered` -> `verified` — Implemented and verified with automated pytest regression tests
+- 2026-10-25, owner: state `verified` -> `done` — Implementato e verificato con test di regressione pytest automatizzati
+- 2026-10-25, owner: state `delivered` -> `verified` — Implementato e verificato con test di regressione pytest automatizzati
 - 2026-10-25, kilo: state `in progress` -> `delivered`
 - 2026-10-25, kilo: state `open` -> `in progress`

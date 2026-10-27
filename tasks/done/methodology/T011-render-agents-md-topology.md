@@ -1,10 +1,10 @@
-# T011 render-agents-md: render rules that match the actual orchestrator/executor topology
+# T011 render-agents-md: generare regole coerenti con la reale topologia orchestratore/esecutore
 
 - id: T011
-- title: render-agents-md: render rules that match the actual orchestrator/executor topology
+- title: render-agents-md: generare regole coerenti con la reale topologia orchestratore/esecutore
 - category: methodology
 - priority: P1
-- priority-reason: An applied block steers every future session; a wrong block (wrong orchestrator, foreign tools, contradicting model rules) silently misleads agents
+- priority-reason: Un blocco applicato guida ogni sessione futura; un blocco errato (orchestratore sbagliato, tool estranei, regole sui modelli contraddittorie) fuorvia silenziosamente gli agenti
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,44 +12,44 @@
 - decider: -
 - sources: ../../status/agents-md-generated-block-2026-10-16.md in the ai-coding-tools workspace (block found applied without explanation on 2026-10-16, reviewed and removed)
 - paths: plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py
-- handoff: Read tasks/methodology/T011-render-agents-md-topology.md, do the open steps, run the Verification, update the task and tasks/00-INDEX.md.
+- handoff: Leggere tasks/methodology/T011-render-agents-md-topology.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e tasks/00-INDEX.md.
 - verifier: claude:orchestration
-- short: render-agents-md topology
+- short: Topologia render-agents-md
 
 ## Goal
 
-The block that `render-agents-md` writes into a workspace `AGENTS.md` matches the workspace's real topology. It never prescribes tools or models that the orchestrating session cannot use.
+Il blocco che `render-agents-md` scrive nel file `AGENTS.md` di un workspace rispecchia la topologia reale del workspace. Non prescrive mai tool o modelli che la sessione di orchestrazione non può utilizzare.
 
-A block applied to `ai-coding-tools/AGENTS.md` on 2026-10-16 had four problems:
+Un blocco applicato a `ai-coding-tools/AGENTS.md` il 2026-10-16 presentava quattro problemi:
 
-- It declared `primary_orchestrator = "kilo"` taken from the global defaults, although the workspace has no project config and is in fact orchestrated by Claude delegating to Kilo over MCP.
-- Its Rule 3 prescribed Kilo-native tools (`agent_manager`, `task`).
-- Its Rule 4 listed Kilo models (`google/gemini-4-argon`) that the owner's rule (Kilo always `google/gemini-3.8-flash`) contradicts and that kilo-mcp does not offer.
-- It introduced a strict "no implementation in the main session" rule that the owner never approved.
+- Dichiarava `primary_orchestrator = "kilo"` preso dai default globali, sebbene il workspace non abbia una configurazione di progetto e sia di fatto orchestrato da Claude che delega a Kilo tramite MCP.
+- La sua Regola 3 prescriveva tool nativi di Kilo (`agent_manager`, `task`).
+- La sua Regola 4 elencava modelli di Kilo (`google/gemini-4-argon`) che la regola dell'owner (Kilo sempre su `google/gemini-3.8-flash`) contraddice e che kilo-mcp non offre.
+- Introduceva una regola rigida di "nessuna implementazione nella sessione principale" che l'owner non ha mai approvato.
 
 ## Steps
 
-1. **Topology-aware rendering.** The isolation and delegation tools depend on the pair (orchestrator, executor).
-   - Same framework: the orchestrator's native tools.
-   - Different frameworks: the MCP binding's tools (for example `kilo_implement(isolation="worktree")` when Claude orchestrates and Kilo executes; `claude-mcp` tools in the opposite direction).
-   - The tool names come from the tool tables in config (`native_*_tool`, `mcp_server`, `mcp_implement_tool`), never from hard-coded Kilo text.
-2. **No silent defaults.** When the workspace has no project config, `--apply` refuses and names the routing it would use; `--allow-global-routing` forces it. `--diff` shows the same warning.
-3. **Models only from the effective config.** Before rendering, validate each listed model id against the tool's catalog when that tool can list one (for example `kilo models`). Unknown ids produce a warning in `--diff` and a refusal on `--apply`, unless `--allow-unknown-models` is given.
-4. **Opinionated rules are opt-in.** Rule 1 ("keep the main session free") is rendered only when the config sets `[agents_md] strict_main_session = true`. The default is a softer wording.
+1. **Generazione consapevole della topologia.** I tool di isolamento e di delega dipendono dalla coppia (orchestratore, esecutore).
+   - Stesso framework: i tool nativi dell'orchestratore.
+   - Framework diversi: i tool del binding MCP (ad esempio `kilo_implement(isolation="worktree")` quando Claude orchestra e Kilo esegue; i tool `claude-mcp` nella direzione opposta).
+   - I nomi dei tool provengono dalle tabelle dei tool nella configurazione (`native_*_tool`, `mcp_server`, `mcp_implement_tool`), mai da testo cablato specifico per Kilo.
+2. **Nessun default silenzioso.** Quando il workspace non ha una configurazione di progetto, `--apply` rifiuta l'operazione e indica il routing che utilizzerebbe; `--allow-global-routing` lo forza. `--diff` mostra lo stesso avviso.
+3. **Modelli solo dalla configurazione effettiva.** Prima di generare, validare ogni ID di modello elencato rispetto al catalogo del tool quando quel tool può elencarne uno (ad esempio `kilo models`). Gli ID sconosciuti producono un avviso in `--diff` e un rifiuto con `--apply`, a meno che non venga passato `--allow-unknown-models`.
+4. **Le regole prescrittive sono opt-in.** La Regola 1 ("mantenere libera la sessione principale") viene generata nella versione rigida solo quando la configurazione imposta `[agents_md] strict_main_session = true`. Il default usa una formulazione più morbida.
 
 ## Verification
 
-- Unit tests render the block for three pairs: claude→kilo, kilo→kilo, codex→kilo.
-  - The claude→kilo rendering names `kilo_implement`, not `agent_manager`.
-  - The kilo→kilo rendering names `agent_manager`/`task`.
-- `--apply` refuses on a workspace with no project config.
-- `--diff` on `/Users/Alfredo/works/ai-coding-tools` (read-only) shows the routing warning.
-- Nothing is applied to any real workspace.
+- Gli unit test generano il blocco per tre coppie: claude→kilo, kilo→kilo, codex→kilo.
+  - La generazione claude→kilo nomina `kilo_implement`, non `agent_manager`.
+  - La generazione kilo→kilo nomina `agent_manager`/`task`.
+- `--apply` rifiuta l'esecuzione su un workspace privo di configurazione di progetto.
+- `--diff` su `/Users/Alfredo/works/ai-coding-tools` (in sola lettura) mostra l'avviso sul routing.
+- Non viene applicato nulla ad alcun workspace reale.
 
-## Result
+## Risultato
 
-Delivered implementation of Steps 1–4 in `orchestration_config.py` with accompanying tests:
-- **Topology-aware rendering:** Pair mechanisms and skills are derived dynamically from effective config tool tables (`native_*_tool`, `mcp_server`, `mcp_implement_tool`, `mcp_wait_tool`). Tested for claude→kilo, kilo→kilo, and codex→kilo pairs.
-- **No silent defaults:** Workspaces lacking project config cause `--apply` to refuse and state the fallback routing unless `--allow-global-routing` is passed; `--diff` includes the routing warning in `warnings`.
-- **Model catalog validation:** Listed model IDs for Kilo are verified against `kilo models` (with a 20 s timeout and in-memory caching), refusing on `--apply` unless `--allow-unknown-models` is provided; skipped validation for Claude and Codex is surfaced in warnings.
-- **Opt-in strict rules:** Rule 1 defaults to a softer architectural focus and only renders the strict prohibition on main-session implementation when `strict_main_session = true` is explicitly configured.
+Consegnata l'implementazione dei passaggi 1–4 in `orchestration_config.py` con i relativi test:
+- **Generazione consapevole della topologia:** I meccanismi di coppia e le skill sono derivati dinamicamente dalle tabelle dei tool della configurazione effettiva (`native_*_tool`, `mcp_server`, `mcp_implement_tool`, `mcp_wait_tool`). Testato per le coppie claude→kilo, kilo→kilo e codex→kilo.
+- **Nessun default silenzioso:** I workspace privi di configurazione di progetto fanno sì che `--apply` rifiuti l'operazione e dichiari il routing di fallback a meno che non venga passato `--allow-global-routing`; `--diff` include l'avviso sul routing in `warnings`.
+- **Validazione del catalogo modelli:** Gli ID dei modelli elencati per Kilo vengono verificati tramite `kilo models` (con timeout di 20 s e caching in memoria), rifiutando l'esecuzione con `--apply` a meno che non sia specificato `--allow-unknown-models`; la validazione saltata per Claude e Codex viene segnalata negli avvisi.
+- **Regole rigide opt-in:** La Regola 1 adotta di default un orientamento architetturale più flessibile e genera il divieto tassativo di implementazione nella sessione principale solo quando `strict_main_session = true` è configurato esplicitamente.

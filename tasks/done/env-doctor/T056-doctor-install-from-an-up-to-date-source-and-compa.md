@@ -1,10 +1,10 @@
-# T056 Doctor: install from an up-to-date source and compare skill content, not the stored hash
+# T056 Doctor: installare da un sorgente aggiornato e confrontare il contenuto della skill, non l'hash memorizzato
 
 - id: T056
-- title: Doctor: install from an up-to-date source and compare skill content, not the stored hash
+- title: Doctor: installare da un sorgente aggiornato e confrontare il contenuto della skill, non l'hash memorizzato
 - category: env-doctor
 - priority: P1
-- priority-reason: Kilo kept outdated orchestration skills after a release; the Doctor called them up to date
+- priority-reason: Kilo ha mantenuto skill di orchestrazione obsolete dopo un rilascio; il Doctor le segnalava come aggiornate
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,32 +12,32 @@
 - decider: -
 - sources: inbox N056 (ai-coding-tools, releasing architect-side 0.7.0)
 - paths: scripts/orchestration_env.py
-- handoff: Read tasks/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: ai-coding-tools-c1
-- short: Doctor fresh skill installs
+- short: Installazione skill aggiornate
 
 ## Goal
 
-install-skills and the status report compare the installed skill content with the source content (not the source_hash stored in .ai-orch-source.json), so an outdated copy is shown as outdated and replaced without --overwrite; the Doctor reports when its source clone (~/.ai-orchestration/repos/<repo>) is behind its remote, or when a configured local checkout is newer, and offers fetch-repos (preview); tests cover both.
+install-skills e il report di stato confrontano il contenuto della skill installata con il contenuto sorgente (non il source_hash salvato in .ai-orch-source.json), così che una copia obsoleta venga mostrata come outdated e sostituita senza --overwrite; il Doctor segnala quando il suo clone sorgente (~/.ai-orchestration/repos/<repo>) è indietro rispetto al remote, o quando un checkout locale configurato è più recente, e propone fetch-repos (in anteprima); i test coprono entrambi i casi.
 
 ## Steps
 
-- [x] Update `detect_skill_state` and `detect_agent_state` in `scripts/orchestration_env.py` to compare installed content hash against current source content hash (`hash_directory` / `sha256`) rather than trusting the install-time marker `source_hash`.
-- [x] Classify clean copies matching previous source versions as `outdated`, distinguishing them from locally modified copies (`modified-or-outdated`).
-- [x] Update `install_skills` so that `outdated` copies (source newer) plan `REPLACE` with reason `(source newer)` without requiring `--overwrite`, while locally modified copies still require `--overwrite`.
-- [x] Ensure receipt marker `.ai-orch-source.json` is updated with the current `source_hash` on replacement/installation.
-- [x] Implement source clone staleness detection in `scripts/orchestration_env.py` (`check_source_repo_stale`, `check_source_repo_behind_remote`, `check_local_checkout_ahead`): report warnings in `env status` and `install-skills` when `~/.ai-orchestration/repos/<repo>` is behind its remote or when a configured local checkout is ahead, offering `ai-orch env fetch-repos --repos <repo>`.
-- [x] Add unit tests in `scripts/test_orchestration_env.py` covering outdated copy replacement without `--overwrite`, local edit retention requiring `--overwrite`, marker updates on install, bare remote behind warning, offline tolerance, and local checkout ahead warning.
+- [x] Aggiornare `detect_skill_state` e `detect_agent_state` in `scripts/orchestration_env.py` per confrontare l'hash del contenuto installato con l'hash del contenuto sorgente corrente (`hash_directory` / `sha256`) anziché fidarsi del marker di installazione `source_hash`.
+- [x] Classificare le copie pulite che corrispondono a versioni sorgente precedenti come `outdated`, distinguendole dalle copie modificate localmente (`modified-or-outdated`).
+- [x] Aggiornare `install_skills` in modo che le copie `outdated` (sorgente più recente) pianifichino `REPLACE` con motivo `(source newer)` senza richiedere `--overwrite`, mentre le copie modificate localmente continuino a richiedere `--overwrite`.
+- [x] Assicurarsi che il marker di ricevuta `.ai-orch-source.json` venga aggiornato con il `source_hash` corrente al momento della sostituzione/installazione.
+- [x] Implementare il rilevamento dell'obsolescenza del clone sorgente in `scripts/orchestration_env.py` (`check_source_repo_stale`, `check_source_repo_behind_remote`, `check_local_checkout_ahead`): riportare avvisi in `env status` e `install-skills` quando `~/.ai-orchestration/repos/<repo>` è indietro rispetto al suo remote o quando un checkout locale configurato è avanti, proponendo `ai-orch env fetch-repos --repos <repo>`.
+- [x] Aggiungere unit test in `scripts/test_orchestration_env.py` che coprano la sostituzione delle copie obsolete senza `--overwrite`, il mantenimento delle modifiche locali che richiedono `--overwrite`, l'aggiornamento dei marker durante l'installazione, l'avviso di remote indietro, la tolleranza offline e l'avviso di checkout locale più recente.
 
 ## Verification
 
-- `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/ plugins/architect-side/skills/task-pipeline/scripts/ plugins/shared/skills/orchestration-setup/scripts/`: 563 passed in 381.60s.
-- `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/test_orchestration_env.py`: 81 passed in 108.96s.
-- Isolated live check in scratch temp directory: verified `install-skills` installs v1, source edit in scratch clone updates to v2, and subsequent dry-run plans `REPLACE` with `(source newer)` without `--overwrite`.
+- `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/ plugins/architect-side/skills/task-pipeline/scripts/ plugins/shared/skills/orchestration-setup/scripts/`: 563 passati in 381.60s.
+- `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/test_orchestration_env.py`: 81 passati in 108.96s.
+- Verifica live isolata in una directory temporanea di scratch: verificato che `install-skills` installa la v1, la modifica del sorgente nel clone di scratch aggiorna alla v2 e il successivo dry-run pianifica `REPLACE` con `(source newer)` senza `--overwrite`.
 
 ## Log (newest first)
 
-- 2026-10-25, ai-coding-tools-c1: state `verified` -> `done` — Requester check (independent of the executor, kilo): read-only dry run on the real home shows Kilo skills up to date with no spurious REPLACE and the new warning that the source clone is behind its remote; tests cover outdated-copy replacement without --overwrite; full suite 563 passed
-- 2026-10-25, ai-coding-tools-c1: state `delivered` -> `verified` — Requester check (independent of the executor, kilo): read-only dry run on the real home shows Kilo skills up to date with no spurious REPLACE and the new warning that the source clone is behind its remote; tests cover outdated-copy replacement without --overwrite; full suite 563 passed
-- 2026-10-25, ai-coding-tools-c1: state `in progress` -> `delivered` — Requester check (independent of the executor, kilo): read-only dry run on the real home shows Kilo skills up to date with no spurious REPLACE and the new warning that the source clone is behind its remote; tests cover outdated-copy replacement without --overwrite; full suite 563 passed
-- 2026-10-25, ai-coding-tools-c1: state `open` -> `in progress` — Requester check (independent of the executor, kilo): read-only dry run on the real home shows Kilo skills up to date with no spurious REPLACE and the new warning that the source clone is behind its remote; tests cover outdated-copy replacement without --overwrite; full suite 563 passed
+- 2026-10-25, ai-coding-tools-c1: state `verified` -> `done` — Verifica del richiedente (indipendente dall'esecutore, kilo): il dry run in sola lettura sulla home reale mostra le skill di Kilo aggiornate senza REPLACE spuri e il nuovo avviso che il clone sorgente è indietro rispetto al remote; i test coprono la sostituzione delle copie obsolete senza --overwrite; suite completa 563 passati
+- 2026-10-25, ai-coding-tools-c1: state `delivered` -> `verified` — Verifica del richiedente (indipendente dall'esecutore, kilo): il dry run in sola lettura sulla home reale mostra le skill di Kilo aggiornate senza REPLACE spuri e il nuovo avviso che il clone sorgente è indietro rispetto al remote; i test coprono la sostituzione delle copie obsolete senza --overwrite; suite completa 563 passati
+- 2026-10-25, ai-coding-tools-c1: state `in progress` -> `delivered` — Verifica del richiedente (indipendente dall'esecutore, kilo): il dry run in sola lettura sulla home reale mostra le skill di Kilo aggiornate senza REPLACE spuri e il nuovo avviso che il clone sorgente è indietro rispetto al remote; i test coprono la sostituzione delle copie obsolete senza --overwrite; suite completa 563 passati
+- 2026-10-25, ai-coding-tools-c1: state `open` -> `in progress` — Verifica del richiedente (indipendente dall'esecutore, kilo): il dry run in sola lettura sulla home reale mostra le skill di Kilo aggiornate senza REPLACE spuri e il nuovo avviso che il clone sorgente è indietro rispetto al remote; i test coprono la sostituzione delle copie obsolete senza --overwrite; suite completa 563 passati

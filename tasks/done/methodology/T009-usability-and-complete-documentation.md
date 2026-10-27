@@ -1,10 +1,10 @@
-# T009 Product & per-skill usability, quickstart playbook, and instruction clarity
+# T009 Usabilità del prodotto e delle singole skill, playbook di avvio rapido e chiarezza delle istruzioni
 
 - id: T009
-- title: Product & per-skill usability, quickstart playbook, and instruction clarity
+- title: Usabilità del prodotto e delle singole skill, playbook di avvio rapido e chiarezza delle istruzioni
 - category: methodology
 - priority: P1
-- priority-reason: Owner requirement: clear usability, documentation, and operational instructions both per-skill and for the complete orchestration product
+- priority-reason: Requisito dell'owner: usabilità chiara, documentazione e istruzioni operative sia per singola skill sia per l'intero prodotto di orchestrazione
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,26 +12,26 @@
 - decider: -
 - sources: conversation 2026-10-15 (owner explicit requirement)
 - paths: README.md, docs/00-QUICKSTART-AND-PLAYBOOK.md, plugins/*/skills/*/SKILL.md, plugins/*/skills/*/SKILL.template.md
-- handoff: Read tasks/methodology/T009-usability-and-complete-documentation.md and tasks/01-repo-consolidation/plan.md (01.3), write docs/00-QUICKSTART-AND-PLAYBOOK.md, overhaul README.md, and add Quick Reference headers to each skill, then run Verification and update the registry.
+- handoff: Leggere tasks/methodology/T009-usability-and-complete-documentation.md e tasks/01-repo-consolidation/plan.md (01.3), scrivere docs/00-QUICKSTART-AND-PLAYBOOK.md, revisionare README.md e aggiungere intestazioni Quick Reference a ciascuna skill, quindi eseguire la Verification e aggiornare il registro.
 - verifier: orchestrator:deep-reasoning
-- short: Usability and quickstart
+- short: Usabilità e avvio rapido
 
 ## Goal
 
-Provide end-to-end documentation, practical playbooks, and scannable per-skill instructions so both a human operator and an AI agent can configure, bootstrap, and run `ai-orchestration` (as a whole product and skill by skill) without friction.
+Fornire documentazione end-to-end, playbook pratici e istruzioni facilmente consultabili per ogni skill, in modo che sia un operatore umano sia un agente AI possano configurare, inizializzare ed eseguire `ai-orchestration` (come prodotto complessivo e skill per skill) senza attriti.
 
 ## Steps
 
-1. Write `docs/00-QUICKSTART-AND-PLAYBOOK.md` with step-by-step workflows explicitly covering both **Single-Framework Native Mode** (Kilo-only or Claude-only: task definition, acceptance criteria, parallel native worktrees/subagents, blind-subagent verification — zero MCP required) and **Multi-Framework MCP Mode** (delegating across `kilo-mcp` / `claude-mcp` / `codex`):
-   - Global & project configuration (`orchestration.toml` + `AGENTS.md` generation for single-framework vs. multi-framework setups);
-   - Choosing between inline delegation, Emergent Task (`T###`), and Initiative (`NN-<slug>`);
-   - Delegating across channels (native `agent_manager`/`task` or Claude `Agent` vs. external MCP `kilo-mcp`/`claude-mcp` vs. manual CLI worktrees);
-   - Running optional independent verification (`self`, `independent-session` within the same framework, `cross-agent` across frameworks, `panel`, `owner`);
-   - Troubleshooting & script reference (`orchestration_config.py`, `tasks_engine.py`, `apply_fix_to_worktree.sh`).
-2. Overhaul `README.md` so it explains the unified `ai-orchestration` product, its 3 plugins (`architect-side`, `executor-side`, `shared`), every skill's exact role, and how it connects to `kilo-mcp`, `claude-mcp`, and the upcoming UI.
-3. Add a consistent **Quick Reference** section at the top of each skill (`Role`, `When to use`, `Companion scripts`, `Related skills`) and regenerate generic/bound skills and indices.
+1. Scrivere `docs/00-QUICKSTART-AND-PLAYBOOK.md` con flussi di lavoro passo-passo che coprano esplicitamente sia la **Modalità nativa a singolo framework** (solo Kilo o solo Claude: definizione dei task, criteri di accettazione, worktree/subagent nativi paralleli, verifica con subagent alla cieca — senza necessità di MCP) sia la **Modalità MCP multi-framework** (delega attraverso `kilo-mcp` / `claude-mcp` / `codex`):
+   - Configurazione globale e di progetto (`orchestration.toml` + generazione di `AGENTS.md` per configurazioni a singolo framework o multi-framework);
+   - Scelta tra delega inline, Task emergente (`T###`) e Iniziativa (`NN-<slug>`);
+   - Delega attraverso i canali (`agent_manager`/`task` nativi o `Agent` di Claude rispetto a MCP esterni `kilo-mcp`/`claude-mcp` o worktree CLI manuali);
+   - Esecuzione della verifica indipendente opzionale (`self`, `independent-session` all'interno dello stesso framework, `cross-agent` tra framework diversi, `panel`, `owner`);
+   - Risoluzione dei problemi e riferimento agli script (`orchestration_config.py`, `tasks_engine.py`, `apply_fix_to_worktree.sh`).
+2. Revisionare `README.md` in modo che spieghi il prodotto unificato `ai-orchestration`, i suoi 3 plugin (`architect-side`, `executor-side`, `shared`), il ruolo esatto di ogni skill e come si collega a `kilo-mcp`, `claude-mcp` e alla futura UI.
+3. Aggiungere una sezione **Quick Reference** uniforme in cima a ogni skill (`Role`, `When to use`, `Companion scripts`, `Related skills`) e rigenerare le skill generiche/associate e gli indici.
 
 ## Verification
 
-- `python3 scripts/regenerate_generic_skills.py && python3 scripts/generate_skill_indices.py` exits 0.
-- All relative links in `README.md` and `docs/00-QUICKSTART-AND-PLAYBOOK.md` resolve on disk.
+- `python3 scripts/regenerate_generic_skills.py && python3 scripts/generate_skill_indices.py` termina con codice 0.
+- Tutti i link relativi in `README.md` e `docs/00-QUICKSTART-AND-PLAYBOOK.md` si risolvono correttamente su disco.

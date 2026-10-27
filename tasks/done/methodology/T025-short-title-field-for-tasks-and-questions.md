@@ -1,10 +1,10 @@
-# T025 Short title field for tasks and questions
+# T025 Campo titolo breve per task e domande
 
 - id: T025
-- title: Short title field for tasks and questions
+- title: Campo titolo breve per task e domande
 - category: methodology
 - priority: P2
-- priority-reason: Owner request 2026-10-18: bare ids (T007, 12.16) in agent chat are unreadable
+- priority-reason: Richiesta dell'owner del 2026-10-18: i soli ID (T007, 12.16) nella chat degli agenti sono illeggibili
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: -
 - paths: -
-- handoff: Read tasks/methodology/T025-short-title-field-for-tasks-and-questions.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/methodology/T025-short-title-field-for-tasks-and-questions.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: Short title field
+- short: Campo titolo breve
 
 ## Goal
 
-Every task, plan task and question carries a 3-4 word short title (header field, e.g. 'Short: release manager'), generated when missing, validated by the engine, shown by the UI/VS Code next to the id, and the skills (task-pipeline, orchestration-workflow template, kilo binding, executor contract) instruct agents to always cite 'ID (short title)' in chat and reports.
+Ogni task, task di piano e domanda porta un titolo breve di 3-4 parole (campo header, ad es. 'Short: release manager'), generato quando assente, validato dal motore e mostrato dalla UI e da VS Code accanto all'ID; inoltre le skill (task-pipeline, template orchestration-workflow, binding di Kilo, contratto dell'executor) istruiscono gli agenti a citare sempre 'ID (titolo breve)' in chat e nei report.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

@@ -1,10 +1,10 @@
-# T027 Stale-claim recovery relaunches a turn whose child process has not written its pid yet
+# T027 Il recupero dei claim scaduti riavvia un turno il cui processo figlio non ha ancora scritto il proprio pid
 
 - id: T027
-- title: Stale-claim recovery relaunches a turn whose child process has not written its pid yet
+- title: Il recupero dei claim scaduti riavvia un turno il cui processo figlio non ha ancora scritto il proprio pid
 - category: server-and-bindings
 - priority: P1
-- priority-reason: Gemini review 2026-10-18: violates 'never two resumptions of the same session at the same time'
+- priority-reason: Revisione di Gemini del 2026-10-18: viola il principio 'mai due riprese della stessa sessione contemporaneamente'
 - next-up: no
 - state: done with a caveat: validated by the architect, no user yet
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: -
 - paths: -
-- handoff: Read tasks/server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: Duplicate turn resumption
+- short: Ripresa duplicata del turno
 
 ## Goal
 
-run_next_turn claims a turn, releases the orchestrator lock, and the pid is written only after the child starts; a concurrent run-next sees pid=None and treats the claim as crashed (orchestration_orchestrator.py:1034-1052, :1112, :1186-1193), requeueing and launching a second resumption. Respect lease_expires_at and a startup grace period before recovering a claim with no pid; add a test that runs two drains concurrently against a slow-starting stub and asserts a single resumption.
+run_next_turn acquisisce il claim di un turno, rilascia il lock dell'orchestratore e il pid viene scritto solo dopo l'avvio del processo figlio; un run-next concorrente vede pid=None e tratta il claim come terminato in modo anomalo (orchestration_orchestrator.py:1034-1052, :1112, :1186-1193), rimettendolo in coda e avviando una seconda ripresa della sessione. Rispettare lease_expires_at e un periodo di tolleranza all'avvio prima di recuperare un claim privo di pid; aggiungere un test che esegua due svuotamenti concorrenti della coda su uno stub ad avvio lento e verifichi che avvenga una sola ripresa.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

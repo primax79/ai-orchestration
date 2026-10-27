@@ -1,10 +1,10 @@
-# T045 Broker follow-ups from validation: mcp --local, stable error codes, project field
+# T045 Follow-up del broker dalla validazione: mcp --local, codici di errore stabili, campo project
 
 - id: T045
-- title: Broker follow-ups from validation: mcp --local, stable error codes, project field
+- title: Follow-up del broker dalla validazione: mcp --local, codici di errore stabili, campo project
 - category: server-and-bindings
 - priority: P1
-- priority-reason: 16.5 failed validation on its promised in-process mode; error contract deviates from spec 3b
+- priority-reason: 16.5 ha fallito la validazione sulla modalità in-process promessa; il contratto degli errori devia dalla specifica 3b
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: inbox N042, N045 (d4science-python-library validation of 16.5)
 - paths: bin/ai-orch, ../ai-orchestration-ui/backend/broker/
-- handoff: Read tasks/server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: Broker validation follow-ups
+- short: Follow-up validazione broker
 
 ## Goal
 
-'ai-orch mcp --local' serves the broker tools in-process (no broker process) as 16.5 promised; every broker error carries a stable kebab-case 'error' code (e.g. hash-mismatch) and a readable 'message' (no raw CLI JSON); tasks.next and questions.list items carry 'project', and workspace-level next distinguishes _workspace items.
+'ai-orch mcp --local' serve i tool del broker in-process (senza processo broker esterno) come promesso in 16.5; ogni errore del broker riporta un codice 'error' stabile in kebab-case (ad es. hash-mismatch) e un 'message' leggibile (nessun JSON grezzo della CLI); gli elementi di tasks.next e questions.list includono 'project', e il comando next a livello di workspace distingue gli elementi _workspace.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

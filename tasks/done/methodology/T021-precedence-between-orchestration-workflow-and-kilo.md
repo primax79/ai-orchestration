@@ -1,10 +1,10 @@
-# T021 Precedence between orchestration-workflow and kilo-mcp-orchestrator; fix binding template drift
+# T021 Precedenza tra orchestration-workflow e kilo-mcp-orchestrator; correzione del disallineamento del template di binding
 
 - id: T021
-- title: Precedence between orchestration-workflow and kilo-mcp-orchestrator; fix binding template drift
+- title: Precedenza tra orchestration-workflow e kilo-mcp-orchestrator; correzione del disallineamento del template di binding
 - category: methodology
 - priority: P2
-- priority-reason: Owner's open answer to Q003; T018 shows the bound skill lost verification modes, decision table and state table
+- priority-reason: Risposta aperta dell'owner a Q003; T018 mostra che la skill associata ha perso le modalità di verifica, la tabella decisionale e la tabella degli stati
 - next-up: no
 - state: done with a caveat: validated by the architect, no user yet
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: -
 - paths: plugins/architect-side/skills/orchestration-workflow/, ../kilo-mcp/bindings/orchestration-workflow.json, ../kilo-mcp/plugins/architect-side/skills/kilo-mcp-orchestrator/
-- handoff: Read tasks/methodology/T021-precedence-between-orchestration-workflow-and-kilo.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/methodology/T021-precedence-between-orchestration-workflow-and-kilo.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: Binding template drift
+- short: Drift template di binding
 
 ## Goal
 
-Implement tasks/env-doctor/notes/T018-precedence-analysis.md sections 4 and 5: reciprocal precedence text in both skills, non-competing descriptions, keep verification modes / post-verification decision table / state table / scaffolding check in the bound skill (template not overridden), health-check cadence, wait-vs-detached note, and the dispatch-state rule (in progress before dispatch, delivered on Final Report) in the binding so regeneration keeps it.
+Implementare le sezioni 4 e 5 di tasks/env-doctor/notes/T018-precedence-analysis.md: testo di precedenza reciproca in entrambe le skill, descrizioni non in competizione, mantenimento delle modalità di verifica / tabella decisionale post-verifica / tabella degli stati / controllo dello scaffolding nella skill associata (template non sovrascritto), cadenza dell'health-check, nota su attesa bloccante rispetto a monitoraggio scollegato e regola sullo stato di invio (in progress prima dell'invio, delivered al Final Report) nel binding affinché la rigenerazione la preservi.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done with a caveat: validated by the architect, no user yet` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

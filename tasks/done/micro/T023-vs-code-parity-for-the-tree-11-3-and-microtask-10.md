@@ -1,10 +1,10 @@
-# T023 VS Code parity for the Tree (11.3) and microtask (10.5) messages
+# T023 Parità VS Code per i messaggi Tree (11.3) e microtask (10.5)
 
 - id: T023
-- title: VS Code parity for the Tree (11.3) and microtask (10.5) messages
+- title: Parità VS Code per i messaggi Tree (11.3) e microtask (10.5)
 - category: micro
 - priority: P2
-- priority-reason: The webview sends new message types without handlers; the extension release waits for it
+- priority-reason: La webview invia nuovi tipi di messaggio privi di handler; il rilascio dell'estensione dipende da questo
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: -
 - paths: ../vscode-ai-orchestration/src/views/dashboard-panel.ts
-- handoff: Read tasks/micro/T023-vs-code-parity-for-the-tree-11-3-and-microtask-10.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/micro/T023-vs-code-parity-for-the-tree-11-3-and-microtask-10.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: VS Code tree parity
+- short: Parità albero VS Code
 
 ## Goal
 
-Add the extension handlers for every message type the dashboard now sends (tree structure actions, micro create, promote, set-kind, set-labels, labels list) so test-bridge-parity is green, then sync the webview and release the extension.
+Aggiungere gli handler dell'estensione per ogni tipo di messaggio ora inviato dalla dashboard (azioni sulla struttura dell'albero, creazione microtask, promozione, impostazione kind, impostazione etichette, elenco etichette) affinché test-bridge-parity sia verde, quindi sincronizzare la webview e rilasciare l'estensione.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

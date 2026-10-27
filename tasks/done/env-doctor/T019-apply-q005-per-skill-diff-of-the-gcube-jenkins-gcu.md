@@ -1,10 +1,10 @@
-# T019 Apply Q005: per-skill diff of the gcube-jenkins, gcube-security-audit and frontend-design copies
+# T019 Applicare Q005: diff per singola skill delle copie di gcube-jenkins, gcube-security-audit e frontend-design
 
 - id: T019
-- title: Apply Q005: per-skill diff of the gcube-jenkins, gcube-security-audit and frontend-design copies
+- title: Applicare Q005: diff per singola skill delle copie di gcube-jenkins, gcube-security-audit e frontend-design
 - category: env-doctor
 - priority: P3
-- priority-reason: Owner answered Q005 with C; the duplicates keep showing in the Doctor until decided
+- priority-reason: L'owner ha risposto C a Q005; i duplicati continuano a comparire nel Doctor finché non si prende una decisione
 - next-up: no
 - state: done
 - executor: claude
@@ -12,15 +12,15 @@
 - decider: -
 - sources: -
 - paths: -
-- handoff: Read tasks/env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: d4science-python-library-2e
-- short: Duplicate skills alignment
+- short: Allineamento skill duplicate
 
 ## Goal
 
-For each of the three skills, diff the standalone copy against the plugin copy, list what differs, and file one question per skill for the owner's choice. Decision: questions/Q005.
+Per ciascuna delle tre skill, eseguire il diff della copia standalone rispetto alla copia del plugin, elencare le differenze e aprire una domanda per skill per la scelta dell'owner. Decisione: questions/Q005.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.

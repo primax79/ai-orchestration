@@ -1,10 +1,10 @@
-# T033 Test sessions isolated from the user's global config
+# T033 Sessioni di test isolate dalla configurazione globale dell'utente
 
 - id: T033
-- title: Test sessions isolated from the user's global config
+- title: Sessioni di test isolate dalla configurazione globale dell'utente
 - category: server-and-bindings
 - priority: P1
-- priority-reason: A flaky engine test and five run tests depended on the operator's machine (live broker lock, model mapping)
+- priority-reason: Un test instabile del motore e cinque test delle run dipendevano dalla macchina dell'operatore (lock del broker attivo, mappatura dei modelli)
 - next-up: no
 - state: done
 - executor: self
@@ -12,19 +12,19 @@
 - decider: -
 - sources: suite failures 2026-10-21
 - paths: conftest.py, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
-- handoff: Read tasks/server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: Test config isolation
+- short: Isolamento config nei test
 
 ## Goal
 
-Every pytest session gets a temporary global config with a fixed model mapping, so a broker started by another session or the operator's own mapping cannot change results. Also: the sync-index --adopt preview prints the hash to apply it with. Delivered in 4f1caab and 4a3c4f2; full suite 490 passed.
+Ogni sessione pytest riceve una configurazione globale temporanea con una mappatura fissa dei modelli, così che un broker avviato da un'altra sessione o la mappatura personale dell'operatore non possano alterare i risultati. Inoltre: l'anteprima di sync-index --adopt stampa l'hash necessario per applicarla. Consegnato in 4f1caab e 4a3c4f2; suite completa 490 passati.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

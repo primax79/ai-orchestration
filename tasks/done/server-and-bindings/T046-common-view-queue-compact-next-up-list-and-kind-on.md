@@ -1,10 +1,10 @@
-# T046 Common view Queue: compact next-up list and kind on rows
+# T046 Coda della vista comune: elenco next-up compatto e tipo di task sulle righe
 
 - id: T046
-- title: Common view Queue: compact next-up list and kind on rows
+- title: Coda della vista comune: elenco next-up compatto e tipo di task sulle righe
 - category: server-and-bindings
 - priority: P3
-- priority-reason: Usability: 41 cards in the All-projects queue
+- priority-reason: Usabilità: 41 schede nella coda All-projects
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: inbox N044 (d4science-python-library validation of 16.9)
 - paths: ../ai-orchestration-ui/frontend/src
-- handoff: Read tasks/server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: Compact common queue
+- short: Coda comune compatta
 
 ## Goal
 
-In the All-projects view the Queue shows a compact next-up list (like the project view, a few items per project or overall) with a link to the full list, and backlog rows show the task kind.
+Nella vista All-projects la scheda Queue mostra un elenco next-up compatto (come nella vista di progetto, pochi elementi per progetto o complessivi) con un link all'elenco completo, e le righe del backlog mostrano il kind del task.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

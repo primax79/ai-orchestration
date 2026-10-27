@@ -1,10 +1,10 @@
-# T010 Core skill renames decision (`docs/06` taxonomy vs. current skill names)
+# T010 Decisione sulla ridenominazione delle skill principali (tassonomia `docs/06` rispetto ai nomi attuali)
 
 - id: T010
-- title: Core skill renames decision (docs/06 taxonomy vs. current skill names)
+- title: Decisione sulla ridenominazione delle skill principali (tassonomia docs/06 rispetto ai nomi attuali)
 - category: methodology
 - priority: P2
-- priority-reason: Owner decision needed on whether to rename core skills (e.g. macroplan-authoring -> task-pipeline) before committing or defer to avoid churn
+- priority-reason: Necessaria decisione dell'owner se rinominare le skill principali (ad es. macroplan-authoring -> task-pipeline) prima del commit o rimandare per evitare modifiche invasive
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,21 +12,21 @@
 - decider: -
 - sources: tasks/_reviews/2026-10-15-coherence-review-from-claude.md (F5), docs/06-naming-taxonomy-and-coherence.md
 - paths: docs/06-naming-taxonomy-and-coherence.md, plugins/, ../kilo-mcp/bindings/
-- handoff: Read docs/06-naming-taxonomy-and-coherence.md and tasks/methodology/T010-core-skill-naming-decision.md, record the owner's decision on whether to execute or defer the core skill renames, and update the registry.
+- handoff: Leggere docs/06-naming-taxonomy-and-coherence.md e tasks/methodology/T010-core-skill-naming-decision.md, registrare la decisione dell'owner se eseguire o rimandare la ridenominazione delle skill principali e aggiornare il registro.
 - verifier: owner
-- short: Skill renames decision
+- short: Decisione rinomina skill
 
 ## Goal
 
-Decide whether to execute the core skill renames proposed in `docs/06-naming-taxonomy-and-coherence.md` §2.1 (`macroplan-authoring` → `task-pipeline`, `interactive-role-setup` → `orchestration-setup`, `delegation-roi-analysis` → `orchestration-metrics`, `task-delegation` → `task-worktree-ops`, `headless-executor-contract` → `executor-contract`) before committing, or defer them and keep the current names. (Note: the `kilo-mcp-*` prefix alignment in `../kilo-mcp` §2.2 is already applied).
+Decidere se eseguire le ridenominazioni delle skill principali proposte in `docs/06-naming-taxonomy-and-coherence.md` §2.1 (`macroplan-authoring` → `task-pipeline`, `interactive-role-setup` → `orchestration-setup`, `delegation-roi-analysis` → `orchestration-metrics`, `task-delegation` → `task-worktree-ops`, `headless-executor-contract` → `executor-contract`) prima del commit, oppure rimandarle mantenendo i nomi attuali. (Nota: l'allineamento del prefisso `kilo-mcp-*` in `../kilo-mcp` §2.2 è già applicato).
 
 ## Steps
 
-1. Confirm with the owner whether to execute the `docs/06` §2.1 core skill renames now or defer them.
-2. If deferred: mark §2.1 in `docs/06-naming-taxonomy-and-coherence.md` as deferred/future and close this task.
-3. If approved: rename the skill directories, frontmatter `name` fields, `skill-requirements.json`, `regenerate_generic_skills.py`, and `../kilo-mcp/scripts/regenerate_bound_skills.py` mappings, then regenerate and verify.
+1. Confermare con l'owner se eseguire ora le ridenominazioni delle skill principali di `docs/06` §2.1 o se rimandarle.
+2. Se rimandate: contrassegnare il §2.1 in `docs/06-naming-taxonomy-and-coherence.md` come rimandato/futuro e chiudere questo task.
+3. Se approvate: rinominare le directory delle skill, i campi `name` del frontmatter, `skill-requirements.json`, `regenerate_generic_skills.py` e le mappature in `../kilo-mcp/scripts/regenerate_bound_skills.py`, quindi rigenerare e verificare.
 
 ## Verification
 
-- `./bin/ai-orch config validate --plugin-dir ./plugins/architect-side --plugin-dir ./plugins/executor-side --plugin-dir ./plugins/shared` exits 0.
-- `python3 ../kilo-mcp/scripts/regenerate_bound_skills.py --check` exits 0.
+- `./bin/ai-orch config validate --plugin-dir ./plugins/architect-side --plugin-dir ./plugins/executor-side --plugin-dir ./plugins/shared` termina con codice 0.
+- `python3 ../kilo-mcp/scripts/regenerate_bound_skills.py --check` termina con codice 0.

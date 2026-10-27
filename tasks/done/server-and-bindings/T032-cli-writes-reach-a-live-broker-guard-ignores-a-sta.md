@@ -1,10 +1,10 @@
-# T032 CLI writes reach a live broker; guard ignores a stale manifest
+# T032 Le scritture da CLI raggiungono un broker attivo; la guardia ignora i manifest obsoleti
 
 - id: T032
-- title: CLI writes reach a live broker; guard ignores a stale manifest
+- title: Le scritture da CLI raggiungono un broker attivo; la guardia ignora i manifest obsoleti
 - category: server-and-bindings
 - priority: P1
-- priority-reason: Once a broker runs, every session without the broker MCP tools (evolution-assurance, gcube-audit) cannot write tasks at all
+- priority-reason: Quando un broker è attivo, tutte le sessioni prive dei tool MCP del broker (evolution-assurance, gcube-audit) non riescono più a scrivere i task
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,19 +12,19 @@
 - decider: -
 - sources: message from d4science-evolution-assurance-37, 2026-10-21; broker guard of 16.2
 - paths: scripts/orchestration_broker_lock.py, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, bin/ai-orch
-- handoff: Read tasks/server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggere tasks/server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
-- short: CLI writes through broker
+- short: Scritture CLI tramite broker
 
 ## Goal
 
-While a live broker holds broker.lock, a mutating ai-orch CLI command forwards the write to it (stdio shim or local HTTP with the UI token) and returns the broker's result, instead of failing with broker-owns-writes. The guard treats a lock as held only when the manifest pid is alive, and its message never cites a dead pid from a stale broker.json. No session ever needs AI_ORCH_BROKER_CHILD to write.
+Mentre un broker attivo detiene broker.lock, un comando CLI mutante di ai-orch inoltra la scrittura al broker (tramite shim stdio o HTTP locale con il token della UI) e ne restituisce il risultato, anziché fallire con broker-owns-writes. La guardia considera il lock detenuto solo quando il pid del manifest è attivo e il suo messaggio non cita mai un pid terminato proveniente da un broker.json obsoleto. Nessuna sessione ha mai bisogno di AI_ORCH_BROKER_CHILD per scrivere.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo le specifiche e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite suite di test automatizzata e controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
+- 2026-10-23, owner: state `verified` -> `done` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzate e approvato dall'owner per la pulizia

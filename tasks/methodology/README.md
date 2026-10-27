@@ -2,17 +2,17 @@
 
 owner-session: unassigned
 
-## Goal and scope
+## Obiettivo e ambito
 
-Evolutions and refinements to the protocol-agnostic orchestration skills (`../ai-architect-executor/`) and their bound counterparts (`../kilo-mcp/`): Phase 5 decision criteria, worktree lifecycle closure, conflict resolution for incompatible designs, contract hardening, and progressive disclosure of incident narratives. State and priority of its tasks are in `tasks/00-INDEX.md`; working notes are in `notes/` next to this file.
+Evoluzioni e affinamenti alle skill di orchestrazione indipendenti dal protocollo (`../ai-architect-executor/`) e alle rispettive controparti con binding (`../kilo-mcp/`): criteri decisionali della Fase 5, chiusura del ciclo di vita dei worktree, risoluzione dei conflitti per design incompatibili, consolidamento del contratto e divulgazione progressiva delle analisi degli incidenti. Stato e priorità dei relativi task si trovano in `tasks/00-INDEX.md`; le note di lavoro sono in `notes/` accanto a questo file.
 
-## Start a session on the whole category
+## Avviare una sessione sull'intera categoria
 
-> Read tasks/methodology/README.md and its tasks in priority order, set owner-session, work the tasks one at a time (P0 first), and keep the task files, this README and tasks/00-INDEX.md current.
+> Leggere tasks/methodology/README.md e i relativi task in ordine di priorità, impostare owner-session, lavorare i task uno alla volta (prima i P0) e mantenere aggiornati i file dei task, questo README e tasks/00-INDEX.md.
 
-## Rules
+## Regole
 
-- Only the owner session edits the task files and this README; others add notes below or create new T### tasks.
-- A finished task moves with `git mv` to `tasks/done/methodology/`, same name.
+- Solo la sessione proprietaria modifica i file dei task e questo README; le altre aggiungono note qui sotto o creano nuovi task T###.
+- Un task completato viene spostato con `git mv` in `tasks/done/methodology/`, mantenendo lo stesso nome.
 
-## Shared notes
+## Note condivise

@@ -1,7 +1,7 @@
-# Q007 gcube-security-audit: should the 0.3.0 branch be merged and released so the plugin becomes the canonical copy
+# Q007 gcube-security-audit: il branch 0.3.0 deve essere unito e rilasciato così che il plugin diventi la copia canonica
 
 - id: Q007
-- question: gcube-security-audit: should the 0.3.0 branch be merged and released so the plugin becomes the canonical copy?
+- question: gcube-security-audit: il branch 0.3.0 deve essere unito e rilasciato così che il plugin diventi la copia canonica?
 - status: answered
 - blocks: T019 (waiting)
 - decider: owner
@@ -10,17 +10,17 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
-- short: Security-audit release
+- short: Rilascio security-audit
 
 ## Context
 
-The standalone copy (~/.kilo/skills/gcube-security-audit, symlinked in ~/.claude/skills) is 0.3.0: 21 files, two-level audit method, 7 review templates, 7 reference guides, 4 more scripts, stricter rules.json. The plugin (gcube-developer-tools 0.2.1) still ships 0.1.4. The 0.3.0 files are committed in gcube-ai-toolkit on branch skills/security-audit-0.3-d4science-infra, never merged to main. Details: T019-skill-diffs.md section 2.
+La copia standalone (~/.kilo/skills/gcube-security-audit, con symlink in ~/.claude/skills) è alla versione 0.3.0: 21 file, metodo di audit a due livelli, 7 template di revisione, 7 guide di riferimento, 4 script aggiuntivi, rules.json più restrittivo. Il plugin (gcube-developer-tools 0.2.1) distribuisce ancora la 0.1.4. I file della 0.3.0 sono committati in gcube-ai-toolkit sul branch skills/security-audit-0.3-d4science-infra, mai unito in main. Dettagli: T019-skill-diffs.md sezione 2.
 
 ## Options
 
-- **A** — Merge and release: merge the branch into gcube-ai-toolkit main, bump the plugin, update Claude, remove the standalone copy and symlink
-- **B** — Standalone canonical: keep the 0.3.0 standalone copy and leave the plugin at 0.1.4, acknowledged in the Doctor
-- **C** — Back to 0.1.4: discard the 0.3.0 work and keep only the plugin version
+- **A** — Unire e rilasciare: fare merge del branch in main di gcube-ai-toolkit, incrementare la versione del plugin, aggiornare Claude, rimuovere la copia standalone e il symlink
+- **B** — Standalone canonica: mantenere la copia standalone 0.3.0 e lasciare il plugin alla 0.1.4, riconosciuto nel Doctor
+- **C** — Tornare alla 0.1.4: scartare il lavoro della 0.3.0 e mantenere solo la versione del plugin
 
 ## Answer
 

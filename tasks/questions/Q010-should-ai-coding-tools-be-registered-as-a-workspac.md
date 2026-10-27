@@ -1,7 +1,7 @@
-# Q010 Should ai-coding-tools be registered as a workspace with its three projects (ai-orchestration, ai-swissknife, claude-mcp)
+# Q010 ai-coding-tools deve essere registrato come workspace con i suoi tre progetti (ai-orchestration, ai-swissknife, claude-mcp)
 
 - id: Q010
-- question: Should ai-coding-tools be registered as a workspace with its three projects (ai-orchestration, ai-swissknife, claude-mcp)?
+- question: ai-coding-tools deve essere registrato come workspace con i suoi tre progetti (ai-orchestration, ai-swissknife, claude-mcp)?
 - status: answered
 - blocks: -
 - decider: owner
@@ -13,13 +13,13 @@
 
 ## Context
 
-The VS Code extension 0.6.0 shows 'Projects discovered, not registered' on ~/works/ai-coding-tools. Registration writes to the shared registry in ~/.config/ai-orchestration (preview then apply with a hash) and gives stable project ids for the broker, qualified refs, coordinates and moves. The preview is ready (slug ai-coding-tools).
+L'estensione VS Code 0.6.0 mostra 'Projects discovered, not registered' su ~/works/ai-coding-tools. La registrazione scrive nel registro condiviso in ~/.config/ai-orchestration (anteprima e poi applicazione tramite hash) e fornisce ID di progetto stabili per il broker, riferimenti qualificati, coordinate e spostamenti. L'anteprima è pronta (slug ai-coding-tools).
 
 ## Options
 
-- **A** — Register the workspace and its three projects (preview, then apply)
-- **B** — Register the workspace only
-- **C** — Not now
+- **A** — Registrare il workspace e i suoi tre progetti (anteprima, poi applicazione)
+- **B** — Registrare solo il workspace
+- **C** — Non ora
 
 ## Answer
 
