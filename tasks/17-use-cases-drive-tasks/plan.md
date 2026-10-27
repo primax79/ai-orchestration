@@ -17,7 +17,7 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.4 - Task che nascono dagli use case; kind facoltativo; migrazione dei chiamanti
 
-- **Status:** `open` · **Short:** Task da use case · **Size:** M · **Depends on:** 17.2
+- **Status:** `in progress` (2026-10-28; operator) · **Short:** Task da use case · **Size:** M · **Depends on:** 17.2
 - **Goal:** spec §2: `tasks new --use-case` / `--from-use-case` (precompilazione), anche per i task di iniziativa; `--kind` facoltativo con avviso; avvisi di validate; aggiornati i chiamanti (backend UI, broker `tasks.new`, `orchestration_runs.py`, follow-up interni) senza rompere chi non passa i nuovi campi.
 
 ### 17.5 - Ciclo di vita: approvazione e stadio derivato
@@ -42,7 +42,7 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.9 - API del backend UI per collegamenti e stadi
 
-- **Status:** `open` · **Short:** API use case-task · **Size:** S · **Depends on:** 17.5, 17.7
+- **Status:** `in progress` (2026-10-28; operator) · **Short:** API use case-task · **Size:** S · **Depends on:** 17.5, 17.7
 - **Goal:** backend di ai-orchestration-ui: campi stage/approval/collegamenti/coda in JSON, test di compatibilità del JSON.
 
 ### 17.10 - UI web ed estensione VS Code
@@ -57,17 +57,17 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.12 - Migrazione ai-orchestration
 
-- **Status:** `open` · **Short:** Migrazione ai-orchestration · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
+- **Status:** `in progress` (2026-10-28; operator) · **Short:** Migrazione ai-orchestration · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
 - **Goal:** adopt-links e collegamenti mancanti per UC001-UC037; anteprima, report, validate pulito.
 
 ### 17.13 - Migrazione ai-swissknife
 
-- **Status:** `open` · **Short:** Migrazione ai-swissknife · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
+- **Status:** `in progress` (2026-10-28; operator) · **Short:** Migrazione ai-swissknife · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
 - **Goal:** come 17.12 per UC001-UC034 di ai-swissknife.
 
 ### 17.14 - Migrazione git-code-rag (con la sua sessione)
 
-- **Status:** `open` · **Short:** Migrazione git-code-rag · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
+- **Status:** `in progress` (2026-10-28; operator) · **Short:** Migrazione git-code-rag · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
 - **Goal:** la sessione di git-code-rag applica la migrazione ai suoi 41 use case e la valida; spec §7 punto 7.
 
 ## Closed

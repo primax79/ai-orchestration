@@ -2,7 +2,7 @@
 
 - id: Q029
 - question: Come arrivano i messaggi alle sessioni interattive e dove sta il pannello dei workspace?
-- status: open
+- status: answered
 - blocks: T073 (waiting)
 - decider: owner
 - asked-by: ai-coding-tools-87
@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
+- applied: no
 - short: Messaggi e pannello
 
 ## Context
@@ -23,6 +24,6 @@ Studio tasks/specs/orchestrator-control-plane-study.md (T073), rivisto da Codex;
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-28

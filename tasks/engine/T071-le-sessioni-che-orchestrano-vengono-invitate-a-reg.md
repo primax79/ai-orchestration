@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: L'orchestratore di ai-coding-tools ha lavorato per giorni senza registrazione; il ruolo risultava missing
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
