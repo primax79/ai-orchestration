@@ -111,6 +111,7 @@ try:
         write_file_atomic,
         config_lock,
         _emit_config_changed,
+        format_diff_path,
     )
 except ImportError:
     resolve_config = None  # type: ignore
@@ -121,6 +122,7 @@ except ImportError:
     write_file_atomic = None  # type: ignore
     config_lock = None  # type: ignore
     _emit_config_changed = None  # type: ignore
+    format_diff_path = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -2047,12 +2049,25 @@ def reassign_orchestrator(
     if model is not None:
         text = set_toml_value(text, ["tools", tool, "profiles", "orchestration"], "model", model)
 
+    if format_diff_path is not None:
+        from_hdr = format_diff_path(target_path, "a", ws)
+        to_hdr = format_diff_path(target_path, "b", ws)
+    else:
+        try:
+            rel = target_path.resolve().relative_to(pathlib.Path.home().resolve())
+            from_hdr = f"a/~/{rel}"
+            to_hdr = f"b/~/{rel}"
+        except (ValueError, RuntimeError):
+            p_str = str(target_path.resolve())
+            from_hdr = f"a{p_str}" if p_str.startswith("/") else f"a/{p_str}"
+            to_hdr = f"b{p_str}" if p_str.startswith("/") else f"b/{p_str}"
+
     diff_str = "".join(
         difflib.unified_diff(
             existing_text.splitlines(keepends=True),
             text.splitlines(keepends=True),
-            fromfile=f"a/{target_path.name}",
-            tofile=f"b/{target_path.name}",
+            fromfile=from_hdr,
+            tofile=to_hdr,
         )
     )
 
