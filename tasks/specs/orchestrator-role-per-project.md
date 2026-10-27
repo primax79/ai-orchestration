@@ -1,6 +1,6 @@
 # Spec — Orchestrator role per project, with workspace fallback
 
-> **Status:** Draft v2 (2026-10-28) after reviews by Codex and ai-coding-tools-58
+> **Status:** Draft v2 (2026-10-28) after reviews by Codex and ai-coding-tools-58; re-checked OK by 58 (all 7 points).
 > **Owner decision (2026-10-28, note N074):** "gli orchestrator sono per progetto": there is an orchestrator role **per
 > project**; a project without its own orchestrator is handled by the **workspace orchestrator** (fallback).
 > **Builds on:** `orchestrator-control-plane-study.md` (T073: authority matrix, pull-only mailbox, liveness dimensions,
@@ -125,6 +125,8 @@ Recorded architect decisions (the owner may override):
     targets `P` — specifically, a moved pointer task (`state == "moved"` or `moved-to` referencing `P/<ID>`, see
     `tasks_engine.py:8801, 22312`) or a workspace task whose `paths` are exclusively under `P/` or whose `coordinates`
     field (`tasks_engine.py:1045`) names `P/<ID>` (e.g., workspace `T023` pointing to `git-code-rag`).
+  - The exception holds whatever the pointer task's state, including one already `done`/closed: `P`'s holder may
+    mirror the final state of the project task onto it (review by ai-coding-tools-58).
   - Attempting to mutate any other `_workspace` task from a session that holds only project `P` (and not `_workspace`)
     is **refused** with `error = "outside_project_role_scope"` (and a hint to message `workspace` via mail or pass
     `orchestrator.ask`).
