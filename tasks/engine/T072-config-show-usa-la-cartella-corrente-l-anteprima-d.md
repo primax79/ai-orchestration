@@ -6,7 +6,7 @@
 - priority: P3
 - priority-reason: Comportamento diverso dagli altri comandi; l'anteprima fa credere che il file stia nel repo
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -

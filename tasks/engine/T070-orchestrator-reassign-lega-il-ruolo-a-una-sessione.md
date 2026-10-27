@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Oggi crea una sessione headless fantasma e due salti di generazione (d4science_kb)
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -

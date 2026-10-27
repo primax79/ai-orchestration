@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Una campagna ha segnato 39/41 use case come failing in git-code-rag, letto dal proprietario come prodotto rotto
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: -
 - decider: -
