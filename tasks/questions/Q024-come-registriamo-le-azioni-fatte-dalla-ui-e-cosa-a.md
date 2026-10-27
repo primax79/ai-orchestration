@@ -10,7 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
-- applied: no
+- applied: yes
 - short: Registro e barra laterale
 
 ## Context

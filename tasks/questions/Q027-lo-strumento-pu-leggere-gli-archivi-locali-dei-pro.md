@@ -10,7 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
-- applied: no
+- applied: yes
 - short: Lettura archivi dei provider
 
 ## Context

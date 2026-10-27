@@ -9,3 +9,11 @@
 {"at": "2026-10-25T02:38:11.855199Z", "by": "ai-coding-tools", "note": "Applied 2026-10-17 as stated in the answer text (plugin releases); recorded retroactively", "question": "Q004", "ref": "Applied 2026-10-17 as stated in the answer text (plugin releases); recorded retroactively"}
 {"at": "2026-10-25T02:38:15.626830Z", "by": "ai-coding-tools", "note": "Applied through T019 (Duplicate skills alignment); recorded retroactively", "question": "Q005", "ref": "T019"}
 {"at": "2026-10-27T15:14:54.916982Z", "by": "owner", "note": "Spec use-cases-drive-tasks \u00a73 aggiornata: approval e stage separati (opzione A); 17.5 sbloccata", "question": "Q011", "ref": "Spec use-cases-drive-tasks \u00a73 aggiornata: approval e stage separati (opzione A); 17.5 sbloccata"}
+{"at": "2026-10-27T23:49:32.463118Z", "by": "ai-coding-tools-87", "note": "La risposta coincide con la raccomandazione gi\u00e0 scritta nella spec", "question": "Q022", "ref": "f0e69fe"}
+{"at": "2026-10-27T23:49:32.819044Z", "by": "ai-coding-tools-87", "note": "La risposta coincide con la raccomandazione gi\u00e0 scritta nella spec", "question": "Q023", "ref": "f0e69fe"}
+{"at": "2026-10-27T23:49:33.325562Z", "by": "ai-coding-tools-87", "note": "La risposta coincide con la raccomandazione gi\u00e0 scritta nella spec", "question": "Q024", "ref": "f0e69fe"}
+{"at": "2026-10-27T23:49:33.733706Z", "by": "ai-coding-tools-87", "note": "La risposta coincide con la raccomandazione gi\u00e0 scritta nella spec", "question": "Q027", "ref": "f0e69fe"}
+{"at": "2026-10-27T23:49:34.112157Z", "by": "ai-coding-tools-87", "note": "La risposta coincide con la raccomandazione gi\u00e0 scritta nella spec", "question": "Q029", "ref": "f0e69fe"}
+{"at": "2026-10-27T23:49:34.562961Z", "by": "ai-coding-tools-87", "note": "La risposta coincide con la raccomandazione gi\u00e0 scritta nella spec", "question": "Q030", "ref": "f0e69fe"}
+{"at": "2026-10-27T23:49:34.952061Z", "by": "ai-coding-tools-87", "note": "La risposta coincide con la raccomandazione gi\u00e0 scritta nella spec", "question": "Q031", "ref": "f0e69fe"}
+{"at": "2026-10-27T23:49:35.378045Z", "by": "ai-coding-tools-87", "note": "Spec orchestrator-role-per-project \u00a71.4 e \u00a74.4: subentro automatico di un orchestratore headless di riserva configurato", "question": "Q025", "ref": "f0e69fe"}
