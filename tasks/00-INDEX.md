@@ -86,6 +86,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T067 (Mantenere evidenza in Status) | P2 | [transition mantiene la nota Status esistente dei task di iniziativa](engine/T067-transition-keeps-the-existing-status-note-of-initi.md) | open | kilo | - |
+| T068 (Etichette iniziative aggiornate) | P3 | [sync-index aggiorna le etichette delle iniziative quando cambia il titolo del piano](engine/T068-sync-index-aggiorna-le-etichette-delle-iniziative.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
