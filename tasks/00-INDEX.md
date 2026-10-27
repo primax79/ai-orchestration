@@ -32,6 +32,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | --- | --- |
 | [agent-runs-from-ui](specs/agent-runs-from-ui.md) | - |
 | [blocking-questions](specs/blocking-questions.md) | - |
+| [contextual-element-chat](specs/contextual-element-chat.md) | - |
 | [control-plane-safety](specs/control-plane-safety.md) | - |
 | [events-and-triggers](specs/events-and-triggers.md) | - |
 | [executor-housekeeping-and-completion](specs/executor-housekeeping-and-completion.md) | - |
@@ -39,6 +40,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [orchestration-broker-mcp](specs/orchestration-broker-mcp.md) | - |
 | [orchestration-config-and-agents-md](specs/orchestration-config-and-agents-md.md) | - |
 | [orchestration-extension-spec](specs/orchestration-extension-spec.md) | - |
+| [owner-interactions-study](specs/owner-interactions-study.md) | - |
 | [peer-messaging](specs/peer-messaging.md) | - |
 | [subtasks](specs/subtasks.md) | - |
 | [task-and-state-model](specs/task-and-state-model.md) | - |
@@ -100,8 +102,8 @@ Tasks in `methodology`. Owner session: unassigned ([README](methodology/README.m
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T073 (Studio pannello orchestratori) | P1 | [Studio: pannello di controllo degli orchestratori di tutti i workspace, handoff e coerenza dei registri](methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md) | open | kilo | - |
-| T074 (Chat contestuale per elemento) | P1 | [Chat contestuale con l'IA su un singolo use case, task o domanda](methodology/T074-chat-contestuale-con-l-ia-su-un-singolo-use-case-t.md) | open | kilo | T073 |
-| T076 (Studio interazioni UI) | P1 | [Studio delle interazioni del proprietario con task, use case e domande dalla UI](methodology/T076-studio-delle-interazioni-del-proprietario-con-task.md) | open | kilo | - |
+| T074 (Chat contestuale per elemento) | P1 | [Chat contestuale con l'IA su un singolo use case, task o domanda](methodology/T074-chat-contestuale-con-l-ia-su-un-singolo-use-case-t.md) | waiting (question:Q017) | kilo | T073 |
+| T076 (Studio interazioni UI) | P1 | [Studio delle interazioni del proprietario con task, use case e domande dalla UI](methodology/T076-studio-delle-interazioni-del-proprietario-con-task.md) | waiting (question:Q024) | kilo | - |
 | T080 (Contratto esecutore robusto) | P1 | [executor-contract: commit a ogni passo verde, nessun segreto nei log, shell portabile su macOS/zsh](methodology/T080-executor-contract-commit-a-ogni-passo-verde-nessun.md) | open | kilo | - |
 | T082 (Pattern di integrazione) | P2 | [orchestration-workflow: worktree di integrazione, kilo_cleanup, kilo_verify_worktree, verifica browser mirata](methodology/T082-orchestration-workflow-worktree-di-integrazione-ki.md) | open | kilo | - |
 
@@ -112,6 +114,7 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T075 (Valida e chiudi da UI) | P2 | [Pulsante Valida e chiudi sulla colonna Delivered e sul singolo task](ui/T075-pulsante-richiedi-validazione-sulla-colonna-done-e.md) | open | kilo | - |
+| T084 (Test backend UI rossi) | P1 | [Test del backend della UI rossi su main](ui/T084-test-del-backend-della-ui-rossi-su-main.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -119,7 +122,19 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 <!-- ai-orch:generated decisions -->
 | Key | Question | Blocks | Decider | Recommended |
 | --- | --- | --- | --- | --- |
-| - | None. | - | - | - |
+| [Q012](questions/Q012-chi-risponde-nella-chat-contestuale-di-un-elemento.md) | Chi risponde nella chat contestuale di un elemento? | T074 | owner | A |
+| [Q013](questions/Q013-con-quali-permessi-lavora-la-chat-contestuale.md) | Con quali permessi lavora la chat contestuale? | T074 | owner | A |
+| [Q014](questions/Q014-cosa-succede-se-a-met-conversazione-cambi-strument.md) | Cosa succede se a metà conversazione cambi strumento o modello? | T074 | owner | A |
+| [Q015](questions/Q015-quanti-fili-di-conversazione-per-elemento.md) | Quanti fili di conversazione per elemento? | T074 | owner | A |
+| [Q016](questions/Q016-dove-e-quanto-conserviamo-le-trascrizioni-della-ch.md) | Dove e quanto conserviamo le trascrizioni della chat? | T074 | owner | A |
+| [Q017](questions/Q017-cosa-include-la-prima-versione-della-chat-contestu.md) | Cosa include la prima versione della chat contestuale? | T074 | owner | A |
+| [Q018](questions/Q018-puoi-chiudere-tu-un-task-anche-se-la-sua-modalit-d.md) | Puoi chiudere tu un task anche se la sua modalità di verifica richiede un altro agente o un panel? | T076 | owner | A |
+| [Q019](questions/Q019-come-chiamiamo-il-ritorno-indietro-dopo-un-azione.md) | Come chiamiamo il ritorno indietro dopo un'azione? | T076 | owner | A |
+| [Q020](questions/Q020-un-azione-di-gruppo-deve-riuscire-tutta-o-niente.md) | Un'azione di gruppo deve riuscire tutta o niente? | T076 | owner | A |
+| [Q021](questions/Q021-su-quali-task-agisce-un-azione-di-gruppo-dall-inte.md) | Su quali task agisce un'azione di gruppo dall'intestazione di una colonna? | T076 | owner | A |
+| [Q022](questions/Q022-per-le-modifiche-sul-posto-basta-un-solo-passaggio.md) | Per le modifiche sul posto basta un solo passaggio, invece di anteprima e conferma? | T076 | owner | A |
+| [Q023](questions/Q023-come-funziona-il-comando-processa-inbox.md) | Come funziona il comando Processa inbox? | T076 | owner | A |
+| [Q024](questions/Q024-come-registriamo-le-azioni-fatte-dalla-ui-e-cosa-a.md) | Come registriamo le azioni fatte dalla UI e cosa apre un clic nella barra laterale di VS Code? | T076 | owner | A |
 <!-- /ai-orch:generated decisions -->
 
 ## Done
