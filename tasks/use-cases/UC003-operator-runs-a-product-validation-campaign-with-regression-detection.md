@@ -25,7 +25,7 @@ Evaluates all active use cases across the product, computes the functional readi
 
 ## Automated Verification Command
 ```bash
-T=$(mktemp -d) && ~/.local/bin/ai-orch tasks use-cases create --tasks-dir "$T/tasks" --title "Regress UC" --short "Regress UC" --actor "Operator (CLI)" --status verified --priority P1 --verification-type automated-probe --verification-command "exit 1" && ~/.local/bin/ai-orch tasks use-cases record-validation UC001 --tasks-dir "$T/tasks" --verdict pass --summary "Initial pass" && ~/.local/bin/ai-orch tasks use-cases validate UC001 --tasks-dir "$T/tasks" >/dev/null 2>&1 || true && ~/.local/bin/ai-orch tasks use-cases record-validation UC001 --tasks-dir "$T/tasks" --verdict pass --summary "Reset pass" && ~/.local/bin/ai-orch tasks use-cases campaign --tasks-dir "$T/tasks" --json | jq -e ".regressions_count == 1 and (.report_file | contains(\"_reviews/validation-campaign-\"))" && rm -rf "$T"
+T=$(mktemp -d) && ./bin/ai-orch tasks use-cases create --tasks-dir "$T/tasks" --title "Regress UC" --short "Regress UC" --actor "Operator (CLI)" --status verified --priority P1 --verification-type automated-probe --verification-command "exit 1" && ./bin/ai-orch tasks use-cases record-validation UC001 --tasks-dir "$T/tasks" --verdict pass --summary "Initial pass" && ./bin/ai-orch tasks use-cases validate UC001 --tasks-dir "$T/tasks" >/dev/null 2>&1 || true && ./bin/ai-orch tasks use-cases record-validation UC001 --tasks-dir "$T/tasks" --verdict pass --summary "Reset pass" && ./bin/ai-orch tasks use-cases campaign --tasks-dir "$T/tasks" --json | jq -e ".regressions_count == 1 and (.report_file | contains(\"_reviews/validation-campaign-\"))" && rm -rf "$T"
 ```
 
 ## Acceptance Criteria

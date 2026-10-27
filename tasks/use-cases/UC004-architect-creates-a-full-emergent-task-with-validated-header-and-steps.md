@@ -24,7 +24,7 @@ Allows an architect session to create a standalone emergent task with the 13 man
 
 ## Automated Verification Command
 ```bash
-T=$(mktemp -d) && H=$(~/.local/bin/ai-orch tasks upgrade --tasks-dir "$T/tasks" --json | jq -r .plan_hash) && ~/.local/bin/ai-orch tasks upgrade --tasks-dir "$T/tasks" --apply --expect-plan-hash "$H" >/dev/null && ~/.local/bin/ai-orch tasks new --tasks-dir "$T/tasks" --category engine --title "Implement parser" --short "Implement parser" --priority P1 --priority-reason "Core need" --executor kilo --goal "Parse task headers" --step "Write parser" --verification "pytest" >/dev/null && ~/.local/bin/ai-orch tasks validate --tasks-dir "$T/tasks" --json | jq -e ".ok == true and (.errors | length == 0)" && rm -rf "$T"
+T=$(mktemp -d) && H=$(./bin/ai-orch tasks upgrade --tasks-dir "$T/tasks" --json | jq -r .plan_hash) && ./bin/ai-orch tasks upgrade --tasks-dir "$T/tasks" --apply --expect-plan-hash "$H" >/dev/null && ./bin/ai-orch tasks new --tasks-dir "$T/tasks" --category engine --title "Implement parser" --short "Implement parser" --priority P1 --priority-reason "Core need" --executor kilo --goal "Parse task headers" --step "Write parser" --verification "pytest" >/dev/null && ./bin/ai-orch tasks validate --tasks-dir "$T/tasks" --json | jq -e ".ok == true and (.errors | length == 0)" && rm -rf "$T"
 ```
 
 ## Acceptance Criteria

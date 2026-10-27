@@ -24,7 +24,7 @@ Executes a use case automated verification command, captures stdout/stderr and e
 
 ## Automated Verification Command
 ```bash
-T=$(mktemp -d) && ~/.local/bin/ai-orch tasks use-cases create --tasks-dir "$T/tasks" --title "Probe UC" --short "Probe UC" --actor "Operator (CLI)" --status active --priority P1 --verification-type automated-probe --verification-command "echo ok" && ~/.local/bin/ai-orch tasks use-cases validate UC001 --tasks-dir "$T/tasks" --json | jq -e ".verdict == \"pass\" and .status == \"verified\"" && rm -rf "$T"
+T=$(mktemp -d) && ./bin/ai-orch tasks use-cases create --tasks-dir "$T/tasks" --title "Probe UC" --short "Probe UC" --actor "Operator (CLI)" --status active --priority P1 --verification-type automated-probe --verification-command "echo ok" && ./bin/ai-orch tasks use-cases validate UC001 --tasks-dir "$T/tasks" --json | jq -e ".verdict == \"pass\" and .status == \"verified\"" && rm -rf "$T"
 ```
 
 ## Acceptance Criteria

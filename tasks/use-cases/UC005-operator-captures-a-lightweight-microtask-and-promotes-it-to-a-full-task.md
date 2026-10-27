@@ -24,7 +24,7 @@ Captures a small bug or chore immediately as an XS microtask under tasks/micro/ 
 
 ## Automated Verification Command
 ```bash
-T=$(mktemp -d) && H=$(~/.local/bin/ai-orch tasks upgrade --tasks-dir "$T/tasks" --json | jq -r .plan_hash) && ~/.local/bin/ai-orch tasks upgrade --tasks-dir "$T/tasks" --apply --expect-plan-hash "$H" >/dev/null && ~/.local/bin/ai-orch tasks micro --tasks-dir "$T/tasks" --title "Fix typo in navbar" --kind fix --priority P3 --what "Fix label typo" >/dev/null && ~/.local/bin/ai-orch tasks promote T001 --tasks-dir "$T/tasks" --category engine --json | jq -e ".ok == true and (.file_path | contains(\"engine/T001-\"))" && rm -rf "$T"
+T=$(mktemp -d) && H=$(./bin/ai-orch tasks upgrade --tasks-dir "$T/tasks" --json | jq -r .plan_hash) && ./bin/ai-orch tasks upgrade --tasks-dir "$T/tasks" --apply --expect-plan-hash "$H" >/dev/null && ./bin/ai-orch tasks micro --tasks-dir "$T/tasks" --title "Fix typo in navbar" --kind fix --priority P3 --what "Fix label typo" >/dev/null && ./bin/ai-orch tasks promote T001 --tasks-dir "$T/tasks" --category engine --json | jq -e ".ok == true and (.file_path | contains(\"engine/T001-\"))" && rm -rf "$T"
 ```
 
 ## Acceptance Criteria

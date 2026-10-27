@@ -24,7 +24,7 @@ Allows an architect session to define an end-to-end actor scenario with precondi
 
 ## Automated Verification Command
 ```bash
-T=$(mktemp -d) && ~/.local/bin/ai-orch tasks use-cases create --tasks-dir "$T/tasks" --title "Sample UC" --short "Sample UC" --actor "Architect session" --status draft --priority P1 --linked-tasks "15.1" && ~/.local/bin/ai-orch tasks use-cases show UC001 --tasks-dir "$T/tasks" --json | jq -e ".use_case.id == \"UC001\" and .use_case.short_title == \"Sample UC\"" && rm -rf "$T"
+T=$(mktemp -d) && ./bin/ai-orch tasks use-cases create --tasks-dir "$T/tasks" --title "Sample UC" --short "Sample UC" --actor "Architect session" --status draft --priority P1 --linked-tasks "15.1" && ./bin/ai-orch tasks use-cases show UC001 --tasks-dir "$T/tasks" --json | jq -e ".use_case.id == \"UC001\" and .use_case.short_title == \"Sample UC\"" && rm -rf "$T"
 ```
 
 ## Acceptance Criteria
