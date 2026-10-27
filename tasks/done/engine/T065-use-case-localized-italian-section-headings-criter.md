@@ -10,7 +10,7 @@
 - executor: kilo
 - depends-on: -
 - decider: -
-- sources: _inbox/to-analyze/20261025-172456-use-cases-localized-section-headings/note.md
+- sources: _inbox/analyzed/20261025-172456-use-cases-localized-section-headings/note.md
 - paths: -
 - handoff: Read tasks/engine/T065-use-case-localized-italian-section-headings-criter.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: owner

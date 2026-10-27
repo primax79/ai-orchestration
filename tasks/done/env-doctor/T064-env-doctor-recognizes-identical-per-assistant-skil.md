@@ -10,7 +10,7 @@
 - executor: kilo
 - depends-on: -
 - decider: -
-- sources: _inbox/to-analyze/20261025-170336-env-doctor-flags-per-assistant-skill-cop/note.md
+- sources: _inbox/analyzed/20261025-170336-env-doctor-flags-per-assistant-skill-cop/note.md
 - paths: -
 - handoff: Read tasks/env-doctor/T064-env-doctor-recognizes-identical-per-assistant-skil.md, do the open steps, run the Verification, update the task and the registry.
 - verifier: owner
