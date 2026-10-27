@@ -6,7 +6,7 @@
 - priority: P3
 - priority-reason: Comportamento diverso dagli altri comandi; l'anteprima fa credere che il file stia nel repo
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -23,9 +23,17 @@
 
 ## Steps
 
-- [ ] config show: --workspace predefinito = cartella corrente, come orchestrator e sessions
-- [ ] Diff dell'anteprima di reassign con il percorso reale del file
+- [x] config show: --workspace predefinito = cartella corrente, come orchestrator e sessions
+- [x] Diff dell'anteprima di reassign con il percorso reale del file
 
 ## Verification
 
-- Test: config show dalla cartella del workspace trova la config di progetto; header del diff con il percorso reale
+- Test eseguiti con successo in `test_orchestration_config.py` e `test_orchestration_orchestrator.py`:
+  - `test_config_show_defaults_to_cwd`: `ai-orch config show` e `cmd_show` senza `--workspace` risolvono la cartella corrente come default, trovando la configurazione di progetto in `~/.config/ai-orchestration/projects/<nome>/orchestration.toml` (sia in formato JSON che testo formattato); `--workspace` esplicito continua a funzionare sovrascrivendo la cartella corrente.
+  - `test_format_diff_path`: formattazione corretta degli header diff per percorsi relativi alla home (`a/~/.config/...`), percorsi assoluti fuori home (`a/<path>`) e percorsi locali al workspace (`a/.ai-orchestration.local.toml`), evitando sempre intestazioni bare come `a/orchestration.toml`.
+  - `test_reassign_dry_run_shows_plan`, `test_reassign_cli`, `test_reassign_dry_run_diff_header_home_relative`, `test_reassign_dry_run_diff_header_absolute_path_outside_home`: verifica che l'anteprima diff di reassign mostri sempre il percorso target reale e mai `--- a/orchestration.toml`.
+- Suite completa passata: `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/ plugins/shared/skills/orchestration-setup/scripts/` (364 passati su 364).
+
+## Log (newest first)
+
+- 2026-10-27, kilo: state `open` -> `delivered` — config show adotta la cartella corrente come workspace di default e il diff di reassign mostra il percorso reale del file

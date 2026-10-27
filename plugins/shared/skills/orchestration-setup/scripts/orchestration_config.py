@@ -358,6 +358,37 @@ def find_project_config_path(
     return projects_root / workspace.resolve().name / "orchestration.toml"
 
 
+def format_diff_path(
+    path: pathlib.Path,
+    prefix: str = "a",
+    workspace: pathlib.Path | None = None,
+) -> str:
+    """Format path for unified diff headers (fromfile / tofile).
+
+    Preserves the real target path:
+      - Paths within workspace: <prefix>/<relative-to-workspace>
+      - Paths within user home: <prefix>/~/<relative-to-home>
+      - Absolute paths outside home: <prefix><absolute-path> (or <prefix>/<absolute-path>)
+    Never returns a bare filename that reads like a repository file.
+    """
+    resolved = path.resolve()
+    if workspace is not None:
+        try:
+            rel = resolved.relative_to(workspace.resolve())
+            return f"{prefix}/{rel}"
+        except (ValueError, RuntimeError):
+            pass
+    try:
+        rel = resolved.relative_to(pathlib.Path.home().resolve())
+        return f"{prefix}/~/{rel}"
+    except (ValueError, RuntimeError):
+        pass
+    p_str = str(resolved)
+    if p_str.startswith("/"):
+        return f"{prefix}{p_str}"
+    return f"{prefix}/{p_str}"
+
+
 def load_toml_file(path: pathlib.Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -1450,8 +1481,9 @@ def inject_or_replace_agents_block(existing_text: str, new_block: str) -> str:
 # ---------------------------------------------------------------------------
 
 def cmd_show(args: argparse.Namespace) -> int:
-    ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
-    cfg, meta = resolve_config(args.global_config, ws)
+    ws_arg = getattr(args, "workspace", None) or "."
+    ws = pathlib.Path(ws_arg).resolve()
+    cfg, meta = resolve_config(getattr(args, "global_config", None), ws)
     errors, warnings = validate_config(cfg)
     payload = {
         "meta": meta,
@@ -1601,8 +1633,8 @@ def cmd_set_profile(args: argparse.Namespace) -> int:
             difflib.unified_diff(
                 existing_text.splitlines(keepends=True),
                 text.splitlines(keepends=True),
-                fromfile=f"a/{target_path.name}",
-                tofile=f"b/{target_path.name}",
+                fromfile=format_diff_path(target_path, "a", ws),
+                tofile=format_diff_path(target_path, "b", ws),
             )
         )
         changed = existing_text != text
@@ -1791,8 +1823,8 @@ def cmd_set_routing(args: argparse.Namespace) -> int:
             difflib.unified_diff(
                 existing_text.splitlines(keepends=True),
                 text.splitlines(keepends=True),
-                fromfile=f"a/{target_path.name}",
-                tofile=f"b/{target_path.name}",
+                fromfile=format_diff_path(target_path, "a", ws),
+                tofile=format_diff_path(target_path, "b", ws),
             )
         )
         changed = existing_text != text
@@ -2397,8 +2429,8 @@ def build_setup_plan(
         difflib.unified_diff(
             existing_text.splitlines(keepends=True),
             new_text.splitlines(keepends=True),
-            fromfile=f"a/{target_path.name}",
-            tofile=f"b/{target_path.name}",
+            fromfile=format_diff_path(target_path, "a", ws),
+            tofile=format_diff_path(target_path, "b", ws),
         )
     )
 
@@ -2592,7 +2624,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p_show = sub.add_parser("show", help="Show merged Global + Project configuration")
-    p_show.add_argument("--workspace", default=None, help="Project workspace root")
+    p_show.add_argument("--workspace", default=".", help="Project workspace root (default: current directory)")
     p_show.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_show.set_defaults(func=cmd_show)

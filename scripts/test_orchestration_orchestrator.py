@@ -825,11 +825,54 @@ def test_reassign_dry_run_shows_plan(ws: pathlib.Path):
     assert res["generation"] == 1
     assert res["target_generation"] == 2
     assert "default_orchestrator" in res["diff"]
+    # T072: Diff header must name the real target path, never a bare repo file
+    assert "--- a/orchestration.toml" not in res["diff"]
+    assert "+++ b/orchestration.toml" not in res["diff"]
+    assert "a/.ai-orchestration.local.toml" in res["diff"]
 
     # Verify no state was modified during dry-run
     st_after = orch.get_orchestrator_status(ws)
     assert st_after["generation"] == 1
     assert st_after["tool"] == "claude"
+
+
+def test_reassign_dry_run_diff_header_home_relative(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+    """T072: Reassign diff header formats paths under home as a/~/.config/..."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.delenv("AI_ORCHESTRATION_CONFIG", raising=False)
+
+    ws = fake_home / "works" / "d4science_kb"
+    ws.mkdir(parents=True)
+    orch.start_orchestrator(ws)
+
+    res = orch.reassign_orchestrator(ws, tool="kilo", dry_run=True)
+    assert res["ok"] is True
+    assert res["dry_run"] is True
+    assert "--- a/orchestration.toml" not in res["diff"]
+    assert "+++ b/orchestration.toml" not in res["diff"]
+    assert "--- a/~/.config/ai-orchestration/projects/d4science_kb/orchestration.toml" in res["diff"]
+    assert "+++ b/~/.config/ai-orchestration/projects/d4science_kb/orchestration.toml" in res["diff"]
+
+
+def test_reassign_dry_run_diff_header_absolute_path_outside_home(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+    """T072: Reassign diff header formats paths outside home with absolute path."""
+    cfg_dir = tmp_path / "custom_config"
+    cfg_dir.mkdir()
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_dir))
+
+    ws = tmp_path / "ws_no_local_dot"
+    ws.mkdir()
+    orch.start_orchestrator(ws)
+
+    res = orch.reassign_orchestrator(ws, tool="kilo", dry_run=True)
+    assert res["ok"] is True
+    assert res["dry_run"] is True
+    assert "--- a/orchestration.toml" not in res["diff"]
+    assert "+++ b/orchestration.toml" not in res["diff"]
+    expected_path = str((cfg_dir / "projects" / ws.name / "orchestration.toml").resolve())
+    assert expected_path in res["diff"]
 
 
 def test_reassign_stale_hash_refused(ws: pathlib.Path):
@@ -916,6 +959,9 @@ def test_reassign_cli(ws: pathlib.Path):
     dry_data = json.loads(res_dry.stdout)
     assert dry_data["ok"] is True
     assert dry_data["dry_run"] is True
+    assert "--- a/orchestration.toml" not in dry_data["diff"]
+    assert "+++ b/orchestration.toml" not in dry_data["diff"]
+    assert "a/.ai-orchestration.local.toml" in dry_data["diff"]
     plan_hash = dry_data["plan_hash"]
 
     # 2. stale hash refused
