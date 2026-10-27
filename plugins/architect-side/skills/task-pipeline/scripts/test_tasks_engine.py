@@ -13827,3 +13827,303 @@ def test_t067_initiative_task_note_truncation_over_200_chars(tmp_path: pathlib.P
     assert f"- **Status:** `done` (merged 765f5d7 2026-09-07; done {today}, verifier X) · **Short:** Trunc test" == status_line
 
 
+def test_t068_clean_initiative_title() -> None:
+    assert (
+        te.clean_initiative_title(
+            "# 01 — Consolidare le skill di orchestrazione e dei task in ai-orchestration — Piano di implementazione",
+            num="01",
+        )
+        == "Consolidare le skill di orchestrazione e dei task in ai-orchestration"
+    )
+    assert (
+        te.clean_initiative_title(
+            "# 01 — Consolidate Orchestration & Task Skills into ai-orchestration — Implementation plan",
+            num="01",
+        )
+        == "Consolidate Orchestration & Task Skills into ai-orchestration"
+    )
+    assert (
+        te.clean_initiative_title("# 02 - Titolo semplice con trattino", num="02")
+        == "Titolo semplice con trattino"
+    )
+    assert te.clean_initiative_title("# 03 — Titolo — Summary", num="03") == "Titolo"
+    assert te.clean_initiative_title("# 04 — Titolo — Riepilogo", num="04") == "Titolo"
+    assert te.clean_initiative_title("# Riepilogo: 05 - Titolo", num="05") == "Titolo"
+    assert te.clean_initiative_title("06 - Senza cancelletto", num="06") == "Senza cancelletto"
+
+
+def test_t068_sync_index_initiative_labels_renamed_and_curated(tmp_path: pathlib.Path) -> None:
+    """T068: Renamed plan updates label via plain sync; hand-written label different from all titles is kept; task rows untouched."""
+    # Setup git repo
+    subprocess.run(["git", "init"], cwd=str(tmp_path), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(tmp_path), check=True)
+
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # Initiative 01: starts with English title, later translated to Italian
+    init01_dir = tasks_dir / "01-scaffold"
+    init01_dir.mkdir(parents=True)
+    p01 = init01_dir / "plan.md"
+    p01.write_text("# 01 - Old Scaffold Title — Implementation plan\n\n## Tasks\n", encoding="utf-8")
+
+    # Initiative 02: starts with Auth title
+    init02_dir = tasks_dir / "02-auth"
+    init02_dir.mkdir(parents=True)
+    p02 = init02_dir / "plan.md"
+    p02.write_text("# 02 - Auth Feature\n\n## Tasks\n", encoding="utf-8")
+
+    # Emergent task T099
+    cat_dir = tasks_dir / "engine"
+    cat_dir.mkdir(parents=True)
+    _write_sample_task(
+        cat_dir / "T099-test.md",
+        task_id="T099",
+        title="Full Emergent Task Title For T099",
+        category="engine",
+        priority="P1",
+        next_up="no",
+        state="open",
+    )
+
+    subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=str(tmp_path), check=True, capture_output=True)
+
+    # Translate plan 01 title to Italian
+    p01.write_text("# 01 - Nuovo Titolo Scaffold — Piano di implementazione\n\n## Tasks\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "commit", "-m", "Translate plan 01"], cwd=str(tmp_path), check=True, capture_output=True)
+
+    # Create 00-INDEX.md with:
+    # - 01 having the old title label (from git history)
+    # - 02 having a hand-curated label (differs from current and all past titles)
+    # - T099 having a hand-curated short task label
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        """# Task Index
+
+## Initiatives
+
+<!-- ai-orch:generated initiatives -->
+| Priority | # | Initiative | Status | Depends on | Size |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 01 | [Old Scaffold Title](01-scaffold/plan.md) | open | - | M |
+| 2 | 02 | [Curated Auth Label](02-auth/plan.md) | open | - | M |
+<!-- /ai-orch:generated initiatives -->
+
+## Next up
+
+<!-- ai-orch:generated next-up -->
+| Id | Priority | Task | Executor | Handoff |
+| --- | --- | --- | --- | --- |
+<!-- /ai-orch:generated next-up -->
+
+## Tasks by category
+
+<!-- ai-orch:generated tasks-by-category -->
+### engine
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T099 | P1 | [curated task label](engine/T099-test.md) | open | kilo | - |
+<!-- /ai-orch:generated tasks-by-category -->
+
+## Decisions waiting
+
+<!-- ai-orch:generated decisions -->
+| - | None. | - | - |
+<!-- /ai-orch:generated decisions -->
+
+## Done
+
+<!-- ai-orch:generated done -->
+| Id | Task | Result | Closed |
+| --- | --- | --- | --- |
+<!-- /ai-orch:generated done -->
+""",
+        encoding="utf-8",
+    )
+
+    # 1. Plain sync-index:
+    # - 01 label updates to "Nuovo Titolo Scaffold" (because "Old Scaffold Title" was in git history)
+    # - 02 label stays "Curated Auth Label" (hand-curated: differs from current and all previous titles)
+    # - T099 label stays "curated task label" (emergent task untouched)
+    res_sync = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync.returncode == 0, res_sync.stderr
+    synced = index_path.read_text(encoding="utf-8")
+
+    assert "| 1 | 01 | [Nuovo Titolo Scaffold](01-scaffold/plan.md) | open | - | M |" in synced
+    assert "| 2 | 02 | [Curated Auth Label](02-auth/plan.md) | open | - | M |" in synced
+    assert "| T099 | P1 | [curated task label](engine/T099-test.md) | open | kilo | - |" in synced
+
+    # 2. sync-index --refresh-labels:
+    # - preview shows change for 02: Curated Auth Label -> Auth Feature
+    res_prev = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--refresh-labels")
+    assert res_prev.returncode == 0
+    assert "[Curated Auth Label]" in res_prev.stdout
+    assert "[Auth Feature]" in res_prev.stdout
+    assert "--refresh-labels --apply" in res_prev.stderr
+
+    # - apply overrides 02 to "Auth Feature", keeps T099 untouched
+    res_apply = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--refresh-labels", "--apply")
+    assert res_apply.returncode == 0, res_apply.stderr
+    refreshed = index_path.read_text(encoding="utf-8")
+
+    assert "| 1 | 01 | [Nuovo Titolo Scaffold](01-scaffold/plan.md) | open | - | M |" in refreshed
+    assert "| 2 | 02 | [Auth Feature](02-auth/plan.md) | open | - | M |" in refreshed
+    assert "| T099 | P1 | [curated task label](engine/T099-test.md) | open | kilo | - |" in refreshed
+
+
+def test_t068_sync_index_initiative_labels_non_git_repo(tmp_path: pathlib.Path) -> None:
+    """T068: In a non-git directory, a label is curated only if it is not a prefix/substring-equal of the title."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    init01_dir = tasks_dir / "01-full"
+    init01_dir.mkdir(parents=True)
+    p01 = init01_dir / "plan.md"
+    p01.write_text("# 01 - Full Initiative Title — Implementation plan\n\n## Tasks\n", encoding="utf-8")
+
+    init02_dir = tasks_dir / "02-another"
+    init02_dir.mkdir(parents=True)
+    p02 = init02_dir / "plan.md"
+    p02.write_text("# 02 - Another Initiative Title\n\n## Tasks\n", encoding="utf-8")
+
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        """# Task Index
+
+## Initiatives
+
+<!-- ai-orch:generated initiatives -->
+| Priority | # | Initiative | Status | Depends on | Size |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 01 | [Full Initiative](01-full/plan.md) | open | - | M |
+| 2 | 02 | [Hand-crafted](02-another/plan.md) | open | - | M |
+<!-- /ai-orch:generated initiatives -->
+
+## Next up
+
+<!-- ai-orch:generated next-up -->
+| Id | Priority | Task | Executor | Handoff |
+| --- | --- | --- | --- | --- |
+<!-- /ai-orch:generated next-up -->
+
+## Tasks by category
+
+<!-- ai-orch:generated tasks-by-category -->
+<!-- /ai-orch:generated tasks-by-category -->
+
+## Decisions waiting
+
+<!-- ai-orch:generated decisions -->
+| - | None. | - | - |
+<!-- /ai-orch:generated decisions -->
+
+## Done
+
+<!-- ai-orch:generated done -->
+| Id | Task | Result | Closed |
+| --- | --- | --- | --- |
+<!-- /ai-orch:generated done -->
+""",
+        encoding="utf-8",
+    )
+
+    # 1. Plain sync-index:
+    # 01 label is prefix of "Full Initiative Title" -> not curated -> follows current title
+    # 02 label is NOT prefix/substring -> curated -> kept as "Hand-crafted"
+    res_sync = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync.returncode == 0, res_sync.stderr
+    synced = index_path.read_text(encoding="utf-8")
+    assert "| 1 | 01 | [Full Initiative Title](01-full/plan.md) | open | - | M |" in synced
+    assert "| 2 | 02 | [Hand-crafted](02-another/plan.md) | open | - | M |" in synced
+
+    # 2. With --refresh-labels: forces 02 to current title
+    res_ref = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--refresh-labels", "--apply")
+    assert res_ref.returncode == 0, res_ref.stderr
+    refreshed = index_path.read_text(encoding="utf-8")
+    assert "| 2 | 02 | [Another Initiative Title](02-another/plan.md) | open | - | M |" in refreshed
+
+
+def test_t068_sync_index_initiative_in_done_table(tmp_path: pathlib.Path) -> None:
+    """T068: Initiative rows in Done table follow current title or keep hand-curated label."""
+    subprocess.run(["git", "init"], cwd=str(tmp_path), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(tmp_path), check=True)
+
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    done_init01 = tasks_dir / "done" / "01-consolidation"
+    done_init01.mkdir(parents=True)
+    p01 = done_init01 / "plan.md"
+    p01.write_text("# 01 - Old English Consolidation — Implementation plan\n\n## Tasks\n", encoding="utf-8")
+
+    done_init02 = tasks_dir / "done" / "02-migration"
+    done_init02.mkdir(parents=True)
+    p02 = done_init02 / "plan.md"
+    p02.write_text("# 02 - Migration Service\n\n## Tasks\n", encoding="utf-8")
+
+    subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "commit", "-m", "Initial"], cwd=str(tmp_path), check=True, capture_output=True)
+
+    # Rename 01
+    p01.write_text("# 01 - Consolidamento delle skill in italiano — Piano di implementazione\n\n## Tasks\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "commit", "-m", "Rename 01"], cwd=str(tmp_path), check=True, capture_output=True)
+
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        """# Task Index
+
+## Initiatives
+
+<!-- ai-orch:generated initiatives -->
+<!-- /ai-orch:generated initiatives -->
+
+## Next up
+
+<!-- ai-orch:generated next-up -->
+| Id | Priority | Task | Executor | Handoff |
+| --- | --- | --- | --- | --- |
+<!-- /ai-orch:generated next-up -->
+
+## Tasks by category
+
+<!-- ai-orch:generated tasks-by-category -->
+<!-- /ai-orch:generated tasks-by-category -->
+
+## Decisions waiting
+
+<!-- ai-orch:generated decisions -->
+| - | None. | - | - |
+<!-- /ai-orch:generated decisions -->
+
+## Done
+
+<!-- ai-orch:generated done -->
+| Id | Task | Result | Closed |
+| --- | --- | --- | --- |
+| 01 | [Old English Consolidation](done/01-consolidation/plan.md) | done | 2026-10-15 |
+| 02 | [Curated Migration](done/02-migration/plan.md) | done | 2026-10-16 |
+<!-- /ai-orch:generated done -->
+""",
+        encoding="utf-8",
+    )
+
+    res_sync = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--apply")
+    assert res_sync.returncode == 0, res_sync.stderr
+    synced = index_path.read_text(encoding="utf-8")
+
+    assert "| 01 | [Consolidamento delle skill in italiano](done/01-consolidation/plan.md) | done | 2026-10-15 |" in synced
+    assert "| 02 | [Curated Migration](done/02-migration/plan.md) | done | 2026-10-16 |" in synced
+
+    # --refresh-labels overrides curated label on 02
+    res_ref = run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--refresh-labels", "--apply")
+    assert res_ref.returncode == 0, res_ref.stderr
+    refreshed = index_path.read_text(encoding="utf-8")
+    assert "| 02 | [Migration Service](done/02-migration/plan.md) | done | 2026-10-16 |" in refreshed
+
+

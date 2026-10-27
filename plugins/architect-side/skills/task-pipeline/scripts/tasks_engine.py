@@ -3687,6 +3687,31 @@ def check_dependency_cycles(tree: dict[str, TaskNode]) -> list[str]:
     return errors
 
 
+_TRAILING_PLAN_SUFFIXES_RE = re.compile(
+    r"\s+[—–-]\s+(?:Implementation plan|Piano di implementazione|Summary|Riepilogo)\s*$",
+    re.IGNORECASE,
+)
+
+
+def clean_initiative_title(raw_heading: str, num: str | None = None) -> str:
+    """Clean initiative title by stripping H1 markdown markers, summary prefix,
+    leading number prefix (e.g. '01 - ' or '01 — '), and trailing suffixes like
+    ' — Implementation plan', ' — Piano di implementazione', ' — Summary', ' — Riepilogo'.
+    """
+    h = re.sub(r"^#+\s*", "", raw_heading.strip()).strip()
+    h = re.sub(r"^(?:Summary|Riepilogo):\s*", "", h, flags=re.IGNORECASE).strip()
+    if num:
+        h = re.sub(rf"^(?:INIT-)?{re.escape(num)}\s*[—–-]\s*", "", h, flags=re.IGNORECASE).strip()
+    else:
+        h = re.sub(r"^(?:INIT-)?\d{2,}\s*[—–-]\s*", "", h, flags=re.IGNORECASE).strip()
+    while True:
+        new_h = _TRAILING_PLAN_SUFFIXES_RE.sub("", h).strip()
+        if new_h == h:
+            break
+        h = new_h
+    return h
+
+
 def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
     """Discover all tasks/nodes in the tasks hierarchy as a dictionary of id -> TaskNode."""
     tasks_dir = pathlib.Path(tasks_dir).resolve()
@@ -3719,7 +3744,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
         text = plan_path.read_text(encoding="utf-8")
         h1_m = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
         raw_title = h1_m.group(1).strip() if h1_m else slug
-        t_clean = re.sub(rf"^{num}\s+[—–-]\s+", "", raw_title).strip()
+        t_clean = clean_initiative_title(raw_title, num=num)
 
         scanned_lines, _ = scan_markdown_blocks(text)
         init_own_fields: dict[str, Any] = {}
@@ -10379,6 +10404,110 @@ def _format_index_task_cell(
     return f"[{title}]({rel_path})"
 
 
+def _get_plan_previous_titles(
+    plan_path: pathlib.Path,
+    num: str | None = None,
+    tasks_dir: pathlib.Path | None = None,
+) -> set[str] | None:
+    """Extract historical cleaned titles from `git log -p --follow -- <plan.md>`."""
+    cwd = tasks_dir if tasks_dir and tasks_dir.is_dir() else (plan_path.parent if plan_path.parent.is_dir() else None)
+    if not cwd:
+        return None
+    try:
+        cmd = ["git", "log", "-p", "--follow", "-n", "50", "--", str(plan_path)]
+        res = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if res.returncode != 0:
+            return None
+        titles: set[str] = set()
+        for line in res.stdout.splitlines():
+            m = re.match(r"^[+-]#\s+(.+)$", line)
+            if m:
+                raw_h = m.group(1).strip()
+                cleaned = clean_initiative_title(raw_h, num=num)
+                if cleaned:
+                    titles.add(cleaned)
+        return titles
+    except Exception:
+        return None
+
+
+def _format_initiative_index_cell(
+    existing_title_cell: str | None,
+    plan_path: pathlib.Path,
+    current_title: str,
+    num: str | None,
+    tasks_dir: pathlib.Path,
+    refresh_labels: bool = False,
+    default_rel_path: str | None = None,
+    uses_plain_title: bool = False,
+    git_titles_cache: dict[str, set[str] | None] | None = None,
+) -> str:
+    """Format an initiative table cell. If the label was hand-curated (differs from
+    current title AND every previous title of the plan in git history), keep it.
+    If not a git repo, keep it if it is not a prefix/substring-equal of the title.
+    If refresh_labels=True, force label to current_title.
+    """
+    if existing_title_cell:
+        m_link = re.match(r"^\[([^\]]+)\]\(([^)]+)\)$", existing_title_cell.strip())
+        if m_link:
+            existing_label = m_link.group(1).strip()
+            target_link = m_link.group(2).strip()
+        else:
+            existing_label = existing_title_cell.strip()
+            target_link = None
+    else:
+        existing_label = None
+        target_link = default_rel_path
+
+    if refresh_labels or not existing_label:
+        chosen_label = current_title
+    elif existing_label == current_title:
+        chosen_label = current_title
+    else:
+        # Check if existing_label is hand-curated
+        if _is_inside_git_repo(tasks_dir):
+            cache_key = str(plan_path.resolve()) if plan_path.exists() else str(plan_path)
+            if git_titles_cache is not None and cache_key in git_titles_cache:
+                prev_titles = git_titles_cache[cache_key]
+            else:
+                prev_titles = _get_plan_previous_titles(plan_path, num=num, tasks_dir=tasks_dir)
+                if git_titles_cache is not None:
+                    git_titles_cache[cache_key] = prev_titles
+
+            if prev_titles is not None and (
+                existing_label in prev_titles
+                or any(existing_label.replace("`", "") == pt.replace("`", "") for pt in prev_titles)
+            ):
+                # Matched a previous title in git history -> not hand-curated -> follows current title
+                chosen_label = current_title
+            else:
+                # Differs from current and all previous titles -> hand-curated
+                chosen_label = existing_label
+        else:
+            # Not a git repo: treat as curated only if not a prefix/substring-equal of the title
+            is_sub_or_prefix = (
+                existing_label == current_title
+                or current_title.startswith(existing_label)
+                or existing_label in current_title
+                or existing_label.replace("`", "") in current_title.replace("`", "")
+            )
+            if is_sub_or_prefix:
+                chosen_label = current_title
+            else:
+                chosen_label = existing_label
+
+    if target_link and not uses_plain_title:
+        return f"[{chosen_label}]({target_link})"
+    return chosen_label
+
+
 def _extract_task_decision_question(wt: dict[str, Any]) -> tuple[str, str] | None:
     """Return (decider_who, question_text) when a waiting/blocked task has a real question, else None.
     Never returns the decider's name as the question text.
@@ -10717,13 +10846,20 @@ def _format_initiative_status_cell(
     return fallback_status or init_node.derived_state or init_node.state or "open"
 
 
-def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: bool = False, reorder: bool = False) -> str:
+def render_synced_index(
+    tasks_dir: pathlib.Path,
+    existing_index: str,
+    adopt: bool = False,
+    reorder: bool = False,
+    refresh_labels: bool = False,
+) -> str:
     has_conflict_markers = bool(re.search(r"^(<{7}|={7}|>{7}|\|{7})\b", existing_index, re.MULTILINE)) or ("<<<<<<<" in existing_index)
     if has_conflict_markers:
         existing_index = _strip_conflict_markers_ours(existing_index)
         adopt = True
 
     prefer_bare_id = (not has_conflict_markers) and _index_uses_bare_id_format(existing_index)
+    git_titles_cache: dict[str, set[str] | None] = {}
 
     tree = discover_task_tree(tasks_dir)
     emergent = discover_emergent_tasks(tasks_dir)
@@ -10817,11 +10953,31 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
                 row_line = line_s
                 if init_num in tree:
                     init_node = tree[init_num]
+                    changed_cell = False
                     if init_node.children:
                         new_status = _format_initiative_status_cell(init_node, tree)
                         if cells[status_col_idx] != new_status:
                             cells[status_col_idx] = new_status
-                            row_line = "| " + " | ".join(cells) + " |"
+                            changed_cell = True
+                    if title_col_idx < len(cells):
+                        existing_title_cell = cells[title_col_idx]
+                        plan_path = pathlib.Path(init_node.file_path)
+                        new_title_cell = _format_initiative_index_cell(
+                            existing_title_cell=existing_title_cell,
+                            plan_path=plan_path,
+                            current_title=init_node.title,
+                            num=init_num,
+                            tasks_dir=tasks_dir,
+                            refresh_labels=refresh_labels,
+                            default_rel_path=init_node.rel_path,
+                            uses_plain_title=False,
+                            git_titles_cache=git_titles_cache,
+                        )
+                        if existing_title_cell != new_title_cell:
+                            cells[title_col_idx] = new_title_cell
+                            changed_cell = True
+                    if changed_cell:
+                        row_line = "| " + " | ".join(cells) + " |"
                 ordered_init_rows.append((init_num, cells, row_line))
 
         existing_pri_vals = [r[1][0].strip() for r in ordered_init_rows if r[1]] if id_col_idx == 1 else []
@@ -11507,16 +11663,43 @@ def render_synced_index(tasks_dir: pathlib.Path, existing_index: str, adopt: boo
             continue
         if any(ct["id"] == base_id for ct in conditional_tasks):
             continue
+        existing_task_cell = cells[1] if len(cells) > 1 else None
+        init_key = re.sub(r"^INIT-", "", base_id)
+        matched_inode = None
+        if init_key in tree and tree[init_key].node_type == "initiative":
+            matched_inode = tree[init_key]
+        elif existing_task_cell:
+            m_ilink = re.search(r"\[([^\]]+)\]\((?:(?:done|merged)/)?(\d{2,})-[^/]+/(?:plan|summary)\.md\)", existing_task_cell)
+            if m_ilink and m_ilink.group(2) in tree and tree[m_ilink.group(2)].node_type == "initiative":
+                matched_inode = tree[m_ilink.group(2)]
+
         if base_id in done_tasks_map:
             dt = done_tasks_map[base_id]
             seen_done_ids.add(base_id)
-            existing_task_cell = cells[1] if len(cells) > 1 else None
             id_cell = _format_index_id_cell(dt, row_id, done_prefer_bare, existing_task_cell)
             task_cell = _format_index_task_cell(dt, existing_task_cell, done_prefer_bare)
             res_val = cells[2] if len(cells) > 2 and cells[2] not in ("", "-") else dt["state"]
             closed_val = cells[3] if len(cells) > 3 and cells[3] not in ("", "-") else _git_closed_date(tasks_dir, dt["rel_path"])
             extra_s = _format_extra_cells(cells, 4, done_col_count, dt, done_hdr_cells)
             done_rows.append((base_id, f"| {id_cell} | {task_cell} | {res_val} | {closed_val} |{extra_s}"))
+        elif matched_inode is not None:
+            seen_done_ids.add(base_id)
+            plan_path = pathlib.Path(matched_inode.file_path)
+            task_cell = _format_initiative_index_cell(
+                existing_title_cell=existing_task_cell,
+                plan_path=plan_path,
+                current_title=matched_inode.title,
+                num=matched_inode.id,
+                tasks_dir=tasks_dir,
+                refresh_labels=refresh_labels,
+                default_rel_path=matched_inode.rel_path,
+                uses_plain_title=False,
+                git_titles_cache=git_titles_cache,
+            )
+            res_val = cells[2] if len(cells) > 2 and cells[2] not in ("", "-") else "done"
+            closed_val = cells[3] if len(cells) > 3 and cells[3] not in ("", "-") else _git_closed_date(tasks_dir, matched_inode.rel_path)
+            extra_s = _format_extra_cells(cells, 4, done_col_count, None, done_hdr_cells)
+            done_rows.append((base_id, f"| {row_id} | {task_cell} | {res_val} | {closed_val} |{extra_s}"))
         elif base_id not in resolved_ids:
             seen_done_ids.add(base_id)
             task_cell = cells[1] if len(cells) > 1 else "-"
@@ -14086,6 +14269,7 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
     preview_flag = bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
     expect_hash = getattr(args, "expect_hash", None)
     reorder = getattr(args, "reorder", False)
+    refresh_labels = bool(getattr(args, "refresh_labels", False))
 
     # If --apply, run under exclusive task-write lock
     if apply_flag and not preview_flag:
@@ -14164,7 +14348,9 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
 
                 # 4. Render
                 try:
-                    rendered = render_synced_index(tasks_dir, existing, adopt=adopt, reorder=reorder)
+                    rendered = render_synced_index(
+                        tasks_dir, existing, adopt=adopt, reorder=reorder, refresh_labels=refresh_labels
+                    )
                 except ValueError as e:
                     err_msg = str(e)
                     if getattr(args, "json", False):
@@ -14300,7 +14486,9 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
 
     # 4. Render
     try:
-        rendered = render_synced_index(tasks_dir, existing, adopt=adopt, reorder=reorder)
+        rendered = render_synced_index(
+            tasks_dir, existing, adopt=adopt, reorder=reorder, refresh_labels=refresh_labels
+        )
     except ValueError as e:
         err_msg = str(e)
         if getattr(args, "json", False):
@@ -14354,8 +14542,9 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                 if diff_str:
                     sys.stdout.write(diff_str)
                 adopt_hint = "--adopt " if adopt else ""
+                refresh_hint = "--refresh-labels " if refresh_labels else ""
                 print(
-                    f"[preview] apply with: {adopt_hint}--apply --expect-hash {current_hash}",
+                    f"[preview] apply with: {adopt_hint}{refresh_hint}--apply --expect-hash {current_hash}",
                     file=sys.stderr,
                 )
                 print("[preview] nothing written; re-run with --apply to write these changes")
@@ -14468,6 +14657,12 @@ def cmd_sync_index(args: argparse.Namespace) -> int:
                 print(f"  - {sline}")
             if diff_str:
                 sys.stdout.write(diff_str)
+            adopt_hint = "--adopt " if adopt else ""
+            refresh_hint = "--refresh-labels " if refresh_labels else ""
+            print(
+                f"[preview] apply with: {adopt_hint}{refresh_hint}--apply --expect-hash {current_hash}",
+                file=sys.stderr,
+            )
             print("[preview] nothing written; re-run with --apply to write these changes")
     return 0
 
@@ -21318,6 +21513,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--dry-run", action="store_true", default=False, help="Alias for --preview")
     p_sync.add_argument("--adopt", action="store_true", help="Preview wrapping existing generated tables in markers (apply with --adopt --apply --expect-hash <hash>)")
     p_sync.add_argument("--reorder", action="store_true", help="Re-sort rows in Next up and category tables by priority and ID")
+    p_sync.add_argument("--refresh-labels", action="store_true", default=False, help="Force labels of initiative rows to current plan titles")
     p_sync.add_argument("--expect-hash", default=None, help="Refuse to apply if current index SHA256 does not match this hash")
     p_sync.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_sync.set_defaults(func=cmd_sync_index)
