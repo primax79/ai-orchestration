@@ -99,6 +99,7 @@ Tasks in `methodology`. Owner session: unassigned ([README](methodology/README.m
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T073 (Studio pannello orchestratori) | P1 | [Studio: pannello di controllo degli orchestratori di tutti i workspace, handoff e coerenza dei registri](methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md) | open | kilo | - |
+| T074 (Chat contestuale per elemento) | P1 | [Chat contestuale con l'IA su un singolo use case, task o domanda](methodology/T074-chat-contestuale-con-l-ia-su-un-singolo-use-case-t.md) | open | kilo | T073 |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
