@@ -87,10 +87,9 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T069 (Campagna senza bozze) | P2 | [La campagna di validazione esclude gli use case in bozza](engine/T069-la-campagna-di-validazione-esclude-gli-use-case-in.md) | in progress | kilo | - |
+| T069 (Campagna senza bozze) | P2 | [La campagna di validazione esclude gli use case in bozza](engine/T069-la-campagna-di-validazione-esclude-gli-use-case-in.md) | delivered (verify-by: ai-coding-tools) | kilo | - |
 | T070 (Reassign su sessione attuale) | P2 | [orchestrator reassign lega il ruolo a una sessione interattiva esistente](engine/T070-orchestrator-reassign-lega-il-ruolo-a-una-sessione.md) | in progress | kilo | - |
 | T071 (Invito a registrarsi) | P2 | [Le sessioni che orchestrano vengono invitate a registrarsi come orchestratore](engine/T071-le-sessioni-che-orchestrano-vengono-invitate-a-reg.md) | open | kilo | - |
-| T072 (config show nella cartella) | P3 | [config show usa la cartella corrente; l'anteprima di reassign mostra il percorso reale](engine/T072-config-show-usa-la-cartella-corrente-l-anteprima-d.md) | in progress | kilo | - |
 | T077 (Adozione note vecchie) | P2 | [Le note dell'inbox in formato vecchio vengono adottate con un id](engine/T077-le-note-dell-inbox-in-formato-vecchio-vengono-adot.md) | open | kilo | - |
 
 ### methodology
@@ -194,6 +193,7 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 | T066 (Lingue per progetto) | [Lingua per progetto per i task e per le domande](done/engine/T066-per-project-language-for-tasks-and-for-questions.md) | done | 2026-10-27 |
 | T067 (Mantenere evidenza in Status) | [transition mantiene la nota Status esistente dei task di iniziativa](done/engine/T067-transition-keeps-the-existing-status-note-of-initi.md) | done | 2026-10-27 |
 | T068 (Etichette iniziative aggiornate) | [sync-index aggiorna le etichette delle iniziative quando cambia il titolo del piano](done/engine/T068-sync-index-aggiorna-le-etichette-delle-iniziative.md) | done | 2026-10-27 |
+| T072 (config show nella cartella) | [config show usa la cartella corrente; l'anteprima di reassign mostra il percorso reale](done/engine/T072-config-show-usa-la-cartella-corrente-l-anteprima-d.md) | done | 2026-10-27 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

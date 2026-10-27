@@ -6,13 +6,14 @@
 - priority: P3
 - priority-reason: Comportamento diverso dagli altri comandi; l'anteprima fa credere che il file stia nel repo
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: _inbox/analyzed/20261027-144358-config-show-ignores-the-current-director/note.md
 - paths: ai-orch config show; ai-orch orchestrator reassign --dry-run
 - handoff: Read tasks/engine/T072-config-show-usa-la-cartella-corrente-l-anteprima-d.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: d4science_kb
 - verify-by: d4science_kb
 - short: config show nella cartella
 
@@ -36,4 +37,6 @@
 
 ## Log (newest first)
 
+- 2026-10-27, d4science-kb-3d: state `verified` -> `done` — validated by d4science_kb (verify-by)
+- 2026-10-27, d4science_kb: state `delivered` -> `verified` — re-ran the N069 scenario on 2026-10-27 with architect-side 0.8.3
 - 2026-10-27, kilo: state `open` -> `delivered` — config show adotta la cartella corrente come workspace di default e il diff di reassign mostra il percorso reale del file
