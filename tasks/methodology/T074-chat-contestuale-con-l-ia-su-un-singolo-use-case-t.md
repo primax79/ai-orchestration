@@ -29,6 +29,8 @@ l'IA ha tutti i tool a disposizione per interagire con gli elementi, cambia solo
   orchestrazione): legge, modifica, crea task, use case, domande, transizioni. Non c'è un meccanismo speciale di
   "modifiche proposte": vale il modo di permesso della sessione che risponde, come in qualsiasi sessione.
 - Cambia solo il contesto: la conversazione parte dall'elemento (e dai suoi collegamenti) e resta legata a lui.
+- Elementi: use case, task (anche di iniziativa), domande e note dell'inbox (proprietario: "ovviamente anche sulle note
+  potrebbe servire una chat"; per una nota: chiarirla, smistarla, trasformarla in task o use case).
 - Usi tipici: modifica al volo (rapida, pochi secondi) e ragionamento, che può portare a modifiche in qualsiasi momento.
 
 ## Steps

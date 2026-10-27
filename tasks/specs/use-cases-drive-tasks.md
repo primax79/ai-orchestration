@@ -1,7 +1,7 @@
 # Spec — Use cases drive tasks
 
 > **Status:** Draft v2 (2026-10-27), owner request, highest priority. v2 after an independent Codex review (blockers on
-> migration, the verification guard and the plan breakdown, all addressed below). Lifecycle model §3: owner question Q011.
+> migration, the verification guard and the plan breakdown, all addressed below). Lifecycle model §3 decided by the owner (Q011: option A).
 > **Drives initiative:** 17 (`tasks/17-use-cases-drive-tasks/plan.md`).
 > **Source:** inbox note N072 (`_inbox/analyzed/20261027-144719-use-cases-drive-tasks-dependency-from-us/note.md`)
 > including the owner additions; N067 (campaign fails draft use cases) and T069 are a first slice of §5.
@@ -63,7 +63,7 @@ Two independent fields:
 - **`approval:`** `proposed` | `approved` | `deprecated` — the author/owner intent. `use-cases create` writes
   `proposed`; the owner (or the decider) approves. Replaces today's hand-set `status: draft|active|deprecated`
   (migration: draft -> proposed, active/verified/failing -> approved, deprecated -> deprecated).
-  *Proposed (owner question Q011):* the note used "draft" both for "no tasks" and for "not yet approved";
+  *Decided by the owner (Q011, option A, 2026-10-27):* the note used "draft" both for "no tasks" and for "not yet approved";
   separating them lets a use case be approved before its tasks exist. Migration of today's `status`:
   draft -> proposed; active, verified, failing, partial -> approved; deprecated -> deprecated; the verdict part
   (verified/failing/partial) moves to `last-verdict`, which already exists, so no verdict or log is lost.

@@ -25,6 +25,8 @@ On 2026-10-27 the owner asked whether I (an interactive Claude session orchestra
 - [ ] Blocco gestito di AGENTS.md e skill orchestration-workflow: registrarsi con sessions register --role orchestrator e mandare heartbeat
 - [ ] Comandi che modificano i task, lanciati in un workspace con ruolo missing, stampano un suggerimento di una riga
 
+- [ ] Le sessioni interattive (Claude Code) non mandano heartbeat da sole: l'invito spiega come mandarlo a ogni turno o a ogni controllo periodico, e lo stato "stale" di un titolare interattivo non va letto come assente (d4science-kb-3d 2026-10-27: gen 3 interattiva già stale dopo un'ora)
+
 ## Verification
 
 - Test: ruolo missing -> il suggerimento compare; registrato -> nessun suggerimento

@@ -825,11 +825,54 @@ def test_reassign_dry_run_shows_plan(ws: pathlib.Path):
     assert res["generation"] == 1
     assert res["target_generation"] == 2
     assert "default_orchestrator" in res["diff"]
+    # T072: Diff header must name the real target path, never a bare repo file
+    assert "--- a/orchestration.toml" not in res["diff"]
+    assert "+++ b/orchestration.toml" not in res["diff"]
+    assert "a/.ai-orchestration.local.toml" in res["diff"]
 
     # Verify no state was modified during dry-run
     st_after = orch.get_orchestrator_status(ws)
     assert st_after["generation"] == 1
     assert st_after["tool"] == "claude"
+
+
+def test_reassign_dry_run_diff_header_home_relative(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+    """T072: Reassign diff header formats paths under home as a/~/.config/..."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.delenv("AI_ORCHESTRATION_CONFIG", raising=False)
+
+    ws = fake_home / "works" / "d4science_kb"
+    ws.mkdir(parents=True)
+    orch.start_orchestrator(ws)
+
+    res = orch.reassign_orchestrator(ws, tool="kilo", dry_run=True)
+    assert res["ok"] is True
+    assert res["dry_run"] is True
+    assert "--- a/orchestration.toml" not in res["diff"]
+    assert "+++ b/orchestration.toml" not in res["diff"]
+    assert "--- a/~/.config/ai-orchestration/projects/d4science_kb/orchestration.toml" in res["diff"]
+    assert "+++ b/~/.config/ai-orchestration/projects/d4science_kb/orchestration.toml" in res["diff"]
+
+
+def test_reassign_dry_run_diff_header_absolute_path_outside_home(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+    """T072: Reassign diff header formats paths outside home with absolute path."""
+    cfg_dir = tmp_path / "custom_config"
+    cfg_dir.mkdir()
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_dir))
+
+    ws = tmp_path / "ws_no_local_dot"
+    ws.mkdir()
+    orch.start_orchestrator(ws)
+
+    res = orch.reassign_orchestrator(ws, tool="kilo", dry_run=True)
+    assert res["ok"] is True
+    assert res["dry_run"] is True
+    assert "--- a/orchestration.toml" not in res["diff"]
+    assert "+++ b/orchestration.toml" not in res["diff"]
+    expected_path = str((cfg_dir / "projects" / ws.name / "orchestration.toml").resolve())
+    assert expected_path in res["diff"]
 
 
 def test_reassign_stale_hash_refused(ws: pathlib.Path):
@@ -916,6 +959,9 @@ def test_reassign_cli(ws: pathlib.Path):
     dry_data = json.loads(res_dry.stdout)
     assert dry_data["ok"] is True
     assert dry_data["dry_run"] is True
+    assert "--- a/orchestration.toml" not in dry_data["diff"]
+    assert "+++ b/orchestration.toml" not in dry_data["diff"]
+    assert "a/.ai-orchestration.local.toml" in dry_data["diff"]
     plan_hash = dry_data["plan_hash"]
 
     # 2. stale hash refused
@@ -967,6 +1013,238 @@ def test_reassign_cli(ws: pathlib.Path):
     assert apply_data["status"] == "reassigned"
     assert apply_data["generation"] == 2
     assert apply_data["tool"] == "kilo"
+
+
+def test_reassign_interactive_from_stale_interactive_holder(ws: pathlib.Path):
+    """T070: stale interactive gen 1 -> reassign --kind interactive --provider-session-id X -> gen 2 held by X, kind interactive, no headless session."""
+    # Register gen 1 as kilo interactive session and make it stale
+    gen1_sess = sessions.register_session(
+        ws,
+        tool="kilo",
+        kind="interactive",
+        role="orchestrator",
+        provider_session_id="kilo-sess-gen1",
+    )
+    gen1_sid = gen1_sess["session_id"]
+    sess_file = ws / ".ai-orchestration" / "sessions" / f"{gen1_sid}.json"
+    sess_doc = json.loads(sess_file.read_text(encoding="utf-8"))
+    sess_doc["last_seen"] = "2020-01-01T00:00:00Z"
+    sess_file.write_text(json.dumps(sess_doc, indent=2), encoding="utf-8")
+
+    holder1 = sessions.get_role_holder(ws, "orchestrator")
+    assert holder1 is not None
+    assert holder1["generation"] == 1
+    assert holder1["tool"] == "kilo"
+    assert holder1["status"] == "stale"
+
+    target_prov_id = "9063f48c-47d4-4079-8d84-bd8e25babd33"
+
+    # Dry-run preview shows target session and kind
+    prev = orch.reassign_orchestrator(
+        ws,
+        tool="claude",
+        model="claude-opus-5-5",
+        kind="interactive",
+        provider_session_id=target_prov_id,
+        session_id="d4science-kb-3d",
+        dry_run=True,
+    )
+    assert prev["ok"] is True
+    assert prev["dry_run"] is True
+    assert prev["kind"] == "interactive"
+    assert prev["provider_session_id"] == target_prov_id
+    assert prev["target_session_id"] == "d4science-kb-3d"
+    assert "interactive session d4science-kb-3d" in prev["plan"]
+    plan_hash = prev["plan_hash"]
+
+    # Apply with plan_hash
+    res = orch.reassign_orchestrator(
+        ws,
+        tool="claude",
+        model="claude-opus-5-5",
+        kind="interactive",
+        provider_session_id=target_prov_id,
+        session_id="d4science-kb-3d",
+        expect_hash=plan_hash,
+    )
+    assert res["ok"] is True
+    assert res["status"] == "reassigned"
+    assert res["generation"] == 2
+    assert res["kind"] == "interactive"
+    assert res["session_id"] == "d4science-kb-3d"
+    assert res["provider_session_id"] == target_prov_id
+
+    # Verify orchestrator status and sessions list
+    st2 = orch.get_orchestrator_status(ws)
+    assert st2["generation"] == 2
+    assert st2["tool"] == "claude"
+    assert st2["model"] == "claude-opus-5-5"
+    assert st2["kind"] == "interactive"
+    assert st2["session_id"] == "d4science-kb-3d"
+    assert st2["provider_session_id"] == target_prov_id
+
+    all_sessions = sessions.list_sessions(ws)
+    assert all(s["kind"] == "interactive" for s in all_sessions)
+    assert not any(s["kind"] == "headless" for s in all_sessions)
+
+    old_s = sessions.get_session(ws, gen1_sid)
+    assert old_s["status"] == "retired"
+    assert old_s["retired"]["reason"] == "reassigned"
+
+    new_s = sessions.get_session(ws, "d4science-kb-3d")
+    assert new_s["status"] == "active"
+    assert new_s["kind"] == "interactive"
+    assert new_s["role"] == "orchestrator"
+    assert new_s["generation"] == 2
+    assert new_s["provider_session_id"] == target_prov_id
+
+
+def test_reassign_interactive_reuses_existing_registered_session(ws: pathlib.Path):
+    """T070: If a session with that provider_session_id is already registered, reuse it instead of creating a new one."""
+    sessions.register_session(
+        ws,
+        tool="kilo",
+        kind="interactive",
+        role="orchestrator",
+        provider_session_id="kilo-gen1-uuid",
+    )
+
+    existing_prov_id = "9063f48c-47d4-4079-8d84-bd8e25babd33"
+    pre_reg = sessions.register_session(
+        ws,
+        tool="claude",
+        kind="interactive",
+        session_id="pre-registered-claude-sess",
+        provider_session_id=existing_prov_id,
+        subscriptions=["question.*"],
+    )
+    assert pre_reg["session_id"] == "pre-registered-claude-sess"
+
+    prev = orch.reassign_orchestrator(
+        ws,
+        tool="claude",
+        kind="interactive",
+        provider_session_id=existing_prov_id,
+        dry_run=True,
+    )
+    assert prev["ok"] is True
+    assert prev["kind"] == "interactive"
+    assert prev["target_session_id"] == "pre-registered-claude-sess"
+    assert prev["provider_session_id"] == existing_prov_id
+
+    res = orch.reassign_orchestrator(
+        ws,
+        tool="claude",
+        kind="interactive",
+        provider_session_id=existing_prov_id,
+        expect_hash=prev["plan_hash"],
+    )
+    assert res["ok"] is True
+    assert res["generation"] == 2
+    assert res["session_id"] == "pre-registered-claude-sess"
+    assert res["provider_session_id"] == existing_prov_id
+
+    all_sessions = sessions.list_sessions(ws)
+    assert len(all_sessions) == 2
+    assert not any(s["kind"] == "headless" for s in all_sessions)
+
+    reused = sessions.get_session(ws, "pre-registered-claude-sess")
+    assert reused["role"] == "orchestrator"
+    assert reused["generation"] == 2
+    assert reused["kind"] == "interactive"
+    assert reused["subscriptions"] == ["question.*"]
+
+
+def test_reassign_bind_current_cli(ws: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+    """T070: --bind-current takes provider_session_id from CLAUDE_SESSION_ID or errors clearly when missing."""
+    sessions.register_session(
+        ws,
+        tool="kilo",
+        kind="interactive",
+        role="orchestrator",
+        provider_session_id="kilo-gen1",
+    )
+
+    # 1. Without env var -> clear error asking for --provider-session-id
+    env_no_sid = dict(os.environ)
+    for k in ("CLAUDE_SESSION_ID", "AI_ORCH_PROVIDER_SESSION_ID", "KILO_SESSION_ID", "CODEX_SESSION_ID"):
+        env_no_sid.pop(k, None)
+
+    res_err = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "orchestrator",
+            "reassign",
+            "--tool",
+            "claude",
+            "--bind-current",
+            "--workspace",
+            str(ws),
+            "--json",
+        ],
+        env=env_no_sid,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_err.returncode == 2
+    err_data = json.loads(res_err.stdout)
+    assert err_data["ok"] is False
+    assert "--provider-session-id" in err_data["error"]
+
+    # 2. With CLAUDE_SESSION_ID set -> dry-run and apply bind to that session in 1 generation bump
+    env_with_sid = dict(env_no_sid, CLAUDE_SESSION_ID="9063f48c-47d4-4079-8d84-bd8e25babd33")
+    res_dry = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "orchestrator",
+            "reassign",
+            "--tool",
+            "claude",
+            "--bind-current",
+            "--dry-run",
+            "--workspace",
+            str(ws),
+            "--json",
+        ],
+        env=env_with_sid,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    dry_data = json.loads(res_dry.stdout)
+    assert dry_data["ok"] is True
+    assert dry_data["kind"] == "interactive"
+    assert dry_data["provider_session_id"] == "9063f48c-47d4-4079-8d84-bd8e25babd33"
+
+    res_apply = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "orchestrator",
+            "reassign",
+            "--tool",
+            "claude",
+            "--bind-current",
+            "--expect-hash",
+            dry_data["plan_hash"],
+            "--workspace",
+            str(ws),
+            "--json",
+        ],
+        env=env_with_sid,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    apply_data = json.loads(res_apply.stdout)
+    assert apply_data["ok"] is True
+    assert apply_data["generation"] == 2
+    assert apply_data["kind"] == "interactive"
+    assert apply_data["provider_session_id"] == "9063f48c-47d4-4079-8d84-bd8e25babd33"
+    assert not any(s["kind"] == "headless" for s in sessions.list_sessions(ws))
 
 
 def test_ensure_orchestrator_refuses_uninstalled_tool(ws: pathlib.Path):
