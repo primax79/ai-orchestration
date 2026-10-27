@@ -14854,4 +14854,362 @@ def test_17_2_sync_index_derived_rewrite_events_rollback_and_invalid_tree_refusa
     assert "invalid tasks tree" in inv_payload["error"]
 
 
+# ===========================================================================
+# Task 17.3: Migration `use-cases adopt-links`
+# ===========================================================================
+
+def test_17_3_adopt_links_emergent_initiative_union_snapshot_rollback_idempotent_and_sync_index(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 17.3 (items 1, 2, 3, 4):
+    - `use-cases adopt-links` previews by default and writes with `--apply --expect-plan-hash`.
+    - Supports both emergent tasks (`- use-cases:` header in canonical extension order) and initiative tasks
+      (`**Use cases:**` segment right after `**Depends on:**`), including multiple blocks in the same `plan.md`.
+    - Union with existing task `use-cases` (never removes existing links).
+    - Writes snapshot of every file that will change under `tasks/_reviews/adopt-links-<timestamp>/`
+      with file copies and `manifest.json` containing SHA256 hashes before applying.
+    - Atomic apply with rollback on injected write failure.
+    - Idempotent second run (nothing to do).
+    - After apply, `sync-index` pre-adoption guard no longer skips those use cases, and the derived
+      `linked-tasks` equals the old written lists for every adopted use case.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "01-core").mkdir(parents=True)
+    index_path = tasks_dir / "00-INDEX.md"
+    index_path.write_text(
+        "# Task Index\n\n"
+        "## Initiatives\n<!-- ai-orch:generated initiatives -->\n<!-- /ai-orch:generated initiatives -->\n\n"
+        "## Next up\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+
+    # Emergent task T001 already has `use-cases: UC099` (to test union, never removing) + `run-id` and `short`
+    t1_file = tasks_dir / "features" / "T001-auth.md"
+    t1_file.write_text(
+        "# T001 Auth Flow\n\n"
+        "- id: T001\n"
+        "- title: Auth Flow\n"
+        "- category: features\n"
+        "- priority: P1\n"
+        "- priority-reason: security\n"
+        "- next-up: yes\n"
+        "- state: open\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: src/auth.py\n"
+        "- handoff: Implement auth.\n"
+        "- run-id: run-abc\n"
+        "- use-cases: UC099\n"
+        "- short: Auth Flow\n\n"
+        "## Goal\n\nImplement auth.\n\n"
+        "## Steps\n\n- [ ] Add auth.\n\n"
+        "## Verification\n\n- pytest\n",
+        encoding="utf-8",
+    )
+
+    # Emergent task T002 has no `use-cases` header yet (has `run-id` and `short` to verify insertion order)
+    t2_file = tasks_dir / "features" / "T002-token.md"
+    t2_file.write_text(
+        "# T002 Token Refresh\n\n"
+        "- id: T002\n"
+        "- title: Token Refresh\n"
+        "- category: features\n"
+        "- priority: P1\n"
+        "- priority-reason: auth\n"
+        "- next-up: no\n"
+        "- state: open\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: src/token.py\n"
+        "- handoff: Refresh token.\n"
+        "- run-id: run-xyz\n"
+        "- short: Token Refresh\n\n"
+        "## Goal\n\nRefresh token.\n\n"
+        "## Steps\n\n- [ ] Refresh.\n\n"
+        "## Verification\n\n- pytest\n",
+        encoding="utf-8",
+    )
+
+    # Initiative 01 with two blocks (01.1 has existing Use cases: UC088; 01.2 has no Use cases yet)
+    plan_file = tasks_dir / "01-core" / "plan.md"
+    plan_file.write_text(
+        "# 01 — Core Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Setup storage\n\n"
+        "- **Status:** `done` · **Short:** Setup storage · **Size:** M · **Depends on:** - · **Use cases:** UC088 · **Labels:** storage\n"
+        "- **Goal:** Setup storage.\n\n"
+        "### 01.2 - Query index\n\n"
+        "- **Status:** `done` · **Short:** Query index · **Size:** S · **Depends on:** 01.1 · **Labels:** search\n"
+        "- **Goal:** Query index.\n",
+        encoding="utf-8",
+    )
+
+    def _write_uc(uc_id: str, title: str, linked_tasks_str: str) -> pathlib.Path:
+        p = tasks_dir / "use-cases" / f"{uc_id}-{title.lower().replace(' ', '-')}.md"
+        p.write_text(
+            f"# {uc_id} - {title}\n\n"
+            f"- id: {uc_id}\n"
+            f"- title: {title}\n"
+            f"- actor: User\n"
+            f"- status: active\n"
+            f"- priority: P1\n"
+            f"- linked-tasks: {linked_tasks_str}\n"
+            f"- verification-type: automated-probe\n"
+            f"- last-tested: -\n"
+            f"- last-verdict: -\n\n"
+            f"## Description & Business Value\n{title}.\n\n"
+            f"## Preconditions\n- None.\n\n"
+            f"## Scenario / Interaction Steps\n1. Step.\n\n"
+            f"## Automated Verification Command\n```bash\necho ok\n```\n\n"
+            f"## Acceptance Criteria\n- [ ] Ok.\n\n"
+            f"## AI Validation Log\n",
+            encoding="utf-8",
+        )
+        return p
+
+    # UC001 links 01.1, T001; UC002 links 01.1, 01.2, T002; UC088 links 01.1; UC099 links T001
+    _write_uc("UC001", "Login", "01.1, T001")
+    _write_uc("UC002", "Session", "01.1, 01.2, T002")
+    _write_uc("UC088", "Storage prelinked", "01.1")
+    _write_uc("UC099", "Auth prelinked", "T001")
+
+    # Record written lists before adoption
+    ucs_before = {
+        u["id"]: list(u["written_linked_tasks"])
+        for u in te.discover_use_cases(tasks_dir)
+    }
+
+    # Before adopt-links, sync-index guard skips UC001 and UC002 (whose derived links are currently empty)
+    sync_before = json.loads(run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--preview", "--json").stdout)
+    skipped_before_ids = [s["id"] for s in sync_before["skipped_unadopted_use_cases"]]
+    assert skipped_before_ids == ["UC001", "UC002"]
+
+    # 1. Preview adopt-links (default, no --apply): writes nothing
+    t1_orig = t1_file.read_bytes()
+    t2_orig = t2_file.read_bytes()
+    plan_orig = plan_file.read_bytes()
+
+    res_prev = run_cli("use-cases", "adopt-links", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_prev.returncode == 0, res_prev.stdout + res_prev.stderr
+    prev_data = json.loads(res_prev.stdout)
+    assert prev_data["ok"] is True
+    assert prev_data["applied"] is False
+    assert prev_data["dry_run"] is True
+    assert prev_data["tasks_changed_count"] == 4
+    assert prev_data["files_changed_count"] == 3
+    assert prev_data["unknown_ids"] == []
+    assert t1_file.read_bytes() == t1_orig
+    assert t2_file.read_bytes() == t2_orig
+    assert plan_file.read_bytes() == plan_orig
+    plan_hash = prev_data["plan_hash"]
+
+    # Apply without --expect-plan-hash is refused
+    res_no_hash = run_cli("use-cases", "adopt-links", "--apply", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_no_hash.returncode != 0
+    assert "requires --expect-plan-hash" in json.loads(res_no_hash.stdout)["error"]
+
+    # 2. Test rollback on injected failure during apply
+    real_atomic_write = te._atomic_write_text
+    write_counter = {"n": 0}
+
+    def _fail_on_last_task_write(path: pathlib.Path, content: str, encoding: str = "utf-8") -> None:
+        # Allow snapshot manifest/report writes under _reviews, fail on the 2nd task file write
+        if "_reviews" not in path.parts:
+            write_counter["n"] += 1
+            if write_counter["n"] == 2:
+                raise OSError("Simulated write failure mid-adopt-links")
+        real_atomic_write(path, content, encoding=encoding)
+
+    monkeypatch.setattr(te, "_atomic_write_text", _fail_on_last_task_write)
+    args_fail = te.build_parser().parse_args([
+        "use-cases", "adopt-links", "--tasks-dir", str(tasks_dir),
+        "--apply", "--expect-plan-hash", plan_hash,
+    ])
+    with pytest.raises(OSError, match="Simulated write failure mid-adopt-links"):
+        te.cmd_use_cases_adopt_links(args_fail)
+    monkeypatch.setattr(te, "_atomic_write_text", real_atomic_write)
+
+    # Verify all task files rolled back byte-for-byte
+    assert t1_file.read_bytes() == t1_orig
+    assert t2_file.read_bytes() == t2_orig
+    assert plan_file.read_bytes() == plan_orig
+
+    # 3. Apply adopt-links succeeds
+    res_app = run_cli(
+        "use-cases", "adopt-links",
+        "--tasks-dir", str(tasks_dir),
+        "--apply", "--expect-plan-hash", plan_hash,
+        "--json",
+    )
+    assert res_app.returncode == 0, res_app.stdout + res_app.stderr
+    app_data = json.loads(res_app.stdout)
+    assert app_data["ok"] is True
+    assert app_data["applied"] is True
+    assert app_data["changed"] is True
+
+    # Verify snapshot directory and manifest with sha256 hashes of pre-apply files
+    snap_dir = pathlib.Path(app_data["snapshot_dir"])
+    assert snap_dir.is_dir()
+    assert snap_dir.parent == tasks_dir / "_reviews"
+    assert snap_dir.name.startswith("adopt-links-")
+    manifest_file = pathlib.Path(app_data["manifest_path"])
+    assert manifest_file.is_file()
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    assert manifest["plan_hash"] == plan_hash
+    assert manifest["files_count"] == 3
+    snap_by_rel = {f["path"]: f for f in manifest["files"]}
+    assert snap_by_rel["features/T001-auth.md"]["sha256"] == hashlib.sha256(t1_orig).hexdigest()
+    assert (snap_dir / "features/T001-auth.md").read_bytes() == t1_orig
+    assert snap_by_rel["features/T002-token.md"]["sha256"] == hashlib.sha256(t2_orig).hexdigest()
+    assert (snap_dir / "features/T002-token.md").read_bytes() == t2_orig
+    assert snap_by_rel["01-core/plan.md"]["sha256"] == hashlib.sha256(plan_orig).hexdigest()
+    assert (snap_dir / "01-core/plan.md").read_bytes() == plan_orig
+
+    # Verify union and canonical header/segment ordering on tasks
+    t1_after = t1_file.read_text(encoding="utf-8")
+    assert "- use-cases: UC001, UC099\n" in t1_after
+    assert t1_after.index("- run-id: run-abc") < t1_after.index("- use-cases: UC001, UC099") < t1_after.index("- short: Auth Flow")
+
+    t2_after = t2_file.read_text(encoding="utf-8")
+    assert "- use-cases: UC002\n" in t2_after
+    assert t2_after.index("- run-id: run-xyz") < t2_after.index("- use-cases: UC002") < t2_after.index("- short: Token Refresh")
+
+    plan_after = plan_file.read_text(encoding="utf-8")
+    assert "**Depends on:** - · **Use cases:** UC001, UC002, UC088 · **Labels:** storage" in plan_after
+    assert "**Depends on:** 01.1 · **Use cases:** UC002 · **Labels:** search" in plan_after
+
+    # 4. Idempotent second run (nothing to do)
+    res_second_prev = json.loads(
+        run_cli("use-cases", "adopt-links", "--tasks-dir", str(tasks_dir), "--json").stdout
+    )
+    assert res_second_prev["ok"] is True
+    assert res_second_prev["tasks_changed_count"] == 0
+    assert res_second_prev["files_changed_count"] == 0
+    assert res_second_prev["plan"] == []
+
+    res_second_app = json.loads(
+        run_cli(
+            "use-cases", "adopt-links", "--tasks-dir", str(tasks_dir),
+            "--apply", "--expect-plan-hash", res_second_prev["plan_hash"], "--json",
+        ).stdout
+    )
+    assert res_second_app["ok"] is True
+    assert res_second_app["applied"] is True
+    assert res_second_app["changed"] is False
+
+    # 5. After apply, sync-index guard no longer skips any use case and before/after linked-tasks lists are identical
+    sync_prev_after = json.loads(run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--preview", "--json").stdout)
+    assert sync_prev_after["skipped_unadopted_use_cases"] == []
+    res_sync_app = run_cli(
+        "sync-index", "--tasks-dir", str(tasks_dir),
+        "--apply", "--expect-plan-hash", sync_prev_after["plan_hash"], "--json",
+    )
+    assert res_sync_app.returncode == 0, res_sync_app.stdout + res_sync_app.stderr
+
+    ucs_after = {
+        u["id"]: list(u["written_linked_tasks"])
+        for u in te.discover_use_cases(tasks_dir)
+    }
+    derived_proj = te.compute_use_case_links(tasks_dir)
+    for ucid, before_list in ucs_before.items():
+        assert ucs_after[ucid] == before_list
+        assert derived_proj[ucid] == before_list
+
+
+def test_17_3_adopt_links_unknown_noncanonical_cross_workspace_refusal_and_skip_unknown(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Task 17.3 (items 1, 4):
+    - Fail-closed when `linked-tasks` contains an unknown task ID (`T999`), non-canonical ID (`bad_id` or
+      initiative container ID `01`), or cross-workspace reference (`workspace:other/T001`): preview and apply
+      return non-zero and list every offending reference.
+    - `--skip-unknown` allows preview and apply to proceed, adopting valid links and writing unresolved IDs
+      into the snapshot report and manifest.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "01-init").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    _write_sample_task(tasks_dir / "features" / "T001-valid.md", task_id="T001", title="Valid task", category="features")
+    (tasks_dir / "01-init" / "plan.md").write_text(
+        "# 01 — Init\n\n## Tasks\n\n### 01.1 - Valid child\n\n- **Status:** `open` · **Short:** Valid child · **Size:** S\n- **Goal:** Goal.\n",
+        encoding="utf-8",
+    )
+
+    (tasks_dir / "use-cases" / "UC001-mixed.md").write_text(
+        "# UC001 - Mixed links\n\n"
+        "- id: UC001\n"
+        "- title: Mixed links\n"
+        "- actor: User\n"
+        "- status: active\n"
+        "- priority: P1\n"
+        "- linked-tasks: T001, T999, workspace:other/T002, not-a-task-id, 01\n"
+        "- verification-type: automated-probe\n"
+        "- last-tested: -\n"
+        "- last-verdict: -\n\n"
+        "## Description & Business Value\nMixed.\n\n"
+        "## Preconditions\n- None.\n\n"
+        "## Scenario / Interaction Steps\n1. Step.\n\n"
+        "## Automated Verification Command\n```bash\necho ok\n```\n\n"
+        "## Acceptance Criteria\n- [ ] Ok.\n\n"
+        "## AI Validation Log\n",
+        encoding="utf-8",
+    )
+
+    # 1. Fail-closed without --skip-unknown (both preview and apply fail and list all 4 bad refs)
+    res_fail = run_cli("use-cases", "adopt-links", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_fail.returncode == 1
+    fail_data = json.loads(res_fail.stdout)
+    assert fail_data["ok"] is False
+    assert fail_data["applied"] is False
+    bad_ids = [u["task_id"] for u in fail_data["unknown_ids"]]
+    assert bad_ids == ["T999", "workspace:other/T002", "not-a-task-id", "01"]
+
+    res_fail_app = run_cli(
+        "use-cases", "adopt-links", "--tasks-dir", str(tasks_dir),
+        "--apply", "--expect-plan-hash", fail_data["plan_hash"], "--json",
+    )
+    assert res_fail_app.returncode == 1
+    assert "- use-cases:" not in (tasks_dir / "features" / "T001-valid.md").read_text(encoding="utf-8")
+
+    # 2. With --skip-unknown, preview succeeds and apply adopts T001 while recording the 4 unresolved refs in the report
+    res_skip_prev = run_cli(
+        "use-cases", "adopt-links", "--tasks-dir", str(tasks_dir), "--skip-unknown", "--json",
+    )
+    assert res_skip_prev.returncode == 0
+    skip_prev_data = json.loads(res_skip_prev.stdout)
+    assert skip_prev_data["ok"] is True
+    assert skip_prev_data["links_adopted"] == 1
+    assert len(skip_prev_data["unresolved"]) == 4
+
+    res_skip_app = run_cli(
+        "use-cases", "adopt-links", "--tasks-dir", str(tasks_dir),
+        "--skip-unknown", "--apply", "--expect-plan-hash", skip_prev_data["plan_hash"], "--json",
+    )
+    assert res_skip_app.returncode == 0, res_skip_app.stdout + res_skip_app.stderr
+    skip_app_data = json.loads(res_skip_app.stdout)
+    assert skip_app_data["ok"] is True
+    assert skip_app_data["applied"] is True
+    assert "- use-cases: UC001\n" in (tasks_dir / "features" / "T001-valid.md").read_text(encoding="utf-8")
+
+    snap_dir = pathlib.Path(skip_app_data["snapshot_dir"])
+    report_text = (snap_dir / "report.md").read_text(encoding="utf-8")
+    for bad_ref in ("T999", "workspace:other/T002", "not-a-task-id", "01"):
+        assert bad_ref in report_text
+    manifest = json.loads((snap_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert [u["task_id"] for u in manifest["unresolved_ids"]] == ["T999", "workspace:other/T002", "not-a-task-id", "01"]
+
+
+
 

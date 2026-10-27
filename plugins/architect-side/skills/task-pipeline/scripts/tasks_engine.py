@@ -2472,6 +2472,7 @@ def rewrite_block_in_file(
     clear_verify_by: bool = False,
     new_use_cases: list[str] | None = None,
     clear_use_cases: bool = False,
+    source_text: str | None = None,
 ) -> tuple[str, str] | tuple[str, str, str]:
     """Rewrite one `### id - title` block in place; every other byte of the file is preserved.
 
@@ -2489,7 +2490,7 @@ def rewrite_block_in_file(
         elif new_waiting_on is None:
             clear_waiting_on = True
 
-    text = file_path.read_text(encoding="utf-8")
+    text = source_text if source_text is not None else file_path.read_text(encoding="utf-8")
     heading_re = re.compile(
         rf"^###\s+{re.escape(task_id)}\s+[—–-]\s+.*$",
         re.MULTILINE,
@@ -6578,7 +6579,7 @@ def _plan_derived_use_case_rewrites(
         written_lt = list(uc.get("written_linked_tasks", uc.get("linked_tasks", [])))
         derived_lt = list(projection.get(uc_id, []))
 
-        if written_lt == derived_lt:
+        if sorted(written_lt, key=_natural_sort_key) == derived_lt:
             continue
 
         # Pre-adoption safety guard: do not wipe written linked-tasks to empty while written links are not yet adopted
@@ -6942,6 +6943,394 @@ def unlink_task_use_cases(
         dry_run=dry_run,
         expect_plan_hash=expect_plan_hash,
     )
+
+
+def _replace_block_in_text(
+    file_path: pathlib.Path,
+    source_text: str,
+    node_id: str,
+    new_ucs: list[str],
+) -> str:
+    """Replace `### <node_id> - ...` block in `source_text` using the 17.2 block rewriter (`rewrite_block_in_file`)."""
+    new_block_text, _ = rewrite_block_in_file(
+        file_path,
+        node_id,
+        new_use_cases=new_ucs,
+        clear_use_cases=(len(new_ucs) == 0),
+        dry_run=True,
+        return_diff=False,
+        source_text=source_text,
+    )
+    heading_re = re.compile(rf"^###\s+{re.escape(node_id)}\s+[—–-]\s+.*$", re.MULTILINE)
+    m_h = heading_re.search(source_text)
+    if not m_h:
+        raise ValueError(f"Block for task '{node_id}' not found in {file_path}")
+    start_pos = m_h.start()
+    scanned_lines, _ = scan_markdown_blocks(source_text)
+    heading_line_num = source_text[:start_pos].count("\n") + 1
+    heading_sline_idx = next(
+        (i for i, sl in enumerate(scanned_lines) if sl.line_number == heading_line_num),
+        None,
+    )
+    end_pos = len(source_text)
+    if heading_sline_idx is not None:
+        for idx in range(heading_sline_idx + 1, len(scanned_lines)):
+            sl = scanned_lines[idx]
+            if not sl.is_fenced and (sl.text.startswith("### ") or sl.text.startswith("## ")):
+                end_pos = sum(len(sl2.text) + 1 for sl2 in scanned_lines[:idx])
+                break
+    return source_text[:start_pos] + new_block_text + source_text[end_pos:]
+
+
+def _write_adopt_links_snapshot(
+    tasks_dir: pathlib.Path,
+    file_records: list[dict[str, Any]],
+    plan_hash: str,
+    unresolved: list[dict[str, Any]],
+) -> tuple[pathlib.Path, dict[str, Any]]:
+    """Snapshot every file that will change under `tasks/_reviews/adopt-links-<timestamp>/`
+    (copies + `manifest.json` with sha256 + `unresolved.md` when unresolved ids exist).
+    """
+    reviews_dir = tasks_dir / "_reviews"
+    reviews_dir.mkdir(parents=True, exist_ok=True)
+    ts_base = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    snap_dir = reviews_dir / f"adopt-links-{ts_base}"
+    suffix = 1
+    while snap_dir.exists():
+        snap_dir = reviews_dir / f"adopt-links-{ts_base}-{suffix}"
+        suffix += 1
+    snap_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_files: list[dict[str, Any]] = []
+    for rec in file_records:
+        src_path = pathlib.Path(rec["file_path"])
+        rel_path = rec["path"]
+        dst_path = snap_dir / rel_path
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_bytes = src_path.read_bytes()
+        sha = hashlib.sha256(raw_bytes).hexdigest()
+        dst_path.write_bytes(raw_bytes)
+        manifest_files.append({
+            "path": rel_path,
+            "file_path": str(src_path),
+            "snapshot_path": str(dst_path),
+            "sha256": sha,
+            "size_bytes": len(raw_bytes),
+            "tasks": [t["task_id"] for t in rec.get("tasks", [])],
+        })
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    manifest = {
+        "timestamp": now_iso,
+        "tasks_dir": str(tasks_dir),
+        "snapshot_dir": str(snap_dir),
+        "plan_hash": plan_hash,
+        "files_count": len(manifest_files),
+        "files": manifest_files,
+        "unresolved_ids": unresolved,
+    }
+    manifest_path = snap_dir / "manifest.json"
+    _atomic_write_text(manifest_path, json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    report_lines = [
+        f"# Adopt-Links Migration Report — {now_iso}",
+        "",
+        f"- **Plan Hash:** `{plan_hash}`",
+        f"- **Files Snapshotted:** {len(manifest_files)}",
+        f"- **Unresolved IDs:** {len(unresolved)}",
+        "",
+        "## Snapshotted Files (Before Apply)",
+        "",
+    ]
+    if manifest_files:
+        for mf in manifest_files:
+            report_lines.append(f"- `{mf['path']}` (`sha256:{mf['sha256']}`)")
+    else:
+        report_lines.append("- None")
+
+    if unresolved:
+        report_lines.extend([
+            "",
+            "## Unresolved IDs (Skipped via --skip-unknown)",
+            "",
+        ])
+        for u in unresolved:
+            report_lines.append(
+                f"- **{u['use_case_id']}** (`{u['use_case_path']}`): `{u['task_id']}` — {u['reason']}"
+            )
+    _atomic_write_text(snap_dir / "report.md", "\n".join(report_lines) + "\n", encoding="utf-8")
+    return snap_dir, manifest
+
+
+def adopt_use_case_links(
+    tasks_dir: pathlib.Path,
+    *,
+    dry_run: bool = True,
+    expect_plan_hash: str | None = None,
+    skip_unknown: bool = False,
+) -> dict[str, Any]:
+    """Migrate written `linked-tasks` from use cases onto referenced tasks' `use-cases` (Spec 17.3).
+
+    - Preview by default (`dry_run=True`); `--apply --expect-plan-hash <hash>` writes changes.
+    - Union only, never removes existing task `use-cases`.
+    - Uses the 17.2 writer (`_rewrite_emergent_use_cases_in_text` for emergent/micro tasks,
+      `rewrite_block_in_file` for initiative blocks).
+    - Fail-closed on unknown, non-canonical, or cross-workspace (`workspace:x/...`) task IDs unless
+      `skip_unknown=True` (`--skip-unknown`), which proceeds while recording them as unresolved in the report.
+    - Snapshots every file that will change under `tasks/_reviews/adopt-links-<timestamp>/` (copies + manifest with sha256)
+      before applying, and writes all changes atomically with rollback on failure.
+    """
+    if not is_platform_supported() and not dry_run:
+        return {
+            "ok": False,
+            "applied": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    lock_ctx = contextlib.nullcontext() if dry_run else task_write_lock(tasks_dir)
+    with lock_ctx:
+        tree = discover_task_tree(tasks_dir)
+        all_ucs = sorted(discover_use_cases(tasks_dir), key=lambda u: _natural_sort_key(u.get("id", "")))
+
+        additions_by_task: dict[str, list[str]] = {}
+        unknown_refs: list[dict[str, Any]] = []
+        use_cases_with_links_count = 0
+        links_total_count = 0
+        links_adopted_count = 0
+
+        for uc in all_ucs:
+            uc_id = uc.get("id", "")
+            if not uc_id:
+                continue
+            uc_path = pathlib.Path(uc["file_path"])
+            uc_rel = uc.get("rel_path") or (uc_path.relative_to(tasks_dir).as_posix() if uc_path.is_relative_to(tasks_dir) else str(uc_path))
+            written_lt = list(uc.get("written_linked_tasks", uc.get("linked_tasks", [])))
+            if written_lt:
+                use_cases_with_links_count += 1
+
+            for raw_tid in written_lt:
+                tid = raw_tid.strip()
+                if not tid or tid == "-":
+                    continue
+                links_total_count += 1
+
+                # Classify unknown / non-canonical / cross-workspace refs
+                reason: str | None = None
+                if tid.lower().startswith("workspace:"):
+                    reason = "cross-workspace reference is not a local task in this tree"
+                elif not TASK_ID_RE.match(tid):
+                    reason = "non-canonical task ID"
+                elif tid not in tree:
+                    reason = "unknown task ID (not found in this tasks/ tree)"
+                else:
+                    target_node = tree[tid]
+                    if target_node.node_type == "initiative":
+                        reason = "non-canonical task target (initiative container ID, not a task)"
+                    elif target_node.canonical_state == "moved":
+                        reason = "task is a moved pointer stub"
+
+                if reason is not None:
+                    unknown_refs.append({
+                        "use_case_id": uc_id,
+                        "use_case_path": uc_rel,
+                        "task_id": tid,
+                        "reason": reason,
+                    })
+                    continue
+
+                links_adopted_count += 1
+                bucket = additions_by_task.setdefault(tid, [])
+                if uc_id not in bucket:
+                    bucket.append(uc_id)
+
+        # Group target tasks by file so multi-block plan files are rewritten once in a single atomic write
+        tasks_by_file: dict[pathlib.Path, list[str]] = {}
+        for tid in sorted(additions_by_task.keys(), key=_natural_sort_key):
+            node = tree[tid]
+            tfile = pathlib.Path(node.file_path).resolve()
+            tasks_by_file.setdefault(tfile, []).append(tid)
+
+        file_records: list[dict[str, Any]] = []
+        task_changes: list[dict[str, Any]] = []
+
+        for tfile in sorted(tasks_by_file.keys(), key=lambda p: p.as_posix()):
+            tids = tasks_by_file[tfile]
+            rel_path = tfile.relative_to(tasks_dir).as_posix() if tfile.is_relative_to(tasks_dir) else str(tfile)
+            old_file_text = tfile.read_text(encoding="utf-8")
+            curr_file_text = old_file_text
+            per_file_tasks: list[dict[str, Any]] = []
+
+            for tid in tids:
+                node = tree[tid]
+                curr_ucs = list(node.use_cases) if node.use_cases else parse_use_cases_field(
+                    (node.own_fields or {}).get("use-cases") or (node.own_fields or {}).get("use_cases")
+                )
+                added_ucs: list[str] = []
+                merged_ucs = list(curr_ucs)
+                for ucid in sorted(additions_by_task[tid], key=_natural_sort_key):
+                    if ucid not in merged_ucs:
+                        merged_ucs.append(ucid)
+                        added_ucs.append(ucid)
+                new_ucs = sorted(merged_ucs, key=_natural_sort_key)
+
+                if new_ucs == curr_ucs:
+                    continue
+
+                if node.block_text is not None:
+                    curr_file_text = _replace_block_in_text(tfile, curr_file_text, tid, new_ucs)
+                else:
+                    is_micro = node.node_type == "microtask" or node.category == "micro"
+                    curr_file_text = _rewrite_emergent_use_cases_in_text(curr_file_text, new_ucs, is_micro=is_micro)
+
+                change_entry = {
+                    "task_id": tid,
+                    "path": rel_path,
+                    "file_path": str(tfile),
+                    "node_type": "initiative_block" if node.block_text is not None else node.node_type,
+                    "old_use_cases": curr_ucs,
+                    "added_use_cases": added_ucs,
+                    "new_use_cases": new_ucs,
+                }
+                per_file_tasks.append(change_entry)
+                task_changes.append(change_entry)
+
+            if curr_file_text != old_file_text and per_file_tasks:
+                diff_lines = list(
+                    difflib.unified_diff(
+                        old_file_text.splitlines(keepends=True),
+                        curr_file_text.splitlines(keepends=True),
+                        fromfile=str(tfile),
+                        tofile=f"{tfile} (dry-run)" if dry_run else str(tfile),
+                    )
+                )
+                if len(per_file_tasks) == 1:
+                    t0 = per_file_tasks[0]
+                    old_fmt = ", ".join(t0["old_use_cases"]) or "-"
+                    new_fmt = ", ".join(t0["new_use_cases"]) or "-"
+                    summary = f"{t0['task_id']} use-cases: [{old_fmt}] -> [{new_fmt}]"
+                else:
+                    parts = [
+                        f"{t['task_id']}: [{', '.join(t['old_use_cases']) or '-'}] -> [{', '.join(t['new_use_cases']) or '-'}]"
+                        for t in per_file_tasks
+                    ]
+                    summary = f"use-cases updated on {len(per_file_tasks)} tasks ({'; '.join(parts)})"
+
+                file_records.append({
+                    "path": rel_path,
+                    "file_path": str(tfile),
+                    "before_hash": _file_sha256(tfile),
+                    "old_text": old_file_text,
+                    "new_text": curr_file_text,
+                    "tasks": per_file_tasks,
+                    "summary": summary,
+                    "diff": "".join(diff_lines),
+                })
+
+        operations: list[dict[str, Any]] = [
+            {
+                "action": "modify",
+                "path": rec["path"],
+                "before_hash": rec["before_hash"],
+                "summary": rec["summary"],
+            }
+            for rec in file_records
+        ]
+        plan, plan_hash = compute_operation_plan(operations)
+        combined_diff = "\n".join(rec["diff"] for rec in file_records if rec.get("diff"))
+
+        has_unresolved = len(unknown_refs) > 0
+        blocked_by_unknown = has_unresolved and not skip_unknown
+
+        base_result: dict[str, Any] = {
+            "ok": not blocked_by_unknown,
+            "applied": False,
+            "dry_run": dry_run,
+            "skip_unknown": skip_unknown,
+            "use_cases_total": len(all_ucs),
+            "use_cases_with_links": use_cases_with_links_count,
+            "links_total": links_total_count,
+            "links_adopted": links_adopted_count,
+            "tasks_changed_count": len(task_changes),
+            "files_changed_count": len(file_records),
+            "task_changes": task_changes,
+            "unknown_ids": unknown_refs,
+            "unresolved": unknown_refs,
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "diff": combined_diff,
+            "snapshot_dir": None,
+            "manifest_path": None,
+        }
+
+        if blocked_by_unknown:
+            unk_summary = ", ".join(f"{u['use_case_id']}->{u['task_id']} ({u['reason']})" for u in unknown_refs)
+            base_result["error"] = (
+                f"Refusing to adopt links: {len(unknown_refs)} unknown, non-canonical, or cross-workspace task reference(s) found: "
+                f"{unk_summary}. Fix them or pass --skip-unknown to proceed and record them as unresolved."
+            )
+            return base_result
+
+        if dry_run:
+            return base_result
+
+        if not expect_plan_hash:
+            base_result["ok"] = False
+            base_result["error"] = (
+                "Applying adopt-links requires --expect-plan-hash <hash>. "
+                "Run without --apply to preview and obtain the plan hash."
+            )
+            return base_result
+
+        if expect_plan_hash.strip().lower() != plan_hash.lower():
+            base_result["ok"] = False
+            base_result["error"] = f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}"
+            return base_result
+
+        # Idempotent no-op when nothing to change and no unresolved report needed
+        if not file_records and not unknown_refs:
+            base_result["ok"] = True
+            base_result["applied"] = True
+            base_result["changed"] = False
+            return base_result
+
+        # Write snapshot under tasks/_reviews/adopt-links-<timestamp>/ BEFORE applying
+        snap_dir, manifest = _write_adopt_links_snapshot(
+            tasks_dir,
+            file_records,
+            plan_hash=plan_hash,
+            unresolved=unknown_refs,
+        )
+        base_result["snapshot_dir"] = str(snap_dir)
+        base_result["manifest_path"] = str(snap_dir / "manifest.json")
+        base_result["manifest"] = manifest
+
+        writes: list[tuple[pathlib.Path, str]] = [
+            (pathlib.Path(rec["file_path"]), rec["new_text"])
+            for rec in file_records
+        ]
+        if writes:
+            _apply_file_writes_atomically(writes)
+
+        for tc in task_changes:
+            _emit_event(
+                tasks_dir,
+                "task.updated",
+                {
+                    "field": "use_cases",
+                    "value": ", ".join(tc["new_use_cases"]) if tc["new_use_cases"] else "-",
+                    "old_use_cases": tc["old_use_cases"],
+                    "use_cases": tc["new_use_cases"],
+                    "source": "use-cases.adopt-links",
+                },
+                subject=tc["task_id"],
+            )
+
+        base_result["ok"] = True
+        base_result["applied"] = True
+        base_result["changed"] = len(writes) > 0
+        return base_result
 
 
 # ---------------------------------------------------------------------------
@@ -9512,7 +9901,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
     for ucid, (uc_rel, uc) in parsed_ucs_by_id.items():
         written_lt = list(uc.get("linked_tasks", []))
         derived_lt = list(uc_link_projection.get(ucid, []))
-        if written_lt != derived_lt:
+        if sorted(written_lt, key=_natural_sort_key) != derived_lt:
             written_fmt = ", ".join(written_lt) or "-"
             derived_fmt = ", ".join(derived_lt) or "-"
             warnings.append(
@@ -18528,6 +18917,92 @@ def cmd_use_cases_campaign(args: argparse.Namespace) -> int:
     return 0 if res["failed"] == 0 else 1
 
 
+def cmd_use_cases_adopt_links(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    apply_flag = bool(getattr(args, "apply", False))
+    preview_flag = bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
+    effective_dry_run = not (apply_flag and not preview_flag)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    skip_unknown = bool(getattr(args, "skip_unknown", False))
+    is_json = bool(getattr(args, "json", False))
+
+    res = adopt_use_case_links(
+        tasks_dir=tasks_dir,
+        dry_run=effective_dry_run,
+        expect_plan_hash=expect_plan_hash,
+        skip_unknown=skip_unknown,
+    )
+    args._last_result = res
+    if is_json:
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
+    unknown_list = res.get("unknown_ids", [])
+    if not res.get("ok"):
+        print(f"[FAIL] {res.get('error', 'adopt-links failed')}", file=sys.stderr)
+        if unknown_list:
+            for u in unknown_list:
+                print(
+                    f"  - {u['use_case_id']} ({u['use_case_path']}): {u['task_id']} — {u['reason']}",
+                    file=sys.stderr,
+                )
+        if res.get("plan_hash"):
+            print(f"Plan hash: {res['plan_hash']}", file=sys.stderr)
+        return 1
+
+    if effective_dry_run:
+        print(
+            f"[preview] adopt-links: {res.get('use_cases_with_links', 0)}/{res.get('use_cases_total', 0)} use cases with links, "
+            f"{res.get('links_adopted', 0)} link(s) across {res.get('tasks_changed_count', 0)} task(s) in {res.get('files_changed_count', 0)} file(s) "
+            f"(plan hash: {res.get('plan_hash', '')})"
+        )
+        for tc in res.get("task_changes", []):
+            old_str = ", ".join(tc.get("old_use_cases", [])) or "-"
+            new_str = ", ".join(tc.get("new_use_cases", [])) or "-"
+            print(f"  - [task] {tc['task_id']} ({tc['path']}): use-cases [{old_str}] -> [{new_str}]")
+        for item in res.get("plan", []):
+            summary_str = f" ({item['summary']})" if item.get("summary") else ""
+            print(f"  - [{item.get('action', 'modify')}] {item.get('path', '')}{summary_str}")
+        if unknown_list:
+            print(f"  - [unresolved] {len(unknown_list)} skipped via --skip-unknown:")
+            for u in unknown_list:
+                print(f"      * {u['use_case_id']} ({u['use_case_path']}): {u['task_id']} — {u['reason']}")
+        if res.get("diff"):
+            sys.stdout.write(res["diff"])
+            if not res["diff"].endswith("\n"):
+                print()
+        if not res.get("plan"):
+            print("[ok] all use-case links already adopted on tasks; nothing to change")
+        print(f"Plan hash: {res.get('plan_hash', '')}")
+        skip_hint = "--skip-unknown " if skip_unknown else ""
+        print(
+            f"[preview] apply with: {skip_hint}--apply --expect-plan-hash {res.get('plan_hash', '')}",
+            file=sys.stderr,
+        )
+        print("[preview] nothing written; re-run with --apply to write these changes")
+        return 0
+
+    if not res.get("changed") and not unknown_list:
+        print("[ok] all use-case links already adopted on tasks; nothing written")
+        return 0
+
+    print(
+        f"[ok] adopted {res.get('links_adopted', 0)} link(s) across {res.get('tasks_changed_count', 0)} task(s) "
+        f"in {res.get('files_changed_count', 0)} file(s)"
+    )
+    if res.get("snapshot_dir"):
+        print(f"  - snapshot: {res['snapshot_dir']} (manifest: {res.get('manifest_path')})")
+    for tc in res.get("task_changes", []):
+        old_str = ", ".join(tc.get("old_use_cases", [])) or "-"
+        new_str = ", ".join(tc.get("new_use_cases", [])) or "-"
+        print(f"  - updated {tc['task_id']} ({tc['path']}): use-cases [{old_str}] -> [{new_str}]")
+    if unknown_list:
+        print(f"  - unresolved ({len(unknown_list)} skipped via --skip-unknown):")
+        for u in unknown_list:
+            print(f"      * {u['use_case_id']} ({u['use_case_path']}): {u['task_id']} — {u['reason']}")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Inbox Notes (N###) Data Model, Operations & Commands
 # ---------------------------------------------------------------------------
@@ -23209,6 +23684,18 @@ def build_parser() -> argparse.ArgumentParser:
     uc_camp.add_argument("--tasks-dir", default="tasks")
     uc_camp.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     uc_camp.set_defaults(func=cmd_use_cases_campaign)
+
+    uc_adopt = uc_sub.add_parser(
+        "adopt-links",
+        help="Copy written linked-tasks from use cases onto referenced tasks' use-cases (preview by default; writes with --apply --expect-plan-hash)",
+    )
+    uc_adopt.add_argument("--apply", action="store_true", default=False, help="Apply migration after snapshotting touched files")
+    uc_adopt.add_argument("--preview", "--dry-run", dest="preview", action="store_true", default=False, help="Preview changes without writing (default)")
+    uc_adopt.add_argument("--expect-plan-hash", "--expect-hash", dest="expect_plan_hash", default=None, help="Expected plan hash from preview")
+    uc_adopt.add_argument("--skip-unknown", action="store_true", default=False, help="Proceed when unknown/non-canonical/cross-workspace task IDs exist, recording them as unresolved in the report")
+    uc_adopt.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    uc_adopt.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    uc_adopt.set_defaults(func=cmd_use_cases_adopt_links)
 
     # tasks step
     p_step = sub.add_parser("step", help="Checklist commands for ## Steps of an emergent task")

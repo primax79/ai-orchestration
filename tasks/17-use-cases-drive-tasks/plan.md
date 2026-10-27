@@ -12,8 +12,9 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.3 - Migrazione adopt-links
 
-- **Status:** `open` · **Short:** Migrazione adopt-links · **Size:** S · **Depends on:** 17.2
+- **Status:** `delivered` (2026-10-28, kilo: comando `use-cases adopt-links` fail-closed con `--skip-unknown`, snapshot con manifesto sha256 in `_reviews/adopt-links-<timestamp>/` e applicazione atomica con rollback) · **Short:** Migrazione adopt-links · **Size:** S · **Depends on:** 17.2
 - **Goal:** spec §1: `use-cases adopt-links` porta i `linked-tasks` attuali sui task (unione), si ferma sugli id sconosciuti, istantanea in `_reviews/`; nessun collegamento perso (test su copia di git-code-rag).
+- **Verification:** `use-cases adopt-links` (anteprima predefinita, `--apply --expect-plan-hash`) unisce i `linked-tasks` degli use case nei campi `use-cases:` / `**Use cases:**` dei task tramite lo scrittore di 17.2, rifiuta in modo fail-closed id sconosciuti/non canonici/cross-workspace salvo `--skip-unknown` (registrandoli nel report), salva una copia dei file toccati con `manifest.json` (sha256) in `tasks/_reviews/adopt-links-<timestamp>/` prima della scrittura atomica con rollback, sblocca la guardia pre-adozione di `sync-index` preservando gli elenchi di task collegati; verificato anche su copie di `ai-orchestration/tasks` (36/37 use case con link, 109 link adottati, 0 sconosciuti) e `git-code-rag/tasks` (32/41 use case con link, 71 link adottati, 0 sconosciuti) con `sync-index` successivo a 0 riscritture.
 
 ### 17.4 - Task che nascono dagli use case; kind facoltativo; migrazione dei chiamanti
 
