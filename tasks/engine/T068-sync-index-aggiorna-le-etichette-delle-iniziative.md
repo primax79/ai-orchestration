@@ -6,7 +6,7 @@
 - priority: P3
 - priority-reason: Dopo la traduzione 65 etichette sono rimaste in inglese; sistemate a mano
 - next-up: no
-- state: open
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -22,8 +22,20 @@ After translating plan titles (T036, 2026-10-27) sync-index reported 'already in
 
 ## Steps
 
-- [ ] Un'etichetta uguale a un titolo precedente del piano (dalla storia git o dal titolo registrato all'ultima sync) non è curata a mano e segue il titolo attuale; in alternativa un'opzione sync-index --refresh-labels
+- [x] Per le righe di iniziativa (link a `NN-slug/plan.md` o `summary.md` nelle tabelle Initiatives e Done): l'etichetta segue il titolo attuale del piano (ripulito da prefisso numerico e suffissi come `— Implementation plan`/`— Piano di implementazione`/`— Summary`/`— Riepilogo`), a meno che l'etichetta non sia curata a mano (diversa dal titolo attuale e da ogni titolo precedente estratto da `git log -p --follow -- <plan.md>`, oppure se non in repo git se non è prefisso o sottostringa del titolo).
+- [x] Aggiunta opzione `sync-index --refresh-labels` per forzare l'allineamento delle etichette delle iniziative ai titoli attuali dei piani (anteprima mostra le modifiche; applicazione con hash abituale).
+- [x] Le righe dei task emergenti mantengono inalterato il comportamento T050.
 
 ## Verification
 
-- Test: piano rinominato, l'etichetta nell'indice si aggiorna; un'etichetta scritta a mano diversa da ogni titolo passato resta
+- Test specifici T068 eseguiti con successo in `test_tasks_engine.py`:
+  - `test_t068_clean_initiative_title`: pulizia corretta dei titoli di piano/riepilogo, rimozione di prefissi numerici e suffissi `— Implementation plan`, `— Piano di implementazione`, `— Summary`, `— Riepilogo`.
+  - `test_t068_sync_index_initiative_labels_renamed_and_curated`: piano rinominato aggiorna l'etichetta con sync normale se il vecchio titolo è nella cronologia git; etichetta scritta a mano diversa da tutti i titoli passati viene mantenuta; le righe dei task emergenti rimangono invariate; `--refresh-labels` sovrascrive le etichette curate delle iniziative lasciando intatti i task.
+  - `test_t068_sync_index_initiative_labels_non_git_repo`: in directory non-git le etichette prefisso/sottostringa seguono il titolo corrente, le etichette completamente diverse vengono mantenute come curate; `--refresh-labels` le forza.
+  - `test_t068_sync_index_initiative_in_done_table`: le righe di iniziativa presenti nella tabella Done seguono le stesse regole (aggiornamento da storico git, mantenimento etichette curate, override con `--refresh-labels`).
+- Test suite completa passata: `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider plugins/architect-side/skills/task-pipeline/scripts/` (241 passati su 241).
+- Verifica reale: `sync-index --tasks-dir tasks` su questo repo non riporta modifiche alle iniziative (`Initiatives: +0 -0 ~0 row(s)`).
+
+## Log (newest first)
+
+- 2026-10-27, kilo: state `open` -> `delivered` — etichette delle iniziative allineate ai titoli correnti del piano con fallback git/curated e flag --refresh-labels
