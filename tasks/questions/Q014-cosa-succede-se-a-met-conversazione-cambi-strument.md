@@ -2,7 +2,7 @@
 
 - id: Q014
 - question: Cosa succede se a metà conversazione cambi strumento o modello?
-- status: open
+- status: answered
 - blocks: T074 (waiting)
 - decider: owner
 - asked-by: ai-coding-tools-d8
@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
+- applied: no
 - short: Cambio di modello nel filo
 
 ## Context
@@ -23,6 +24,6 @@ Spec tasks/specs/contextual-element-chat.md (T074), rivista da Codex. §9 Q-C.
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-28

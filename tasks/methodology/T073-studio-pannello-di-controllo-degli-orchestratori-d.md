@@ -6,13 +6,14 @@
 - priority: P1
 - priority-reason: Richiesta del proprietario 2026-10-27: oggi i registri non concordano e il ruolo di orchestratore non è visibile né gestibile
 - next-up: no
-- state: in progress
+- state: waiting
 - executor: kilo
 - depends-on: -
-- decider: owner
+- decider: Q025, Q026, Q027, Q028, Q029, Q030
 - sources: _inbox/analyzed/20261027-144545-in-depth-study-orchestrator-feedback-han/note.md
 - paths: N068; N069; specs ui-multi-project.md, orchestration-broker-mcp.md, orchestration-extension-spec.md, events-and-triggers.md; UC028, UC030, UC033, UC037
 - handoff: Read tasks/methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md, do the open steps, run the Verification, update the task and the registry.
+- waiting-on: question:Q030
 - short: Studio pannello orchestratori
 
 ## Goal
@@ -31,5 +32,11 @@ Owner request (2026-10-27, verbatim intent): we need a mechanism that gives feed
 
 ## Log
 
+- 2026-10-28, ai-coding-tools-87: state `waiting` -> `waiting` — Blocked by question Q030
+- 2026-10-28, ai-coding-tools-87: state `waiting` -> `waiting` — Blocked by question Q029
+- 2026-10-28, ai-coding-tools-87: state `waiting` -> `waiting` — Blocked by question Q028
+- 2026-10-28, ai-coding-tools-87: state `waiting` -> `waiting` — Blocked by question Q027
+- 2026-10-28, ai-coding-tools-87: state `waiting` -> `waiting` — Blocked by question Q026
+- 2026-10-28, ai-coding-tools-87: state `in progress` -> `waiting` — Blocked by question Q025
 - 2026-10-27, kilo: bozza dello studio scritta
 - 2026-10-27, kilo: studio rivisto dopo la revisione di Codex

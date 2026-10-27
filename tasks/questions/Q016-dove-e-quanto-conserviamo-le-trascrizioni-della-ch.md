@@ -2,7 +2,7 @@
 
 - id: Q016
 - question: Dove e quanto conserviamo le trascrizioni della chat?
-- status: open
+- status: answered
 - blocks: T074 (waiting)
 - decider: owner
 - asked-by: ai-coding-tools-d8
@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
+- applied: no
 - short: Conservazione trascrizioni
 
 ## Context
@@ -23,6 +24,6 @@ Spec tasks/specs/contextual-element-chat.md (T074), rivista da Codex. §9 Q-E. P
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-28

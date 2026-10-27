@@ -6,15 +6,14 @@
 - priority: P1
 - priority-reason: Richiesta del proprietario 2026-10-27: interagire con l'IA a partire dalla vista di un elemento
 - next-up: no
-- state: waiting
+- state: open
 - executor: kilo
 - depends-on: T073
-- decider: Q012, Q013, Q014, Q015, Q016, Q017
+- decider: -
 - sources: owner 2026-10-27: 'mi servirebbe poter interagire con ia relativamente a una specifica use-case, task, o questione; nella vista elemento un box in cui mando un messaggio, o apro un pannello contestuale per chat'
 - paths: tasks/specs/contextual-element-chat.md, ai-orchestration-ui, vscode-ai-orchestration
 - handoff: Read tasks/methodology/T074-chat-contestuale-con-l-ia-su-un-singolo-use-case-t.md, do the open steps, run the Verification, update the task and the registry.
 - verify-by: owner
-- waiting-on: question:Q017
 - short: Chat contestuale per elemento
 
 ## Goal
@@ -46,6 +45,7 @@ l'IA ha tutti i tool a disposizione per interagire con gli elementi, cambia solo
 
 ## Log
 
+- 2026-10-28, owner: state `waiting` -> `open` — Unblocked: question Q017 answered
 - 2026-10-27, ai-coding-tools-d8: state `waiting` -> `waiting` — Blocked by question Q017
 - 2026-10-27, ai-coding-tools-d8: state `waiting` -> `waiting` — Blocked by question Q016
 - 2026-10-27, ai-coding-tools-d8: state `waiting` -> `waiting` — Blocked by question Q015

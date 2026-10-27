@@ -2,7 +2,7 @@
 
 - id: Q019
 - question: Come chiamiamo il ritorno indietro dopo un'azione?
-- status: open
+- status: answered
 - blocks: T076 (waiting)
 - decider: owner
 - asked-by: ai-coding-tools-d8
@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
+- applied: no
 - short: Annulla o Riapri
 
 ## Context
@@ -23,6 +24,6 @@ Studio tasks/specs/owner-interactions-study.md (T076), rivisto da Codex. §7 Q-B
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: A
+- answered-by: owner
+- answered: 2026-10-28
