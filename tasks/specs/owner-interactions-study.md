@@ -1,358 +1,390 @@
 # Study: Owner Interactions with Registry Elements from the UI (T076)
 
 - **Task:** `T076 (Studio interazioni UI)`
-- **Date:** 2026-10-27
-- **Status:** Draft for owner review
-- **Scope:** `ai-orchestration` (`tasks_engine.py`), `ai-orchestration-ui` (`backend/server.py`, `frontend/src/components/*`), `vscode-ai-orchestration` (`src/*`, webview bridge & sidebar tree views)
-- **Related specs & tasks:** `T074 (Chat contestuale per elemento)`, `T075 (Valida e chiudi da UI)`, `T073 (Studio pannello orchestratori)`, Initiative `17` (`use-cases-drive-tasks.md`), `task-and-state-model.md`, `control-plane-safety.md`, `ui-multi-project.md`, `orchestration-extension-spec.md`.
+- **Date:** 2026-10-27 (revised after independent Codex review)
+- **Status:** Revised draft for owner review
+- **Scope:** `ai-orchestration` (`tasks_engine.py`), `ai-orchestration-ui` (`backend/server.py`, `frontend/src/components/*`), `vscode-ai-orchestration` (`src/*`, webview bridge & native sidebar tree views)
+- **Related specs & tasks:** `T074 (Chat contestuale per elemento)` (`tasks/specs/contextual-element-chat.md`), `T075 (Valida e chiudi da UI)`, `T073 (Studio pannello orchestratori)`, Initiative `17` (`use-cases-drive-tasks.md`), `task-and-state-model.md`, `control-plane-safety.md`, `ui-multi-project.md`, `orchestration-extension-spec.md`.
 
 ---
 
 ## Executive Summary & Guiding Principles
 
-The owner has been requesting individual UI actions one by one:
+The owner has requested several high-frequency UI interactions over recent sessions:
 - *"Validate & close"* on the `Delivered` column header and on individual tasks (`T075`);
-- *Contextual AI chat* inside a task, use case, or question view (`T074`, where the AI has full tool access and only the conversation context is scoped to the element);
+- *Contextual AI chat* inside a task, use case, question, or inbox note view (`T074`, where the AI has full tool access and only the conversation context is scoped to the element);
 - *Inline field editing* (2026-10-27: *"e.g. interface to change priority: clicking the current priority opens a menu to change it"*);
+- *Process inbox* (2026-10-27: *"mi processi tutti gli inbox? anche per questo servirebbe un comando sull'interfaccia, che eventualmente apre una chat"*);
 - Earlier requests: quick *Pause / Resume* buttons on cards, *Request validation* (`verify-by`), and *Show/hide empty projects*.
 
-Designing these piece by piece has produced an inconsistent interaction model: changing a task's priority works only in the Timeline view and requires 5 clicks including a full-screen diff modal; pausing a task is 1 click on a Kanban card and skips hash checks; validating & closing a delivered task requires opening the detail modal twice (`Approve (Verified)` -> modal closes -> reopen -> `Close Task (Done)`), whereas the CLI engine (`T035`) already supports a single `transition <id> done --verifier owner` walk.
+Designing these piece by piece has left an inconsistent interaction model:
+- Changing a task's priority works only in the Timeline view and requires **4 clicks** (+ optional typing): (1) click priority pill (`TimelineCard.tsx:491`), (2) click `P0`–`P3` in the popover (`TimelineCard.tsx:526`), (3) click `Preview` (`TimelineCard.tsx:582`), (4) click `Apply` in the full-screen `ConfirmDialog` diff modal (`TimelineView.tsx:330-350`).
+- Validating & closing a delivered task today requires **4 clicks across two modal openings**: (1) click the `delivered` card to open `TaskDetailModal`, (2) click `Approve (Verified)` (`TaskDetailModal.tsx:2333`), which calls `onClose()` (`TaskDetailModal.tsx:715`), (3) click the card again in the `Verified` sub-column to reopen `TaskDetailModal`, (4) click `Close Task (Done)` (`TaskDetailModal.tsx:2356`)—whereas the CLI engine (`T035`) already supports a single `transition <id> done --verifier owner` walk.
 
 ### Guiding Criterion: Speed ("Interagire Velocemente")
-1. **One click (or one key) from where the element is seen:** Frequent actions and short-field edits happen **in place** on the card, queue row, tree node, or detail header via inline popovers, hover quick-actions, context menus, and keyboard shortcuts—never forcing a view change or modal round-trip.
-2. **Inline-Edit Everywhere Pattern:** Clicking any short metadata pill (`priority`, `state`, `executor`, `size`, `kind`, `verify-by`, `use-cases`, `labels`, `next-up`, `approval` on use cases) anywhere it is rendered opens a lightweight popover showing **only valid values** for that element/state. Selecting a value executes the engine's preview+hash+apply transaction **automatically under the hood** (`--dry-run` -> `expect_hash` apply) and shows a non-blocking toast with a 1-click **`[Undo]`**. If a field requires a reason (`priority-reason` on emergent tasks, `reason` on `bounced`/`dropped`/`reopen`), the popover includes a compact inline text input (`Enter` to submit).
-3. **Confirmation only for destructive or bulk actions:** Single-item reversible mutations apply immediately with toast undo. Confirmation dialogs are reserved strictly for (a) **bulk actions** (column header actions showing the affected item list + optional note), (b) **destructive actions** (`discard` note, `withdraw` question, `drop` task, `clean` worktree), and (c) **structural/multi-file rewrites** (`sync-index`, `adopt-links`, `expand`/`collapse`, `AGENTS.md`).
+1. **Minimal clicks from where the element is seen (no view switching):**
+   - **Direct primary action buttons** on a card or row (`Validate & Close`, `Pause / Resume`, `Start`, `Deliver`, `Chat`, `Process Note`) cost **1 click**.
+   - **Inline field popover edits** (`Priority`, `Executor`, `State` transitions, `Size`, `Kind`, `Verify-by`, `Use Cases`, `Labels`) cost **2 clicks** (1 click to open the pill menu -> 1 click to select the valid value; + `Enter` only when a mandatory reason is missing).
+   - **Keyboard shortcuts** cost **1 key** (`v`, `p`, `e`, `s`, `l`, `u`, `c`, `Space`) when a card, row, or detail modal already has focus.
+2. **Restrained Card Density (1–2 Primary Actions + 1 Overflow Menu `[⋯]`):**
+   - To avoid cramming 8 tiny buttons onto a Kanban card, each card renders **only its core identity/metadata pills** (`Priority`, `Kind`, `Executor`, `Use Cases`), **1–2 state-specific primary actions** (e.g. `[✓✓ Validate & Close]` and `[💬]` on `delivered`), and **one consistent overflow/context menu `[⋯]`** (also triggered by right-click) holding secondary transitions (`Bounce…`, `Verify-by…`, `Reopen…`, `Drop…`, `Move to Project…`, `Copy Handoff`).
+3. **VS Code Sidebar TreeViews vs. React Webview:**
+   - VS Code's native `TreeView` (`nextUpView`, `initiativesView`, `decisionsView`, `useCasesView`) **cannot render React inline-edit pills or custom HTML popovers**. Its fast path consists of **inline action icons** (`"group": "inline"` in `package.json`, up to 2–3 icons on hover such as `Validate & Close`, `Chat on Element`, `Open Markdown File`), **rich right-click context menus** (`view/item/context` with QuickPick for `Set Priority`, `Set Executor`, `Transition State`), and **keybindings** (`when: "focusedView == nextUpView"`). Clicking a tree item opens its interactive Detail Modal in the Dashboard Webview.
+4. **Honest Reversibility (Exact Inverse `[Undo]` vs. Compensating `[Reopen]`):**
+   - Single-item field edits with an **exact inverse** (`priority`, `size`, `kind`, `executor`, `labels`, `use-cases`, `short`, `next-up`, `verify-by`, `step check/uncheck`, `UC approval`) apply immediately and show a toast with **`[Undo]`**, which re-applies the previous value against the **new post-mutation `task_hash`**.
+   - State closures (`Validate & Close`, `Close`) have **no exact inverse** (since `git mv` archives the file and appends audit log lines); their toast offers a compensating **`[Reopen]`** button (`tasks reopen <id> --to delivered`). Transitions with no clean inverse (`open -> in progress`, `delivered -> verified`, `questions answer`, `questions apply`, `use-cases record-validation`) do not show a fake `[Undo]` button.
 
 ---
 
-## 1. Inventory: Engine Actions vs. Web UI & VS Code Extension Coverage
+## 1. Inventory: Engine Actions, Entity Capabilities & UI/Extension Coverage
 
-The table below maps every registry element (`EmergentTask` `T###`, `InitiativeTask` `NN.T`, `Microtask`, `Initiative` `NN`, `UseCase` `UC###`, `Question` `Q###`, `InboxNote` `N###`) and its states to the available `tasks_engine.py` commands, current Web UI coverage (`ai-orchestration-ui`), and VS Code Extension coverage (`vscode-ai-orchestration` Webview Dashboard + native Sidebar TreeViews).
+### 1.1 Per-Entity Capability Matrix (Full Task vs. Microtask vs. Initiative Leaf vs. Container)
 
-### 1.1 Tasks (`EmergentTask` `T###`, `InitiativeTask` `NN.T`, `Microtask`, `Initiative` `NN`)
+Not every task node supports the same fields or commands in `tasks_engine.py`. The UI must only expose controls that are valid for that entity subtype:
 
-| Element & StateScope | Owner Action | Engine CLI Command (`ai-orch tasks ...`) | Web UI Coverage (Where) | VS Code Extension Coverage |
+| Capability / Field | Emergent Full Task (`tasks/<cat>/T###-*.md` or `T###-*/README.md`) | Microtask (`tasks/micro/T###-*.md`) | Initiative Leaf Task (`NN.T` in `tasks/NN-slug/plan.md`) | Initiative / Parent Container (`NN` or `NN.T` with children) |
 | --- | --- | --- | --- | --- |
+| **State (`state`)** | Own state (`open`..`done`, `dropped`, `paused`) | Own state (`open`..`done`, `dropped`, `paused`) | Own state (`open`..`done`, `dropped`, `paused`) | **Derived from descendants (`compute_derived_state`) — NO state pill or transition buttons! Only `ship <NN>` when all leaves are `done`.** |
+| **Priority (`P0`–`P3`)** | Own (`priority` + **mandatory `priority-reason`**) | Own (`priority`; `priority-reason` optional) | Own (`**Priority:**` override) or inherited from initiative | Own (`Priority` column in `00-INDEX.md` initiatives table) |
+| **Size (`XS`–`XL`)** | Optional header `- size:` | Fixed `XS` (weight `0.5`; use `promote` to resize) | Own (`**Size:**`) | Own (`Size` column in `00-INDEX.md`) |
+| **Kind (`feature`, `bug`, ...)** | Own (`- kind:`) | Own (`- kind:`, required at creation) | Own (`**Kind:**`) | Not applicable |
+| **Executor (`executor`)** | Own (`- executor:`) | Own (`- executor:`) | Own (`**Executor:**`) | Not applicable (assigned per leaf) |
+| **Verify-by (`verify-by`)** | Supported (`set-verify-by`) | Supported (`set-verify-by`) | Supported (`**Verify-by:**`) | Not applicable |
+| **Waiting-on (`waiting-on`)** | Supported (`set-waiting-on`) | Supported (`set-waiting-on`) | Supported (`**Waiting-on:**`) | Not applicable |
+| **Next-up (`next-up`)** | Own (`- next-up: yes\|no`) | Own (`- next-up: yes\|no`) | Driven by initiative `Status: next: NN.T` | Driven by initiative `Status` |
+| **Checklist Steps (`## Steps`)** | `step list\|add\|check\|uncheck` (`T036`) | Optional `## Steps` | Inline in `plan.md` task block (`step` CLI currently targets `T###` files only) | Children are `NN.T` tasks (`child add`) |
+| **Subtasks / Hierarchy** | Can be expanded to folder (`expand`) & have children (`child add`) | Must `promote` to full task first | Can have `NN.T.M` children (`child add`) | Has `NN.T` children (`child add`) |
+| **Attachments (`attach`/`detach`)** | Supported (creates/uses task folder) | Must `promote` first | Not supported on inline `plan.md` nodes | Not supported |
+| **Move to Project (`move`)** | Supported (`tasks move T### --to-project`) | Supported (`tasks move T### --to-project`) | Not supported (part of initiative `plan.md`) | Not supported |
+
+### 1.2 Tasks (`EmergentTask` `T###`, `InitiativeTask` `NN.T`, `Microtask`, `Initiative` `NN`)
+
+| Element & State Scope | Owner Action | Engine CLI Command (`ai-orch tasks ...`) | Web UI Coverage (Where) | VS Code Extension Coverage |
+| --- | --- | --- | --- | --- |
+| **Project / Category** | **Create Full Task (`tasks new`)** | `new --title <t> --category <c> --priority <P> --priority-reason <r> --goal <g> [--from-note <N>] [--from-use-case <UC> (17.4)]` | **Only from Inbox (`inboxToTask`)!** No general `New Task` button in Backlog/Queue/Tree (`MicrotaskQuickAdd` only creates `XS` microtasks) | **Missing** (only `createMicrotask` in webview) |
+| **Project / `micro/`** | **Create / Promote Microtask** | `micro --title <t> --kind <k> ...` / `promote <id> [--category <c>]` | `MicrotaskQuickAdd` in Backlog/Timeline; `Promote` on `TimelineCard`, `TaskTreeView`, `TaskDetailModal` | Webview only |
 | **Any Leaf Task** (`open`) | **Start task** (`-> in progress`) | `transition <id> "in progress" --actor owner` | `TaskDetailModal` footer (*only* for `NN.T`; hidden for `T###` where only `Run…` is shown!) | Webview only; missing in Sidebar TreeView |
 | **Any Leaf Task** (`open`, `in progress`, `bounced`, `delivered`) | **Launch Agent Run** (implement / verify) | `ai-orch run start --task <id> ...` | `TaskDetailModal` footer (`Run…`) & `TaskRunsPanel` | Webview only |
 | **Any Leaf Task** (`open`, `in progress`, `waiting`, `blocked`, `bounced`, `delivered`) | **Pause task** (`-> paused`) | `transition <id> paused --actor owner` | Kanban card icon, Queue row button, `TaskDetailModal` footer (missing in Tree & Timeline) | Webview only |
-| **Any Leaf Task** (`paused`) | **Resume task** (`-> open` or `in progress`) | `transition <id> open\|"in progress" --actor owner` | Kanban card (`-> open`), Queue row (`-> open`), `TaskDetailModal` (`Resume (Open)` & `Resume (In Progress)`) | Webview only |
+| **Any Leaf Task** (`paused`) | **Resume task** (`-> open` or `-> in progress`; *engine has no stored prior state*) | `transition <id> open\|"in progress" --actor owner` | Kanban card (`-> open`), Queue row (`-> open`), `TaskDetailModal` (`Resume (Open)` & `Resume (In Progress)`) | Webview only |
 | **Any Leaf Task** (`in progress`) | **Mark Delivered** (`-> delivered`) | `transition <id> delivered [--verify-by <target>] [--verify-check <text>]` | `TaskDetailModal` footer (only if `taskRuns.length === 0`) or `TaskRunsPanel` (`Mark Delivered`); no `verify-by` input | Webview only |
-| **Any Leaf Task** (`open`, `in progress`) | **Mark Waiting / Set `waiting-on`** | `transition <id> waiting --waiting-on <qual>` / `set-waiting-on <id> <qual>` | **Missing** (only reachable indirectly by creating a `Q###` question) | **Missing** |
-| **Any Leaf Task** (`waiting`) | **Force Unblock** (`-> open`/`in progress`) | `transition <id> open --force-unblock --reason <text>` | **Missing** in UI and backend | **Missing** |
+| **Any Leaf Task** (`open`, `in progress`, `waiting`) | **Set / Change / Clear `waiting-on`** | `transition <id> waiting --waiting-on <qual>` / `set-waiting-on <id> <qual\|none>` (`T042`) | **Missing in UI and backend!** (`waiting-on` badge is rendered read-only; cannot set, change, or clear `waiting-on` from UI) | **Missing** |
+| **Any Leaf Task** (`waiting`) | **Force Unblock** (`-> open` / `in progress`) | `transition <id> open --force-unblock --reason <text>` | **Missing** in UI and backend | **Missing** |
 | **Any Leaf Task** (`open`, `in progress`) | **Mark Blocked** (`-> blocked`) | `transition <id> blocked --reason <text>` | **Missing** in UI | **Missing** |
-| **Any Leaf Task** (`delivered`) | **Approve / Mark Verified** (`-> verified`) | `transition <id> verified --verifier owner --owner-approved --reason <text>` | `TaskDetailModal` footer (`Approve (Verified)`, passes `verifier="operator:owner"`) | Webview only |
-| **Any Leaf Task** (`delivered`) | **Validate & Close (1-shot)** (`delivered -> verified -> done`) | `transition <id> done --verifier owner [--reason <text>]` or `close <id> --verifier owner` (`T035`) | **Missing** (`T075` requested: needed on Kanban column, card, and detail) | **Missing** |
-| **Any Leaf Task** (`delivered`, `in progress`) | **Close as Self-Verified Caveat** (`-> done with a caveat`) | `close <id> --self-verified` or `close <id> --caveat <text>` (`T035`) | **Missing** in UI and backend | **Missing** |
+| **Any Leaf Task** (`delivered`) | **Approve / Mark Verified** (`-> verified`) | `transition <id> verified --verifier owner --owner-approved --reason <text>` | `TaskDetailModal` footer (`Approve (Verified)`, `TaskDetailModal.tsx:2333`, passes `verifier="operator:owner"`) | Webview only |
+| **Any Leaf Task** (`delivered`, `verified`) | **Validate & Close (1-shot)** (`delivered -> verified -> done`) | `transition <id> done --verifier owner [--reason <text>]` or `close <id> --verifier owner` (`T035`) | **Planned / In-flight (`T075`)** on `Delivered`/`Verified` column headers, card, and detail | **Planned (`T075`)** in Webview; missing in Sidebar TreeView |
+| **Any Leaf Task** (`delivered`, `in progress`) | **Close with Caveat / Self-Verified** (`-> done with a caveat`) | `close <id> --self-verified` or `close <id> --caveat <text>` (`T035`) | **Missing** in UI and backend | **Missing** |
 | **Any Leaf Task** (`delivered`) | **Bounce to Executor** (`-> bounced`) | `transition <id> bounced --reason <B1..Bn>` | `TaskDetailModal` footer (`Bounce` -> inline textarea) | Webview only |
-| **Any Leaf Task** (`verified`) | **Close Task** (`-> done`) | `transition <id> done --actor owner` or `close <id>` | `TaskDetailModal` footer (`Close Task (Done)`) | Webview only |
-| **Bulk (`delivered` / `verified`)** | **Bulk Validate & Close / Close Verified** | `close --verified [--dry-run] [--expect-plan-hash <h>]` (`T035`) + loop/batch for `delivered` | **Missing** (`T075` requested on `Delivered / Verified` column headers) | **Missing** |
+| **Any Leaf Task** (`verified`) | **Close Task** (`-> done`) | `transition <id> done --actor owner` or `close <id>` | `TaskDetailModal` footer (`Close Task (Done)`, `TaskDetailModal.tsx:2356`) | Webview only |
+| **Bulk (`delivered` / `verified`)** | **Bulk Validate & Close / Close Verified** | `close --verified [--dry-run] [--expect-plan-hash <h>]` (`T035`, `verified` only; no atomic batch CLI for arbitrary task IDs yet) | **Planned (`T075`)** as per-task loop in backend; needs atomic batch CLI command (see §3.5) | **Planned (`T075`)** |
 | **Any Leaf Task** (non-terminal) | **Drop Task** (`-> dropped`) | `transition <id> dropped --reason <text>` | **Missing** in UI (cannot drop a task from UI!) | **Missing** |
 | **Any Leaf Task** (`done`, `done with a caveat`, `dropped`) | **Reopen to Open** (`-> open`) | `reopen <id> --to open --reason <text> [--expect-plan-hash <h>]` | `TaskTreeView` row button (`Reopen`); **missing** in `TaskDetailModal` and Kanban `Done` column! | Webview (`TaskTreeView` only) |
 | **Any Leaf Task** (`done`, `done with a caveat`, `dropped`) | **Reopen to Delivered + Request Verification** (`-> delivered`) | `reopen <id> --to delivered --verify-by <target> [--verify-check <text>] --reason <text>` (`T063`) | **Missing** in UI and backend (backend `/reopen` does not pass `--to` or `--verify-by`) | **Missing** |
-| **Any Task** (any state) | **Set Priority** (`P0`–`P3` + `priority-reason`) | `set-priority <id> <P0-P3> [--reason <text>] [--dry-run] [--expect-task-hash <h>]` | `TimelineCard` only (opens popover -> then opens full `ConfirmDialog` diff modal!); **read-only** in Kanban, Queue, Tree, and `TaskDetailModal`! | Webview (`TimelineCard` only) |
-| **Any Task** (any state) | **Set Size** (`XS`–`XL`) | `set-size <id> <XS-XL> [--dry-run] [--expect-task-hash <h>]` | `TimelineCard` only (popover -> full `ConfirmDialog` modal); read-only elsewhere | Webview (`TimelineCard` only) |
-| **Any Task** (any state) | **Set Executor / Assignee** | `set-executor <id> <executor> [--dry-run] [--expect-task-hash <h>]` | **Missing in UI and backend!** (`server.py` has no `/executor` route; UI displays `executor` as static text everywhere) | **Missing** |
-| **Any Task** (`delivered` or any) | **Request Verification (`verify-by` + `check`)** | `set-verify-by <id> <target> [--check <text>]` / `request-verification` (`T044`) | **Missing in UI and backend!** (`server.py` has no `/verify-by` or `/verification-queue` route) | **Missing** |
-| **Any Task** (any state) | **Set Kind** (`feature`, `bug`, `fix`, `chore`, `docs`, `investigation`) | `set-kind <id> <kind> [--dry-run] [--expect-task-hash <h>]` | Backend route & `api.setKind` exist, **but no UI component calls `setKind`!** `KindBadge` is non-clickable everywhere | **Missing** (bridge exists, no UI trigger) |
-| **Any Task** (any state) | **Edit Labels** (`add`/`remove`/`to`) | `set-labels <id> --to <labels...> [--dry-run] [--expect-task-hash <h>]` | `TaskDetailModal` (`Edit` link -> `LabelEditorModal` -> `ConfirmDialog`: 6 clicks) | Webview (`TaskDetailModal` only) |
-| **Any Task** (any state) | **Edit Short Title** (`short`) | `set-short <id> <short> [--dry-run] [--expect-task-hash <h>]` | `TaskDetailModal` header (inline input, auto preview+apply in 2 clicks — good model!) | Webview (`TaskDetailModal` only) |
-| **Any Task** (any state) | **Edit Dependencies** (`depends-on`) | `set-deps <id> --add/--remove [--dry-run] [--expect-task-hash <h>]` | `TimelineCard` only (`+ Add` / `×` -> full `ConfirmDialog` modal); read-only in `TaskDetailModal` | Webview (`TimelineCard` only) |
-| **Any Task** (any state) | **Link / Unlink Use Cases** (`use-cases`) | `link <id> UC###` / `unlink <id> UC###` (Spec 17 `17.2`) | **Missing** (planned in `17.9`–`17.10`) | **Missing** |
+| **Any Task** (any state) | **Set Priority** (`P0`–`P3` + `priority-reason`) | `set-priority <id> <P0-P3> [--reason <text>] [--dry-run] [--expect-task-hash <h>]` | `TimelineCard` only (`TimelineCard.tsx:526` -> `TimelineView.tsx:330`: 4 clicks + full diff modal); **read-only** in Kanban, Queue, Tree, and `TaskDetailModal`! | Webview (`TimelineCard` only) |
+| **Task with Own Size** | **Set Size** (`XS`–`XL`) | `set-size <id> <XS-XL> [--dry-run] [--expect-task-hash <h>]` | `TimelineCard` only (4 clicks + full `ConfirmDialog` modal); read-only elsewhere | Webview (`TimelineCard` only) |
+| **Any Leaf Task** | **Set Executor / Assignee** | `set-executor <id> <executor> [--dry-run] [--expect-task-hash <h>]` | **Missing in UI and backend!** (`server.py` has no `/executor` route; UI displays `executor` as static text everywhere) | **Missing** |
+| **Any Leaf Task** | **Request Verification (`verify-by` + `check`)** | `set-verify-by <id> <target> [--check <text>]` / `request-verification` (`T044`) | **Missing in UI and backend!** (`server.py` has no `/verify-by` or `/verification-queue` route) | **Missing** |
+| **Any Leaf Task** | **Set Kind** (`feature`, `bug`, `fix`, `chore`, `docs`, `investigation`) | `set-kind <id> <kind> [--dry-run] [--expect-task-hash <h>]` | Backend route & `api.setKind` exist, **but no UI component calls `setKind`!** `KindBadge` is non-clickable everywhere | **Missing** (bridge exists, no UI trigger) |
+| **Any Task** | **Edit Labels** (`add`/`remove`/`to`) | `set-labels <id> --to <labels...> [--dry-run] [--expect-task-hash <h>]` | `TaskDetailModal` (`Edit` link -> `LabelEditorModal` -> `ConfirmDialog`: 6 clicks) | Webview (`TaskDetailModal` only) |
+| **Any Task** | **Edit Short Title** (`short`) | `set-short <id> <short> [--dry-run] [--expect-task-hash <h>]` | `TaskDetailModal` header (inline input, auto preview+apply in 2 clicks) | Webview (`TaskDetailModal` only) |
+| **Any Task** | **Edit Dependencies** (`depends-on`) | `set-deps <id> --add/--remove [--dry-run] [--expect-task-hash <h>]` | `TimelineCard` only (`+ Add` / `×` -> full `ConfirmDialog` modal); read-only in `TaskDetailModal` | Webview (`TimelineCard` only) |
+| **Any Task** | **Link / Unlink Use Cases** (`use-cases`) | *Initiative 17 (`17.2`)*: `link <id> UC###` / `unlink <id> UC###` | *Covered by Initiative 17 (`17.9`–`17.10`)* | *Covered by Initiative 17 (`17.10`)* |
 | **Emergent Task** (`T###`) | **Toggle `next-up` (`yes`\|`no`)** | Header field `next-up: yes\|no` *(needs `set-next-up` subcommand in engine)* | **Missing!** Queue empty-state tells user to edit Markdown by hand (`**Next up:** yes`) | **Missing** |
 | **Emergent Task** (`T###`) | **Checklist Steps (`## Steps`)** | `step list\|add\|check\|uncheck <id> ...` (`T036`) | **Missing in UI and backend!** Steps are rendered as static Markdown checkboxes | **Missing** |
 | **Emergent Task** (`T###`) | **Move to another project** | `move <id> --to-project <slug> [--dry-run] [--expect-task-hash <h>]` | **Missing in UI and backend!** Placement warning chip shows warning but offers no 1-click move | **Missing** |
 | **Emergent Task** (`T###`) | **Attach / Detach files** | `attach <id> --file <f>` / `detach <id> --name <n>` | `TaskDetailModal` drag-drop & `Attach…` / `×` (uses `window.confirm` on delete) | Webview only |
-| **Microtask** (`tasks/micro/T###`) | **Create / Promote to full task** | `micro --title ...` / `promote <id> [--category <c>]` | `MicrotaskQuickAdd` in Backlog/Timeline; `Promote` button on `TimelineCard`, `TaskTreeView`, `TaskDetailModal` | Webview only |
 | **Container / Open Leaf** | **Add Child Subtask / Expand / Collapse** | `child add <parent> --title ...` / `expand <id>` / `collapse <id>` | `TaskTreeView` row buttons & `TaskDetailModal` footer | Webview only |
 | **Initiative** (`NN` all leaves done) | **Ship Initiative to `done/NN-slug/`** | `ship <NN> [--dry-run] [--expect-plan-hash <h>]` | **Missing in UI and backend!** | **Missing** |
-| **Any Task** (any state) | **Copy Handoff / Open File** | `show <id>` (`handoff`, `file_path`) | Queue row (`Handoff`), Tree row (copy icon), `TaskDetailModal` (`Copy Prompt`); missing on Kanban card | Sidebar TreeView inline icons (`copyHandoff`, `openTaskFile`) + Webview |
-| **Any Task** (any state) | **Contextual AI Chat on Task** (`T074`) | Enqueue/send scoped chat turn with task + linked UC/spec/question/run context | **Missing** (`T074`: today `OrchestratorChatPanel` is global-only) | **Missing** |
+| **Any Task** | **Copy Handoff / Open File** | `show <id>` (`handoff`, `file_path`) | Queue row (`Handoff`), Tree row (copy icon), `TaskDetailModal` (`Copy Prompt`); missing on Kanban card | Sidebar TreeView inline icons (`copyHandoff`, `openTaskFile`) + Webview |
+| **Any Task** | **Contextual AI Chat on Task** (`T074`) | *Spec `T074`*: scoped chat turn with task + linked UC/spec/question/run context | *Covered by `T074` (`tasks/specs/contextual-element-chat.md`)* | *Covered by `T074`* |
 
-### 1.2 Use Cases (`UC###`)
+### 1.3 Use Cases (`UC###`) — Current Engine vs. Initiative 17
 
-| Element & State / Stage (Spec 15 + Spec 17) | Owner Action | Engine CLI Command (`ai-orch tasks use-cases ...`) | Web UI Coverage (Where) | VS Code Extension Coverage |
+Per `use-cases-drive-tasks.md` (Initiative 17 `17.5` / `17.6`), a Use Case has two orthogonal lifecycle fields:
+- **`approval`** (stored header): `proposed` | `approved` | `deprecated`.
+- **`stage`** (derived pure function from linked tasks & validation state): `draft` (no linked tasks & not ready), `planned` (all linked tasks `open`/`waiting`), `in development` (at least one linked task active/done, not all `done`), `ready` (all linked tasks `done`, never validated), `ready (revalidation pending)` (a linked task was modified/delivered after `last-tested`), `verified` (all linked tasks `done` and `last-verdict: pass`), `failing` (`last-verdict: fail`), `partial` (`last-verdict: partial`), `untested` (`verification-type: manual` or placeholder command, never tested).
+
+| Element & Stage / Approval | Owner Action | Engine CLI Command (`ai-orch tasks use-cases ...`) | Web UI Coverage & Defects | VS Code Extension Coverage |
 | --- | --- | --- | --- | --- |
-| **Use Case** (any) | **Create / Edit Use Case** | `use-cases create [--id UC###] --title ...` | `UseCasesManager` (`New Use Case` modal); **no Edit UI** for existing use cases! | Webview (Create only); Sidebar TreeView opens raw `.md` file |
-| **Use Case** (`approval: proposed\|approved\|deprecated`, Spec 17 §3) | **Approve / Deprecate Use Case** | `use-cases set-approval <UC> approved\|deprecated\|proposed` *(Spec 17 `17.5`)* | **Missing** (today `createUseCase` hardcodes `status: 'active'`) | **Missing** |
-| **Use Case** (`stage: ready\|verified\|failing`) | **Run Automated Validation Probe** | `use-cases validate <UC> [--force] [--timeout 60]` | `UseCasesManager` card (`Validate with AI`) & `UseCaseDetailModal` footer (uses `alert()` on error; no `--force` option for non-ready UCs) | Webview only (missing in `useCasesView` sidebar context menu) |
-| **Use Case** (any) | **Record Owner / Manual Validation Verdict** | `use-cases record-validation <UC> --verdict pass\|fail\|partial --summary ... --actor owner` | **Missing in UI and backend!** Only automated probe `validate` is wired | **Missing** |
-| **Use Case** (any) | **Create Task from Use Case** (pre-filled Goal & Verification) | `tasks new --from-use-case <UC> [--steps 2-3] ...` (Spec 17 §2 `17.4`) | **Missing** (planned in Initiative 17) | **Missing** |
-| **Use Case** (any) | **Link / Unlink Existing Task** | `tasks link <task> <UC>` / `tasks unlink <task> <UC>` (Spec 17 §1 `17.2`) | **Missing** (currently linked task pills in `UseCasesManager` & `UseCaseDetailModal` are non-clickable static spans!) | **Missing** |
-| **Use Case** (all ready UCs) | **Run Validation Campaign** | `use-cases campaign [--filter-actor <a>]` | `UseCasesManager` header (`Run Product Validation Campaign`) | Webview only |
-| **Use Case** (any) | **Edit Short Title / Priority / Actor** | `set-short <UC> <short>` / `use-cases create --id <UC> ...` | **Missing** in `UseCaseDetailModal` | **Missing** |
-| **Use Case** (any) | **Contextual AI Chat on Use Case** (`T074`) | Scoped AI chat with UC + linked tasks + validation log | **Missing** (`T074`) | **Missing** |
+| **Use Case** (new) | **Create Use Case** | `use-cases create [--id UC###] --title ...` | `UseCasesManager` (`New Use Case` modal; hardcodes `status: 'active'`) | Webview (Create only); Sidebar TreeView opens raw `.md` file |
+| **Use Case** (existing) | **Edit Use Case Metadata / Body (DEFECT!)** | **No `use-cases edit` command exists!** `create_or_update_use_case` (`tasks_engine.py:7050-7124`) **overwrites the entire file from a template**, wiping `## AI Validation Log`, `last-tested`, and `last-verdict` if `POST /api/use-cases` is called with an existing ID! | **Missing in UI & destructive in Engine/Backend!** Needs non-destructive `use-cases edit <UC>` preserving existing sections and validation history | **Missing** |
+| **Use Case** (`approval: proposed\|approved\|deprecated`) | **Set Approval** | *Initiative 17 (`17.5`)*: `use-cases set-approval <UC> approved\|deprecated\|proposed` | *Covered by Initiative 17 (`17.9`–`17.10`)* | *Covered by Initiative 17* |
+| **Use Case** (`stage: ready\|verified\|failing` or `--force`) | **Run Automated Validation Probe** | Today: `use-cases validate <UC> [--timeout 60]`. **Note:** `--force` (to run probe when `stage != ready`) does **not** exist yet in `tasks_engine.py`—it is introduced by **Initiative 17 (`17.6`)** | `UseCasesManager` card (`Validate with AI`) & `UseCaseDetailModal` footer (uses `window.alert()` on error) | Webview only (missing in `useCasesView` sidebar context menu) |
+| **Use Case** (any) | **Record Owner / Manual Validation Verdict** | `use-cases record-validation <UC> --verdict pass\|fail\|partial --summary ... --actor owner` (exists today in `tasks_engine.py`, append-only in `## AI Validation Log`) | **Missing in UI and backend!** Only automated probe `validate` is wired | **Missing** |
+| **Use Case** (any) | **Create Task from Use Case** / **Link & Unlink Task** | *Initiative 17 (`17.2`, `17.4`)*: `tasks new --from-use-case <UC>` / `tasks link <task> <UC>` / `unlink` | *Covered by Initiative 17 (`17.9`–`17.10`)* (today linked task pills in `UseCasesManager`/`UseCaseDetailModal` are non-clickable spans) | *Covered by Initiative 17* |
+| **Use Case** (all ready non-draft UCs) | **Run Validation Campaign** | `use-cases campaign [--filter-actor <a>]` (`T069` skips `draft`, `17.6` gates on readiness) | `UseCasesManager` header (`Run Product Validation Campaign`) | Webview only |
+| **Use Case** (any) | **Edit Short Title** | `set-short <UC> <short>` | **Missing** in `UseCaseDetailModal` | **Missing** |
+| **Use Case** (any) | **Contextual AI Chat on Use Case** (`T074`) | *Spec `T074`*: scoped AI chat with UC + linked tasks + validation log | *Covered by `T074`* | *Covered by `T074`* |
 
-### 1.3 Blocking & Non-Blocking Questions (`Q###`)
+### 1.4 Blocking & Non-Blocking Questions (`Q###`)
 
 | Element & Status | Owner Action | Engine CLI Command (`ai-orch tasks questions ...`) | Web UI Coverage (Where) | VS Code Extension Coverage |
 | --- | --- | --- | --- | --- |
-| **Question** (new) | **Ask a Question** (blocking or `--blocks -`) | `questions ask --question "...?" --blocks <ids\|-> ...` | `TaskDetailModal` (`Ask a question…` form, always blocks that task); **no standalone "Ask Question" button** in `DecisionsTab`! | Webview (`TaskDetailModal` only) |
+| **Question** (new, standalone or task-bound) | **Ask a Question** (blocking `<ids>` or non-blocking `--blocks -`) | `questions ask --question "...?" --blocks <ids\|-> [--from-task <id>] ...` | Only inside `TaskDetailModal` (`Ask a question…` form, always blocks that task); **no standalone `+ Ask Question` button in `DecisionsTab`** (cannot create a non-blocking `--blocks -` or multi-task question from UI!) | Webview (`TaskDetailModal` only) |
 | **Question** (`open`) | **Answer Question** (pick option `A..Z` or `open` + optional note) | `questions answer <Q###> --choice <c> [--text <t>] --by owner [--apply-ref <r>] [--changes-result]` | `DecisionsTab` -> `Open Decisions` card radio + `Answer` -> `ConfirmDialog` (3 clicks; **missing** in `TaskDetailModal` where open questions are shown read-only!) | Sidebar `decisionsView` click opens `DecisionsTab` in Webview |
 | **Question** (`open` with `origin-run`) | **Answer & Resume Origin Run** | `questions answer` + `run continue` (`/answer-and-resume`) | `DecisionsTab` (`Answer and resume run` -> `ConfirmDialog`) | Webview |
 | **Question** (`open`, conditional on done task) | **Answer with `--changes-result`** (spawns follow-up task) | `questions answer <Q###> --choice <c> --changes-result` (`T030`) | **Missing in UI!** Checkbox for `--changes-result` is not exposed in `DecisionsTab` | **Missing** |
 | **Question** (`open`) | **Withdraw Question** | `questions withdraw <Q###> --reason <text> --by owner` | `DecisionsTab` (`Withdraw Question…` modal) | Webview |
-| **Question** (`answered`, `applied: false`) | **Record Decision Applied** | `questions apply <Q###> --by owner [--ref <ref>] [--note <note>]` (`T041`) | `DecisionsTab` -> `Awaiting Application` sub-tab (`Apply Decision` modal); also needs 1-click *"Answer & mark applied"* when owner answers directly | Webview |
+| **Question** (`answered`, `applied: false`) | **Record Decision Applied** | `questions apply <Q###> --by owner [--ref <ref>] [--note <note>]` (`T041`) | `DecisionsTab` -> `Awaiting Application` sub-tab (`Apply Decision` modal); missing `--apply-ref` checkbox during `Answer` | Webview |
 | **Question** (`open` or `answered --force`) | **Move to External Tracker** (`status: moved`) | `questions move <Q###> --to <url> [--reason <r>] [--force]` (`T041`, `T052`) | **Missing in UI and backend!** (`server.py` has no `/move` route; `DecisionsTab` filters only `answered \| withdrawn`, hiding `moved` questions!) | **Missing** |
-| **Question** (any) | **Contextual AI Chat on Question** (`T074`) | Scoped AI chat with question options + blocked tasks + specs | **Missing** (`T074`: owner cannot discuss trade-offs with AI right inside the question card before answering) | **Missing** |
+| **Question** (any) | **Contextual AI Chat on Question** (`T074`) | *Spec `T074`*: scoped AI chat with question options + blocked tasks + specs | *Covered by `T074`* | *Covered by `T074`* |
 
-### 1.4 Inbox Notes (`N###`)
+### 1.5 Inbox Notes (`N###`) & "Process Inbox"
 
 | Element & Status | Owner Action | Engine CLI Command (`ai-orch tasks inbox ...`) | Web UI Coverage (Where) | VS Code Extension Coverage |
 | --- | --- | --- | --- | --- |
 | **Inbox Note** (new / `draft` / `ready`) | **Add / Edit Note & Attachments** | `inbox add ...` / `inbox edit <N###> --expect-hash <h>` / `attach` / `detach` | `InboxPanel` (`New note` / `NoteEditorModal` with autosave + drag-drop attachments) | Webview only (no Inbox TreeView in VS Code sidebar) |
 | **Inbox Note** (`draft` / `ready`) | **Toggle `draft` <-> `ready`** | `inbox edit <N###> --status ready\|draft` | Inside `NoteEditorModal` dropdown only; **no 1-click toggle on the list row** | Webview |
+| **Inbox Note** (single note, project, or workspace) | **Process Inbox / Triage with AI & Chat** (owner example, `T074` + `T076`) | Single note: `run start --note <N###> --mode triage` + `accept-triage` + Note Contextual Chat (`T074`). Batch (`Process Inbox` on project/workspace): **missing** on `InboxPanel` header! | Only single-note `Triage with Agent…` inside `NoteEditorModal` (3 clicks to start); **no `Process Inbox` button on `InboxPanel` header or row, and no transition into Contextual Chat on a note** | Webview (`NoteEditorModal` only) |
 | **Inbox Note** (`draft` / `ready`) | **Convert to Full Task / Microtask** | `new --from-note <N###> ...` / `inboxToMicrotask` | Inside `NoteEditorModal` (`Convert to Task…` / `Microtask`) | Webview |
 | **Inbox Note** (`draft` / `ready`) | **Convert to Use Case** (Spec 17 use-case-first) | `use-cases create` + `inbox resolve <N###> --produced UC###` | **Missing!** Inbox only converts to Task or Microtask, not Use Case | **Missing** |
-| **Inbox Note** (`draft` / `ready`) | **Run AI Triage & Accept Proposal** | `run start --note <N###> --mode triage` / `accept-triage` | Inside `NoteEditorModal` (`Triage with Agent…`, per-card accept/reject/edit) | Webview |
 | **Inbox Note** (`draft` / `ready` / `processing`) | **Resolve (Mark Processed) / Discard** | `inbox resolve <N###> --produced <ids>` / `inbox discard <N###> --reason <r>` | Inside `NoteEditorModal` only; **no quick action or bulk discard on `InboxPanel` rows** | Webview |
 | **Inbox Note** (`processed` / `discarded`) | **Reopen Note** (`-> to-analyze/ as ready`) | `inbox reopen <N###>` | Inside `NoteEditorModal` only | Webview |
 
 ---
 
-## 2. Gaps, Friction Points, and Inconsistencies
+## 2. Gaps, Normative Conflicts, and Defects Found
 
-### 2.1 Speed & Click-Count Bottlenecks (Violations of the Guiding Criterion)
-1. **Inline field editing is missing across 90% of the UI, and over-confirmed where it exists:**
-   - In **Kanban**, **Queue**, **Tree**, and **TaskDetailModal**, `priority`, `size`, `executor`, `kind`, `verify-by`, and `use-cases` are **static, non-interactive text**.
-   - Only `TimelineCard` has a popover for `priority` and `size`, **but clicking a new size or priority in `TimelineCard` opens a full-screen `ConfirmDialog` showing a raw unified diff (`TimelineView.tsx:331-372`)**! Changing a task from `P2` to `P1` in Timeline takes **5 clicks + typing**: (1) click `P2` pill, (2) click `P1` in popover, (3) type optional reason, (4) click `Preview`, (5) click `Apply` in the full-screen modal.
-   - By contrast, editing `short_title` in `TaskDetailModal` (`TaskDetailModal.tsx:287-318`) runs `previewSetShortTitle` -> `setShortTitle(expect_plan_hash)` **automatically in one step** without a modal. That automatic preview+hash pattern should be the universal rule for all single-field inline edits.
-2. **Validating and closing a delivered task takes 5–6 clicks and two modal openings (or is impossible in bulk):**
-   - Today, on a `delivered` card: (1) click card to open `TaskDetailModal`, (2) click `Approve (Verified)` — *which immediately closes the modal (`onClose()` at line 715)*, (3) find the card again in the `Verified` sub-column and click it to reopen `TaskDetailModal`, (4) click `Close Task (Done)`.
-   - If 8 tasks are sitting in `Delivered — needs verification` after the owner tested the build, closing them takes **32+ clicks**. There is no `Validate & close` button on the card, no `Validate & close` button in `TaskDetailModal`, and no bulk action on the `Delivered` or `Verified` column headers (`T075`).
-3. **Answering a question Blocking a Task requires switching tabs:**
-   - In `TaskDetailModal`, the `Questions` section lists open blocking questions (`TaskDetailModal.tsx:1510-1570`) **as read-only cards** with no option radio buttons or `Answer` button. The owner has to close the task modal, switch to the `Decisions` tab in the Navbar, find the question, select an option, click `Answer`, and click `Apply` in `ConfirmDialog`.
-4. **Linked pills are dead ends (non-clickable):**
-   - In `UseCasesManager` and `UseCaseDetailModal`, `Task T012` pills are plain `<span>` elements (`UseCaseDetailModal.tsx:146-158`) — clicking them does not open `T012` (in fact, on `UseCasesManager` cards, clicking a task pill triggers the card's `onClick` and opens the Use Case modal instead!).
-   - In `DecisionsTab`, `Blocked Tasks: T012 (short)` pills (`DecisionsTab.tsx:319-351`) are non-clickable `<span>`s.
+### 2.1 Honest Click-Count Bottlenecks in Current Code
+1. **Priority & Size edits in Timeline take 4 clicks (+ typing) and open a 920px diff modal; impossible everywhere else:**
+   - In `TimelineCard.tsx:491-595` and `TimelineView.tsx:330-372`, changing priority requires: (1) click `[P2]` badge, (2) click `[P1]` in popover (`TimelineCard.tsx:526`), (3) type optional reason (`TimelineCard.tsx:546`) and click `Preview` (`TimelineCard.tsx:582`), (4) click `Apply` in `ConfirmDialog` (`TimelineView.tsx:339`).
+   - In **Kanban** (`BacklogManager.tsx`), **Queue**, **Tree** (`TaskTreeView.tsx`), and **TaskDetailModal**, `priority`, `size`, `executor`, `kind`, and `verify-by` are static non-interactive spans.
+2. **Validate & Close today takes 4 clicks across two modal openings:**
+   - On a `delivered` card: (1) click card to open `TaskDetailModal`, (2) click `Approve (Verified)` (`TaskDetailModal.tsx:2333`), which closes the modal via `onClose()` (`TaskDetailModal.tsx:715`), (3) click the card again in the `Verified` sub-column, (4) click `Close Task (Done)` (`TaskDetailModal.tsx:2356`).
+3. **Editing Labels takes 6 clicks:**
+   - (1) Open `TaskDetailModal`, (2) click `Edit` next to Labels, (3) add/remove label in `LabelEditorModal`, (4) click `Preview Changes`, (5) review `ConfirmDialog`, (6) click `Apply`.
+4. **Answering a question blocking a task takes 5 clicks and a tab switch:**
+   - `TaskDetailModal` renders open blocking questions read-only (`TaskDetailModal.tsx:1510-1570`). The owner must (1) close `TaskDetailModal`, (2) click `Decisions` in the Navbar, (3) select an option radio on the question card, (4) click `Answer`, (5) click `Apply` in `ConfirmDialog`.
+5. **Process Inbox has no header or row entry point:**
+   - Processing 4 ready inbox notes requires opening each note modal one by one (`InboxPanel.tsx` -> `NoteEditorModal` -> `Triage with Agent…` -> wait -> `Accept`). There is no `Process Inbox` command on the `InboxPanel` header or note row, and no way to discuss an ambiguous note in a note-scoped chat (`T074`).
 
-### 2.2 Missing Engine Capabilities in UI & Backend
-- **CLI-only task mutations (no backend route, no UI):** `set-executor`, `set-verify-by` / `request-verification`, `verification-queue`, `set-waiting-on`, `step list/add/check/uncheck`, `move --to-project`, `ship <initiative>`, `close --verified`, `close --self-verified`, `close --caveat`, `transition ... --force-unblock`, `reopen --to delivered --verify-by`.
-- **CLI-only question mutations:** `questions move --to <url>` (`T041`/`T052`), `questions answer --changes-result` (`T030`), `questions answer --apply-ref` (1-step answer+apply). Furthermore, `DecisionsTab` history filter (`'all' | 'answered' | 'withdrawn'`) omits `'moved'`.
-- **CLI-only use-case mutations:** `use-cases record-validation` (owner manual pass/fail/partial verdict), `use-cases edit` (updating title, actor, priority, scenario, or `verification_command` of an existing UC without recreating it), plus Spec 17's `approval` (`proposed` -> `approved` -> `deprecated`), `tasks link`/`unlink`, and `tasks new --from-use-case`.
-- **Missing engine subcommand for `next-up`:** `tasks_engine.py` has `new --next-up yes|no`, `set-priority`, `set-size`, `set-kind`, `set-labels`, `set-short`, `set-executor`, `set-verify-by`, `set-waiting-on`, but **no `set-next-up <id> yes|no`** command! Adding `set-next-up` (or `--next-up` on `set-priority`) lets the owner star/unstar tasks into the Queue in 1 click.
+### 2.2 Normative Conflict: `verifier: owner` vs. `verification-mode` (`task-and-state-model.md` vs. `tasks_engine.py`)
+- **What the normative spec says (`tasks/specs/task-and-state-model.md:125-145`):**
+  - `task-and-state-model.md` §3.1 defines four `verification-mode` policies: `independent-session`, `cross-agent` (*"verifier tool family must differ from `executor`"*), `panel` (*"requires >= 2 independent verifiers"*), and `owner` (*"requires explicit human/owner sign-off (`verifier: owner`)"*). Under a strict reading of that table, a task whose `verification-mode` is `cross-agent` or `panel` requires an independent agent/panel verification record before `verified -> done`.
+- **What `tasks_engine.py` actually implements (`tasks_engine.py:8935-8952`):**
+  - `_is_independent_verifier(executor, actor, verifier)` unconditionally returns `True` whenever `verifier` or `actor` is `"owner"` or `"user"` (line 8943: `if cand_norm in ("owner", "user"): return True`), regardless of the task's `verification-mode`! Furthermore, `T035` and `T075` explicitly rely on `transition <id> done --verifier owner` walking `delivered -> verified -> done` in one command.
+- **Resolution needed (see Owner Question `Q-A`):** We should align `task-and-state-model.md` with the owner-centric model: the **owner is the ultimate authority** and can always validate & close any task (`--verifier owner`), but when a task declared `verification-mode: cross-agent` or `panel` (or has a pending `verify-by: <other-workspace>`) and has no prior agent verification record, the UI badge and audit log should explicitly label the closure as an **audited owner override** (e.g. `verifier: owner (override: skipped cross-agent)`), rather than silently pretending a cross-agent run happened.
 
-### 2.3 Wording, Actor/Verifier, and Confirmation Inconsistencies
-1. **Inconsistent Actor & Verifier strings:**
-   - `api.transitionTask` defaults to `actor = 'operator'`.
-   - `TaskDetailModal` line 2333 passes `verifier = 'operator:owner'` and `reason = 'Verified by human operator in UI'`.
-   - `DecisionsTab` and `T035`/`T075` use `owner` (`--verifier owner`, `--by owner`, `--actor owner`).
-   - **Rule to standardize:** Every human action from the Web UI or VS Code Extension must pass `--actor owner` (and `--verifier owner --owner-approved` when verifying/closing).
-2. **Inconsistent State & Action Labels:**
-   - `open -> in progress`: `TaskDetailModal` shows `Run…` for `T###` (hiding manual `Start Task`!) and `Start Task (In Progress)` for `NN.T`.
-   - `delivered -> verified`: `TaskDetailModal` calls it `Approve (Verified)`, `TaskRunsPanel` calls it `Apply Verdict`, CLI calls it `Verify`.
-   - `verified -> done`: `TaskDetailModal` calls it `Close Task (Done)`, T075 calls the combined action `Validate & close`.
-3. **Confirmation Whiplash (Too much vs. Too little):**
-   - *Too much:* Changing `size` or `priority` on `TimelineCard` pops up a 920px modal with a unified git diff.
-   - *Too little / wrong mechanism:* Clicking `Pause` on a Kanban card (`BacklogManager.tsx:210-224`) calls `api.transitionTask` without `expectTaskHash` and with no undo toast; deleting a task attachment (`TaskDetailModal.tsx:475`) uses browser `window.confirm()`, and `UseCasesManager`/`UseCaseDetailModal`/`TaskTreeView` use `window.alert()`, which `control-plane-safety.md` §1 V3 & §2.4 explicitly forbade because VS Code webviews block `alert()`/`confirm()`.
-4. **Web UI vs. VS Code Sidebar TreeView Parity:**
-   - The VS Code Dashboard Webview shares the React frontend (`dist-webview`), so every Webview improvement lands in both once `dashboard-panel.ts` handlers are in parity.
-   - However, the **VS Code Sidebar TreeViews** (`nextUpView`, `initiativesView`, `decisionsView`, `useCasesView` in `package.json`) only have **2 context-menu commands** (`Copy Handoff Prompt` and `Open Task File` on `taskItem`). Clicking a task in `nextUpView` opens the raw `.md` file in the editor instead of opening the task in the Dashboard or offering quick inline context-menu actions (`Validate & Close`, `Pause / Resume`, `Set Priority`, `Chat on Element`, `Validate Use Case`).
+### 2.3 Destructive Use-Case Edit Defect (`tasks_engine.py:7050`)
+- `create_or_update_use_case` in `tasks_engine.py:7050-7124` (backed by `POST /api/use-cases`) overwrites the entire `UC###-*.md` file from a fresh template whenever an existing `id: UC###` is passed. If the UI calls `POST /api/use-cases` to edit a use case's title, priority, actor, or scenario without passing `validation_log`, `last_tested`, and `last_verdict`, **the entire `## AI Validation Log` history and last verdict are wiped out**.
+- **Fix required:** Add a non-destructive `ai-orch tasks use-cases edit <UC###>` command (with `--expect-hash`) that parses the existing `UC###` file and updates only the requested header fields or body sections while preserving `## AI Validation Log`, `last-tested`, `last-verdict`, and `approval`.
+
+### 2.4 Normative Preview -> Apply Rule (`control-plane-safety.md:147`) vs. Fast Single-Field Edits
+- `control-plane-safety.md` §2.1 (line 147) mandates a two-step UI flow (`Preview` -> user inspects diff in `ConfirmDialog` -> `Apply` with `expect_hash`).
+- Applying that rule literally to single-field badge edits (`priority`, `size`, `labels`) is what created the 4-to-6 click modal bottleneck in `TimelineView` and `LabelEditorModal`.
+- Rather than violating `control-plane-safety.md` silently, **§3.3 proposes an explicit normative amendment to `control-plane-safety.md` §2.1**: for single-item, single-field edits that have an **exact inverse** (`set-priority`, `set-size`, `set-kind`, `set-executor`, `set-labels`, `set-short`, `set-next-up`, `set-verify-by`, `set-waiting-on`, `step check/uncheck`), the UI may pass the **already-loaded `task_bundle_sha256`** directly to the apply endpoint (1 round-trip, still concurrency-checked by `.ai-orch.lock` + `expect_task_hash`) and surface a toast with `[Undo]`. Multi-file, bulk, and structural mutations keep the mandatory two-step `Preview` -> `ConfirmDialog` -> `Apply` flow.
 
 ---
 
-## 3. Interaction Model Proposal (Speed-First & Inline-Everywhere)
+## 3. Interaction Model Proposal (Speed, Safety, Undo & Audit)
 
-### 3.1 Core Design: The "Inline-Edit & 1-Click Action" Architecture
+### 3.1 Five Interaction Surfaces & Card Density Discipline
 
-Every interaction is governed by two rules from the owner's 2026-10-27 addendum:
-1. **Speed (1 click / 1 key from current view, zero view switching):** If the owner sees a badge or an item, they can act on it right there.
-2. **Silent Preview-Hash-Apply + Toast Undo:** The safety invariant of `control-plane-safety.md` (atomic lock + `expect_task_hash` / `expect_plan_hash`) is preserved **100%**, but for single-item field edits and reversible transitions, the frontend performs the preview+apply handshake **transparently in the background** (or passes the already-loaded `task.task_bundle_sha256` directly to the apply endpoint) and surfaces a bottom-right **Action Toast** with a 1-click **`[Undo]`** button (which runs the inverse command: previous field value, `transition` back, or `reopen`).
+1. **Column / Section Header (Bulk Actions on Checked Selection):**
+   - **Delivered sub-header:** `[✓✓ Validate & Close (N)… ]` (`T075`), `[⊳ Request Verification…]`.
+   - **Verified sub-header:** `[✓ Close Verified (N)…]` (`tasks close --verified`).
+   - **Open / In Progress header:** `[⏸ Pause (N)…]`.
+   - **Paused header:** `[▶ Resume (N)…]`.
+   - **Inbox `To Analyze` header:** **`[✨ Process Inbox (N)…]`** (triage ready notes with AI + open note chat when reasoning is needed).
+   - **Decisions `Awaiting Application` header:** `[✓ Mark Applied (N)…]`.
+2. **Card / Row Surface (Restrained Density: Inline Pills + 1–2 Primary Actions + `[⋯]` Overflow):**
+   - **Clickable metadata pills (2 clicks: open popover -> pick value):** `[P1 ▾]`, `[feature ▾]`, `[@kilo ▾]`, `[UC012]`, `[☆]` (1-click star toggle for `next-up`). Container rows (`Initiative NN`) show their derived state as a non-clickable badge.
+   - **1–2 Primary Action buttons (1 click):**
+     - `open` leaf: `[▶ Start]` + `[💬]`
+     - `in progress` leaf: `[✓ Deliver]` + `[💬]`
+     - `waiting` leaf: `[💬 Answer Q###]` + `[💬]`
+     - `delivered` leaf: **`[✓✓ Validate & Close ▾]`** + `[💬]`
+     - `verified` leaf: **`[✓ Close]`** + `[💬]`
+     - `paused` leaf: **`[▶ Resume]`** + `[💬]`
+     - `done` / `dropped` leaf: **`[↺ Reopen…]`** + `[💬]`
+   - **Consistent Overflow Menu `[⋯]` (or Right-Click anywhere on the card/row):** Holds all secondary actions (`Run with Agent…`, `Pause`, `Bounce…`, `Approve (Verified only)`, `Close with Caveat…`, `Request Verification (verify-by)…`, `Set Size ▸`, `Edit Labels…`, `Set Waiting-on…`, `Move to Project ▸`, `Add Subtask…`, `Copy Handoff`, `Open Markdown File`, `Drop Task…`).
+3. **Detail View (`TaskDetailModal`, `UseCaseDetailModal`, Question Card, `NoteEditorModal`):**
+   - Header exposes all applicable inline-editable pills (`Priority`, `State` for leaves, `Kind`, `Size`, `Executor`, `Verify-by`, `Waiting-on`, `Use Cases`, `Labels`, `Short Title`, `Next-up ★`).
+   - Interactive `## Steps` checkboxes (`tasks step check/uncheck`) + `+ Add step…` input on emergent tasks.
+   - Inline answer controls on open blocking `Q###` cards inside `TaskDetailModal`.
+   - Quick AI Chat bar + expandable Contextual Chat drawer (`T074`).
+4. **VS Code Native Sidebar TreeViews (`nextUpView`, `initiativesView`, `decisionsView`, `useCasesView`):**
+   - Since VS Code `TreeItem` rows cannot render React popovers, parity is achieved through native VS Code idioms:
+     - **Click tree item:** Opens the item's Detail Modal in the AI Orchestration Dashboard Webview (see `Q-G`).
+     - **Hover inline icons (`"group": "inline"`, max 3):**
+       - On `delivered`/`verified` task: `[$(check-all)] Validate & Close`, `[$(comment-discussion)] Chat on Task`, `[$(go-to-file)] Open File`.
+       - On `open`/`in progress` task: `[$(debug-pause)] Pause`, `[$(comment-discussion)] Chat on Task`, `[$(clippy)] Copy Handoff`.
+       - On Use Case: `[$(beaker)] Validate Use Case`, `[$(comment-discussion)] Chat on Use Case`, `[$(go-to-file)] Open File`.
+     - **Right-click context menu (`view/item/context`):** Full command palette for that item (`Set Priority…` via `vscode.window.showQuickPick`, `Set Executor…`, `Transition State…`, `Validate & Close`, `Request Verification…`, `Reopen…`, `Copy Handoff`, `Open Markdown File`).
+5. **Keyboard Shortcuts (1 Key When Focused):**
+   - When a card, row, or detail modal has keyboard focus: `v` (`Validate & Close` / `Validate UC`), `p` (open Priority menu, then `1`–`4`), `e` (open Executor menu), `s` (open State menu), `l` (open Labels menu), `u` (open Use Cases menu), `c` or `/` (focus Contextual AI Chat), `Space` (toggle Pause/Resume or step checkbox).
 
-### 3.2 Universal Inline-Edit Popover Pattern (`<InlineFieldPopover>`)
+### 3.2 Action-by-Action Reversibility & Undo Contract (No Blanket "Undo")
 
-Wherever a short field is rendered—on a **Kanban card**, **Queue row**, **Tree row**, **Timeline card**, **Task detail header**, **Use Case card/detail**, or **Question card**—it is a clickable pill with a subtle hover border and chevron:
+We distinguish strictly between **Exact Inverse (`[Undo]`)**, **Compensating Action (`[Reopen]` / `[Uncheck]`)**, and **Non-Reversible / Append-Only** mutations:
 
-| Field Pill | Appears On | Valid Values Shown in Popover | Extra Inline Input in Popover | Engine Command Executed (Auto Preview/Hash) | Undo Action in Toast |
-| --- | --- | --- | --- | --- | --- |
-| **Priority** (`P0`..`P3`) | Task card, Queue, Tree, Timeline, Task Detail, UC card/detail | `P0 (Urgent)`, `P1 (High)`, `P2 (Normal)`, `P3 (Low)` | Compact `Reason` input (pre-filled with current `priority_reason`; required only if empty on emergent task, `Enter` saves) | `tasks set-priority <id> <P> --reason <r> --expect-task-hash <h>` | `set-priority <id> <old_P> --reason <old_r>` |
-| **State** (`open`, etc.) | Queue, Tree, Timeline, Task Detail, Kanban card context | **Only legal target states** from current state (e.g. from `delivered`: `Validate & Close (done)`, `Mark Verified`, `Bounce…`, `Pause`) | Inline `reason` / `note` input when target is `bounced`, `blocked`, `dropped`, `done with a caveat`, or `reopen` | `tasks transition <id> <target> --actor owner [--verifier owner] [--reason <r>] --expect-task-hash <h>` | `transition` back or `reopen <id> --to <old_state>` |
-| **Executor** (`kilo`, etc.) | Task card, Queue, Tree, Task Detail | Configured tools (`kilo`, `claude`, `codex`, `self`, `user-decision`) + discovered live sessions (`session:<name>`) + `workspace:<slug>` | Optional filter input | `tasks set-executor <id> <exec> --expect-task-hash <h>` | `set-executor <id> <old_exec>` |
-| **Size** (`XS`..`XL`) | Queue, Tree, Timeline, Task Detail | `XS (1)`, `S (2)`, `M (3)`, `L (5)`, `XL (8)` | None (instant 1-click on option) | `tasks set-size <id> <S> --expect-task-hash <h>` | `set-size <id> <old_S>` |
-| **Kind** (`feature`, etc.) | Task card, Queue, Tree, Timeline, Task Detail | `feature`, `bug`, `fix`, `chore`, `docs`, `investigation` | None (instant 1-click on option) | `tasks set-kind <id> <K> --expect-task-hash <h>` | `set-kind <id> <old_K>` |
-| **Verify-by** (`verify-by`) | Delivered card, Task Detail | `owner`, configured workspaces (`gcube_atlas`, ...), active sessions (`session:...`), or `- (clear)` | Optional 1-line `What to check` input (`--check`) | `tasks set-verify-by <id> <target> [--check <c>] --expect-task-hash <h>` | `set-verify-by <id> "<old>"` |
-| **Use Cases** (`UC###`) | Task card, Queue, Tree, Task Detail | Multi-select checklist of project's `UC### (short title)` with search filter + `+ New Use Case…` | Search box | `tasks link <id> <UC>` / `tasks unlink <id> <UC>` | Inverse `unlink` / `link` |
-| **Labels** (`labels`) | Task card (`+` chip), Queue, Tree, Task Detail | Multi-select checklist of existing labels + type-to-create new `[a-z0-9-]+` tag | Tag filter/create input | `tasks set-labels <id> --add/--remove <lbl> --expect-task-hash <h>` | Inverse `--remove` / `--add` |
-| **Next-up** (`★` star) | Task card, Queue, Tree, Task Detail | 1-click toggle (`yes` <-> `no`) | None | `tasks set-next-up <id> yes\|no --expect-task-hash <h>` | Toggle back |
-| **UC Approval** (`proposed` / `approved` / `deprecated`) | Use Case card, Use Case Detail | `proposed`, `approved`, `deprecated` | None (instant 1-click) | `tasks use-cases set-approval <UC> <val>` | Restore `<old_val>` |
-
-### 3.3 Where Actions Live (5 Interaction Surfaces)
-
-1. **Column / Section Header (Bulk Actions on Visible Items):**
-   - Acts on all currently visible (filtered) cards in that column or section.
-   - **Delivered sub-header:** `[✓✓ Validate & Close All (N)]` (`T075`), `[⊳ Request Verification (N)…]`.
-   - **Verified sub-header:** `[✓ Close All Verified (N)]` (`tasks close --verified`).
-   - **Open / Ready header:** `[⏸ Pause All Visible (N)]`.
-   - **Paused header:** `[▶ Resume All Visible (N)]`.
-   - **Decisions `Awaiting Application` header:** `[✓ Mark All Applied (N)]`.
-   - **Inbox `To Analyze` header:** `[✓ Triage Selected / Discard Selected]`.
-2. **Card / Row Quick Actions (1-Click Primary Action + Inline Pills):**
-   - Every card (Kanban, Use Case, Question) and row (Queue, Tree, Inbox) exposes:
-     - **Clickable inline pills** for `Priority`, `Kind`, `Executor`, `Size`, `Use Cases`, `Labels`, `Next-up ★`.
-     - **State-specific primary 1-click button** on the right/footer of the card:
-       - On `open`: `[▶ Start]` (or `[▶ Run…]`) + `[⏸]`
-       - On `in progress`: `[✓ Deliver]` + `[⏸]`
-       - On `waiting`: `[💬 Answer Q###]` (opens inline question popover or focuses question!)
-       - On `delivered`: **`[✓✓ Validate & Close]`** (primary green button, 1 click!) + `[↩ Bounce]` + `[💬]`
-       - On `verified`: **`[✓ Close]`** (1 click!)
-       - On `paused`: **`[▶ Resume]`** (1 click!)
-       - On `done` / `dropped`: **`[↺ Reopen]`**
-     - **Contextual Chat button `[💬]`** (`T074`): opens the slide-over Contextual AI Chat drawer anchored to that element without leaving the board.
-3. **Context Menu (Right-Click or `[⋯]` Button on Any Card / Row / VS Code Tree Item):**
-   - Provides the full action set for that element without opening the detail modal: *Validate & Close*, *Validate & Close with Note…*, *Approve (Verified only)*, *Bounce…*, *Request Verification (`verify-by`)…*, *Set Priority ▸*, *Set Executor ▸*, *Set Kind ▸*, *Link Use Case ▸*, *Move to Project ▸*, *Add Subtask…*, *Copy Handoff*, *Open Markdown File*, *Drop Task…*, *Chat with AI on this Element*.
-4. **Detail View (`TaskDetailModal`, `UseCaseDetailModal`, Question Card, `NoteEditorModal`):**
-   - **Header:** All metadata pills are inline-editable (`Priority`, `State`, `Kind`, `Size`, `Executor`, `Profile`, `Verification Mode`, `Verify-by`, `Use Cases`, `Labels`, `Short Title`).
-   - **Interactive Body:** In `TaskDetailModal`, `## Steps` checkboxes (`- [ ]` / `- [x]`) are clickable in place (calling `ai-orch tasks step check/uncheck`), with an `+ Add step…` inline input at the bottom of the list. Open blocking `Q###` questions inside `TaskDetailModal` render their option radio buttons and `[Answer]` button **inline** so the owner never has to leave the task modal.
-   - **Contextual AI Chat Drawer / Box (`T074`):** Persistent bottom/side chat box scoped to the element.
-   - **Sticky Action Bar Footer:** Primary transition buttons (`[✓✓ Validate & Close]`, `[✓ Approve (Verified)]`, `[↩ Bounce…]`, `[▶ Run…]`, `[⏸ Pause]`, `[↺ Reopen…]`, `[🗑 Drop…]`).
-5. **Keyboard Shortcuts (When Hovering or Focusing a Card / Row / Detail Modal):**
-   - `v` — **Validate & Close** (on `delivered` or `verified` task); on Use Case: **Validate with AI**.
-   - `p` — **Priority** menu (`1`=`P0`, `2`=`P1`, `3`=`P2`, `4`=`P3`).
-   - `e` — **Executor** menu.
-   - `s` — **State** transition menu.
-   - `l` — **Labels** popover.
-   - `u` — **Use Cases** link popover.
-   - `c` — **Contextual AI Chat** on focused element (`T074`).
-   - `Space` — Toggle **Pause / Resume** (or check/uncheck focused step).
-   - `Cmd/Ctrl+Enter` — Submit active inline input / confirm dialog.
-
-### 3.4 Confirmation Levels & Feedback
-
-| Level | When Used | UX Mechanism | Safety & Audit Under the Hood |
+| Action Category | Concrete Actions | Post-Mutation Toast Action | Mechanics & Hash Handling |
 | --- | --- | --- | --- |
-| **Level 0: Immediate + Toast Undo** | Single-item inline field edits (`priority`, `size`, `kind`, `executor`, `labels`, `use-cases`, `short`, `next-up`, `verify-by`, `step check`), single-item forward transitions (`Start`, `Pause`, `Resume`, `Approve Verified`, **`Validate & Close` on a single card**), `Copy Handoff`. | Applies immediately on click. Shows a 5-second toast: `✓ T075 validated & closed (owner) [Add Note…] [Undo]`. | Sends `expect_task_hash` (from card's `task_bundle_sha256`). If 409 stale, auto-refetches and retries or shows conflict toast. `[Add Note…]` in the toast or a split-button dropdown `[✓✓ Validate & Close ▾]` lets the owner attach a custom verification note when desired. |
-| **Level 1: Inline Micro-Prompt (Popover)** | Single-item actions that **require a mandatory reason/input** by engine guard: `Bounce` (`B1..Bn`), `Drop` (`reason`), `Block` (`reason`), `Reopen` (`reason` + optional `--to delivered --verify-by`), `Priority` when `priority-reason` is missing, `Force Unblock` (`reason`), `Record UC Validation` (`pass/fail/partial` + `summary`). | Small popover anchored to the button with a focused text input (`Enter` to apply, `Esc` to cancel). Zero full-screen modal. | Passes `--reason` + `--expect-task-hash`. Appends dated entry to `## Log` / `PROGRESS.md`. |
-| **Level 2: Lightweight List Confirmation Dialog** | **Bulk actions** (`Validate & Close All (N)` on column header, `Close All Verified (N)`, `Pause All`), **Destructive actions** (`Withdraw Question`, `Discard Inbox Note`, `Delete Attachment`, `Cleanup Worktree`), and **Question Answering with Run Resume**. | Compact modal listing the affected `ID (short title)` items, an optional shared `Verification Note / Reason` input, and `[Confirm (N)]`. | Computes batch preview (`--dry-run`) and applies with `--expect-plan-hash`. |
-| **Level 3: Full Diff Preview Modal (`ConfirmDialog`)** | **Multi-file / Structural / Config rewrites**: `Sync 00-INDEX.md`, `Use Cases adopt-links`, `Expand / Collapse` task folder, `Promote` microtask, `Accept Triage Proposal`, `Install Skills / Register MCP`, `Apply AGENTS.md`, `Orchestrator Reassign`. | Existing `ConfirmDialog` with unified diff, plan items, and `expect_plan_hash`. | Full `control-plane-safety.md` §2 plan hash + flock verification. |
+| **1. Exact Inverse** (Single-field metadata & checklist edits) | `set-priority`, `set-size`, `set-kind`, `set-executor`, `set-short`, `set-labels`, `set-next-up`, `set-verify-by`, `set-waiting-on`, `step check` / `uncheck`, `tasks link` / `unlink`, `use-cases set-approval`, `inbox edit --status draft\|ready` | **`[Undo]`** (shown for 6 seconds) | The apply response returns the **new `task_hash`** (`after_hash`) and the UI remembers `{ previous_value, after_hash }`. Clicking `[Undo]` calls the exact same command with `previous_value` and `expect_task_hash = after_hash`. If the file was modified again in the meantime, `expect_task_hash` fails with `409 Conflict` and the conflict banner is shown. |
+| **2. Compensating Action** (Terminal task/note closures) | `Validate & Close` (`delivered -> verified -> done`), `Close` (`verified -> done`), `Close with Caveat`, `Drop Task` (`-> dropped`), `inbox resolve`, `inbox discard` | **`[Reopen]`** (never labelled `Undo`) | Closing a task moves the file to `tasks/done/` (`git mv`), sets `verifier`, and appends 1–2 audit lines to `## Log`. It cannot be "un-happened" silently. Clicking **`[Reopen]`** in the toast runs `tasks reopen <id> --to <delivered\|open> --reason "Reopened immediately from UI"` (or `inbox reopen <N###>`), which restores the file and appends an honest reopen log line. |
+| **3. Forward Non-Terminal Transitions (No Inverse Button)** | `Start` (`open -> in progress`), `Deliver` (`in progress -> delivered`), `Approve` (`delivered -> verified`), `Bounce` (`delivered -> bounced`), `Pause` (`-> paused`), `Resume` (`paused -> open\|in progress`) | **Status toast only** (no `[Undo]` button) | The engine does not store prior state on `paused`, and `in progress -> open` or `verified -> delivered` are not legal backward transitions in `task-and-state-model.md`. The user can use the state pill or card button (`Pause` / `Resume` / `Bounce`) to move to the next legal state. |
+| **4. Append-Only / Multi-Entity Mutations (No Inverse)** | `questions answer`, `questions apply`, `questions withdraw`, `questions move`, `use-cases record-validation`, `use-cases validate`, `tasks new`, `tasks promote`, `tasks expand`/`collapse`, `tasks ship` | **Status toast only** (or Level 1/2/3 confirmation beforehand) | Answering a question unblocks dependent tasks and logs an event; validation probes append to `## AI Validation Log`. These have no automatic inverse. |
 
-### 3.5 The Owner as Verifier (`--verifier owner`) and Audit Trail
+### 3.3 Explicit Amendment to `control-plane-safety.md` §2.1 & 409 Conflict Handling
 
-When the owner clicks **`Validate & Close`** (single or bulk) or **`Approve (Verified)`**:
-1. **Command executed:** `ai-orch tasks transition <id> done --actor owner --verifier owner --owner-approved [--reason "<note>"] --expect-task-hash <hash>` (or `ai-orch tasks close <id> --actor owner --verifier owner --owner-approved [--reason "<note>"]`).
-2. **Engine behavior (`T035`):**
-   - If the task is in `delivered`, the engine walks `delivered -> verified -> done` in a single atomic transaction under `.ai-orch.lock`.
-   - If the task is in `verified`, it transitions `verified -> done`.
-   - Sets header `- verifier: owner` (satisfying the independent verification guard for all `verification-mode` values: `owner`, `independent-session`, `cross-agent`, `panel`, `self`).
-   - Writes dated audit lines in `## Log` (for single-file tasks) or `PROGRESS.md` (for folder tasks) and in the `**Status:**` note of initiative tasks (`T067`):
-     - `- 2026-10-27, owner: state delivered -> verified (verifier: owner) — Validated by owner from UI[: <optional note>]`
-     - `- 2026-10-27, owner: state verified -> done (verifier: owner) — Validated by owner from UI[: <optional note>]`
-   - Moves emergent task files to `tasks/done/<category>/` via `git mv` (or moves inline initiative blocks to `## Closed`).
-   - Emits `task.state_changed` events (`delivered -> verified`, `verified -> done`) to `.ai-orchestration/events/`.
-3. **Use-case regression guard (Spec 17 §5):** If the task is linked to an approved use case that is currently `failing` and has not passed a probe since the task was delivered, the engine refuses unless `--owner-approved` is set; in the UI, if a linked UC is `failing`, the button shows a warning badge `⚠ UC004 failing — Override & Close?` so the owner never overrides a failing use case accidentally.
+1. **Proposed Amendment to `control-plane-safety.md` §2.1 (Fast-Path Concurrency Token for Exact-Inverse Field Edits):**
+   - *Current rule (`control-plane-safety.md:147`):* Every write must call `--dry-run` first, display a preview diff, and then call `--apply --expect-*-hash`.
+   - *Proposed amendment:* For **Category 1 (Exact Inverse) single-field edits** (`set-priority`, `set-size`, `set-kind`, `set-executor`, `set-labels`, `set-short`, `set-next-up`, `set-verify-by`, `set-waiting-on`, `step check/uncheck`, `link`/`unlink`, `set-approval`), the UI may pass the **`task_bundle_sha256` already loaded with the card/detail payload** directly as `expect_task_hash` to the mutation endpoint in a **single round-trip**, without a prior `--dry-run` modal. The engine still acquires `.ai-orch.lock` and verifies `expect_task_hash == current_hash` before writing.
+   - All **Category 2, 3, and 4 mutations**—and all **bulk, structural, or multi-file mutations**—continue to require an explicit preview hash or confirmation step (see Owner Question `Q-E`).
+2. **Strict 409 Conflict Handling (NEVER Auto-Retry Silently):**
+   - If any mutation returns **`409 Conflict` (`hash_mismatch`)**, it means another actor (an executor run, an orchestrator session, or a git pull) modified the task since the UI rendered it.
+   - **The UI must NEVER silently refetch the new hash and re-apply the mutation** (which would blindly overwrite concurrent changes, e.g. changing priority or closing a task whose spec or state just changed).
+   - Instead, on `409 Conflict`, the UI **refetches the updated element**, highlights what changed in an inline conflict banner/popover (`"T075 was updated by another session while you were viewing it — review the updated state and click Apply again"`), and lets the owner confirm or cancel with one click.
 
-### 3.6 Permissions: Direct Owner Actions vs. Contextual AI Chat
+### 3.4 Audit Trail & Provenance for Token-Authenticated UI Calls
 
-- **Direct UI Actions (Buttons, Inline Popovers, Bulk Actions):** Execute deterministically via `ai-orch` CLI with `--actor owner` (authenticated by the local UI token `X-AI-Orch-Token` or the VS Code extension host). They do not invoke an LLM and cost zero tokens.
-- **Contextual AI Chat (`T074`):** Runs as a conversation turn with the AI session (the workspace's active interactive/headless orchestrator or a dedicated element session, see §6.1). As specified by the owner in `T074`, **the AI has all tools available (`ai-orch` CLI/MCP, file read/edit) and operates under its session's normal permission mode**—there is no artificial "read-only proposal-only" cage when the owner is chatting directly with their session.
+- **What the backend actually knows:** A request arriving at `ai-orchestration-ui/backend/server.py` with `X-AI-Orch-Token` (or via the VS Code extension `CliClient`) proves that the caller holds the local UI/extension capability token on the user's machine. **It does NOT cryptographically prove a physical human mouse click** (a local process or browser automation with access to the token could call the endpoint).
+- **Honest Audit Wording & Provenance Metadata:**
+  - Every UI-initiated CLI command passes `--actor owner` (or `--verifier owner` when verifying/closing) **plus a provenance tag** in the audit log / event payload: `via: web-ui` or `via: vscode-ext`, alongside the short `request_id` (and `client_session_id` of the browser tab / webview instance).
+  - Log lines written to `## Log` / `PROGRESS.md` use accurate, non-overclaiming wording:
+    - Standard closure (when `verification-mode: owner` or already verified):
+      `- 2026-10-27, owner (via web-ui): state delivered -> verified (verifier: owner) — Validated & closed from UI[: <note>]`
+    - Owner override closure (when `verification-mode` was `cross-agent` / `panel` or `verify-by` was another workspace, and no independent agent verification was recorded yet):
+      `- 2026-10-27, owner (via web-ui): state delivered -> verified (verifier: owner [owner-override: verification-mode=cross-agent]) — Validated & closed from UI[: <note>]`
+
+### 3.5 Bulk Actions: Frozen Selection Scope & Atomic Batch Execution
+
+When the owner clicks a column-header bulk action (e.g. `[✓✓ Validate & Close (3)…]` on the `Delivered` sub-column):
+1. **Bulk Scope (Frozen at Preview + Per-Row Checkboxes):**
+   - Clicking the column header button snapshots the **exact list of task IDs currently visible in that column under the active filters** (search query, label filter, project filter, `Next-up only`).
+   - The Level 2 confirmation dialog displays those `N` tasks with **individual checkboxes** (all checked by default, so the owner can uncheck 1 task they want to keep open) and shows a filter summary banner if a filter is active (`"Showing 3 of 7 delivered tasks (filtered by label #ui)"`).
+   - Even if a WebSocket event arrives while the dialog is open, the batch operates **only on the explicitly checked IDs and their previewed hashes**—never on a live wildcard query.
+2. **Atomic Engine Batch Command (`all-or-none` under one `.ai-orch.lock`):**
+   - Today, `tasks close --verified` (`T035`) only supports tasks already in `verified`, and `T075`'s initial step 1 loops `transition <id> done` one task at a time in the backend. Looping in the backend means if task 3 of 5 fails a guard (e.g. a placeholder step or a concurrent edit), tasks 1–2 are already committed and moved to `tasks/done/`, leaving a partial state.
+   - **Proposed Engine Command (`tasks batch-transition` / `close --ids`):** Add `ai-orch tasks close <id1> [<id2> ...] --verifier owner [--reason <note>] [--dry-run] [--expect-plan-hash <hash>]` to `tasks_engine.py`:
+     - In `--dry-run`, it validates all guards and computes the transitions for every listed ID under `.ai-orch.lock`, returning a single deterministic `plan_hash` (and per-task validation warnings/errors if any task is ineligible).
+     - On apply (`--expect-plan-hash <hash>`), it acquires `.ai-orch.lock` once, verifies that **every** listed task's hash still matches the preview, and applies all file updates, `git mv` operations, and `00-INDEX.md` sync **atomically (all-or-none)**.
+   - *Relation to `T075`:* `T075` can land its narrow UI/backend slice immediately, and Task `18.1` upgrades the backend endpoint to call the atomic engine batch command instead of a Python loop.
 
 ---
 
-## 4. Complete Action Matrix: Kanban Columns, States & Element Views (Clicks Today vs. Proposed)
+## 4. Complete Action Matrix: Clicks Today vs. Proposed
 
-### 4.1 Task Action Matrix by State & Surface (with Click-Count Comparison)
+### 4.1 Task Action Matrix by State & Surface
 
-| State / Column | Action Name (Consistent English UI Label) | Surface Placement | Confirmation Level | Engine Command | Clicks Today (Web UI) | Clicks Proposed |
+*(Note on click counts: **1 click** = direct button on card/row; **2 clicks** = click inline pill -> click value in popover; **1 key** = keyboard shortcut when card/row/modal is focused.)*
+
+| State / Scope | Action Name (English UI Label) | Surface Placement | Confirmation & Post-Action Toast | Engine Command | Clicks Today (Web UI) | Clicks Proposed |
 | --- | --- | --- | --- | --- | --- | --- |
-| **All Visible States** (Any Card / Row / Detail) | **Change Priority** (`P0`–`P3`) | Clickable `[P1 ▾]` pill on Card, Queue, Tree, Timeline, Detail + Shortcut `p` | **Level 0** (Immediate + Toast Undo; inline reason input if required) | `set-priority <id> <P> [--reason <r>]` | **5 clicks** in Timeline (with diff modal); **Impossible** in Kanban / Queue / Tree / Detail | **2 clicks** (click pill -> click `P1`) or **2 keys** (`p` -> `2`) |
-| **All Visible States** | **Change Executor** | Clickable `[@kilo ▾]` pill on Card, Queue, Tree, Detail + Shortcut `e` | **Level 0** (Immediate + Toast Undo) | `set-executor <id> <exec>` | **Impossible** (CLI only) | **2 clicks** (click pill -> pick executor) |
-| **All Visible States** | **Change Size** (`XS`–`XL`) | Clickable `[M ▾]` pill on Queue, Tree, Timeline, Detail | **Level 0** (Immediate + Toast Undo) | `set-size <id> <size>` | **4 clicks** in Timeline (with diff modal); **Impossible** elsewhere | **2 clicks** |
-| **All Visible States** | **Change Kind** (`feature`, `fix`, ...) | Clickable `[feature ▾]` badge on Card, Queue, Tree, Timeline, Detail | **Level 0** (Immediate + Toast Undo) | `set-kind <id> <kind>` | **Impossible** (no UI trigger) | **2 clicks** |
-| **All Visible States** | **Link / Unlink Use Cases** (`UC###`) | Clickable `[UC001 +]` chip on Card, Queue, Tree, Detail + Shortcut `u` | **Level 0** (Immediate toggle in checklist popover + Toast Undo) | `link <id> <UC>` / `unlink <id> <UC>` | **Impossible** (planned in 17.10) | **2 clicks** (click chip -> toggle UC) |
-| **All Visible States** | **Edit Labels** | Clickable `[+ tag]` chip on Card, Queue, Tree, Detail + Shortcut `l` | **Level 0** (Immediate toggle in popover + Toast Undo) | `set-labels <id> --add/--remove <lbl>` | **6 clicks** (open Detail -> Edit -> Modal -> Preview -> ConfirmDialog -> Apply) | **2 clicks** |
-| **All Visible States** | **Toggle Next Up (`★`)** | Star icon `[☆]` / `[★]` on Card, Queue, Tree, Detail | **Level 0** (Immediate 1-click toggle) | `set-next-up <id> yes\|no` | **Impossible** (manual Markdown edit) | **1 click** |
-| **All Visible States** | **Chat on Task (`💬`)** (`T074`) | `[💬]` icon on Card, Queue, Tree, Detail + Shortcut `c` | None (opens chat drawer / focuses input) | `orchestrator chat --about <id>` (or session relay) | **Impossible** (global chat only, manual ID typing) | **1 click** (or `c`) |
-| **1. `open`** (Open Column / Queue / Tree) | **Start Task** (`-> in progress`) | Card quick button `[▶ Start]`, State pill, Detail footer | **Level 0** (Immediate + Toast Undo) | `transition <id> "in progress" --actor owner` | **2 clicks** for `NN.T` (open Detail -> Start); **Impossible** for `T###` without Run | **1 click** on card |
-| **1. `open`** | **Run with Agent…** | Card button `[⚡ Run…]`, Detail footer | **Level 3** (`RunDialog` preview -> start) | `run start --task <id> ...` | **3–4 clicks** (open Detail -> Run… -> Start) | **2 clicks** from card |
-| **1. `open` / `in progress`** | **Pause Task** (`-> paused`) | Card icon `[⏸]`, Queue row `[Pause]`, Detail footer, Column header `[⏸ Pause All]` | **Level 0** (Single: Immediate + Toast Undo) / **Level 2** (Bulk) | `transition <id> paused --actor owner` | **1 click** on Kanban/Queue (no hash/undo); **2 clicks** in Detail; **Impossible** in Tree | **1 click** everywhere (with hash + undo) |
-| **2. `in progress`** (In Progress Column) | **Mark Delivered** (`-> delivered`) | Card quick button `[✓ Deliver]`, State pill, Detail footer | **Level 0** (Immediate; optional split-menu to set `verify-by`) | `transition <id> delivered --actor owner` | **2 clicks** (open Detail -> Mark Delivered, hidden if runs exist) | **1 click** on card |
-| **3. `waiting` / `blocked`** (Waiting / Blocked Column) | **Answer Blocking Question** (`Q###`) | Card button `[💬 Answer Q011]` -> inline popover or Detail inline options | **Level 0/1** (Select option -> Answer) | `questions answer <Q###> --choice <c> --by owner` | **5+ clicks** (switch to Decisions tab -> find Q -> select -> Answer -> ConfirmDialog) | **2 clicks** inline from card or Task Detail |
-| **3. `waiting` / `blocked`** | **Unblock Task** (`-> open` / `in progress`) | State pill / Card `[Unblock…]` | **Level 1** (Inline reason popover if `--force-unblock`) | `transition <id> open [--force-unblock --reason <r>]` | **Impossible** in UI | **2 clicks** |
-| **4. `bounced`** (In Progress Column, Bounced badge) | **Resume / Re-run Executor** | Card button `[▶ Continue Run]` or `[▶ Start]` | **Level 0** (or `RunDialog` if new run) | `run continue <run_id>` or `transition <id> "in progress"` | **3–4 clicks** via Detail -> Runs panel | **1–2 clicks** on card |
-| **5. `delivered`** (Delivered Sub-Column & Verification Queue) | **Validate & Close** (`delivered -> verified -> done`) (`T075`) | **Primary button `[✓✓ Validate & Close]`** on Card, Detail footer, Tree row, VS Code TreeView + Shortcut `v` | **Level 0** for single card (Immediate + Toast `[Add Note…] [Undo]`) or **Split-button `[▾]`** to add note before applying | `transition <id> done --actor owner --verifier owner --owner-approved [--reason <note>]` | **6 clicks + 2 modals** (Open Detail -> Approve -> closes modal -> Reopen Detail -> Close Task) | **1 click** (or key `v`) |
-| **5. `delivered` (Bulk)** | **Validate & Close All (`N`)** (`T075`) | **Delivered Column Header** `[✓✓ Validate & Close (N)]` | **Level 2** (Compact dialog listing the `N` tasks + optional shared verification note) | Batch `transition <id> done --actor owner --verifier owner --owner-approved` | **Impossible** (6 × N clicks) | **2 clicks** (Header button -> Confirm) |
-| **5. `delivered`** | **Approve Only (Mark Verified)** (`-> verified`) | State pill / Split-button `[▾]` -> `Mark Verified Only`, Detail footer | **Level 0** (Immediate + Toast Undo) | `transition <id> verified --actor owner --verifier owner --owner-approved` | **2 clicks** (Open Detail -> Approve) | **2 clicks** from card menu or **1 click** in Detail |
-| **5. `delivered`** | **Bounce** (`-> bounced`) | Card button `[↩ Bounce]`, Detail footer | **Level 1** (Inline popover for `B1..Bn` findings) | `transition <id> bounced --actor owner --reason <r>` | **3 clicks** (Open Detail -> Bounce -> Confirm Bounce) | **2 clicks** on card |
-| **5. `delivered`** | **Request Verification (`verify-by`)** | Clickable `[Verify-by: +]` pill on Card & Detail, Column header `[⊳ Request Verification…]` | **Level 0** (Pick workspace/session + optional check text) | `set-verify-by <id> <target> [--check <c>]` | **Impossible** (CLI only) | **2 clicks** |
-| **6. `verified`** (Verified Sub-Column) | **Close Task** (`-> done`) | **Primary button `[✓ Close]`** on Card, Detail footer, Tree row | **Level 0** (Immediate + Toast Undo) | `transition <id> done --actor owner` | **2 clicks** (Open Detail -> Close Task) | **1 click** on card |
-| **6. `verified` (Bulk)** | **Close All Verified (`N`)** | **Verified Sub-Column Header** `[✓ Close All (N)]` | **Level 2** (Compact dialog listing the `N` verified tasks) | `close --verified --expect-plan-hash <h>` | **Impossible** (2 × N clicks) | **2 clicks** |
-| **7. `paused`** (Paused Column) | **Resume Task** (`-> open` or prior state) | Card button `[▶ Resume]`, Column header `[▶ Resume All (N)]` | **Level 0** (Single) / **Level 2** (Bulk) | `transition <id> open --actor owner` | **1 click** on card; **Impossible** in bulk | **1 click** (Single) / **2 clicks** (Bulk) |
-| **8. `done` / `done with a caveat` / `dropped`** (Done / Dropped Columns & Tree) | **Reopen Task** (`-> open` or `-> delivered`) | Card button `[↺ Reopen]`, Tree row, Detail footer | **Level 1** (Inline popover: target `open` vs `delivered`, optional `verify-by`, mandatory `reason`) | `reopen <id> --to open\|delivered [--verify-by <t>] --reason <r>` | **4 clicks** in Tree only (`open` target only); **Impossible** in Kanban/Detail or to `delivered` | **2 clicks** everywhere |
-| **Any Non-Terminal Leaf** | **Drop Task** (`-> dropped`) | Card `[⋯]` menu -> `Drop Task…`, State pill, Detail footer | **Level 1** (Popover requiring drop `reason`) | `transition <id> dropped --actor owner --reason <r>` | **Impossible** in UI | **2 clicks** |
+| **Project / Board** | **New Full Task…** | Board/Queue/Tree header `[+ New Task…]` | Modal form (`title`, `category`, `priority`, `reason`, `goal`) | `tasks new --title ...` | **Impossible** (only from Inbox note or Microtask) | **2 clicks** (`+ New Task` -> `Create`) |
+| **Leaf & Container** (where applicable per §1.1) | **Change Priority** (`P0`–`P3`) | Clickable `[P1 ▾]` pill on Card, Queue, Tree, Timeline, Detail + Key `p` (`1`–`4`); VS Code TreeView context menu | **Immediate** (1 round-trip with loaded `expect_task_hash`; inline reason input if `priority-reason` is empty) + Toast **`[Undo]`** | `set-priority <id> <P> [--reason <r>] --expect-task-hash <h>` | **4 clicks + typing** in Timeline (`TimelineCard.tsx:526`, `TimelineView.tsx:330`); **Impossible** elsewhere | **2 clicks** (pill -> value) or **2 keys** (`p` -> `2`) |
+| **Leaf Task** | **Change Executor** | Clickable `[@kilo ▾]` pill on Card, Queue, Tree, Detail + Key `e`; VS Code TreeView context menu | **Immediate** (`expect_task_hash`) + Toast **`[Undo]`** | `set-executor <id> <exec> --expect-task-hash <h>` | **Impossible** (CLI only) | **2 clicks** (pill -> executor) |
+| **Task with Own Size** | **Change Size** (`XS`–`XL`) | Clickable `[M ▾]` pill on Queue, Tree, Timeline, Detail, Card `[⋯]` | **Immediate** (`expect_task_hash`) + Toast **`[Undo]`** | `set-size <id> <size> --expect-task-hash <h>` | **4 clicks** in Timeline (with diff modal, `TimelineView.tsx:353`); **Impossible** elsewhere | **2 clicks** (pill -> size) |
+| **Leaf Task** | **Change Kind** (`feature`, `fix`, ...) | Clickable `[feature ▾]` badge on Card, Queue, Tree, Timeline, Detail | **Immediate** (`expect_task_hash`) + Toast **`[Undo]`** | `set-kind <id> <kind> --expect-task-hash <h>` | **Impossible** (no UI trigger) | **2 clicks** (badge -> kind) |
+| **Any Task** | **Edit Labels** | Clickable `[+ tag]` chip on Detail, Tree, Queue, Card `[⋯]` + Key `l` | **Immediate** toggle in popover (`expect_task_hash`) + Toast **`[Undo]`** | `set-labels <id> --add/--remove <lbl> --expect-task-hash <h>` | **6 clicks** (`TaskDetailModal` -> `LabelEditorModal` -> `ConfirmDialog`) | **2 clicks** (chip -> toggle tag) |
+| **Emergent Task (`T###`)** | **Toggle Next Up (`★`)** | Star icon `[☆]` / `[★]` on Card, Queue, Tree, Detail | **Immediate** (`expect_task_hash`) + Toast **`[Undo]`** | `set-next-up <id> yes\|no --expect-task-hash <h>` | **Impossible** (manual Markdown edit) | **1 click** |
+| **Emergent Task (`T###`)** | **Check / Uncheck / Add Step** (`## Steps`) | Interactive checkboxes & `+ Add step…` in `TaskDetailModal` | **Immediate** (`expect_task_hash`) + Toast **`[Undo]`** | `step check\|uncheck\|add <id> ... --expect-task-hash <h>` | **Impossible** (CLI only) | **1 click** per checkbox |
+| **Any Task** | **Link / Unlink Use Cases** (`UC###`) | *Initiative 17 (`17.10`)*: `[UC###]` pill / `[+ UC]` popover + Key `u` | **Immediate** toggle + Toast **`[Undo]`** | `link <id> <UC>` / `unlink <id> <UC>` (`17.2`) | **Impossible** (in flight in `17.10`) | **2 clicks** (popover -> toggle UC) |
+| **Any Task** | **Chat on Task (`💬`)** (`T074`) | `[💬]` button on Card, Queue, Tree, Detail + Key `c` / `/` | Opens Contextual Chat drawer / focuses quick bar | *Spec `T074`*: element-scoped chat turn | **Impossible** (global chat only) | **1 click** (or key `c`) |
+| **1. `open` Leaf** | **Start Task** (`-> in progress`) | Card primary button `[▶ Start]`, State pill, Detail footer | **Immediate** (`expect_task_hash`); status toast (no inverse) | `transition <id> "in progress" --actor owner` | **2 clicks** for `NN.T` (Detail -> Start); **Impossible** for `T###` without Run | **1 click** on card |
+| **1. `open` Leaf** | **Run with Agent…** | Card `[⋯]` / Detail footer `[⚡ Run…]` | `RunDialog` preview -> Start | `run start --task <id> ...` | **3–4 clicks** (Detail -> Run… -> Start) | **2–3 clicks** |
+| **1. `open` / `in progress` Leaf** | **Pause Task** (`-> paused`) | Card icon `[⏸]`, Queue row `[Pause]`, Detail footer, Column header `[⏸ Pause (N)…]` | Single: **Immediate** (`expect_task_hash`); Bulk: **Level 2 dialog** | `transition <id> paused --actor owner` | **1 click** on Kanban/Queue (missing `expect_task_hash`); **2 clicks** in Detail | **1 click** (with `expect_task_hash`) |
+| **2. `in progress` Leaf** | **Mark Delivered** (`-> delivered`) | Card primary button `[✓ Deliver ▾]`, State pill, Detail footer | **Immediate** (or split `[▾]` to set `verify-by` at delivery) | `transition <id> delivered --actor owner [--verify-by <t>]` | **2 clicks** (Detail -> Mark Delivered, hidden if runs exist) | **1 click** on card |
+| **3. `waiting` / `blocked` Leaf** | **Answer Blocking Question** (`Q###`) | Card button `[💬 Answer Q011]` -> inline popover, or inline inside `TaskDetailModal` | **Immediate** on option click + `Answer` (no inverse) | `questions answer <Q###> --choice <c> --by owner` | **5 clicks** (close Detail -> Decisions tab -> select -> Answer -> ConfirmDialog) | **2 clicks** inline from card or Task Detail |
+| **3. `waiting` Leaf** | **Set / Change / Clear `waiting-on`** | Clickable `[Waiting on: … ▾]` pill in Detail & Card `[⋯]` | **Immediate** (`expect_task_hash`) + Toast **`[Undo]`** | `set-waiting-on <id> <qual\|none> --expect-task-hash <h>` | **Impossible** (CLI only) | **2 clicks** |
+| **3. `waiting` Leaf** | **Force Unblock** (`-> open`) | Detail footer / Card `[⋯]` -> `Force Unblock…` | **Inline reason popover** (1 input + `Enter`) | `transition <id> open --force-unblock --reason <r>` | **Impossible** in UI | **2 clicks** + reason |
+| **5. `delivered` Leaf** | **Validate & Close** (`delivered -> verified -> done`) (`T075`) | **Primary button `[✓✓ Validate & Close ▾]`** on Card, Detail footer, Tree row, VS Code TreeView inline icon + Key `v` | **1-click immediate** on single card (or split `[▾]` for note / override prompt if `cross-agent`); Toast offers **`[+ Add Note]` & `[Reopen]`** | `transition <id> done --actor owner --verifier owner --owner-approved [--reason <note>]` | **4 clicks across 2 modal openings** (`TaskDetailModal.tsx:2333`, `715`, `2356`) | **1 click** on card (or key `v` when focused) |
+| **5. `delivered` (Bulk)** | **Validate & Close Checked (`N`)** (`T075`) | **Delivered Sub-Column Header** `[✓✓ Validate & Close (N)…]` | **Level 2 Checklist Dialog** (frozen visible IDs + checkboxes + optional shared note, `expect_plan_hash`) | Atomic batch `close <ids...> --verifier owner --owner-approved --expect-plan-hash <h>` | **Impossible** (`4 × N` clicks) | **2 clicks** (Header button -> Confirm) |
+| **5. `delivered` Leaf** | **Approve Only (Mark Verified)** (`-> verified`) | Card split-button `[▾]` -> `Mark Verified Only`, State pill, Detail footer | **Immediate** (`expect_task_hash`); status toast | `transition <id> verified --actor owner --verifier owner --owner-approved` | **2 clicks** (Open Detail -> Approve, closes modal) | **2 clicks** from card split menu or **1 click** in Detail |
+| **5. `delivered` Leaf** | **Bounce** (`-> bounced`) | Card `[⋯]` / Detail footer `[↩ Bounce…]` | **Inline reason popover** (`B1..Bn` findings) | `transition <id> bounced --actor owner --reason <r>` | **3 clicks** (Open Detail -> Bounce -> Confirm Bounce) | **2 clicks** + reason |
+| **5. `delivered` Leaf** | **Request Verification (`verify-by`)** | Clickable `[Verify-by: + ▾]` pill on Delivered card & Detail | **Immediate** on target selection (`expect_task_hash`) + Toast **`[Undo]`** | `set-verify-by <id> <target> [--check <c>] --expect-task-hash <h>` | **Impossible** (CLI only) | **2 clicks** |
+| **6. `verified` Leaf** | **Close Task** (`-> done`) | **Primary button `[✓ Close]`** on Card, Detail footer, Tree row + Key `v` | **1-click immediate** (`expect_task_hash`) + Toast **`[Reopen]`** | `transition <id> done --actor owner` | **2 clicks** (Open Detail -> Close Task) | **1 click** on card |
+| **6. `verified` (Bulk)** | **Close All Verified (`N`)** | **Verified Sub-Column Header** `[✓ Close Verified (N)…]` | **Level 2 Checklist Dialog** (`expect_plan_hash`) | `close --verified --expect-plan-hash <h>` | **Impossible** (`2 × N` clicks) | **2 clicks** |
+| **7. `paused` Leaf** | **Resume Task** (`-> open` or `-> in progress`) | Card primary button `[▶ Resume ▾]` (`open` default, `[▾]` for `in progress`), Column header `[▶ Resume (N)…]` | Single: **Immediate** (`expect_task_hash`); Bulk: **Level 2 dialog** | `transition <id> open\|"in progress" --actor owner` | **1 click** on card (`-> open` only); **Impossible** in bulk | **1 click** (`-> open`) or **2 clicks** (`-> in progress` / Bulk) |
+| **8. `done` / `done with a caveat` / `dropped` Leaf** | **Reopen Task** (`-> open` or `-> delivered`) | Card primary button `[↺ Reopen…]`, Tree row, Detail footer, Toast `[Reopen]` | **Inline popover** (target `open` vs `delivered`, optional `verify-by`, mandatory `reason`) | `reopen <id> --to open\|delivered [--verify-by <t>] --reason <r>` | **4 clicks** in Tree only (`open` target only); **Impossible** in Kanban/Detail or to `delivered` | **2 clicks** + reason |
+| **Any Non-Terminal Leaf** | **Drop Task** (`-> dropped`) | Card `[⋯]` menu -> `Drop Task…`, Detail footer | **Level 1/2 confirmation** requiring drop `reason` + Toast **`[Reopen]`** | `transition <id> dropped --actor owner --reason <r>` | **Impossible** in UI | **2 clicks** + reason |
+| **Initiative Container (`NN` all leaves `done`)** | **Ship Initiative** (`-> done/NN-slug/`) | Tree row / Detail header `[📦 Ship Initiative…]` | **Level 3 `ConfirmDialog`** (`--dry-run` -> `--expect-plan-hash`) | `ship <NN> --expect-plan-hash <h>` | **Impossible** (CLI only) | **2 clicks** |
 
 ### 4.2 Element View Action Matrix (Use Cases, Questions, Inbox Notes)
 
-| Element View | Action Name (English UI Label) | Surface Placement | Confirmation Level | Engine Command | Clicks Today | Clicks Proposed |
+| Element View | Action Name (English UI Label) | Surface Placement | Confirmation & Post-Action Toast | Engine Command | Clicks Today | Clicks Proposed |
 | --- | --- | --- | --- | --- | --- | --- |
-| **Use Cases** (`UseCasesManager` & `UseCaseDetailModal`) | **Approve / Set Approval** (`proposed` / `approved` / `deprecated`) | Clickable `[PROPOSED ▾]` badge on UC card & Detail header | **Level 0** (Immediate + Toast Undo) | `use-cases set-approval <UC> <val>` | **Impossible** | **2 clicks** (or 1-click `[✓ Approve]` on `proposed` card) |
-| **Use Cases** | **Validate with AI** (run probe) | Card button `[▶ Validate]`, Detail footer, VS Code TreeView inline button | **Level 0** (Immediate run; if stage != ready, offers `[Force Validate]`) | `use-cases validate <UC> [--force]` | **1 click** (uses `alert()` on error) | **1 click** (in-app toast/banner, no `alert()`) |
-| **Use Cases** | **Record Owner Verdict** (`Pass` / `Fail` / `Partial`) | Card `[⋯]` menu & Detail header `[✓ Record Verdict…]` | **Level 1** (Popover: `Pass` \| `Fail` \| `Partial` + 1-line summary) | `use-cases record-validation <UC> --verdict <v> --summary <s> --actor owner` | **Impossible** (CLI only) | **2 clicks** |
-| **Use Cases** | **Create Task from Use Case** | Card `[+ Task]` button & Detail `Linked Tasks` header `[+ New Task from UC]` | **Level 1/2** (Pre-filled modal from UC title, steps, criteria) | `tasks new --from-use-case <UC> ...` | **Impossible** | **2 clicks** |
-| **Use Cases** | **Link / Unlink Existing Task** | Detail & Card `[+ Link Task ▾]` popover; click task pill to open task, `×` to unlink | **Level 0** (Immediate + Toast Undo) | `tasks link <task> <UC>` / `unlink` | **Impossible** (pills are static text) | **1 click** to open task; **2 clicks** to link/unlink |
-| **Use Cases** | **Edit Use Case** (title, actor, priority, scenario, command) | Detail `[✎ Edit]` toggle + inline priority/actor pills | **Level 0** (Inline save with hash) | `use-cases create --id <UC> ...` (preserving validation log!) | **Impossible** in UI | **2 clicks** |
-| **Use Cases** | **Chat on Use Case (`💬`)** (`T074`) | Card `[💬]` & Detail chat drawer | None | Scoped chat turn on `UC###` | **Impossible** | **1 click** |
-| **Questions** (`DecisionsTab` & `TaskDetailModal`) | **Answer Question** (pick option) | Option row in `DecisionsTab` AND inline inside `TaskDetailModal`; `[✓ Answer]` | **Level 0** (1-click on `[Answer A (Recommended)]` or select + `Answer` with Toast Undo; checkbox `[x] Mark applied` & `[ ] Changes finished task result`) | `questions answer <Q###> --choice <c> --by owner [--apply-ref <r>] [--changes-result]` | **3 clicks** in DecisionsTab (always opens `ConfirmDialog`); **Impossible** inside `TaskDetailModal` | **1–2 clicks** in both DecisionsTab and `TaskDetailModal` |
-| **Questions** | **Mark Decision Applied** | `Awaiting Application` card `[✓ Mark Applied]` (1-click with default blocked task ref, or popover for custom ref) | **Level 0** (1-click default ref) / **Level 1** (custom ref) | `questions apply <Q###> --by owner --ref <ref>` | **3 clicks** (opens modal every time) | **1 click** |
-| **Questions** | **Move to External Tracker** | Question card `[⋯]` -> `Move to Tracker…` | **Level 1** (Popover for tracker URL + optional reason) | `questions move <Q###> --to <url>` | **Impossible** (CLI only) | **2 clicks** |
-| **Questions** | **Chat on Question (`💬`)** (`T074`) | `[💬 Discuss with AI]` on Question card | None | Scoped chat turn on `Q###` | **Impossible** | **1 click** |
-| **Inbox Notes** (`InboxPanel` & `NoteEditorModal`) | **Quick Convert to Task / Microtask / Use Case** | Row hover buttons `[+ Task]`, `[⚡ Micro]`, `[+ UC]` + inside `NoteEditorModal` | **Level 0** for `[⚡ Micro]` (1 click!); **Level 1** modal for Task / UC | `inboxToMicrotask` / `inboxToTask` / `use-cases create` + `inbox resolve` | **3–4 clicks** (must open `NoteEditorModal` first) | **1 click** (`⚡ Micro`) / **2 clicks** (`+ Task` / `+ UC`) from row |
-| **Inbox Notes** | **Quick Discard / Resolve** | Row hover `[✓ Resolve]` `[🗑 Discard]` + Bulk selection bar | **Level 1** (Inline reason popover) / **Level 2** (Bulk) | `inbox resolve` / `inbox discard` | **3–4 clicks** inside modal only | **2 clicks** from row |
+| **Use Cases** (`UseCasesManager` & `UseCaseDetailModal`) | **Set Approval** (`proposed` / `approved` / `deprecated`) | *Initiative 17 (`17.10`)*: Clickable `[PROPOSED ▾]` badge on UC card & Detail header | **Immediate** + Toast **`[Undo]`** | `use-cases set-approval <UC> <val>` (`17.5`) | **Impossible** (in flight in `17.5`/`17.10`) | **2 clicks** |
+| **Use Cases** | **Validate with AI** (run probe; `--force` when `stage != ready` per `17.6`) | Card button `[▶ Validate]`, Detail footer, VS Code TreeView inline icon | **Immediate** run (if `stage != ready`, popover offers `[Force Validate]` once `17.6` lands; no `window.alert()`) | `use-cases validate <UC> [--force (17.6)]` | **1 click** (uses `window.alert()` on error) | **1 click** |
+| **Use Cases** | **Record Owner Verdict** (`Pass` / `Fail` / `Partial`) | Card `[⋯]` menu & Detail footer `[✓ Record Verdict…]` | **Inline popover** (`Pass` \| `Fail` \| `Partial` + 1-line summary; append-only, no undo) | `use-cases record-validation <UC> --verdict <v> --summary <s> --actor owner` | **Impossible** (CLI only) | **2 clicks** + summary |
+| **Use Cases** | **Edit Use Case** (non-destructive!) | Detail `[✎ Edit]` mode + inline `Priority` / `Actor` / `Short` pills | **Immediate** for pills + Toast **`[Undo]`**; Save button for body sections (`expect_hash`) | **New:** `use-cases edit <UC> ... --expect-hash <h>` (preserves `## AI Validation Log`!) | **Impossible** in UI (and `create --id` wipes log!) | **2 clicks** |
+| **Use Cases** | **Create Task from UC / Link Task / Navigate to Task** | *Initiative 17 (`17.9`–`17.10`)*: clickable `Task T###` pills + `[+ Task from UC]` + `[+ Link Task ▾]` | Click pill = **1 click** to open task; Link/Unlink = **2 clicks** + Toast **`[Undo]`** | `tasks new --from-use-case <UC>` (`17.4`) / `link` / `unlink` (`17.2`) | **Impossible** (pills are non-clickable spans today) | **1 click** (open) / **2 clicks** (link/create) |
+| **Use Cases** | **Chat on Use Case (`💬`)** (`T074`) | Card `[💬]` & Detail quick chat bar / drawer | Opens Contextual Chat | *Spec `T074`*: scoped chat turn on `UC###` | **Impossible** | **1 click** |
+| **Questions** (`DecisionsTab` & `TaskDetailModal`) | **Ask Standalone / Non-Blocking Question** | `DecisionsTab` header `[+ Ask Question…]` (`Blocks: none (--blocks -)` or task picker) | Modal form -> Create | `questions ask --question "...?" --blocks <ids\|->` | **Impossible** from `DecisionsTab` (only inside `TaskDetailModal`) | **2 clicks** |
+| **Questions** | **Answer Question** (in `DecisionsTab` OR inline in `TaskDetailModal`) | Option radio + `[✓ Answer]` (with `[x] Also mark applied` & `[ ] Changes finished task result` checkboxes) | **2 clicks** (select option -> click `Answer`; Level 2 dialog only if resuming a run or `--changes-result`; no inverse) | `questions answer <Q###> --choice <c> --by owner [--apply-ref <r>] [--changes-result]` | **3 clicks** in `DecisionsTab` (always opens `ConfirmDialog`); **5 clicks** from `TaskDetailModal` | **2 clicks** in both `DecisionsTab` and `TaskDetailModal` |
+| **Questions** | **Mark Decision Applied** | `Awaiting Application` card `[✓ Mark Applied]` | **1 click** (uses blocked task ID as default `--ref`, or `[▾]` for custom note; no inverse) | `questions apply <Q###> --by owner --ref <ref>` | **3 clicks** (opens modal every time) | **1 click** |
+| **Questions** | **Move to External Tracker** (`status: moved`) | Question card `[⋯]` -> `Move to Tracker…` (+ add `Moved` filter pill in `DecisionsTab`) | **Inline popover** for tracker URL + optional reason | `questions move <Q###> --to <url> [--reason <r>]` | **Impossible** (CLI only; `moved` hidden in UI) | **2 clicks** + URL |
+| **Questions** | **Chat on Question (`💬`)** (`T074`) | `[💬 Discuss with AI]` on Question card | Opens Contextual Chat | *Spec `T074`*: scoped chat turn on `Q###` | **Impossible** | **1 click** |
+| **Inbox Notes** (`InboxPanel` & `NoteEditorModal`) | **Process Inbox** (Single note, Project, or Workspace — Owner example) | `InboxPanel` header **`[✨ Process Inbox (N)]`** + Row button **`[✨ Process]`** + `NoteEditorModal` | Opens note-focused Contextual Chat / Triage runner with AI triage proposal as the suggested first action (see `Q-F`) | Triage run / Contextual Chat (`T074`) + `accept-triage` | **3–4 clicks per note** inside `NoteEditorModal` only; no header command or chat | **1 click** from header or row |
+| **Inbox Notes** | **Toggle `draft` <-> `ready`** | Clickable `[DRAFT ▾]` / `[READY ▾]` pill on `InboxPanel` row | **Immediate** (`expect_hash`) + Toast **`[Undo]`** | `inbox edit <N###> --status ready\|draft --expect-hash <h>` | **3 clicks** (open modal -> dropdown -> close) | **1–2 clicks** on row |
+| **Inbox Notes** | **Quick Convert to Task / Microtask / Use Case** | Row `[⋯]` / hover `[⚡ Micro]` `[+ Task]` `[+ UC]` + inside `NoteEditorModal` | `[⚡ Micro]` = **1 click**; `[+ Task]` / `[+ UC]` = **2 clicks** via pre-filled modal | `inboxToMicrotask` / `inboxToTask` / `use-cases create` + `inbox resolve` | **3–4 clicks** (must open `NoteEditorModal` first) | **1–2 clicks** from row |
+| **Inbox Notes** | **Resolve / Discard Note** | Row `[⋯]` -> `Resolve…` / `Discard…` + Bulk header action | **Inline reason popover** (single) / **Level 2 dialog** (bulk) + Toast **`[Reopen]`** | `inbox resolve` / `inbox discard` | **3–4 clicks** inside modal only | **2 clicks** from row |
 
 ---
 
 ## 5. ASCII Mockups
 
-### 5.1 Kanban Column Headers & Card Quick Actions + Inline Edit Popovers
+### 5.1 Kanban Column Headers & Restrained Card Density (2-Click Pill Popover + 1-Click Primary Action + `[⋯]` Overflow)
 
 ```text
 +----------------------------------------------------------------------------------------------------------------------+
-| WORKFLOW BOARD                                      [☆ Next-up only] [⏸ Show paused (2)] [👁 Show done (68)] [Sync] |
+| WORKFLOW BOARD                              [+ New Task…] [⚡ Quick Microtask] [☆ Next-up] [⏸ Paused (2)] [👁 Done] |
 +======================================================+===============================================================+
-| ● IN PROGRESS (3)                        [⏸ Pause 3] | ● DELIVERED / VERIFIED (4)                                    |
+| ● IN PROGRESS (3)                    [⏸ Pause (3)…]  | ● DELIVERED / VERIFIED (4)                                    |
 +------------------------------------------------------+---------------------------------------------------------------+
-| +--------------------------------------------------+ | Delivered — needs verification (3)  [✓✓ Validate & Close (3)] |
-| | [P1 ▾] [⚙ engine ▾] [M ▾]          [☆] [⏸] T070 | |                                     [⊳ Verify-by…           ] |
-| | orchestrator reassign binds interactive session  | | +-----------------------------------------------------------+ |
-| | [UC028 ×] [UC038 ×] [+ UC]  [#session ×] [+ tag] | | | [P1 ▾] [📐 method ▾] [M ▾]            [★] [💬] [⋯]  T073 | |
-| | [@kilo ▾]              [💬 Chat] [✓ Deliver ▾]   | | | Study: cross-workspace orchestrator control plane         | |
-| +--------------------------------------------------+ | | [UC028] [UC039] [+ UC]   Verify-by: [owner ▾]             | |
-|          |                                           | | [@kilo ▾]    [↩ Bounce…]  [✓✓ Validate & Close ▾]         | |
-|          v  (Clicking [P1 ▾] opens inline popover)   | +-----------------------------------------------------------+ |
-|   +--------------------------------------+           |                                      |                        |
-|   | Set Priority for T070          [Esc] |           |   (Clicking [✓✓ Validate & Close] applies in 1 click!         |
-|   | [P0]  [*P1*]  [P2]  [P3]             |           |    Clicking [▾] opens optional note/verdict menu:)            |
-|   | Reason: [Requested by owner N068___] |           |   +-------------------------------------------------------+   |
-|   | (Click P0-P3 or press Enter -> saves |           |   | ✓✓ Validate & Close now (verifier: owner)        [v] |   |
-|   |  immediately with hash + Undo toast) |           |   | ✓✓ Validate & Close with note…                       |   |
-|   +--------------------------------------+           |   | ✓  Approve only (move to Verified, keep open)        |   |
+| +--------------------------------------------------+ | Delivered — needs verification (3) [✓✓ Validate & Close (3)…] |
+| | [P1 ▾] [⚙ engine ▾]                   [☆] [⋯]    | |                                    [⊳ Request Verification… ] |
+| | T070 · Reassign su sessione attuale              | | +-----------------------------------------------------------+ |
+| | orchestrator reassign binds interactive session  | | | [P1 ▾] [📐 method ▾]   Verify-by: [owner ▾]    [★] [⋯]    | |
+| | [@kilo ▾] [UC028]            [💬] [✓ Deliver ▾]  | | | T073 · Studio pannello orchestratori                      | |
+| +--------------------------------------------------+ | | Study: cross-workspace orchestrator control plane         | |
+|          |                                           | | [@kilo ▾] [UC028]        [💬] [✓✓ Validate & Close ▾]     | |
+|          v  (Click 1: open [P1 ▾] pill;              | +-----------------------------------------------------------+ |
+|              Click 2: pick P0-P3 -> immediate apply) |                                      |                        |
+|   +--------------------------------------+           |   (Click [✓✓ Validate & Close] -> 1-click immediate closure!  |
+|   | Set Priority for T070          [Esc] |           |    Click [▾] or [⋯] for secondary options:)                   |
+|   | [P0]  [*P1*]  [P2]  [P3]             |           |   +-------------------------------------------------------+   |
+|   | Reason: [Requested by owner N068___] |           |   | ✓✓ Validate & Close now (verifier: owner)        [v] |   |
+|   +--------------------------------------+           |   | ✓✓ Validate & Close with note…                       |   |
+|                                                      |   | ✓  Approve only (move to Verified, keep open)        |   |
 |                                                      |   | ⚠  Close with caveat (self-verified / note)…         |   |
+|                                                      |   | ↩  Bounce to executor…                               |   |
 |                                                      |   +-------------------------------------------------------+   |
 |                                                      | - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - |
-|                                                      | Verified — ready to close (1)            [✓ Close All (1)]    |
+|                                                      | Verified — ready to close (1)        [✓ Close Verified (1)…]  |
 |                                                      | +-----------------------------------------------------------+ |
-|                                                      | | [P2 ▾] [🔧 fix ▾] [S ▾]   Verifier: owner     [💬]  T069 | |
-|                                                      | | Validation campaign skips draft use cases                 | |
-|                                                      | | [@kilo ▾]                     [↩ Reopen]  [✓ Close]       | |
+|                                                      | | [P2 ▾] [🔧 fix ▾]      Verifier: owner         [☆] [⋯]    | |
+|                                                      | | T069 · Campagna senza bozze                               | |
+|                                                      | | [@kilo ▾]                          [💬] [✓ Close]         | |
 |                                                      | +-----------------------------------------------------------+ |
 +======================================================+===============================================================+
-| Bottom-right Toast after 1-click Validate & Close:                                                                   |
+| Toast after 1-click Priority edit (Exact Inverse -> shows [Undo]):                                                   |
 | +------------------------------------------------------------------------------------------------------------------+ |
-| | ✓ T073 (Studio pannello orchestratori) validated & closed by owner.                  [+ Add Note]  [Undo (5s)]   | |
+| | ✓ T070 priority changed P2 -> P1.                                                                   [Undo (6s)]  | |
+| +------------------------------------------------------------------------------------------------------------------+ |
+| Toast after 1-click Validate & Close (Compensating Action -> shows [Reopen], never fake Undo):                       |
+| +------------------------------------------------------------------------------------------------------------------+ |
+| | ✓ T073 validated & closed (verifier: owner).                                        [+ Add Note]  [Reopen (6s)]  | |
 | +------------------------------------------------------------------------------------------------------------------+ |
 +----------------------------------------------------------------------------------------------------------------------+
 ```
 
-### 5.2 Bulk "Validate & Close" Confirmation Dialog (`T075` — Level 2 Confirmation)
+### 5.2 Bulk "Validate & Close" Confirmation Dialog (`T075` — Frozen Visible Selection & Atomic Plan Hash)
 
 ```text
 +==============================================================================+
-| ✓✓ Validate & Close 3 Delivered Tasks                                    [×] |
+| ✓✓ Validate & Close Delivered Tasks (3 of 3 visible selected)            [×] |
 +------------------------------------------------------------------------------+
-| The following 3 visible tasks in Delivered will be marked `verified`         |
-| (`verifier: owner`) and closed (`done`, moved to `tasks/done/`):             |
+| Active filter: Project = ai-orchestration · Showing 3 delivered tasks.       |
+| All checked tasks will be atomically verified (`verifier: owner`) and        |
+| closed (`done`) under plan hash `9f3a1c2e…`:                                 |
 |                                                                              |
-|  [x] T073 (Studio pannello orchestratori) — Study: orchestrator control...   |
-|  [x] T075 (Valida e chiudi da UI) — Validate & close button on Delivered...  |
-|  [x] 16.9b (Web UI multi-project) — Switcher, project and common views       |
+|  [x] T073 (Studio pannello orchestratori) [mode: owner]                      |
+|  [x] T075 (Valida e chiudi da UI)         [mode: owner]                      |
+|  [x] 16.9b (Web UI multi-project)         [mode: cross-agent ⚠ override]     |
+|                                                                              |
+|  ⚠ Note: 16.9b declares `verification-mode: cross-agent` with no prior       |
+|    cross-agent run. Closing as owner records an audited `owner-override`.    |
 |                                                                              |
 | Validation Note (optional, recorded in each task's ## Log / PROGRESS.md):    |
 | +--------------------------------------------------------------------------+ |
@@ -363,7 +395,7 @@ When the owner clicks **`Validate & Close`** (single or bulk) or **`Approve (Ver
 +==============================================================================+
 ```
 
-### 5.3 Task Detail Modal: Inline Header Bar, Interactive Steps, Inline Questions & Contextual AI Chat (`T074`)
+### 5.3 Task Detail Modal: Inline Pills, Interactive Steps, Inline Questions & Contextual AI Chat (`T074`)
 
 ```text
 +======================================================================================================================+
@@ -371,143 +403,137 @@ When the owner clicks **`Validate & Close`** (single or bulk) or **`Approve (Ver
 | [P1 ▾] [ai-orch] 17.5 (Stadio degli use case ✎) [✨ feature ▾] [M ▾] [State: waiting ▾] [★ Next-up]                  |
 | Ciclo di vita: approvazione e stadio derivato                                                                        |
 +----------------------------------------------------------------------------------------------------------------------+
-| Executor: [@kilo ▾]  | Profile: [bulk-execution ▾] | Verify-by: [owner ▾]        | Use Cases: [UC012 ×] [+ Link UC▾] |
+| Executor: [@kilo ▾]  | Waiting-on: [Q011 ▾]        | Verify-by: [owner ▾]        | Use Cases: [UC012 ×] [+ Link UC▾] |
 | Mode: [owner ▾]      | Depends on: [17.1 ×] [+ ▾]  | Labels: [#ui ×] [#uc ×] [+] | File: tasks/17-.../plan.md [Open] |
 +======================================================================================================================+
 | [📄 Specification & Steps]  [⚡ Runs (1)]  [📎 Attachments (0)]         [Structured | Raw]   [💬 Contextual Chat (2)] |
 +----------------------------------------------------------------------+-----------------------------------------------+
 | ## Goal                                                              | 💬 CHAT ON 17.5 (Stadio degli use case)       |
 | Spec §3 according to Q011: `approval` field with migration from      | Context: 17.5 + spec/use-cases-drive-tasks.md |
-| `status`, `stage` as pure function; shown by show/list/index.        | + Q011 + UC012 · Session: ai-coding-tools-d8  |
+| `status`, `stage` as pure function; shown by show/list/index.        | + Q011 + UC012 · Session: claude (sonnet) [▾] |
 |                                                                      | --------------------------------------------- |
 | ## Steps  (Click checkbox to toggle in place via `tasks step check`) | [Owner 15:02]: Can we also include `partial`  |
 | - [x] 1. Parse `approval:` header and fallback from legacy `status:` | in the migration from status to last-verdict? |
 | - [ ] 2. Implement pure `compute_use_case_stage(uc, linked_tasks)`   |                                               |
-| - [ ] 3. Expose `approval` and `stage` in `use-cases list/show`      | [Claude 15:02]: Yes — I updated step 1 of     |
+| - [ ] 3. Expose `approval` and `stage` in `use-cases list/show`      | [Claude 15:02]: Done — updated step 1 of      |
 | [+ Add step…_______________________________________________] [Add]   | `17.5` and §3 of `use-cases-drive-tasks.md`   |
 |                                                                      | so `partial` maps to `approval: approved` and |
-| ## Blocking Questions (1 Open — Answer directly here!)               | `last-verdict: partial`.                      |
-| +------------------------------------------------------------------+ |   ✓ Edited tasks/specs/use-cases-drive-...    |
-| | Q011 (Approvazione vs stadio UC) · Open · Blocks: 17.5           | |   ✓ Edited tasks/17-use-cases-drive-tasks/... |
-| | Separiamo l'approvazione di uno use case dal suo stadio derivato?| |                                               |
-| | (o) A — Sì: campo `approval` + `stage` derivato [Recommended]    | | [Ask or instruct AI on 17.5…                ] |
-| | ( ) B — No: un solo campo con `draft (approved)`                 | | [____________________________________] [Send] |
-| | Note: [________________________________________________________] | +-----------------------------------------------+
-| | [x] Mark applied to 17.5   [Withdraw…]     [✓ Answer & Unblock]  |
+| ## Blocking Questions (1 Open — Answer directly here in 2 clicks!)   | `last-verdict: partial`.                      |
+| +------------------------------------------------------------------+ |   ✓ task.updated: 17.5 (hash 4c92..)          |
+| | Q011 (Approvazione vs stadio UC) · Open · Blocks: 17.5           | |                                               |
+| | Separiamo l'approvazione di uno use case dal suo stadio derivato?| | [Ask or tell AI about 17.5…                 ] |
+| | (o) A — Sì: campo `approval` + `stage` derivato [★ Recommended]  | | [____________________________________] [Send] |
+| | ( ) B — No: un solo campo con `draft (approved)`                 | +-----------------------------------------------+
+| | Note: [________________________________________________________] |
+| | [x] Mark applied (`--apply-ref 17.5`)     [✓ Answer & Unblock]   |
 | +------------------------------------------------------------------+ |
 +======================================================================================================================+
-| State: waiting (blocked by Q011)     [⏸ Pause] [🔓 Force Unblock…] [⚡ Run…] [✓ Deliver] [✓✓ Validate & Close ▾]     |
+| QUICK AI: [Ask or tell AI about 17.5… (/ to focus)_____________________] [Send]  [⏸ Pause] [🔓 Unblock…] [⚡ Run…]   |
 +======================================================================================================================+
 ```
 
-### 5.4 Use Case Detail Modal & Card Quick Actions
+### 5.4 Inbox Panel: "Process Inbox" Command & Note-Focused Contextual Chat (`T074` + `T076`)
 
 ```text
 +======================================================================================================================+
-| [UC012] (Use case lifecycle ✎)  [Approval: APPROVED ▾]  [Stage: IN DEVELOPMENT (2/4 tasks done)]  [P1 ▾]  Actor: [Owner ▾] [×] |
-| Owner manages use case approval and derived readiness stage                                                          |
+| INBOX — TO ANALYZE (3 ready, 1 draft)            [+ New Note]  [✨ Process Inbox (3 ready)…]  [🗑 Discard Selected…] |
++======================================================================================================================+
+| [x] N071 · [READY ▾] · 10m ago · from: owner · about: UI priority editing                                            |
+|     "es. interfaccia per cambiare priorità: click sulla priorità corrente apre un menu per cambiarla"                |
+|     [✨ Process & Chat]  [⚡ Quick Microtask]  [+ Task…]  [+ Use Case…]  [✓ Resolve…]  [⋯]                           |
 +----------------------------------------------------------------------------------------------------------------------+
-| Verification Type: [automated-probe ▾] | Last Tested: 2026-10-27 (PASS) | Revalidation: [pending ⚠] | [✎ Edit UC]   |
-+======================================================================================================================+
-| LINKED IMPLEMENTATION TASKS (2/4 done — Click any task to open, or change its state/priority inline!)                |
-| +------------------------------------------------------------------------------------------------------------------+ |
-| | ✓ 17.1 (Proiezione collegamenti) [P1 ▾] [done]          | ⏳ 17.5 (Stadio degli use case) [P1 ▾] [waiting Q011]   | |
-| | ✓ 17.2 (Link e riscrittura)      [P1 ▾] [verified] [✓]  | ○ 17.6 (Validazione se pronti) [P2 ▾] [open] [▶ Start]| |
-| +------------------------------------------------------------------------------------------------------------------+ |
-| [+ Create New Task from UC012…]   [+ Link Existing Task ▾]                                                           |
-|                                                                                                                      |
-| ## Scenario / Interaction Steps                                                                                      |
-| 1. Owner creates a use case (`approval: proposed`, `stage: draft`).                                                  |
-| 2. Owner clicks `[✓ Approve]` on the use case card (`approval: approved`).                                           |
-| 3. Owner clicks `[+ Create Task from UC]` -> task is created with `--use-case UC012` (`stage: planned`).             |
-|                                                                                                                      |
-| ## 💬 Contextual AI Chat on UC012                                                                                    |
-| [e.g. "Split step 3 into two acceptance criteria and create the backend task"______________________________] [Send]  |
-+======================================================================================================================+
-| tasks/use-cases/UC012-lifecycle.md    [✓ Record Manual Verdict ▾]  [▶ Force Validate with AI]  [✓ Approve Use Case]  |
-+======================================================================================================================+
-```
-
-### 5.5 Question Detail / Card in `DecisionsTab` (with 1-Click Recommended Answer, Move to Tracker & Contextual AI Chat)
-
-```text
-+======================================================================================================================+
-| [Q011] (Approvazione vs stadio UC ✎)  [Open]  Asked by: claude (today)             Blocks: [→ 17.5 (Stadio UC)] [⋯] |
-| Separiamo l'approvazione di uno use case dal suo stadio derivato dai task?                                           |
-+----------------------------------------------------------------------------------------------------------------------+
-| ▸ Context & Background (click to expand)                                                                             |
-|                                                                                                                      |
-| Answer Options:                                                                                                      |
-|  (o) A — Sì: campo `approval` (proposed|approved|deprecated) + `stage` derivato dai task  [★ Recommended]           |
-|  ( ) B — No: un solo campo con valore `draft (approved)`                                                             |
-|  ( ) Other / open answer: [Optional note or custom answer…_________________________________________________________] |
-|                                                                                                                      |
-| 💬 Discuss Q011 with AI: ["What happens to existing verified UCs under Option A?"_________________________] [Ask AI] |
-+----------------------------------------------------------------------------------------------------------------------+
-| [Withdraw…]  [↗ Move to Tracker…]         [x] Record as applied (`--apply-ref 17.5`)    [✓ Answer A (Recommended)]   |
+| [x] N072 · [READY ▾] · 5m ago · from: gcube_atlas · about: verification-queue filtering                              |
+|     "verification-queue --for should also match session aliases when a workspace has multiple worktrees"             |
+|     +--------------------------------------------------------------------------------------------------------------+ |
+|     | 💬 PROCESS NOTE N072 — AI Triage & Contextual Chat                                                    [Hide] | |
+|     | Suggested Triage Proposal: **Create Emergent Task** in `engine` (P2, executor: `kilo`, links `UC014`)        | |
+|     |   Title: "verification-queue --for matches session aliases across worktrees"                                 | |
+|     |   [✓ Accept & Create Task]   [Convert to Use Case Instead…]   [Mark Already Covered by T044]   [Discard]     | |
+|     | ------------------------------------------------------------------------------------------------------------ | |
+|     | [Ask or refine with AI: e.g. "Make it P1 and link to T070 instead"_________________________________] [Send]  | |
+|     +--------------------------------------------------------------------------------------------------------------+ |
 +======================================================================================================================+
 ```
 
 ---
 
-## 6. How T074 and T075 Fit & Unified Implementation Plan
+## 6. Relationship to Initiative 17, T074, and T075 & Initiative 18 Plan
 
-### 6.1 How `T075` (Validate & Close) and `T074` (Contextual AI Chat) Fit into the Architecture
+### 6.1 Clean Boundary with Initiative 17, `T074`, and `T075` (No Duplication)
+- **Initiative 17 (`tasks/17-use-cases-drive-tasks/plan.md`)** already owns:
+  - `17.1`–`17.2`: Bidirectional `use-cases` <-> `linked-tasks` projection and `tasks link` / `unlink` CLI.
+  - `17.4`: `tasks new --from-use-case <UC###>`.
+  - `17.5`–`17.6`: Use-case `approval` (`proposed` | `approved` | `deprecated`) vs. derived `stage` (`draft`, `planned`, `in development`, `ready`, `ready (revalidation pending)`, `verified`, `failing`, `partial`, `untested`) and `use-cases validate --force`.
+  - `17.9`–`17.10`: Backend routes and UI components for use-case stage/approval and task <-> use-case linking.
+- **`T074` (`tasks/specs/contextual-element-chat.md`)** has its own full specification and depends on `T073` (orchestrator control plane & session routing).
+- **`T075` (`Valida e chiudi da UI`)** remains a narrow, immediately shippable slice (Validate & Close on `Delivered`/`Verified` column headers, card, and detail modal). Once the atomic batch close command (`18.1` below) lands in `tasks_engine.py`, `T075`'s bulk endpoint moves onto that atomic engine batch command instead of looping per task.
+- **Initiative 18 (`tasks/18-owner-fast-interactions/plan.md`)** (or `19` if `T074`'s initiative claims `18` first) covers the **net-new engine, backend, Web UI, and VS Code extension slices** identified in this study without duplicating `17.*` or `T074`.
 
-1. **`T075` (Validate & Close from UI) is the flagship transition action of this model:**
-   - Rather than a one-off button, `T075` is implemented via a unified **Single & Batch Transition Endpoint** (`POST /api/tasks/validate-close` + `/preview`, or extending `/api/tasks/transition` and `/api/tasks/close`) that accepts `{ task_ids: string[], reason?: string, expect_hashes?: Record<string, string>, expect_plan_hash?: string }`.
-   - On a **single card** (`Delivered` or `Verified`) or in **`TaskDetailModal`**, clicking `[✓✓ Validate & Close]` (or pressing `v`) executes immediately (Level 0 confirmation) with `--actor owner --verifier owner --owner-approved`, showing the undo/add-note toast. Clicking the split caret `[▾]` lets the owner type a verification note first.
-   - On the **`Delivered` and `Verified` column headers**, clicking `[✓✓ Validate & Close (N)]` opens the Level 2 checklist dialog (Mockup §5.2) with a shared optional note and applies across all checked tasks.
-2. **`T074` (Contextual AI Chat per Element) is the universal AI escape hatch for any interaction:**
-   - Whenever an owner interaction goes beyond a 1-click field change—e.g. *"rewrite the steps of T075"*, *"split UC012 into two tasks"*, *"what are the trade-offs of Q011?"*—the owner clicks `[💬]` (or presses `c`) on that Task, Use Case, Question, or Inbox Note.
-   - **Data Model:** Every turn in `orchestrator/queue/` and `conversation` gains an optional `context_ref: { kind: "task" | "use_case" | "question" | "note", id: string, project: string }` (stored as `about: "T076"` / `thread_id: "element:ai-orchestration/T076"`).
-   - **Context Assembly:** On the first turn (or when the element file's SHA256 has changed since the last turn in that element's thread), the backend automatically prepends a compact `<element_context>` block containing the element's Markdown file, its linked use cases / tasks / questions summaries, and its latest run/validation status.
-   - **Full Tool Access:** The responding AI session (per `T073`, either the workspace's active interactive/headless orchestrator session or a dedicated session resumed per element) has **all standard tools** (`ai-orch` CLI/MCP, file edits) under its session permission mode. Any mutation it performs emits standard events and updates the open modal/card live via WebSocket.
-   - **Dual Visibility:** Each element's chat history is persisted per element (shown inside `TaskDetailModal` / `UseCaseDetailModal` / `DecisionsTab` / slide-over drawer) **and** appears in the main `OrchestratorChatPanel` tagged with a clickable `[T076 (Studio interazioni UI)]` chip (filterable by element).
-
-### 6.2 Proposed Initiative Breakdown (Backend, Web UI, and VS Code Extension Separated)
-
-We recommend organizing this work into a dedicated initiative (e.g., **Initiative 18 — Fast Owner Interactions, Inline Editing & Contextual Element Chat**, absorbing `T075` and `T074` and coordinating with Initiative `17`'s `17.9`–`17.10`):
+### 6.2 Proposed Initiative 18 Breakdown (Ordered, Right-Sized `S`/`M` Tasks)
 
 | Task ID | Layer | Title & Scope | Size | Depends On | Priority |
 | --- | --- | --- | --- | --- | --- |
-| **18.1** (`T075` backend) | **Engine & Backend** | **Validate & Close (`validate-close`) single/bulk + missing task mutation endpoints** — Add `set-next-up <id> yes\|no` to `tasks_engine.py`; add backend endpoints in `server.py` for single & bulk `validate-close` (`transition <id> done --verifier owner --owner-approved`), `close --verified`, `set-executor`, `set-verify-by`, `verification-queue`, `set-waiting-on`, `set-next-up`, `step check/uncheck/add`, `move --to-project`, `ship`, and `reopen --to delivered --verify-by`. Standardize `--actor owner`. | M | - | **P1** (Immediate) |
-| **18.2** (`T075` UI + ext) | **Web UI & VS Code** | **Validate & Close buttons on Delivered/Verified columns, cards, detail, and VS Code TreeView** — Add 1-click `[✓✓ Validate & Close]` (with split-button note option & toast undo) on `Delivered`/`Verified` cards, Tree rows, and `TaskDetailModal`; add bulk `[✓✓ Validate & Close (N)]` on Kanban column headers with checklist + note dialog; add bridge handlers in `dashboard-panel.ts` and context-menu commands in VS Code `nextUpView`/`initiativesView`. | M | 18.1 | **P1** (Immediate) |
-| **18.3** | **Web UI** | **Universal `<InlineFieldPopover>` & Silent Preview-Hash-Apply with Toast Undo** — Build reusable inline-edit popover + undo toast system. Make `Priority`, `State` (allowed transitions only), `Executor`, `Size`, `Kind`, `Verify-by`, `Labels`, `Use Cases`, and `Next-up ★` clickable in place across Kanban cards, Queue rows, Tree rows, Timeline cards (removing the full-screen diff modal for single-field edits in Timeline!), and `TaskDetailModal`. Include inline reason input when required (`priority-reason`, `bounced`, `dropped`, `reopen`). | L | 18.1, 17.2 | **P1** |
-| **18.4** | **Engine & Backend** | **Use Case, Question & Inbox quick-action endpoints** — Add `use-cases record-validation`, `use-cases edit` (header/body update preserving validation log), `questions move`, `questions answer --changes-result --apply-ref`, and `inbox to-use-case` endpoints in `server.py`. | S | 17.5 | **P1** |
-| **18.5** | **Web UI** | **Interactive Detail & Cross-Navigation for Tasks, Use Cases, Questions, and Inbox** — Make `## Steps` checkboxes interactive in `TaskDetailModal`; allow answering blocking `Q###` questions inline inside `TaskDetailModal`; make all `Task T###` and `UC###` pills clickable across views; add `Record Verdict`, `Approve`, `Edit`, and `+ Task from UC` to `UseCasesManager`/`UseCaseDetailModal`; add 1-click `Answer Recommended`, `Move to Tracker`, and `moved` filter to `DecisionsTab`; add row-level quick actions to `InboxPanel`. Replace remaining `window.alert`/`window.confirm` calls. | M | 18.3, 18.4 | **P2** |
-| **18.6** (`T074` spec + backend) | **Engine & Backend** | **Contextual Element Chat (`T074`) backend & context assembler** — Finalize `tasks/specs/contextual-element-chat.md`; add `element_ref` (`task` \| `use_case` \| `question` \| `note`) to chat turns/threads; build automatic `<element_context>` assembler (element file + linked UCs/tasks/questions/logs); route turns to workspace orchestrator or per-element session with full tool access. | M | T073 | **P1** |
-| **18.7** (`T074` UI + ext) | **Web UI & VS Code** | **Contextual Element Chat UI (`T074`)** — Add `[💬]` button on every card/row and persistent Contextual Chat drawer/pane in `TaskDetailModal`, `UseCaseDetailModal`, `DecisionsTab`, and `InboxPanel`; show element-tagged turns in `OrchestratorChatPanel` with filter chips; sync to VS Code webview. | M | 18.6 | **P1** |
-| **18.8** | **Web UI & VS Code** | **Keyboard Shortcuts & VS Code Sidebar TreeView Context Menus** — Add keyboard navigation (`v`, `p`, `e`, `s`, `l`, `u`, `c`, `Space`) on boards/lists and add full right-click context menu commands (`Validate & Close`, `Pause/Resume`, `Set Priority`, `Set Executor`, `Validate Use Case`, `Answer Question`, `Chat on Element`) to VS Code sidebar tree views. | S | 18.2, 18.3, 18.7 | **P2** |
+| **18.1** | **Engine (`tasks_engine.py`)** | **Atomic batch `close`/`transition`, `set-next-up`, non-destructive `use-cases edit`, and owner-override audit marker** — (1) Add atomic multi-ID `tasks close <id1> <id2> ... [--verifier owner] [--reason <r>] [--dry-run] [--expect-plan-hash <h>]` that validates and transitions a list of `delivered`/`verified` tasks all-or-none under one `.ai-orch.lock`; (2) record explicit `[owner-override: verification-mode=<mode>]` in `## Log` when `--verifier owner` closes a task whose `verification-mode` is `cross-agent`/`panel` without a prior independent verification record; (3) add `tasks set-next-up <id> yes\|no [--dry-run] [--expect-task-hash <h>]`; (4) add non-destructive `tasks use-cases edit <UC###>` (`--title`, `--actor`, `--priority`, `--short`, `--description`, `--scenario`, `--verification-command`, `--expect-hash`) that preserves `## AI Validation Log`, `last-tested`, and `last-verdict`. | M | Owner answers `Q-A`..`Q-E` | **P1** |
+| **18.2** | **Backend (`server.py`)** | **Upgrade `T075` bulk `validate-close` to atomic engine batch + expose missing task mutation endpoints** — Move `POST /api/tasks/validate-close` onto `18.1`'s atomic batch CLI (`expect_plan_hash`); add backend endpoints for `set-executor`, `set-verify-by`, `verification-queue`, `set-waiting-on`, `set-next-up`, `step list/add/check/uncheck`, `move --to-project`, `ship <NN>`, and `reopen --to delivered --verify-by`. Standardize `--actor owner` and provenance metadata (`via: web-ui`, `request_id`). | M | 18.1, T075 | **P1** |
+| **18.3** | **Backend (`server.py`)** | **Use Case, Question, and Inbox missing endpoints** — Add backend routes for `use-cases edit` (non-destructive, from `18.1`), `use-cases record-validation` (owner manual `pass`\|`fail`\|`partial` verdict), `questions move --to <url>`, `questions answer` with `--apply-ref` and `--changes-result`, standalone `questions ask` (`--blocks -`), and `inbox to-use-case`. | S | 18.1 | **P1** |
+| **18.4** | **Web UI (`frontend`)** | **Reusable `<InlineFieldPopover>`, Toast `[Undo]` / `[Reopen]` system, and 409 Conflict Banner** — Build the shared `<InlineFieldPopover>` primitive (2-click selection, optional inline reason input, keyboard `1`–`4` / `Enter` / `Esc`), the `<ActionToast>` manager (exact-inverse `[Undo]` using post-action `task_hash` vs. compensating `[Reopen]` for closures), and the non-retrying `409 Conflict` refetch+review banner. Amend `control-plane-safety.md` §2.1 for Category 1 single-field edits. | M | 18.2 | **P1** |
+| **18.5** | **Web UI (`frontend`)** | **Inline-edit pills & restrained card quick actions across Kanban, Queue, Tree, Timeline, and Task Detail** — Wire `<InlineFieldPopover>` for `Priority`, `Executor`, `State` (leaf tasks only, legal transitions), `Size`, `Kind`, `Verify-by`, `Waiting-on`, `Labels`, and `Next-up ★` across `BacklogManager`, `TaskTreeView`, `TimelineCard` (replacing the 4-click full-screen diff modal for priority/size!), and `TaskDetailModal`. Add `[+ New Task…]` modal, interactive `## Steps` checkboxes in `TaskDetailModal`, and card `[⋯]` overflow menu. | M | 18.4 | **P1** |
+| **18.6** | **Web UI (`frontend`)** | **Questions, Use Cases, and "Process Inbox" fast interactions** — (1) Render inline option radios + `[Answer & Unblock]` inside `TaskDetailModal` for open blocking questions; add `[+ Ask Question…]`, `Move to Tracker…`, and `Moved` filter to `DecisionsTab`; (2) make `Task T###` pills clickable in `UseCasesManager`/`UseCaseDetailModal`, add `Record Verdict…` and non-destructive `Edit UC`, and remove remaining `window.alert`/`window.confirm` calls; (3) add `[✨ Process Inbox]` on `InboxPanel` header and note rows (opening note-scoped triage + chat per `Q-F`), 1-click `draft`/`ready` pill toggle, and `+ Use Case` conversion. | M | 18.3, 18.4, T074 | **P2** |
+| **18.7** | **VS Code Extension & Keyboard Shortcuts** | **Webview bridge parity, VS Code Sidebar TreeView inline/context commands, and board keyboard shortcuts** — (1) Register all `18.2`–`18.3` message types in `dashboard-panel.ts`; (2) add inline hover icons (`Validate & Close`, `Chat on Element`, `Validate Use Case`) and right-click QuickPick context menu commands (`Set Priority`, `Set Executor`, `Transition State`, `Reopen`) to `nextUpView`, `initiativesView`, `decisionsView`, and `useCasesView` in `package.json` & `extension.ts`; (3) wire single-key shortcuts (`v`, `p`, `e`, `s`, `l`, `u`, `c`, `Space`) when a card/row/modal is focused. | M | 18.5, 18.6 | **P2** |
 
 ---
 
 ## 7. Open Questions for the Owner
 
-### Q-A: Single-Click "Validate & Close" Confirmation vs. Always Showing a Dialog (`T075`)
-- **Context:** In `T075`, the initial description mentioned a confirmation dialog with the task list and an optional note, while the owner's `T076` addendum specifies: *"Frequent actions cost one click from where the element is shown... Confirmation only for destructive or bulk actions; everything else applies immediately with a quick undo."*
-- **Options:**
-  - **Option A (1-Click Immediate on Single Card + Toast with `[+ Add Note]` & `[Undo]`; Dialog only for Bulk Column Header — Recommended):** Clicking `[✓✓ Validate & Close]` on a single card or detail modal validates and closes it immediately in **1 click**, showing a toast `✓ T075 validated & closed [Add Note…] [Undo]` (plus a split-button caret `[▾]` on the button if the owner wants to type a note beforehand). Clicking `[✓✓ Validate & Close All (N)]` on the **column header** opens the confirmation dialog with the list of `N` tasks and optional note.
-  - **Option B (Always Open Confirmation Dialog for Both Single and Bulk):** Even a single-card `Validate & Close` opens a confirmation modal asking for an optional note (2 clicks minimum).
-- **Recommendation:** **Option A**. It satisfies the 1-click speed criterion for single tasks while still giving a 1-click path to add a note (via split-button `[▾]` or toast) and keeping the confirmation dialog for bulk column operations.
+*(Note: The owner has already decided the guiding speed criterion, 2-click inline pill menus for short fields, and full tool access in contextual chat (`T074`). Only the remaining policy and edge-case questions are listed below.)*
 
-### Q-B: `priority-reason` When Changing Priority Inline
-- **Context:** The task grammar requires `priority-reason` to be non-empty on full emergent tasks (`T###`), whereas microtasks and initiative tasks (`NN.T`) do not require it. When the owner clicks `[P2 ▾]` on an emergent task card and picks `P1`:
+### Q-A: Owner Closure When `verification-mode` is `cross-agent` or `panel` (Verifier Policy)
+- **Context:** `task-and-state-model.md:125` states that `cross-agent` and `panel` tasks require an independent agent/panel verification record before closing, whereas `tasks_engine.py:8943` (`_is_independent_verifier`) allows `verifier: owner` to satisfy any verification mode, and `T075` closes delivered tasks as `verifier: owner`.
 - **Options:**
-  - **Option A (1-Click Apply Keeping/Updating Reason Optional, Prompt Only if Empty — Recommended):** Selecting `P0`–`P3` in the popover applies **immediately in 1 click** if the task already has a `priority-reason` (while also showing an optional inline `Reason` input in the popover if the owner wants to type a new reason first, or `[Edit reason]` in the toast). If the task has no `priority-reason` (`-`), the inline input is focused and `Enter` applies.
-  - **Option B (Always Require Typing a New `priority-reason` Before Applying):** Every priority change on an emergent task requires typing a new reason and pressing `Enter` (2 steps instead of 1 click).
-- **Recommendation:** **Option A**. Most tasks created by `tasks new` or triage already have a `priority-reason`; forcing the owner to re-type a reason every time they bump `P2 -> P1` on the board slows down triage.
+  - **Option A (Allow Owner Closure Everywhere as an Explicit, Audited Owner Override — Recommended):** The owner can always `Validate & Close` any task (`--verifier owner`), regardless of `verification-mode` or `verify-by`. When the task's `verification-mode` is `cross-agent` or `panel` (or `verify-by` points to another workspace) and no prior verification was recorded, the UI shows a small warning badge on the button/dialog (`⚠ Override cross-agent`) and the engine records `verifier: owner (override: skipped cross-agent)` in `## Log`. Update `task-and-state-model.md` §3.1 to match.
+  - **Option B (Block 1-Click Owner Closure on `cross-agent` / `panel` Tasks Unless Explicitly Forced in a Modal):** Refuse 1-click `Validate & Close` on tasks with `verification-mode: cross-agent` or `panel` unless an independent agent run has already marked them `verified`, or force a separate override modal.
+- **Recommendation:** **Option A**. The owner is the ultimate authority when testing the product live; flagging the override in the UI badge and recording it explicitly in `## Log` preserves audit honesty without blocking the owner.
 
-### Q-C: Who Responds to Contextual Element Chat (`T074`)?
-- **Context:** When the owner opens Contextual Chat on `T076`, `UC012`, or `Q011` and sends a message:
+### Q-B: Reversibility & Toast Action Contract (`[Undo]` vs. `[Reopen]`)
+- **Context:** Metadata edits (`priority`, `size`, `kind`, `executor`, `labels`, `use-cases`, `next-up`, `verify-by`, `step check`) have an exact inverse, whereas closing a task (`Validate & Close` -> `done`) moves the file to `tasks/done/` and writes audit log entries.
 - **Options:**
-  - **Option A (Dedicated Per-Element Resumable Session, with Option to Route to Workspace Orchestrator — Recommended):** Default to a lightweight resumable session bound to the element (`element:<project>/<id>`, using the configured `orchestration` or `deep-reasoning` profile and `--resume <session_id>` on subsequent turns on that same element) so the conversation stays 100% focused on that element and can run in parallel without blocking or polluting the main workspace orchestrator's context window; include a toggle in the chat header `[Responder: Element Session ▾ | Workspace Orchestrator]`.
-  - **Option B (Always Route Through the Single Workspace Orchestrator Queue):** Every contextual element chat turn is enqueued into the workspace orchestrator's single turn queue (`owner_chat` with `<element_context>`).
-- **Recommendation:** **Option A**. If the owner is discussing `UC012` while the main orchestrator is busy running a turn or if the owner chats on 3 different tasks, a per-element session responds immediately, keeps a clean element-specific context, and still has all `ai-orch` and file tools.
+  - **Option A (Show `[Undo]` Only for Exact Inverses; Show `[Reopen]` for Closures; No Button for Non-Reversible Transitions — Recommended):** Show `[Undo]` on the toast only when the exact previous state can be restored against the post-action `task_hash` (Category 1 edits). On task/note closures (`Validate & Close`, `Close`, `Drop`, `Discard`), label the toast button **`[Reopen]`** (which runs `tasks reopen <id> --to delivered` or `inbox reopen`). Do not show an undo button on `open -> in progress`, `questions answer`, or `record-validation`.
+  - **Option B (Label Both Metadata Reverts and Task Reopens as `[Undo]`):** Use the label `[Undo]` even when the underlying action is `tasks reopen`.
+- **Recommendation:** **Option A**. Calling `reopen` (which adds a reopen entry to `## Log`) `"Reopen"` rather than `"Undo"` is transparent about what happens in the git/task history.
 
-### Q-D: Clicking a Task or Use Case in the VS Code Sidebar TreeViews
-- **Context:** Today in the VS Code extension sidebar (`Next Up`, `Initiatives`, `Use Cases`), clicking a task or use case opens its raw `.md` file in the text editor (`vscode.open`), whereas clicking a question in `Decisions Waiting` opens the Dashboard Webview focused on that question.
+### Q-C: Bulk Action Atomicity (`All-or-None` vs. `Best-Effort Partial`)
+- **Context:** When the owner runs a bulk action from a column header (e.g. `Validate & Close (5)` on the `Delivered` column), one of the 5 tasks might fail a guard (e.g. a leftover template placeholder in `## Verification` per `T062`, or a concurrent edit).
 - **Options:**
-  - **Option A (Open Item Detail in Dashboard Webview on Click; Keep `Open Markdown File` as Inline Action Icon — Recommended):** Clicking a task, initiative, or use case in the VS Code sidebar opens its interactive Detail Modal in the AI Orchestration Dashboard (where inline edits, `Validate & Close`, and Contextual Chat live), while the inline `[$(go-to-file)]` icon on the tree row opens the raw `.md` file in the editor.
-  - **Option B (Keep Click = Open Raw `.md` File; Add `Open in Dashboard` Inline Icon):** Preserve current behavior.
-- **Recommendation:** **Option A**, so the VS Code sidebar and Dashboard act as one cohesive UI rather than dropping the owner into raw Markdown when they click a task.
+  - **Option A (Atomic `All-or-None` Engine Batch with Pre-Flight Guard Check in Preview — Recommended):** The preview step (`--dry-run`) checks all guards across the selected tasks, marks any ineligible task in red in the checklist dialog (auto-unchecking it with the reason shown), and computes one `plan_hash` for the eligible checked set. When the owner clicks `Confirm`, the engine applies all checked tasks **atomically (all-or-none)** under a single `.ai-orch.lock`.
+  - **Option B (Best-Effort Loop with Per-Task Partial Results):** Loop task by task; commit whichever tasks succeed and show a summary of which ones failed.
+- **Recommendation:** **Option A**. Surface guard failures in the preview checklist so the owner can uncheck the offending task before applying, and guarantee atomic all-or-none execution on apply.
+
+### Q-D: Bulk Action Scope on Filtered Boards
+- **Context:** The Kanban board or Queue may have active filters (project selector, search box, label filter, `Next-up only`).
+- **Options:**
+  - **Option A (Act on Currently Visible Filtered Cards, Frozen at Preview, with Per-Row Checkboxes in the Dialog — Recommended):** Clicking `[✓✓ Validate & Close (N)…]` on a column header captures the exact `N` tasks currently visible in that column, displays them with individual checkboxes (all checked by default) and a banner noting any active filter (`"3 of 7 delivered tasks shown (filtered by #ui)"`), and executes only on the checked IDs.
+  - **Option B (Act on All Tasks in That State Across the Project Regardless of Active UI Filters):** Ignore active search/label filters when clicking the column header button.
+- **Recommendation:** **Option A**. Acting on hidden cards that are filtered out of view is dangerous; freezing the visible list and providing checkboxes in the dialog gives the owner exact control.
+
+### Q-E: Fast-Path Concurrency Check (`control-plane-safety.md` Amendment) & `409 Conflict` Handling
+- **Context:** `control-plane-safety.md:147` currently requires a two-step `Preview` -> `ConfirmDialog` -> `Apply` flow for every write.
+- **Options:**
+  - **Option A (Amend `control-plane-safety.md` so Single-Field Exact-Inverse Edits Use the Loaded `task_hash` in 1 Round-Trip; Never Auto-Retry on `409` — Recommended):** Allow Category 1 single-field inline edits (`priority`, `size`, `kind`, `executor`, `labels`, `short`, `next-up`, `verify-by`, `waiting-on`, `step check`, `link`/`unlink`) to send the already-loaded `task_bundle_sha256` directly to the apply endpoint (1 round-trip + `[Undo]` toast). If the engine returns `409 Conflict`, **never auto-retry silently**—refetch the task and show an inline conflict banner so the owner can review the concurrent change.
+  - **Option B (Keep Two-Step Preview Round-Trip Before Every Inline Pill Edit):** Run a background `--dry-run` HTTP call before every inline edit, or keep `ConfirmDialog`.
+- **Recommendation:** **Option A**. Passing the loaded `task_bundle_sha256` preserves 100% of the optimistic concurrency guarantee (`409` if anything changed since render) while cutting latency in half.
+
+### Q-F: "Process Inbox" Command Behavior
+- **Context:** The owner asked for a UI command to process inbox notes (*"mi processi tutti gli inbox? anche per questo servirebbe un comando sull'interfaccia, che eventualmente apre una chat"*).
+- **Options:**
+  - **Option A (Unified `[✨ Process Inbox]` Command Opening Note-Focused Chat with AI Triage Proposal as the Suggested First Action — Recommended):**
+    - On a **single note row** (`[✨ Process]`): opens the note's Contextual Chat drawer (`T074`) and immediately runs/displays the structured AI triage proposal (`Create Task`, `Create Use Case`, `Ask Question`, `Already Covered by <ID>`, or `Discard`) with 1-click `[Accept]` buttons **plus** the live chat input right below so the owner can either accept in 1 click or tell the AI *"make it P1 and link UC012"* in natural language.
+    - On the **Inbox header** (`[✨ Process Inbox (N ready)]`): runs AI triage across all `ready` notes in the project/workspace and opens a stepping queue view where each note shows its proposal card + inline chat box (`[Accept & Next ->]`).
+  - **Option B (Separate "Run Batch Triage" and "Open Chat" Commands):** Keep batch triage as a background job that only writes proposal JSON, separate from contextual chat.
+- **Recommendation:** **Option A**. Combining the structured 1-click triage proposal with the note-scoped chat input in one surface matches the owner's exact workflow (*"process inbox, which optionally opens a chat"* when a note needs discussion or refinement).
+
+### Q-G: Audit Wording for Token-Authenticated UI Mutations & VS Code Sidebar Click Behavior
+- **Context:** (1) UI calls are authenticated by `X-AI-Orch-Token` / VS Code host and should record honest provenance; (2) clicking a task or use case in the VS Code sidebar (`Next Up`, `Initiatives`, `Use Cases`) currently opens the raw `.md` file instead of the Dashboard detail modal.
+- **Options:**
+  - **Option A (Record `owner (via web-ui | vscode-ext)` + `request_id` in Audit Logs; Click in VS Code Sidebar Opens Dashboard Detail Modal — Recommended):** Attribute UI mutations to `owner (via web-ui)` / `owner (via vscode-ext)` with `request_id` in the event ledger (never claiming hardware proof of a physical click), and make clicking a task/UC in the VS Code sidebar open its Detail Modal in the Dashboard Webview (keeping `Open Markdown File` as an inline `[$(go-to-file)]` icon).
+  - **Option B (Record Plain `owner` Without Surface Tag; Keep VS Code Sidebar Click = Open Raw `.md` File):** Keep current behavior.
+- **Recommendation:** **Option A**.
