@@ -6,13 +6,14 @@
 - priority: P2
 - priority-reason: Oggi crea una sessione headless fantasma e due salti di generazione (d4science_kb)
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: _inbox/analyzed/20261027-144357-orchestrator-reassign-cannot-hand-the-ro/note.md
 - paths: ai-orch orchestrator reassign; ai-orch sessions register; UC028
 - handoff: Read tasks/engine/T070-orchestrator-reassign-lega-il-ruolo-a-una-sessione.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: d4science_kb
 - verify-by: d4science_kb
 - short: Reassign su sessione attuale
 
@@ -39,4 +40,6 @@ What (2026-10-27, workspace ~/works/d4science_kb): the owner declared the curren
 
 ## Log (newest first)
 
+- 2026-10-27, d4science-kb-3d: state `verified` -> `done` — validated by d4science_kb; caveat on provider-id reuse reported to the owner session
+- 2026-10-27, d4science_kb: state `delivered` -> `verified` — re-ran the N068 scenario on the real registry, 2026-10-27
 - 2026-10-27, kilo: state `open` -> `delivered` — reassign lega il ruolo orchestrator a una sessione interattiva esistente (--kind interactive / --bind-current) in un solo salto di generazione senza sessioni headless fantasma
