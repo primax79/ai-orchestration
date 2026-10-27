@@ -85,7 +85,6 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T067 (Mantenere evidenza in Status) | P2 | [transition mantiene la nota Status esistente dei task di iniziativa](engine/T067-transition-keeps-the-existing-status-note-of-initi.md) | open | kilo | - |
 | T068 (Etichette iniziative aggiornate) | P3 | [sync-index aggiorna le etichette delle iniziative quando cambia il titolo del piano](engine/T068-sync-index-aggiorna-le-etichette-delle-iniziative.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
@@ -168,6 +167,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T064 (Copie skill identiche nel Doctor) | [env doctor riconosce come intenzionali le copie identiche delle skill per assistente tra ~/.claude/skills e ~/.kilo/skills](done/env-doctor/T064-env-doctor-recognizes-identical-per-assistant-skil.md) | done | 2026-10-25 |
 | T065 (Sezioni casi d'uso in italiano) | [Intestazioni di sezione dei casi d'uso localizzate in italiano, opzione --criteria e titoli brevi con stop-word italiane](done/engine/T065-use-case-localized-italian-section-headings-criter.md) | done | 2026-10-25 |
 | T066 (Lingue per progetto) | [Lingua per progetto per i task e per le domande](done/engine/T066-per-project-language-for-tasks-and-for-questions.md) | done | 2026-10-27 |
+| T067 (Mantenere evidenza in Status) | [transition mantiene la nota Status esistente dei task di iniziativa](done/engine/T067-transition-keeps-the-existing-status-note-of-initi.md) | done | 2026-10-27 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

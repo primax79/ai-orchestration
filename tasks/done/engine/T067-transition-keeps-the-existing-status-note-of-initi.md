@@ -6,13 +6,14 @@
 - priority: P2
 - priority-reason: La chiusura di 148 task di ai-swissknife ha cancellato lo sha di merge (l'evidenza) da ogni blocco del piano
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: _inbox/analyzed/20261027-105658-transition-to-done-replaces-the-status-n/note.md
 - paths: -
 - handoff: Leggi tasks/engine/T067-transition-keeps-the-existing-status-note-of-initi.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
+- verifier: claude:ai-coding-tools
 - verify-by: ai-coding-tools
 - short: Mantenere evidenza in Status
 
@@ -37,4 +38,6 @@ In ai-swissknife (2026-10-27) i blocchi dei task di iniziativa avevano '- **Stat
 
 ## Log (newest first)
 
+- 2026-10-27, claude:ai-coding-tools: state `verified` -> `done` — verified by ai-coding-tools
+- 2026-10-27, claude:ai-coding-tools: state `delivered` -> `verified` — OK: on a scratch copy of ai-swissknife/tasks with architect-side 0.8.1: 37.2 delivered with '(merged abc1234 2026-10-27)' -> done gives '(merged abc1234 2026-10-27; done 2026-10-27, verifier claude:ai-coding-tools)'; walk from in progress keeps the note with one final entry; >200-char note keeps first entry and last event. Note: the event log still records one task.transitioned per step (delivered->verified, verified->done); the single entry applies to the Status note, as the T067 tests define
 - 2026-10-27, kilo: state `open` -> `delivered` — preservata l'evidenza delle note Status nei blocchi di iniziativa e aggiunti test T067
