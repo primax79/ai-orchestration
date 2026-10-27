@@ -37,10 +37,14 @@ applicazione immediata con annullamento rapido. Lo studio misura ogni azione in 
 
 ## Steps
 
-- [ ] Bozza (Kilo): inventario dei comandi del motore per elemento e stato, copertura attuale della UI e dell'estensione, lacune, matrice azioni x stati x posizione, modelli di conferma, proposta, mockup ASCII, piano
+- [x] Bozza (Kilo): inventario dei comandi del motore per elemento e stato, copertura attuale della UI e dell'estensione, lacune, matrice azioni x stati x posizione, modelli di conferma, proposta, mockup ASCII, piano (`tasks/specs/owner-interactions-study.md`)
 - [ ] Revisione Codex e dell'architetto
 - [ ] Revisione del proprietario; poi piano in iniziativa (T075 e T074 vi rientrano)
 
 ## Verification
 
 - Studio in tasks/specs/owner-interactions-study.md con la matrice completa e le domande aperte; approvato dal proprietario
+
+## Log (newest first)
+
+- 2026-10-27, kilo: bozza dello studio scritta
