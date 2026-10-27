@@ -22,10 +22,14 @@ Dalla vista di un elemento (use case, task, domanda) il proprietario scrive un m
 
 ## Usi previsti (proprietario, 2026-10-27)
 
-"così gli dico ad es. una modifica al volo, o ci ragiono sopra":
+"così gli dico ad es. una modifica al volo, o ci ragiono sopra"; "ovviamente può generare modifiche"; "semplicemente
+l'IA ha tutti i tool a disposizione per interagire con gli elementi, cambia solo il contesto della conversazione".
 
-- **Modifica al volo:** chiedo un cambiamento all'elemento (titolo, passi, criteri, priorità, collegamenti); l'IA lo propone come diff dell'elemento e io lo applico con un clic dopo averlo visto (anteprima + hash, come le altre modifiche). Deve essere rapido: pochi secondi, senza aprire altro.
-- **Ragionamento:** discuto l'elemento (dubbi, alternative, rischi, impatto su altri task o use case). La discussione può generare modifiche in qualsiasi momento (proprietario: "ovviamente può generare modifiche"): l'IA le propone nel filo come diff dell'elemento, o come nuovo task, nuovo use case o domanda, e io le applico con un clic come nella modifica al volo. Niente viene scritto senza la mia conferma.
+- L'IA della chat contestuale è un'IA con tutti i tool (gli stessi `ai-orch` e di file che usa una sessione di
+  orchestrazione): legge, modifica, crea task, use case, domande, transizioni. Non c'è un meccanismo speciale di
+  "modifiche proposte": vale il modo di permesso della sessione che risponde, come in qualsiasi sessione.
+- Cambia solo il contesto: la conversazione parte dall'elemento (e dai suoi collegamenti) e resta legata a lui.
+- Usi tipici: modifica al volo (rapida, pochi secondi) e ragionamento, che può portare a modifiche in qualsiasi momento.
 
 ## Steps
 
