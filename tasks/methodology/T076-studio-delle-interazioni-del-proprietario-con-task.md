@@ -19,6 +19,15 @@
 
 Uno studio che inventaria e progetta le interazioni del proprietario con gli elementi del registro (task, iniziative, use case, domande, note dell'inbox) dalla UI web e dall'estensione: per ogni stato, quali azioni servono (validare e chiudere, rimandare indietro, chiedere validazione, riaprire, rispondere, approvare uno use case, collegare, cambiare priorità, chattare sull'elemento), dove stanno (colonna, scheda, dettaglio, menu, scorciatoie), singole o di gruppo, quale conferma, quale comando del motore le esegue, cosa c'è già e cosa manca. Include le interazioni con l'IA (T074) e la coerenza tra UI web ed estensione.
 
+## Esempi del proprietario
+
+- **Modifica sul posto** (2026-10-27): "es. interfaccia per cambiare priorità: click sulla priorità corrente apre un menu
+  per cambiarla". Lo stesso modello per gli altri campi brevi (esecutore, stato con le sole transizioni ammesse,
+  verify-by, collegamenti agli use case, etichette): il valore è cliccabile ovunque compaia (scheda, riga della coda,
+  dettaglio), il menu mostra solo i valori validi, la modifica si applica subito con l'anteprima/hash del motore e un
+  annullamento rapido; se il campo richiede una motivazione (priority-reason) il menu la chiede.
+- **Valida e chiudi** (T075) e **chat contestuale** (T074).
+
 ## Steps
 
 - [ ] Bozza (Kilo): inventario dei comandi del motore per elemento e stato, copertura attuale della UI e dell'estensione, lacune, matrice azioni x stati x posizione, modelli di conferma, proposta, mockup ASCII, piano
