@@ -112,7 +112,8 @@ Recorded architect decisions (the owner may override):
   - A live or stale (`heartbeat_valid = false`) holder of `P` is **never** overridden by the `_workspace` holder during
     resolution. Liveness affects display and `takeover_eligible` (§5), never resolution.
   - Only an explicit `orchestrator release --project P` (by the holder or owner) or an owner reassignment/quarantine
-    returns `P` to `_workspace` fallback.
+    returns `P` to `_workspace` fallback. The automatic takeover of an inactive interactive holder by a configured
+    headless standby (§4.4, Q025) changes the holder of `P`, not the resolution rule.
 
 ### 1.5 Scope of `_workspace` vs. Project Holders (and Pointer Tasks)
 - **Workspace role (`_workspace`) scope:** `_workspace` tasks, inbox triage of the workspace registry, cross-project
@@ -442,8 +443,14 @@ or `"_workspace"`):
     heartbeat_ttl_sec` / `heartbeat_ttl_sec_interactive` or `AI_ORCH_SESSION_STALE_TIMEOUT`.
     `heartbeat_valid = (now - session.last_seen) <= ttl(kind)`.
   - `takeover_threshold_sec`: default **`1800` seconds** for headless holders (`orchestrator-control-plane-study.md`
-    §6 `Q-G` line 682, configurable via `[orchestrator] takeover_threshold_sec`). For interactive holders, expiry of
-    `heartbeat_valid` never triggers auto-fallback (`Q-A`); takeover is **owner-confirmed only** (or holder-declared).
+    §6 `Q-G` line 682, configurable via `[orchestrator] takeover_threshold_sec`).
+  - **Interactive holder inactive (owner decision Q025 = B, 2026-10-28, overrides T073's recommendation A):** after
+    `takeover_threshold_sec_interactive` without heartbeat or activity on key `K`, a **headless orchestrator configured
+    as the key's standby** (`[projects.<slug>.routing] standby = "<headless holder>"`, or the workspace's) takes over `K`
+    automatically: generation bump, fresh fencing token, `orchestrator.auto_takeover` event, notice in the former
+    holder's mailbox and an owner notification. The former interactive holder is fenced; when it comes back it sees the
+    takeover and may request the key back (handoff request). No standby configured: no automatic takeover (display only).
+    This is a system policy with a configured standby, not an agent `--force` takeover, which stays forbidden.
   - `recent_activity` (provider transcript mtime) and `process_observed` (`ps`/`lsof` check) are **read-only display
     hints only** (`authority: "hint_only"`, T073 `Q-D`).
 

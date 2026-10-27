@@ -2,7 +2,7 @@
 
 - id: Q025
 - question: Se l'orchestratore interattivo di un progetto è fermo, subentra da solo un orchestratore headless?
-- status: open
+- status: answered
 - blocks: T073 (in progress)
 - decider: owner
 - asked-by: ai-coding-tools-87
@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
+- applied: no
 - short: Titolare interattivo fermo
 
 ## Context
@@ -23,6 +24,6 @@ Studio tasks/specs/orchestrator-control-plane-study.md (T073), rivisto da Codex;
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: B
+- answered-by: owner
+- answered: 2026-10-28

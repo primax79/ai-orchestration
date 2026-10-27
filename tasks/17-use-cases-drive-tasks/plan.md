@@ -10,12 +10,6 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ## Tasks
 
-### 17.3 - Migrazione adopt-links
-
-- **Status:** `delivered` (2026-10-28, kilo, commit `f973708`: comando `use-cases adopt-links` fail-closed con `--skip-unknown`, snapshot con manifesto sha256 in `_reviews/adopt-links-<timestamp>/` e applicazione atomica con rollback) · **Short:** Migrazione adopt-links · **Size:** S · **Depends on:** 17.2
-- **Goal:** spec §1: `use-cases adopt-links` porta i `linked-tasks` attuali sui task (unione), si ferma sugli id sconosciuti, istantanea in `_reviews/`; nessun collegamento perso (test su copia di git-code-rag).
-- **Verification:** `use-cases adopt-links` (anteprima predefinita, `--apply --expect-plan-hash`) unisce i `linked-tasks` degli use case nei campi `use-cases:` / `**Use cases:**` dei task tramite lo scrittore di 17.2, rifiuta in modo fail-closed id sconosciuti/non canonici/cross-workspace salvo `--skip-unknown` (registrandoli nel report), salva una copia dei file toccati con `manifest.json` (sha256) in `tasks/_reviews/adopt-links-<timestamp>/` prima della scrittura atomica con rollback, sblocca la guardia pre-adozione di `sync-index` preservando gli elenchi di task collegati; verificato anche su copie di `ai-orchestration/tasks` (36/37 use case con link, 109 link adottati, 0 sconosciuti) e `git-code-rag/tasks` (32/41 use case con link, 71 link adottati, 0 sconosciuti) con `sync-index` successivo a 0 riscritture.
-
 ### 17.4 - Task che nascono dagli use case; kind facoltativo; migrazione dei chiamanti
 
 - **Status:** `in progress` (2026-10-28; operator) · **Short:** Task da use case · **Size:** M · **Depends on:** 17.2
@@ -84,3 +78,9 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 - **Status:** `done` (2026-10-27, kilo, commit `4cde307`: comandi `tasks link`/`unlink` con anteprima/apply e riscrittura transazionale derivata di `linked-tasks` in `sync-index` con guardia pre-adozione; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Link e riscrittura derivata · **Size:** M · **Depends on:** 17.1
 - **Goal:** spec §1: `tasks link`/`unlink` (anteprima/apply), inserimento rispettando l'ordine dei campi e la posizione del segmento nei blocchi; riscrittura mirata di `linked-tasks` dentro il piano di `sync-index` (hash, transazione, rollback, evento `use_case.links_changed`); mai su un albero non valido.
 - **Verification:** `tasks link` e `tasks unlink` (anteprima predefinita, `--apply --expect-plan-hash`) scrivono `use-cases:` dopo `run-id` e prima di `short` sui task emergenti e `**Use cases:**` subito dopo `**Depends on:**` nei blocchi di iniziativa, aggiornando nella stessa transazione i `linked-tasks:` degli use case interessati; `sync-index` include le riscritture mirate di `linked-tasks:` nel piano con hash unico, rollback atomico, rifiuto su albero con errori di `validate`, emissione di `use_case.links_changed` e guardia pre-adozione ("run use-cases adopt-links first" per i 36 use case con `linked-tasks` scritti e non ancora adottati).
+
+### 17.3 - Migrazione adopt-links
+
+- **Status:** `done` (2026-10-28, kilo, commit `f973708`: comando `use-cases adopt-links` fail-closed con `--skip-unknown`, snapshot con manifesto sha256 in `_reviews/adopt-links-<timestamp>/` e applicazione atomica con rollback; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Migrazione adopt-links · **Size:** S · **Depends on:** 17.2
+- **Goal:** spec §1: `use-cases adopt-links` porta i `linked-tasks` attuali sui task (unione), si ferma sugli id sconosciuti, istantanea in `_reviews/`; nessun collegamento perso (test su copia di git-code-rag).
+- **Verification:** `use-cases adopt-links` (anteprima predefinita, `--apply --expect-plan-hash`) unisce i `linked-tasks` degli use case nei campi `use-cases:` / `**Use cases:**` dei task tramite lo scrittore di 17.2, rifiuta in modo fail-closed id sconosciuti/non canonici/cross-workspace salvo `--skip-unknown` (registrandoli nel report), salva una copia dei file toccati con `manifest.json` (sha256) in `tasks/_reviews/adopt-links-<timestamp>/` prima della scrittura atomica con rollback, sblocca la guardia pre-adozione di `sync-index` preservando gli elenchi di task collegati; verificato anche su copie di `ai-orchestration/tasks` (36/37 use case con link, 109 link adottati, 0 sconosciuti) e `git-code-rag/tasks` (32/41 use case con link, 71 link adottati, 0 sconosciuti) con `sync-index` successivo a 0 riscritture.

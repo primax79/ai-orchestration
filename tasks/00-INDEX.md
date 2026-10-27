@@ -23,7 +23,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 13 | 13 | [Rielaborazione del Doctor: rilievi reali, azionabili e risolvibili](done/13-doctor-rework/plan.md) | done with a caveat (done: 13.1–13.7) | 06 | M |
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
-| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | in progress (done: 17.1–17.2; running: 17.4, 17.9, 17.12–17.14) | - | M |
+| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | in progress (done: 17.1–17.3; running: 17.4, 17.9, 17.12–17.14) | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -125,14 +125,8 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 | Key | Question | Blocks | Decider | Recommended |
 | --- | --- | --- | --- | --- |
 | [Q020](questions/Q020-un-azione-di-gruppo-deve-riuscire-tutta-o-niente.md) | Un'azione di gruppo deve riuscire tutta o niente? | T076 | owner | A |
-| [Q022](questions/Q022-per-le-modifiche-sul-posto-basta-un-solo-passaggio.md) | Per le modifiche sul posto basta un solo passaggio, invece di anteprima e conferma? | T076 | owner | A |
-| [Q023](questions/Q023-come-funziona-il-comando-processa-inbox.md) | Come funziona il comando Processa inbox? | T076 | owner | A |
-| [Q024](questions/Q024-come-registriamo-le-azioni-fatte-dalla-ui-e-cosa-a.md) | Come registriamo le azioni fatte dalla UI e cosa apre un clic nella barra laterale di VS Code? | T076 | owner | A |
-| [Q025](questions/Q025-se-l-orchestratore-interattivo-di-un-progetto-ferm.md) | Se l'orchestratore interattivo di un progetto è fermo, subentra da solo un orchestratore headless? | T073 | owner | A |
 | [Q026](questions/Q026-come-scopriamo-i-workspace-non-ancora-registrati.md) | Come scopriamo i workspace non ancora registrati? | T073 | owner | A |
 | [Q028](questions/Q028-quello-che-si-scopre-dagli-archivi-e-dai-processi.md) | Quello che si scopre dagli archivi e dai processi può decidere presenza o subentri? | T073 | owner | A |
-| [Q030](questions/Q030-come-mostriamo-la-presenza-di-un-orchestratore.md) | Come mostriamo la presenza di un orchestratore? | T073 | owner | A |
-| [Q031](questions/Q031-chi-pu-prendere-passare-riassegnare-e-ripulire-il.md) | Chi può prendere, passare, riassegnare e ripulire il ruolo di orchestratore? | T073 | owner | A |
 <!-- /ai-orch:generated decisions -->
 
 ## Done
