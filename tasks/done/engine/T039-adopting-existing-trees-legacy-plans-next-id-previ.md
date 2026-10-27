@@ -1,10 +1,10 @@
-# T039 Adopting existing trees: legacy plans/, next-id preview, discover before registering
+# T039 Adozione di alberi esistenti: cartella legacy plans/, anteprima di next-id, discover prima della registrazione
 
 - id: T039
-- title: Adopting existing trees: legacy plans/, next-id preview, discover before registering
+- title: Adozione di alberi esistenti: cartella legacy plans/, anteprima di next-id, discover prima della registrazione
 - category: engine
 - priority: P2
-- priority-reason: New trees start next to legacy layouts; ids announced before creation collide
+- priority-reason: I nuovi alberi nascono accanto a layout legacy; gli id annunciati prima della creazione entrano in collisione
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,21 +12,21 @@
 - decider: -
 - sources: feedback round 2026-10-21: inbox N001, N014, N015
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, scripts/orchestration_registry.py
-- handoff: Read tasks/tasks/T039-adopting-existing-trees-legacy-plans-next-id-previ.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggi tasks/tasks/T039-adopting-existing-trees-legacy-plans-next-id-previ.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
-- short: Adoption helpers
+- short: Supporto adozione alberi
 
 ## Goal
 
-'tasks upgrade --dry-run' (or a normalize command) proposes moving a legacy plans/NN-*/ macroplan into tasks/; 'tasks new --dry-run' prints the id it would take; 'projects discover <path>' works read-only on an unregistered workspace. Also (inbox N038): validate warns, never fails, on legacy free-text header fields of old tasks. Also (inbox N043): the registry warns about registered projects whose folder is gone, and 'projects discover' prints added/removed projects instead of the whole list.
+'tasks upgrade --dry-run' (o un comando normalize) propone di spostare un macropiano legacy plans/NN-*/ dentro tasks/; 'tasks new --dry-run' stampa l'id che verrebbe assegnato; 'projects discover <path>' funziona in sola lettura su un workspace non registrato. Inoltre (inbox N038): validate emette un avviso, senza mai fallire, sui campi header a testo libero legacy dei vecchi task. Inoltre (inbox N043): il registro avvisa dei progetti registrati la cui cartella non esiste più, e 'projects discover' stampa i progetti aggiunti/rimossi anziché l'intero elenco.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo la specifica e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite la suite di test automatizzati e i controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged aeaced7; tasks next-id, legacy plans/ detection in upgrade, and pre-registration projects discover verified
-- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T039 (Adopting existing trees: legacy plans/, next-id preview, discover before registering) to Kilo
+- 2026-10-23, owner: state `verified` -> `done` — Validato dalle suite di test automatizzati e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzati e approvato dall'owner per la pulizia
+- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Eseguito merge di aeaced7; verificati tasks next-id, rilevamento di plans/ legacy in upgrade e projects discover prima della registrazione
+- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Assegnazione di T039 (Adozione di alberi esistenti: cartella legacy plans/, anteprima di next-id, discover prima della registrazione) a Kilo

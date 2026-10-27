@@ -1,10 +1,10 @@
-# T052 questions move refuses or warns on an already answered question
+# T052 questions move rifiuta o avvisa su una domanda che ha già ricevuto risposta
 
 - id: T052
-- title: questions move refuses or warns on an already answered question
+- title: questions move rifiuta o avvisa su una domanda che ha già ricevuto risposta
 - category: engine
 - priority: P3
-- priority-reason: Minor gap found while validating T041
+- priority-reason: Lacuna minore rilevata durante la validazione di T041
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,17 +12,17 @@
 - decider: -
 - sources: inbox N051 (gcube_audit)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
-- handoff: Read tasks/engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggi tasks/engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
-- short: Move answered question guard
+- short: Guardia move domanda risolta
 
 ## Goal
 
-'ai-orch questions move Q###' on a question in status 'answered' refuses with a message saying the answer should be applied (questions apply), unless --force is given; covered by a test.
+'ai-orch questions move Q###' su una domanda nello stato 'answered' rifiuta l'operazione con un messaggio che indica che la risposta dovrebbe essere applicata (questions apply), a meno che non venga specificato --force; coperto da un test.
 
 ## Steps
 
-- [x] Add `force: bool = False` (`--force`) to `move_question` and `cmd_questions_move`, refusing `status: answered` questions without `--force`.
+- [x] Aggiungere `force: bool = False` (`--force`) a `move_question` e `cmd_questions_move`, rifiutando le domande con `status: answered` senza `--force`.
 
 ## Verification
 
@@ -30,7 +30,7 @@
 
 ## Log (newest first)
 
-- 2026-10-25, owner: state `verified` -> `done` — Implemented and verified with automated pytest regression tests
-- 2026-10-25, owner: state `delivered` -> `verified` — Implemented and verified with automated pytest regression tests
+- 2026-10-25, owner: state `verified` -> `done` — Implementato e verificato con test di regressione pytest automatizzati
+- 2026-10-25, owner: state `delivered` -> `verified` — Implementato e verificato con test di regressione pytest automatizzati
 - 2026-10-25, kilo: state `in progress` -> `delivered`
 - 2026-10-25, kilo: state `open` -> `in progress`
