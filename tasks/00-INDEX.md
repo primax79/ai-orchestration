@@ -23,7 +23,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 13 | 13 | [Rielaborazione del Doctor: rilievi reali, azionabili e risolvibili](done/13-doctor-rework/plan.md) | done with a caveat (done: 13.1–13.7) | 06 | M |
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
-| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | waiting (next: 17.1–17.4, 17.6–17.14) | - | M |
+| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | open | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -87,10 +87,11 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T069 (Campagna senza bozze) | P2 | [La campagna di validazione esclude gli use case in bozza](engine/T069-la-campagna-di-validazione-esclude-gli-use-case-in.md) | in progress | kilo | - |
-| T070 (Reassign su sessione attuale) | P2 | [orchestrator reassign lega il ruolo a una sessione interattiva esistente](engine/T070-orchestrator-reassign-lega-il-ruolo-a-una-sessione.md) | in progress | kilo | - |
 | T071 (Invito a registrarsi) | P2 | [Le sessioni che orchestrano vengono invitate a registrarsi come orchestratore](engine/T071-le-sessioni-che-orchestrano-vengono-invitate-a-reg.md) | open | kilo | - |
-| T072 (config show nella cartella) | P3 | [config show usa la cartella corrente; l'anteprima di reassign mostra il percorso reale](engine/T072-config-show-usa-la-cartella-corrente-l-anteprima-d.md) | in progress | kilo | - |
+| T077 (Adozione note vecchie) | P2 | [Le note dell'inbox in formato vecchio vengono adottate con un id](engine/T077-le-note-dell-inbox-in-formato-vecchio-vengono-adot.md) | open | kilo | - |
+| T079 (Workspace da sottocartella) | P2 | [I comandi lanciati da una sottocartella risolvono il workspace che la contiene](engine/T079-i-comandi-lanciati-da-una-sottocartella-risolvono.md) | open | kilo | - |
+| T081 (Branch e sblocco dipendenti) | P2 | [tasks_engine: list --branches, sblocco dei dipendenti e validate --branch](engine/T081-tasks-engine-list-branches-sblocco-dei-dipendenti.md) | open | kilo | - |
+| T083 (Rinomina sessione per provider) | P3 | [L'id del provider identifica la sessione: un nome nuovo rinomina il record invece di crearne un altro](engine/T083-l-id-del-provider-identifica-la-sessione-un-nome-n.md) | open | kilo | - |
 
 ### methodology
 
@@ -99,6 +100,18 @@ Tasks in `methodology`. Owner session: unassigned ([README](methodology/README.m
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T073 (Studio pannello orchestratori) | P1 | [Studio: pannello di controllo degli orchestratori di tutti i workspace, handoff e coerenza dei registri](methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md) | open | kilo | - |
+| T074 (Chat contestuale per elemento) | P1 | [Chat contestuale con l'IA su un singolo use case, task o domanda](methodology/T074-chat-contestuale-con-l-ia-su-un-singolo-use-case-t.md) | open | kilo | T073 |
+| T076 (Studio interazioni UI) | P1 | [Studio delle interazioni del proprietario con task, use case e domande dalla UI](methodology/T076-studio-delle-interazioni-del-proprietario-con-task.md) | open | kilo | - |
+| T080 (Contratto esecutore robusto) | P1 | [executor-contract: commit a ogni passo verde, nessun segreto nei log, shell portabile su macOS/zsh](methodology/T080-executor-contract-commit-a-ogni-passo-verde-nessun.md) | open | kilo | - |
+| T082 (Pattern di integrazione) | P2 | [orchestration-workflow: worktree di integrazione, kilo_cleanup, kilo_verify_worktree, verifica browser mirata](methodology/T082-orchestration-workflow-worktree-di-integrazione-ki.md) | open | kilo | - |
+
+### ui
+
+Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T075 (Valida e chiudi da UI) | P2 | [Pulsante Valida e chiudi sulla colonna Delivered e sul singolo task](ui/T075-pulsante-richiedi-validazione-sulla-colonna-done-e.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -106,7 +119,7 @@ Tasks in `methodology`. Owner session: unassigned ([README](methodology/README.m
 <!-- ai-orch:generated decisions -->
 | Key | Question | Blocks | Decider | Recommended |
 | --- | --- | --- | --- | --- |
-| [Q011](questions/Q011-separiamo-l-approvazione-di-uno-use-case-dal-suo-s.md) | Separiamo l'approvazione di uno use case dal suo stadio derivato dai task? | 17.5 | owner | A |
+| - | None. | - | - | - |
 <!-- /ai-orch:generated decisions -->
 
 ## Done
@@ -182,6 +195,10 @@ Tasks in `methodology`. Owner session: unassigned ([README](methodology/README.m
 | T066 (Lingue per progetto) | [Lingua per progetto per i task e per le domande](done/engine/T066-per-project-language-for-tasks-and-for-questions.md) | done | 2026-10-27 |
 | T067 (Mantenere evidenza in Status) | [transition mantiene la nota Status esistente dei task di iniziativa](done/engine/T067-transition-keeps-the-existing-status-note-of-initi.md) | done | 2026-10-27 |
 | T068 (Etichette iniziative aggiornate) | [sync-index aggiorna le etichette delle iniziative quando cambia il titolo del piano](done/engine/T068-sync-index-aggiorna-le-etichette-delle-iniziative.md) | done | 2026-10-27 |
+| T072 (config show nella cartella) | [config show usa la cartella corrente; l'anteprima di reassign mostra il percorso reale](done/engine/T072-config-show-usa-la-cartella-corrente-l-anteprima-d.md) | done | 2026-10-27 |
+| T078 (Lezioni ricerca_auto) | [Smistare le lezioni di ricerca_auto del 2026-10-17 contro lo stato attuale](done/methodology/T078-smistare-le-lezioni-di-ricerca-auto-del-2026-10-17.md) | done | 2026-10-27 |
+| T069 (Campagna senza bozze) | [La campagna di validazione esclude gli use case in bozza](done/engine/T069-la-campagna-di-validazione-esclude-gli-use-case-in.md) | done | 2026-10-27 |
+| T070 (Reassign su sessione attuale) | [orchestrator reassign lega il ruolo a una sessione interattiva esistente](done/engine/T070-orchestrator-reassign-lega-il-ruolo-a-una-sessione.md) | done | 2026-10-27 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

@@ -4,7 +4,7 @@
 **Perché:** richiesta del proprietario 2026-10-27 (nota N072), priorità massima: i task nascono dagli use case, un use
 case dipende dai suoi task (molti a molti), la validazione gira solo sugli use case pronti, il lavoro nuovo parte dagli
 use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failing` use case in bozza senza task.
-**Decisione aperta:** Q011 (approvazione separata dallo stadio): blocca 17.5; il resto procede.
+**Decisione:** Q011 risposta A (approvazione separata dallo stadio derivato), 2026-10-27.
 **Relazione con T069:** T069 (campagna solo sugli use case attivi, untested non è failing) è un tampone già in corso;
 17.6 lo sostituisce con l'ambito basato sulla prontezza e ne conserva la regola su `untested`.
 
@@ -33,13 +33,13 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.5 - Ciclo di vita: approvazione e stadio derivato
 
-- **Status:** `waiting` · **Decider:** Q011 · **Waiting-on:** question:Q011 · **Short:** Stadio degli use case · **Size:** M · **Depends on:** 17.1, Q011
+- **Status:** `open` · **Short:** Stadio degli use case · **Size:** M · **Depends on:** 17.1
 - **Goal:** spec §3 secondo la risposta a Q011: campo `approval` con migrazione da `status` (verdetto in `last-verdict`, nessun log perso), `stage` come funzione pura; mostrato da show/list/indice.
 
 ### 17.6 - Validazione solo sugli use case pronti
 
 - **Status:** `open` · **Short:** Validazione solo se pronti · **Size:** M · **Depends on:** 17.5, T069
-- **Goal:** spec §5: `use-cases validate` rifiuta se non pronto (salvo `--force` registrato); campagne solo sugli use case in ambito, gli altri "Not ready (N/M)"; sostituisce l'ambito di T069 tenendo la regola `untested`.
+- **Goal:** spec §5: `use-cases validate` rifiuta se non pronto (salvo `--force` registrato); campagne solo sugli use case in ambito, gli altri "Not ready (N/M)"; sostituisce l'ambito di T069 tenendo la regola `untested`; il punteggio di prontezza esclude gli `untested` dal denominatore o li mostra a parte (osservazione di ai-coding-tools-ea nella validazione di T069: 75% = 24/32 con 7 untested).
 
 ### 17.7 - Regressione: rivalidazione e chiusura sicura dei task
 

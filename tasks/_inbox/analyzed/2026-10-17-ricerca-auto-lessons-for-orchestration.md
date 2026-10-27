@@ -57,3 +57,8 @@ Every verification repeated the same 6 steps: throwaway database from a dump of 
 - `kilo_metrics` reports `avg duration: 0s`; the Architect could not use it to see how long runs take.
 - The zsh pitfalls cost many tool calls: unmatched globs abort the whole command (`no matches found`), `set --` with a space-containing pair, and `sed -i` needs `-i ''` on macOS; the skills should show portable forms (`find`, python for multi-line edits).
 - Sessions of Kilo are all titled `New session - <timestamp>`; a title derived from the task id (`T076 resume`) would make cleanup and attribution possible without a registry.
+
+---
+**Smistata il 2026-10-27 (ai-coding-tools-d8, T078).** Analisi: `tasks/_reviews/2026-10-27-ricerca-auto-lessons-triage.md`
+(23 richieste: 9 fatte, 9 in parte, 5 no). Task creati: T037, T038, T039 (kilo-mcp, registro del workspace),
+T080 (contratto esecutore), T081 (branch e sblocco dipendenti), T082 (pattern di integrazione nella skill).

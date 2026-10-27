@@ -128,6 +128,9 @@ ai-orch setup --apply --expect-hash <plan_hash> [--workspace <dir>] [--start-orc
 ai-orch orchestrator reassign --tool kilo [--model <model>] [--scope project|global] --dry-run [--json]
 #    Confirm and apply reassignment:
 ai-orch orchestrator reassign --tool kilo [--model <model>] [--scope project|global] --expect-hash <hash> [--json]
+#    Bind role to an existing interactive session in one generation bump (no headless session created):
+ai-orch orchestrator reassign --tool claude [--model <model>] --kind interactive --provider-session-id <uuid> [--session-id <name>] --expect-hash <hash> [--json]
+ai-orch orchestrator reassign --tool claude [--model <model>] --bind-current --expect-hash <hash> [--json]
 
 # 4. Initialize global config (~/.config/ai-orchestration/orchestration.toml)
 ai-orch config init-global [--force] [--global-config <file>] [--json]
@@ -254,11 +257,11 @@ The engine writes the file atomically under exclusive `config_lock`, verifies th
 When reassigning the orchestrator role (to another tool or model), never mutate the role record directly. Instead, invoke:
 ```bash
 # Preview
-ai-orch orchestrator reassign --tool <tool> [--model <model>] [--scope project|global] --dry-run
+ai-orch orchestrator reassign --tool <tool> [--model <model>] [--scope project|global] [--kind interactive --provider-session-id <uuid> | --bind-current] --dry-run
 # Apply
-ai-orch orchestrator reassign --tool <tool> [--model <model>] [--scope project|global] --expect-hash <hash>
+ai-orch orchestrator reassign --tool <tool> [--model <model>] [--scope project|global] [--kind interactive --provider-session-id <uuid> | --bind-current] --expect-hash <hash>
 ```
-This executes fenced succession: updates the configuration, registers a candidate session with the new tool, conducts the handoff turn, retires the prior session with reason `reassigned`, advances generation ($N \to N+1$), preserves queue items and cursor, and emits `config.changed` and `orchestrator.rotated`.
+This executes fenced succession: updates the configuration, registers a candidate session with the new tool (or binds directly to the specified interactive session without creating a phantom headless session), conducts the handoff turn when headless, retires the prior session with reason `reassigned`, advances generation ($N \to N+1$), preserves queue items and cursor, and emits `config.changed` and `orchestrator.rotated`.
 
 ## Verification
 

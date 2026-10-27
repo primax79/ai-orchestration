@@ -14321,3 +14321,181 @@ def test_17_1_use_case_link_projection_validate_and_show(tmp_path: pathlib.Path)
 
 
 
+# ===========================================================================
+# Initiative T069: Campaign Skips Draft Use Cases; Untested Is Not Failing
+# ===========================================================================
+
+def test_t069_campaign_skips_drafts_and_untested_is_not_failing(tmp_path: pathlib.Path) -> None:
+    """T069: Campaign runs only active (and verified/failing) use cases; drafts are listed in Out of scope (draft) without changing status; exit 127 / missing test file / timeout recorded as untested without setting status failing."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # 1. Active use case: passing
+    res1 = run_cli(
+        "use-cases", "create",
+        "--id", "UC001",
+        "--title", "Active Passing Flow",
+        "--actor", "Tester",
+        "--status", "active",
+        "--verification-command", "echo 'PASS_OK'",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res1.returncode == 0
+
+    # 2. Active use case: failing probe
+    res2 = run_cli(
+        "use-cases", "create",
+        "--id", "UC002",
+        "--title", "Active Failing Flow",
+        "--actor", "Tester",
+        "--status", "active",
+        "--verification-command", "exit 1",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res2.returncode == 0
+
+    # 3. Draft use case 1: probe exits 1 (deliberately unimplemented), should NOT run
+    res3 = run_cli(
+        "use-cases", "create",
+        "--id", "UC003",
+        "--title", "Draft Unimplemented Flow",
+        "--actor", "Tester",
+        "--status", "draft",
+        "--verification-command", "exit 1",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res3.returncode == 0
+
+    # 4. Draft use case 2: probe echo, should NOT run
+    res4 = run_cli(
+        "use-cases", "create",
+        "--id", "UC004",
+        "--title", "Draft Future Feature",
+        "--actor", "Tester",
+        "--status", "draft",
+        "--verification-command", "echo 'SHOULD_NOT_EXECUTE'",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res4.returncode == 0
+
+    # 5. Active use case: probe command does not exist (exit 127)
+    res5 = run_cli(
+        "use-cases", "create",
+        "--id", "UC005",
+        "--title", "Active Probe Nonexistent Command",
+        "--actor", "Tester",
+        "--status", "active",
+        "--verification-command", "nonexistent-cmd-xyz-12345",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res5.returncode == 0
+
+    # Run the validation campaign
+    res_camp = run_cli("use-cases", "campaign", "--tasks-dir", str(tasks_dir), "--json")
+    # Return code 1 because UC002 failed
+    assert res_camp.returncode == 1
+    camp = json.loads(res_camp.stdout)
+    assert camp["ok"] is True
+    assert camp["total"] == 3  # 3 active tested
+    assert camp["passed"] == 1  # UC001
+    assert camp["failed"] == 1  # UC002
+    assert camp["untested"] == 1  # UC005
+    assert camp["out_of_scope"] == 2  # UC003, UC004
+    assert camp["readiness_score"] == 33.3  # 1/3
+
+    # Inspect statuses and last-verdict of each use case
+    uc1 = json.loads(run_cli("use-cases", "show", "UC001", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc1["status"] == "verified"
+    assert uc1["last_verdict"] == "pass"
+
+    uc2 = json.loads(run_cli("use-cases", "show", "UC002", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc2["status"] == "failing"
+    assert uc2["last_verdict"] == "fail"
+
+    uc5 = json.loads(run_cli("use-cases", "show", "UC005", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc5["status"] == "active"  # NOT failing!
+    assert uc5["last_verdict"] == "untested"
+
+    uc3 = json.loads(run_cli("use-cases", "show", "UC003", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc3["status"] == "draft"  # untouched
+    assert uc3["last_verdict"] in (None, "-")  # untouched
+
+    uc4 = json.loads(run_cli("use-cases", "show", "UC004", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc4["status"] == "draft"  # untouched
+    assert uc4["last_verdict"] in (None, "-")  # untouched
+
+    # Check report content
+    report_file = pathlib.Path(camp["report_file"])
+    assert report_file.is_file()
+    report_text = report_file.read_text(encoding="utf-8")
+
+    assert "- **Total Tested:** 3" in report_text
+    assert "- **Passed:** 1" in report_text
+    assert "- **Failed:** 1" in report_text
+    assert "- **Untested:** 1" in report_text
+    assert "- **Out of scope:** 2" in report_text
+    assert "## Out of scope (draft)" in report_text
+    assert "UC003" in report_text
+    assert "UC004" in report_text
+    assert "| **UC001** |" in report_text
+    assert "| `PASS` |" in report_text
+    assert "| **UC002** |" in report_text
+    assert "| `FAIL` |" in report_text
+    assert "| **UC005** |" in report_text
+    assert "| `UNTESTED` |" in report_text
+
+
+def test_t069_probe_missing_test_file_and_timeout_recorded_as_untested(tmp_path: pathlib.Path) -> None:
+    """T069: Missing test file and timeout probes are recorded as untested and do not mark use cases as failing."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # 1. Missing test file probe
+    run_cli(
+        "use-cases", "create",
+        "--id", "UC010",
+        "--title", "Missing Test File Flow",
+        "--actor", "Tester",
+        "--status", "active",
+        "--verification-command", "pytest tests/nonexistent_test_abc.py",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    res_val = run_cli("use-cases", "validate", "UC010", "--tasks-dir", str(tasks_dir), "--json")
+    val_data = json.loads(res_val.stdout)
+    assert val_data["verdict"] == "untested"
+    assert val_data["status"] == "active"
+
+    uc10 = json.loads(run_cli("use-cases", "show", "UC010", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc10["status"] == "active"
+    assert uc10["last_verdict"] == "untested"
+
+    # 2. Timeout probe
+    run_cli(
+        "use-cases", "create",
+        "--id", "UC011",
+        "--title", "Timing Out Flow",
+        "--actor", "Tester",
+        "--status", "active",
+        "--verification-command", "python3 -c 'import time; time.sleep(5)'",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    # Validate with 1s timeout
+    ok, res_to = te.validate_use_case_probe(tasks_dir, "UC011", timeout_seconds=1)
+    assert ok is True
+    assert res_to["verdict"] == "untested"
+    assert res_to["status"] == "active"
+
+    uc11 = json.loads(run_cli("use-cases", "show", "UC011", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc11["status"] == "active"
+    assert uc11["last_verdict"] == "untested"
+
+

@@ -8,3 +8,4 @@
 {"at": "2026-10-25T02:38:09.308906Z", "by": "ai-coding-tools", "note": "Open answer applied through T018 (Orchestration skill precedence); recorded retroactively", "question": "Q003", "ref": "T018"}
 {"at": "2026-10-25T02:38:11.855199Z", "by": "ai-coding-tools", "note": "Applied 2026-10-17 as stated in the answer text (plugin releases); recorded retroactively", "question": "Q004", "ref": "Applied 2026-10-17 as stated in the answer text (plugin releases); recorded retroactively"}
 {"at": "2026-10-25T02:38:15.626830Z", "by": "ai-coding-tools", "note": "Applied through T019 (Duplicate skills alignment); recorded retroactively", "question": "Q005", "ref": "T019"}
+{"at": "2026-10-27T15:14:54.916982Z", "by": "owner", "note": "Spec use-cases-drive-tasks \u00a73 aggiornata: approval e stage separati (opzione A); 17.5 sbloccata", "question": "Q011", "ref": "Spec use-cases-drive-tasks \u00a73 aggiornata: approval e stage separati (opzione A); 17.5 sbloccata"}

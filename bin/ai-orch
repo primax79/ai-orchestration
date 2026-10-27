@@ -601,12 +601,13 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "reassign": {
                     "usage": (
                         "ai-orch orchestrator reassign --tool <tool> [--model <model>] "
-                        "[--scope global|project] [--dry-run] [--expect-hash <hash>] "
+                        "[--kind headless|interactive] [--provider-session-id <uuid>] [--session-id <name>] "
+                        "[--bind-current] [--scope global|project] [--dry-run] [--expect-hash <hash>] "
                         "[--no-handoff] [--workspace <dir>] [--global-config <file>] [--json]"
                     ),
                     "description": (
-                        "Reassign orchestrator role to another tool/model via fenced succession "
-                        "(shows plan preview & hash in dry-run; applies with config update, succession, and config.changed)."
+                        "Reassign orchestrator role to another tool/model or bind to an existing interactive session "
+                        "via fenced succession (shows plan preview & hash in dry-run; applies with config update, succession, and config.changed)."
                     ),
                 },
                 "cancel": {

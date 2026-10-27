@@ -7380,7 +7380,14 @@ def record_use_case_validation(
         now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         now_date = datetime.date.today().isoformat()
         verdict_clean = verdict.strip().lower()
-        new_status = "verified" if verdict_clean == "pass" else ("failing" if verdict_clean == "fail" else "partial")
+        if verdict_clean == "pass":
+            new_status = "verified"
+        elif verdict_clean == "fail":
+            new_status = "failing"
+        elif verdict_clean == "untested":
+            new_status = target.get("status") or "active"
+        else:
+            new_status = "partial"
 
         log_entry = f"\n### [{now_iso}] AI Validation by {actor}\n- **Verdict:** `{verdict.upper()}`\n- **Summary:** {summary}\n"
         if evidence:
@@ -7406,12 +7413,56 @@ def record_use_case_validation(
         return True, {
             "ok": True,
             "id": uc_id,
-            "verdict": verdict,
+            "verdict": verdict_clean,
             "status": new_status,
             "summary": summary,
             "file_path": str(fpath),
             "rel_path": str(fpath.relative_to(tasks_dir)),
         }
+
+
+def _detect_probe_untested_reason(
+    cmd: str,
+    workspace: pathlib.Path,
+    exit_code: int,
+    out: str,
+    err: str,
+) -> str | None:
+    """Return a reason string if the probe failed for a reason outside the product, else None."""
+    combined = f"{out}\n{err}".lower()
+
+    # 1. Exit 127: Command not found
+    if exit_code == 127 or "command not found" in combined:
+        return f"command not found (exit code {exit_code})"
+
+    # 2. Exit 4: Pytest usage error (missing file / directory)
+    if exit_code == 4 and ("file or directory not found" in combined or "pytest" in cmd.lower()):
+        return "pytest test file or directory not found (exit code 4)"
+
+    # 3. Missing file or directory patterns in output
+    if "file or directory not found" in combined:
+        return "file or directory not found"
+    if "no such file or directory" in combined:
+        return "no such file or directory"
+    if "can't open file" in combined or "cannot open file" in combined:
+        return "cannot open test file"
+    if "modulenotfounderror" in combined and ("test" in combined or "test" in cmd.lower()):
+        return "test module not found"
+
+    # 4. Check if command references specific test file paths that don't exist
+    for token in cmd.split():
+        clean_token = token.strip("\"'`;,|&")
+        if clean_token.startswith("-") or "$" in clean_token or "*" in clean_token:
+            continue
+        if clean_token.startswith(("test/", "tests/", "spec/", "specs/")) or (
+            ("test" in clean_token or "spec" in clean_token)
+            and clean_token.endswith((".py", ".sh", ".js", ".ts", ".jsx", ".tsx", ".rb"))
+        ):
+            target_path = workspace / clean_token
+            if not target_path.exists():
+                return f"missing test file: {clean_token}"
+
+    return None
 
 
 def validate_use_case_probe(
@@ -7459,10 +7510,17 @@ def validate_use_case_probe(
             evidence = f"```\n$ {cmd}\n(exit code 0)\n{out[:500]}\n```"
             gaps = None
         else:
-            verdict = "fail"
-            summary = f"Automated probe failed with exit code {exit_code} in {elapsed:.2f}s"
-            evidence = f"```\n$ {cmd}\n(exit code {exit_code})\nSTDOUT:\n{out[:300]}\nSTDERR:\n{err[:300]}\n```"
-            gaps = [err or out or f"Command failed with exit code {exit_code}"]
+            untested_reason = _detect_probe_untested_reason(cmd, workspace, exit_code, out, err)
+            if untested_reason:
+                verdict = "untested"
+                summary = f"Automated probe could not run: {untested_reason}"
+                evidence = f"```\n$ {cmd}\n(exit code {exit_code})\nSTDOUT:\n{out[:300]}\nSTDERR:\n{err[:300]}\n```"
+                gaps = [err or out or untested_reason]
+            else:
+                verdict = "fail"
+                summary = f"Automated probe failed with exit code {exit_code} in {elapsed:.2f}s"
+                evidence = f"```\n$ {cmd}\n(exit code {exit_code})\nSTDOUT:\n{out[:300]}\nSTDERR:\n{err[:300]}\n```"
+                gaps = [err or out or f"Command failed with exit code {exit_code}"]
 
         ok, res = record_use_case_validation(
             tasks_dir=tasks_dir,
@@ -7479,12 +7537,12 @@ def validate_use_case_probe(
         return ok, res
     except subprocess.TimeoutExpired:
         elapsed = time.time() - start_t
-        summary = f"Automated probe timed out after {timeout_seconds}s"
+        summary = f"Automated probe could not run: timed out after {timeout_seconds}s"
         evidence = f"Command timed out: `{cmd}`"
         ok, res = record_use_case_validation(
             tasks_dir=tasks_dir,
             uc_id=uc_id,
-            verdict="fail",
+            verdict="untested",
             summary=summary,
             evidence=evidence,
             actor=actor,
@@ -7509,10 +7567,20 @@ def run_validation_campaign(
     if actor_filter:
         use_cases = [u for u in use_cases if u.get("actor", "").lower() == actor_filter.lower()]
 
+    in_scope: list[dict[str, Any]] = []
+    out_of_scope: list[dict[str, Any]] = []
+
+    for uc in use_cases:
+        st = (uc.get("status") or "draft").strip().lower()
+        if st in ("draft", "deprecated"):
+            out_of_scope.append(uc)
+        else:
+            in_scope.append(uc)
+
     results: list[dict[str, Any]] = []
     regressions: list[dict[str, Any]] = []
 
-    for uc in use_cases:
+    for uc in in_scope:
         prev_verdict = (uc.get("last_verdict") or "").lower()
         ok, res = validate_use_case_probe(tasks_dir, uc["id"], timeout_seconds=timeout_seconds, actor=actor_name)
         res["title"] = uc["title"]
@@ -7526,6 +7594,8 @@ def run_validation_campaign(
     total = len(results)
     passed = sum(1 for r in results if r.get("verdict") == "pass")
     failed = sum(1 for r in results if r.get("verdict") == "fail")
+    untested = sum(1 for r in results if r.get("verdict") == "untested")
+    out_of_scope_count = len(out_of_scope)
     score_pct = round((passed / total * 100), 1) if total > 0 else 0.0
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -7540,6 +7610,8 @@ def run_validation_campaign(
         f"- **Total Tested:** {total}",
         f"- **Passed:** {passed}",
         f"- **Failed:** {failed}",
+        f"- **Untested:** {untested}",
+        f"- **Out of scope:** {out_of_scope_count}",
         f"- **Regressions Detected:** {len(regressions)}",
         "",
         "## Compliance Matrix by Use Case",
@@ -7548,9 +7620,21 @@ def run_validation_campaign(
         "| :--- | :--- | :--- | :---: | :--- |",
     ]
     for r in results:
-        v_badge = "PASS" if r.get("verdict") == "pass" else ("FAIL" if r.get("verdict") == "fail" else "UNTESTED")
+        v = (r.get("verdict") or "untested").lower()
+        v_badge = "PASS" if v == "pass" else ("FAIL" if v == "fail" else "UNTESTED")
         cmd_snippet = f"`{r.get('command')[:40]}...`" if r.get("command") else "-"
         report_lines.append(f"| **{r['id']}** | {r['title']} | {r['actor']} | `{v_badge}` | {cmd_snippet} |")
+
+    if out_of_scope:
+        report_lines.extend([
+            "",
+            "## Out of scope (draft)",
+            "",
+            "The following use cases were skipped because they are in draft status:",
+            "",
+        ])
+        for uc in out_of_scope:
+            report_lines.append(f"- **{uc['id']}**: {uc['title']} (status: `{uc.get('status', 'draft')}`)")
 
     if regressions:
         report_lines.extend([
@@ -7573,6 +7657,8 @@ def run_validation_campaign(
         "total": total,
         "passed": passed,
         "failed": failed,
+        "untested": untested,
+        "out_of_scope": out_of_scope_count,
         "regressions_count": len(regressions),
         "regressions": regressions,
         "report_file": str(report_file),
@@ -17631,7 +17717,7 @@ def cmd_use_cases_campaign(args: argparse.Namespace) -> int:
     else:
         print(f"Product Validation Campaign ({res['timestamp']}):")
         print(f"  Readiness Score: {res['readiness_score']}% ({res['passed']}/{res['total']} verified)")
-        print(f"  Passed: {res['passed']}, Failed: {res['failed']}, Regressions: {res['regressions_count']}")
+        print(f"  Passed: {res['passed']}, Failed: {res['failed']}, Untested: {res.get('untested', 0)}, Out of scope: {res.get('out_of_scope', 0)}, Regressions: {res['regressions_count']}")
         print(f"  Report: {res['report_file']}")
         if res["regressions"]:
             print("\n  REGRESSIONS:")
@@ -22274,7 +22360,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     uc_rec = uc_sub.add_parser("record-validation", help="Record an AI validation result on a use case")
     uc_rec.add_argument("uc_id", help="Use case ID (e.g. UC001)")
-    uc_rec.add_argument("--verdict", choices=["pass", "fail", "partial"], required=True)
+    uc_rec.add_argument("--verdict", choices=["pass", "fail", "partial", "untested"], required=True)
     uc_rec.add_argument("--summary", required=True, help="Summary of validation findings")
     uc_rec.add_argument("--evidence", default="", help="Execution evidence / output snippet")
     uc_rec.add_argument("--gaps", default="", help="Semicolon-separated list of gaps found")
