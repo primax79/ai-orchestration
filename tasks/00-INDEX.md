@@ -85,7 +85,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T067 (Keep status evidence) | P2 | [transition keeps the existing Status note of initiative tasks](engine/T067-transition-keeps-the-existing-status-note-of-initi.md) | open | kilo | - |
+| T067 (Mantenere evidenza in Status) | P2 | [transition mantiene la nota Status esistente dei task di iniziativa](engine/T067-transition-keeps-the-existing-status-note-of-initi.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -101,72 +101,72 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 <!-- ai-orch:generated done -->
 | Id | Task | Result | Closed |
 | --- | --- | --- | --- |
-| T010 (Skill renames decision) | [Core skill renames decision (docs/06 taxonomy vs. current skill names)](done/methodology/T010-core-skill-naming-decision.md) | done | 2026-10-15 |
-| T009 (Usability and quickstart) | [Product & per-skill usability, quickstart playbook, and instruction clarity](done/methodology/T009-usability-and-complete-documentation.md) | done | 2026-10-15 |
-| T005 (Executor contract hardening) | [Hardening headless-executor-contract and evaluating Kilo agent mode](done/methodology/T005-headless-contract-and-agent-mode.md) | done | 2026-10-15 |
-| T004 (Conflict-resolver rework) | [Rework conflict-resolver for Architect audience and incompatible designs](done/methodology/T004-conflict-resolver-rework.md) | done | 2026-10-15 |
-| T003 (Phase 5 closure) | [Phase 5 explicit decision point and worktree lifecycle closure](done/methodology/T003-phase5-decision-and-worktree-cleanup.md) | done | 2026-10-15 |
-| T002 (Decision telemetry rework) | [Decision telemetry (kilo_log_decision) and ROI analysis rework](done/server-and-bindings/T002-decision-telemetry-and-roi-rework.md) | done | 2026-10-15 |
-| T001 (Task wait guidance) | [Task completion wait (kilo_task_wait) and watcher guidance](done/server-and-bindings/T001-task-completion-wait-and-watcher.md) | done | 2026-10-15 |
-| T011 (render-agents-md topology) | [render-agents-md: render rules that match the actual orchestrator/executor topology](done/methodology/T011-render-agents-md-topology.md) | done | 2026-10-17 |
-| T013 (Answer dialog wording) | [Answer confirmation dialog says "No modifications required"](done/micro/T013-answer-dialog-wording.md) | done | 2026-10-17 |
-| T014 (Flaky backend test) | [One backend test failed once in eleven runs](done/micro/T014-flaky-backend-test.md) | done | 2026-10-17 |
-| T006 (Incident narratives extraction) | [Extract incident narratives to references/incidents.md (progressive disclosure)](done/methodology/T006-incidents-progressive-disclosure.md) | done | 2026-10-17 |
-| T007 (Verification gate tool) | [Structured verification gate tool in kilo-mcp](done/server-and-bindings/T007-verification-gate-tool.md) | done | 2026-10-17 |
-| T008 (claude-mcp spike) | [claude-mcp Phase 1 empirical spike (Option A --bg vs Option B detached -p)](done/server-and-bindings/T008-claude-mcp-phase1-spike.md) | done | 2026-10-17 |
-| T020 (Flaky run tests) | [Flaky run-engine tests under load](done/micro/T020-flaky-run-engine-tests-under-load.md) | done | 2026-10-17 |
-| T015 (Navbar label wrapping) | [Navbar labels wrap on narrow widths](done/micro/T015-navbar-narrow-width.md) | done | 2026-10-18 |
-| T012 (Hung kilo runs) | [kilo-mcp: detect kilo run processes that hang after finishing](done/server-and-bindings/T012-kilo-run-hangs-after-completion.md) | done | 2026-10-18 |
-| T031 (Conditional done follow-ups) | [Conditional done: question age in the index; conditions: header position](done/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md) | done | 2026-10-21 |
-| T034 (Built-in feedback channel) | [Tooling feedback built into the product: ai-orch feedback, skill rule, upgrade AGENTS.md](done/server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md) | done | 2026-10-21 |
-| T019 (Duplicate skills alignment) | [Apply Q005: per-skill diff of the gcube-jenkins, gcube-security-audit and frontend-design copies](done/env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md) | done | 2026-10-21 |
-| T036 (Steps by command) | [Steps and verification authored by command; placeholders rejected](done/engine/T036-steps-and-verification-authored-by-command-placeho.md) | done | 2026-10-23 |
-| T039 (Adoption helpers) | [Adopting existing trees: legacy plans/, next-id preview, discover before registering](done/engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md) | done | 2026-10-23 |
-| T041 (Question workflow gaps) | [Questions: unapplied answers surfaced, moved-to-tracker status, Notes section](done/engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | done | 2026-10-23 |
-| T042 (Waiting-on qualifier) | [Waiting-on qualifier for waiting tasks](done/engine/T042-waiting-on-qualifier-for-waiting-tasks.md) | done | 2026-10-23 |
-| T044 (Durable verification requests) | [Durable verification requests addressed to a workspace or session](done/engine/T044-durable-verification-requests-addressed-to-a-works.md) | done | 2026-10-23 |
-| T016 (Doctor findings study) | [Study: are the Doctor's persistent findings real, and do we handle them right?](done/env-doctor/T016-doctor-findings-study.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
-| T017 (Remove project skill copies) | [Apply Q002: remove the untracked project-scope skill copies in ai-orchestration](done/env-doctor/T017-apply-q002-remove-the-untracked-project-scope-skil.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
-| T018 (Orchestration skill precedence) | [Q003 follow-up: precedence when orchestration-workflow and the generic orchestration skill coexist](done/env-doctor/T018-q003-follow-up-precedence-when-orchestration-workf.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
-| T021 (Binding template drift) | [Precedence between orchestration-workflow and kilo-mcp-orchestrator; fix binding template drift](done/methodology/T021-precedence-between-orchestration-workflow-and-kilo.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
-| T025 (Short title field) | [Short title field for tasks and questions](done/methodology/T025-short-title-field-for-tasks-and-questions.md) | done | 2026-10-23 |
-| T023 (VS Code tree parity) | [VS Code parity for the Tree (11.3) and microtask (10.5) messages](done/micro/T023-vs-code-parity-for-the-tree-11-3-and-microtask-10.md) | done | 2026-10-23 |
-| T022 (Run engine fixes) | [Run engine fixes found by the 07.5/12.1 live capture](done/server-and-bindings/T022-run-engine-fixes-found-by-the-07-5-12-1-live-captu.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
-| T026 (Trigger enqueue race) | [Trigger enqueue races the orchestrator queue and advances the role cursor too early](done/server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
-| T027 (Duplicate turn resumption) | [Stale-claim recovery relaunches a turn whose child process has not written its pid yet](done/server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
-| T028 (Unattended turn hardening) | [Unattended turns: enforce reduced capability on every tool and harden the untrusted-data delimiters](done/server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
-| T029 (Letter-suffix plan ids) | [Plan task ids with a letter suffix drop out of the index](done/server-and-bindings/T029-plan-task-ids-with-a-letter-suffix-drop-out-of-the.md) | done | 2026-10-23 |
-| T030 (Conditional done) | [conditions: header for tasks done with open questions that may change the result](done/server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md) | done | 2026-10-23 |
-| T032 (CLI writes through broker) | [CLI writes reach a live broker; guard ignores a stale manifest](done/server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md) | done | 2026-10-23 |
-| T033 (Test config isolation) | [Test sessions isolated from the user's global config](done/server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md) | done | 2026-10-23 |
-| T040 (Workspace next) | [Workspace-wide next-up and open tasks across projects](done/server-and-bindings/T040-workspace-wide-next-up-and-open-tasks-across-proje.md) | done | 2026-10-23 |
-| T043 (Cross-workspace task links) | [Cross-workspace executor and depends-on links with live state](done/server-and-bindings/T043-cross-workspace-executor-and-depends-on-links-with.md) | done | 2026-10-23 |
-| T045 (Broker validation follow-ups) | [Broker follow-ups from validation: mcp --local, stable error codes, project field](done/server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md) | done | 2026-10-23 |
-| T046 (Compact common queue) | [Common view Queue: compact next-up list and kind on rows](done/server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md) | done | 2026-10-23 |
-| T048 (Project selector active counts) | [Project selector shows non-closed ticket counts (waiting, open, progress)](done/server-and-bindings/T048-project-selector-shows-non-closed-ticket-counts-wa.md) | done | 2026-10-23 |
-| T049 (Project discovery hygiene) | [Project discovery: only task trees, no ignored folders or symlinks; ignore config; hide empty projects](done/server-and-bindings/T049-project-discovery-only-task-trees-no-ignored-folde.md) | done | 2026-10-23 |
-| T038 (Stable entry point) | [Stable ai-orch entry point; clean adoption by upgrade](done/tooling/T038-stable-ai-orch-entry-point-clean-adoption-by-upgra.md) | done | 2026-10-23 |
-| T047 (Architect verification without users) | [Architect verification of delivered items that have no user session](done/server-and-bindings/T047-architect-verification-of-delivered-items-that-hav.md) | done | 2026-10-23 |
-| T024 (Proposal confirm engine) | [Confirm or reject trigger-proposed actions (engine + UI wiring)](done/server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
-| T051 (reopen crash) | [tasks reopen crashes on emergent tasks (TypeError in _update_index_task_path)](done/engine/T051-tasks-reopen-crashes-on-emergent-tasks-typeerror-i.md) | done | 2026-10-25 |
-| T054 (Upgrade preview by default) | [tasks upgrade previews by default; writes only with --apply and a plan hash](done/engine/T054-tasks-upgrade-previews-by-default-writes-only-with.md) | done | 2026-10-25 |
-| T056 (Doctor fresh skill installs) | [Doctor: install from an up-to-date source and compare skill content, not the stored hash](done/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md) | done | 2026-10-25 |
-| T050 (Non-destructive upgrade) | [upgrade and sync-index preserve project-specific content; per-project extension fields](done/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md) | done | 2026-10-25 |
-| T053 (Flaky trigger test) | [Make test_confirm_start_run_hash_mismatch_if_plan_changed deterministic](done/engine/T053-make-test-confirm-start-run-hash-mismatch-if-plan.md) | done | 2026-10-25 |
-| T055 (No phantom categories) | [Campaign reports never become categories; sync-index drops vanished categories](done/engine/T055-campaign-reports-never-become-categories-sync-inde.md) | done | 2026-10-25 |
-| T035 (One-shot close) | [One-shot close, clearer derived-state refusal, bulk close of verified](done/engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | done | 2026-10-23 |
-| T037 (Conflict-free task index) | [Task index without merge conflicts across parallel branches](done/engine/T037-task-index-without-merge-conflicts-across-parallel.md) | done | 2026-10-23 |
-| T052 (Move answered question guard) | [questions move refuses or warns on an already answered question](done/engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | done | 2026-10-25 |
-| T057 (Walk step attribution) | [Transition walk attributes each step to the right actor](done/engine/T057-transition-walk-attributes-each-step-to-the-right.md) | done | 2026-10-25 |
-| T058 (Branch id collisions) | [Id collisions across branches and a dangling merge driver](done/engine/T058-id-collisions-across-branches-and-a-dangling-merge.md) | done | 2026-10-25 |
-| T059 (Merge driver opt-in) | [upgrade explains or gates the local git config write of the index merge driver](done/engine/T059-upgrade-explains-or-gates-the-local-git-config-wri.md) | done | 2026-10-25 |
-| T060 (Initiative rows added) | [sync-index adds rows for initiatives missing from the index](done/engine/T060-sync-index-adds-rows-for-initiatives-missing-from.md) | done | 2026-10-25 |
-| T061 (Ask from task keeps args) | [questions ask --from-task keeps explicit arguments](done/engine/T061-questions-ask-from-task-keeps-explicit-arguments.md) | done | 2026-10-25 |
-| T062 (No delivery with placeholders) | [transition to delivered refuses template placeholder sections](done/engine/T062-transition-to-delivered-refuses-template-placehold.md) | done | 2026-10-25 |
-| T063 (Reopen to delivered) | [reopen can target delivered and set verify-by](done/engine/T063-reopen-can-target-delivered-and-set-verify-by.md) | done | 2026-10-25 |
-| T064 (env doctor recognizes identical) | [env doctor recognizes identical per-assistant skill copies across ~/.claude/skills and ~/.kilo/skills as intentional](done/env-doctor/T064-env-doctor-recognizes-identical-per-assistant-skil.md) | done | 2026-10-25 |
-| T065 (Use-case localized Italian section) | [Use-case localized Italian section headings, --criteria option, and Italian stop-word short titles](done/engine/T065-use-case-localized-italian-section-headings-criter.md) | done | 2026-10-25 |
-| T066 (Project languages) | [Per-project language for tasks and for questions](done/engine/T066-per-project-language-for-tasks-and-for-questions.md) | done | 2026-10-27 |
+| T010 (Decisione rinomina skill) | [Decisione sulla ridenominazione delle skill principali (tassonomia docs/06 rispetto ai nomi attuali)](done/methodology/T010-core-skill-naming-decision.md) | done | 2026-10-15 |
+| T009 (Usabilità e avvio rapido) | [Usabilità del prodotto e delle singole skill, playbook di avvio rapido e chiarezza delle istruzioni](done/methodology/T009-usability-and-complete-documentation.md) | done | 2026-10-15 |
+| T005 (Consolidamento contratto executor) | [Consolidamento di headless-executor-contract e valutazione della modalità agente di Kilo](done/methodology/T005-headless-contract-and-agent-mode.md) | done | 2026-10-15 |
+| T004 (Rielaborazione conflict-resolver) | [Rielaborare conflict-resolver per il ruolo Architect e i design incompatibili](done/methodology/T004-conflict-resolver-rework.md) | done | 2026-10-15 |
+| T003 (Chiusura Fase 5) | [Punto decisionale esplicito della Fase 5 e chiusura del ciclo di vita dei worktree](done/methodology/T003-phase5-decision-and-worktree-cleanup.md) | done | 2026-10-15 |
+| T002 (Rielaborazione telemetria decisioni) | [Telemetria delle decisioni (kilo_log_decision) e rielaborazione dell'analisi ROI](done/server-and-bindings/T002-decision-telemetry-and-roi-rework.md) | done | 2026-10-15 |
+| T001 (Guida attesa task) | [Attesa di completamento dei task (kilo_task_wait) e linee guida per il watcher](done/server-and-bindings/T001-task-completion-wait-and-watcher.md) | done | 2026-10-15 |
+| T011 (Topologia render-agents-md) | [render-agents-md: generare regole coerenti con la reale topologia orchestratore/esecutore](done/methodology/T011-render-agents-md-topology.md) | done | 2026-10-17 |
+| T013 (Testo dialogo risposta) | [La finestra di conferma della risposta mostra "No modifications required"](done/micro/T013-answer-dialog-wording.md) | done | 2026-10-17 |
+| T014 (Test backend instabile) | [Un test del backend è fallito una volta su undici esecuzioni](done/micro/T014-flaky-backend-test.md) | done | 2026-10-17 |
+| T006 (Estrazione analisi incidenti) | [Estrarre le analisi degli incidenti in references/incidents.md (divulgazione progressiva)](done/methodology/T006-incidents-progressive-disclosure.md) | done | 2026-10-17 |
+| T007 (Tool gate di verifica) | [Tool strutturato per il gate di verifica in kilo-mcp](done/server-and-bindings/T007-verification-gate-tool.md) | done | 2026-10-17 |
+| T008 (Spike claude-mcp) | [Spike empirico di Fase 1 per claude-mcp (Opzione A --bg vs Opzione B -p scollegato)](done/server-and-bindings/T008-claude-mcp-phase1-spike.md) | done | 2026-10-17 |
+| T020 (Test run instabili) | [Test del motore di esecuzione instabili sotto carico](done/micro/T020-flaky-run-engine-tests-under-load.md) | done | 2026-10-17 |
+| T015 (A capo etichette navbar) | [Le etichette della navbar vanno a capo su larghezze ridotte](done/micro/T015-navbar-narrow-width.md) | done | 2026-10-18 |
+| T012 (Processi kilo run bloccati) | [kilo-mcp: rilevare i processi kilo run che restano bloccati dopo il completamento](done/server-and-bindings/T012-kilo-run-hangs-after-completion.md) | done | 2026-10-18 |
+| T031 (Follow-up done condizionato) | [Completamento condizionato: età della domanda nell'indice; posizione dell'header conditions:](done/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md) | done | 2026-10-21 |
+| T034 (Canale feedback integrato) | [Feedback sugli strumenti integrato nel prodotto: ai-orch feedback, regola nelle skill, upgrade di AGENTS.md](done/server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md) | done | 2026-10-21 |
+| T019 (Allineamento skill duplicate) | [Applicare Q005: diff per singola skill delle copie di gcube-jenkins, gcube-security-audit e frontend-design](done/env-doctor/T019-apply-q005-per-skill-diff-of-the-gcube-jenkins-gcu.md) | done | 2026-10-21 |
+| T036 (Passi da comando) | [Passi e verifica compilati da comando; segnaposto rifiutati](done/engine/T036-steps-and-verification-authored-by-command-placeho.md) | done | 2026-10-23 |
+| T039 (Supporto adozione alberi) | [Adozione di alberi esistenti: cartella legacy plans/, anteprima di next-id, discover prima della registrazione](done/engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md) | done | 2026-10-23 |
+| T041 (Lacune flusso domande) | [Domande: risposte non applicate messe in evidenza, stato moved-to-tracker, sezione Notes](done/engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md) | done | 2026-10-23 |
+| T042 (Qualificatore waiting-on) | [Qualificatore waiting-on per i task in attesa](done/engine/T042-waiting-on-qualifier-for-waiting-tasks.md) | done | 2026-10-23 |
+| T044 (Richieste verifica persistenti) | [Richieste di verifica persistenti indirizzate a un workspace o a una sessione](done/engine/T044-durable-verification-requests-addressed-to-a-works.md) | done | 2026-10-23 |
+| T016 (Studio segnalazioni Doctor) | [Studio: le segnalazioni persistenti del Doctor sono reali e le gestiamo correttamente?](done/env-doctor/T016-doctor-findings-study.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
+| T017 (Rimozione skill di progetto) | [Applicare Q002: rimuovere le copie non tracciate delle skill a livello di progetto in ai-orchestration](done/env-doctor/T017-apply-q002-remove-the-untracked-project-scope-skil.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
+| T018 (Precedenza skill orchestrazione) | [Follow-up di Q003: precedenza quando coesistono orchestration-workflow e la skill di orchestrazione generica](done/env-doctor/T018-q003-follow-up-precedence-when-orchestration-workf.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
+| T021 (Drift template di binding) | [Precedenza tra orchestration-workflow e kilo-mcp-orchestrator; correzione del disallineamento del template di binding](done/methodology/T021-precedence-between-orchestration-workflow-and-kilo.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
+| T025 (Campo titolo breve) | [Campo titolo breve per task e domande](done/methodology/T025-short-title-field-for-tasks-and-questions.md) | done | 2026-10-23 |
+| T023 (Parità albero VS Code) | [Parità VS Code per i messaggi Tree (11.3) e microtask (10.5)](done/micro/T023-vs-code-parity-for-the-tree-11-3-and-microtask-10.md) | done | 2026-10-23 |
+| T022 (Fix motore di esecuzione) | [Correzioni al motore di esecuzione emerse dalla cattura live 07.5/12.1](done/server-and-bindings/T022-run-engine-fixes-found-by-the-07-5-12-1-live-captu.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
+| T026 (Race accodamento trigger) | [L'accodamento dei trigger entra in race condition con la coda dell'orchestratore e avanza troppo presto il cursore di ruolo](done/server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
+| T027 (Ripresa duplicata del turno) | [Il recupero dei claim scaduti riavvia un turno il cui processo figlio non ha ancora scritto il proprio pid](done/server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
+| T028 (Sicurezza turni non presidiati) | [Turni non presidiati: applicare capacità ridotte su ogni tool e irrobustire i delimitatori dei dati non attendibili](done/server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
+| T029 (ID piano con suffisso lettera) | [Gli ID dei task di piano con suffisso alfabetico scompaiono dall'indice](done/server-and-bindings/T029-plan-task-ids-with-a-letter-suffix-drop-out-of-the.md) | done | 2026-10-23 |
+| T030 (Completamento condizionato) | [Header conditions: per i task completati con domande aperte che possono modificare il risultato](done/server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md) | done | 2026-10-23 |
+| T032 (Scritture CLI tramite broker) | [Le scritture da CLI raggiungono un broker attivo; la guardia ignora i manifest obsoleti](done/server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md) | done | 2026-10-23 |
+| T033 (Isolamento config nei test) | [Sessioni di test isolate dalla configurazione globale dell'utente](done/server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md) | done | 2026-10-23 |
+| T040 (Next di workspace) | [Task next-up e open a livello di intero workspace tra più progetti](done/server-and-bindings/T040-workspace-wide-next-up-and-open-tasks-across-proje.md) | done | 2026-10-23 |
+| T043 (Link task cross-workspace) | [Collegamenti executor e depends-on tra workspace diversi con stato in tempo reale](done/server-and-bindings/T043-cross-workspace-executor-and-depends-on-links-with.md) | done | 2026-10-23 |
+| T045 (Follow-up validazione broker) | [Follow-up del broker dalla validazione: mcp --local, codici di errore stabili, campo project](done/server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md) | done | 2026-10-23 |
+| T046 (Coda comune compatta) | [Coda della vista comune: elenco next-up compatto e tipo di task sulle righe](done/server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md) | done | 2026-10-23 |
+| T048 (Conteggi attivi selettore progetti) | [Il selettore di progetto mostra il conteggio dei ticket non chiusi (waiting, open, progress)](done/server-and-bindings/T048-project-selector-shows-non-closed-ticket-counts-wa.md) | done | 2026-10-23 |
+| T049 (Igiene rilevamento progetti) | [Rilevamento dei progetti: solo alberi tasks, nessuna cartella ignorata o symlink; configurazione di esclusione; nascondere i progetti vuoti](done/server-and-bindings/T049-project-discovery-only-task-trees-no-ignored-folde.md) | done | 2026-10-23 |
+| T038 (Punto di ingresso stabile) | [Punto di ingresso ai-orch stabile; adozione pulita tramite upgrade](done/tooling/T038-stable-ai-orch-entry-point-clean-adoption-by-upgra.md) | done | 2026-10-23 |
+| T047 (Verifica architetto senza utenti) | [Verifica da parte dell'architetto degli elementi consegnati privi di sessione utente](done/server-and-bindings/T047-architect-verification-of-delivered-items-that-hav.md) | done | 2026-10-23 |
+| T024 (Motore conferma proposte) | [Confermare o rifiutare le azioni proposte dai trigger (motore + collegamento UI)](done/server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md) | done with a caveat: validated by the architect, no user yet | 2026-10-23 |
+| T051 (Crash su reopen) | [tasks reopen va in crash sui task emergenti (TypeError in _update_index_task_path)](done/engine/T051-tasks-reopen-crashes-on-emergent-tasks-typeerror-i.md) | done | 2026-10-25 |
+| T054 (Anteprima predefinita in upgrade) | [tasks upgrade mostra l'anteprima per impostazione predefinita; scrive solo con --apply e un hash del piano](done/engine/T054-tasks-upgrade-previews-by-default-writes-only-with.md) | done | 2026-10-25 |
+| T056 (Installazione skill aggiornate) | [Doctor: installare da un sorgente aggiornato e confrontare il contenuto della skill, non l'hash memorizzato](done/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md) | done | 2026-10-25 |
+| T050 (Upgrade non distruttivo) | [upgrade e sync-index preservano i contenuti specifici del progetto; campi di estensione per progetto](done/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md) | done | 2026-10-25 |
+| T053 (Test trigger instabile) | [Rendere deterministico test_confirm_start_run_hash_mismatch_if_plan_changed](done/engine/T053-make-test-confirm-start-run-hash-mismatch-if-plan.md) | done | 2026-10-25 |
+| T055 (Nessuna categoria fantasma) | [I report delle campagne non diventano mai categorie; sync-index rimuove le categorie scomparse](done/engine/T055-campaign-reports-never-become-categories-sync-inde.md) | done | 2026-10-25 |
+| T035 (Chiusura in un comando) | [Chiusura in un solo comando, rifiuto più chiaro sullo stato derivato, chiusura massiva dei task verificati](done/engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md) | done | 2026-10-23 |
+| T037 (Indice senza conflitti) | [Indice dei task senza conflitti di merge tra branch paralleli](done/engine/T037-task-index-without-merge-conflicts-across-parallel.md) | done | 2026-10-23 |
+| T052 (Guardia move domanda risolta) | [questions move rifiuta o avvisa su una domanda che ha già ricevuto risposta](done/engine/T052-questions-move-refuses-or-warns-on-an-already-answ.md) | done | 2026-10-25 |
+| T057 (Attribuzione passi transizione) | [L'avanzamento di transizione attribuisce ogni passo all'attore corretto](done/engine/T057-transition-walk-attributes-each-step-to-the-right.md) | done | 2026-10-25 |
+| T058 (Collisioni id tra branch) | [Collisioni di id tra branch e merge driver pendente](done/engine/T058-id-collisions-across-branches-and-a-dangling-merge.md) | done | 2026-10-25 |
+| T059 (Opt-in del merge driver) | [upgrade spiega o subordina a opzione la scrittura nella configurazione git locale del merge driver dell'indice](done/engine/T059-upgrade-explains-or-gates-the-local-git-config-wri.md) | done | 2026-10-25 |
+| T060 (Aggiunta righe iniziative) | [sync-index aggiunge le righe per le iniziative mancanti dall'indice](done/engine/T060-sync-index-adds-rows-for-initiatives-missing-from.md) | done | 2026-10-25 |
+| T061 (Ask from-task mantiene argomenti) | [questions ask --from-task mantiene gli argomenti espliciti](done/engine/T061-questions-ask-from-task-keeps-explicit-arguments.md) | done | 2026-10-25 |
+| T062 (No consegna con segnaposto) | [La transizione a delivered rifiuta le sezioni con segnaposto del template](done/engine/T062-transition-to-delivered-refuses-template-placehold.md) | done | 2026-10-25 |
+| T063 (Reopen verso delivered) | [reopen può avere come destinazione delivered e impostare verify-by](done/engine/T063-reopen-can-target-delivered-and-set-verify-by.md) | done | 2026-10-25 |
+| T064 (Copie skill identiche nel Doctor) | [env doctor riconosce come intenzionali le copie identiche delle skill per assistente tra ~/.claude/skills e ~/.kilo/skills](done/env-doctor/T064-env-doctor-recognizes-identical-per-assistant-skil.md) | done | 2026-10-25 |
+| T065 (Sezioni casi d'uso in italiano) | [Intestazioni di sezione dei casi d'uso localizzate in italiano, opzione --criteria e titoli brevi con stop-word italiane](done/engine/T065-use-case-localized-italian-section-headings-criter.md) | done | 2026-10-25 |
+| T066 (Lingue per progetto) | [Lingua per progetto per i task e per le domande](done/engine/T066-per-project-language-for-tasks-and-for-questions.md) | done | 2026-10-27 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph
