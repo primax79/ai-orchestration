@@ -23,6 +23,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 13 | 13 | [Rielaborazione del Doctor: rilievi reali, azionabili e risolvibili](done/13-doctor-rework/plan.md) | done with a caveat (done: 13.1–13.7) | 06 | M |
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
+| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | open | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -45,6 +46,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [tracker-links](specs/tracker-links.md) | - |
 | [ui-multi-project](specs/ui-multi-project.md) | - |
 | [use-case-management-and-ai-validation](specs/use-case-management-and-ai-validation.md) | - |
+| [use-cases-drive-tasks](specs/use-cases-drive-tasks.md) | - |
 <!-- /ai-orch:generated specs -->
 
 ## Specs
