@@ -6,13 +6,14 @@
 - priority: P2
 - priority-reason: Una campagna ha segnato 39/41 use case come failing in git-code-rag, letto dal proprietario come prodotto rotto
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: _inbox/analyzed/20261027-144044-use-cases-campaign-validates-draft-use-c/note.md
 - paths: -
 - handoff: Read tasks/engine/T069-la-campagna-di-validazione-esclude-gli-use-case-in.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: claude:ai-coding-tools
 - verify-by: ai-coding-tools
 - short: Campagna senza bozze
 
@@ -34,4 +35,6 @@ run_validation_campaign (tasks_engine.py ~7265) says 'Execute all active use cas
 
 ## Log
 
+- 2026-10-27, claude:ai-coding-tools: state `verified` -> `done` — verified by ai-coding-tools
+- 2026-10-27, claude:ai-coding-tools: state `delivered` -> `verified` — OK on a scratch clone of git-code-rag with architect-side 0.8.3, campaign --timeout 15: the 9 draft use cases listed under 'Out of scope (draft)' and their files untouched (git diff empty); missing test file (UC005) and timeout (UC006, plus 5 slow pytest probes over 15 s) recorded as untested with status unchanged; a real failure (UC007 'false') recorded as fail/failing and as a regression; report and summary count Passed 24, Failed 1, Untested 7, Out of scope 9
 - 2026-10-27, kilo: state `open` -> `delivered` — la campagna esclude gli use case draft e deprecated; i probe falliti per cause esterne registrano untested senza impostare failing
