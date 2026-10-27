@@ -33,10 +33,14 @@ l'IA ha tutti i tool a disposizione per interagire con gli elementi, cambia solo
 
 ## Steps
 
-- [ ] Spec (Kilo, sola lettura sul codice: OrchestratorChatPanel, api_post_orchestrator_chat, turni e azioni proposte, vista dettaglio di task/use case/domanda): modello dei fili per elemento, contesto inviato, chi risponde (opzioni e raccomandazione), azioni proposte, permessi, UI web ed estensione
+- [x] Spec (Kilo, sola lettura sul codice: OrchestratorChatPanel, api_post_orchestrator_chat, turni e azioni proposte, vista dettaglio di task/use case/domanda): modello dei fili per elemento, contesto inviato, chi risponde (opzioni e raccomandazione), azioni proposte, permessi, UI web ed estensione — `tasks/specs/contextual-element-chat.md` (sessione dedicata per elemento con `--resume`, store unificato `orchestrator/turns/` + `threads/`, mockup ASCII)
 - [ ] Revisione Codex e dell'architetto; domanda al proprietario su chi risponde
 - [ ] Piano in iniziativa dopo l'approvazione
 
 ## Verification
 
 - Spec in tasks/specs/contextual-element-chat.md con opzioni, raccomandazione e mockup ASCII della vista elemento; approvata dal proprietario
+
+## Log
+
+- 2026-10-27, kilo: bozza della spec scritta
