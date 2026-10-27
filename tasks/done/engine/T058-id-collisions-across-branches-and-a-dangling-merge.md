@@ -1,10 +1,10 @@
-# T058 Id collisions across branches and a dangling merge driver
+# T058 Collisioni di id tra branch e merge driver pendente
 
 - id: T058
-- title: Id collisions across branches and a dangling merge driver
+- title: Collisioni di id tra branch e merge driver pendente
 - category: engine
 - priority: P2
-- priority-reason: Two branches that both run 'tasks new' get the same T###; after merge validate fails and the index keeps one row
+- priority-reason: Due branch che eseguono entrambi 'tasks new' ottengono lo stesso T###; dopo il merge validate fallisce e l'indice mantiene una sola riga
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,17 +12,17 @@
 - decider: -
 - sources: inbox N032 (folded into T037, not solved there); T037 live check 2026-10-25
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
-- handoff: Read tasks/engine/T058-id-collisions-across-branches-and-a-dangling-merge.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggi tasks/engine/T058-id-collisions-across-branches-and-a-dangling-merge.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
-- short: Branch id collisions
+- short: Collisioni id tra branch
 
 ## Goal
 
-After a merge where two branches allocated the same task id, 'ai-orch tasks renumber --dry-run' (or validate's fix hint) proposes the next free id for the later file, rewrites its header, file name and links, and the index regains both rows; validate also warns when the configured merge.ai-orch-index.driver command no longer exists (e.g. a removed worktree path).
+Dopo un merge in cui due branch hanno allocato lo stesso id di task, 'ai-orch tasks renumber --dry-run' (o il suggerimento di correzione di validate) propone il successivo id libero per il file più recente, ne riscrive l'header, il nome del file e i link, e l'indice recupera entrambe le righe; validate inoltre avvisa quando il comando merge.ai-orch-index.driver configurato non esiste più (ad es. il percorso di un worktree rimosso).
 
 ## Steps
 
-- [x] Scan local git branches and sibling worktrees in `_scan_git_branch_and_worktree_ids` for `T###`, `Q###`, `UC###`, `N###` and check duplicate `N###` in `validate_tasks_tree`.
+- [x] Scansionare i branch git locali e i worktree fratelli in `_scan_git_branch_and_worktree_ids` per `T###`, `Q###`, `UC###`, `N###` e controllare i duplicati `N###` in `validate_tasks_tree`.
 
 ## Verification
 
@@ -30,7 +30,7 @@ After a merge where two branches allocated the same task id, 'ai-orch tasks renu
 
 ## Log (newest first)
 
-- 2026-10-25, owner: state `verified` -> `done` — Implemented and verified with automated pytest regression tests
-- 2026-10-25, owner: state `delivered` -> `verified` — Implemented and verified with automated pytest regression tests
+- 2026-10-25, owner: state `verified` -> `done` — Implementato e verificato con test di regressione pytest automatizzati
+- 2026-10-25, owner: state `delivered` -> `verified` — Implementato e verificato con test di regressione pytest automatizzati
 - 2026-10-25, kilo: state `in progress` -> `delivered`
 - 2026-10-25, kilo: state `open` -> `in progress`

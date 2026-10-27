@@ -1,10 +1,10 @@
-# T035 One-shot close, clearer derived-state refusal, bulk close of verified
+# T035 Chiusura in un solo comando, rifiuto più chiaro sullo stato derivato, chiusura massiva dei task verificati
 
 - id: T035
-- title: One-shot close, clearer derived-state refusal, bulk close of verified
+- title: Chiusura in un solo comando, rifiuto più chiaro sullo stato derivato, chiusura massiva dei task verificati
 - category: engine
 - priority: P1
-- priority-reason: Asked by three sessions (two as top change); closing takes four calls today
+- priority-reason: Richiesto da tre sessioni (due come modifica prioritaria); oggi chiudere richiede quattro chiamate
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,48 +12,48 @@
 - decider: -
 - sources: feedback round 2026-10-21: inbox N008, N018, N025, N026
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
-- handoff: Read tasks/tasks/T035-one-shot-close-clearer-derived-state-refusal-bulk.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggi tasks/tasks/T035-one-shot-close-clearer-derived-state-refusal-bulk.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
 - verify-by: gcube_audit
-- short: One-shot close
+- short: Chiusura in un comando
 
 
 
 ## Goal
 
-'tasks transition <id> done --verifier X [--reason R]' walks the legal states in one call, runs every guard once and records the same reason/verifier on each step (dry-run first). A refusal on a derived-state parent shows the current derived state and says it closes when its leaves do. A bulk 'tasks close --verified [--dry-run]' closes verified items, and the index counts 'finished, not archived'. Also from the N035 consultation: a one-command self-close for solo repositories ('--self-verified', which records 'done with a caveat: self-verified only' and a PROGRESS line); the close command offers 'done with a caveat' with its reason (a session closed an incident as plain 'done' for lack of it); '--verifier' accepts a session name as a first-class value (e.g. 'gcube-atlas-83'). Every transition writes a dated line (from, to, actor, verifier, reason) into the task itself: PROGRESS.md for folder tasks, a '## Log' section for single-file tasks, so validations are recorded where the owner reads them (inbox N041, gcube_atlas).
+'tasks transition <id> done --verifier X [--reason R]' attraversa gli stati validi in una sola chiamata, esegue ogni guardia una volta e registra lo stesso motivo/verificatore a ogni passo (prima in dry-run). Un rifiuto su un nodo padre con stato derivato mostra lo stato derivato corrente e indica che si chiude quando si chiudono le sue foglie. Un comando massivo 'tasks close --verified [--dry-run]' chiude gli elementi verificati e l'indice conteggia 'finished, not archived'. Inoltre, dalla consultazione N035: auto-chiusura in un solo comando per i repository con un singolo operatore ('--self-verified', che registra 'done with a caveat: self-verified only' e una riga in PROGRESS); il comando di chiusura offre 'done with a caveat' con il relativo motivo (una sessione ha chiuso un incidente come semplice 'done' per mancanza di tale opzione); '--verifier' accetta un nome di sessione come valore di prima classe (es. 'gcube-atlas-83'). Ogni transizione scrive una riga datata (da, a, attore, verificatore, motivo) nel task stesso: PROGRESS.md per i task a cartella, una sezione '## Log' per i task a file singolo, così le validazioni sono registrate dove l'owner le legge (inbox N041, gcube_atlas).
 
 ## Steps
 
-- [x] Walk `tasks transition <id> done --verifier X [--reason R]` through legal intermediate states (`in progress -> delivered -> verified -> done`) from any non-terminal state, enforcing the independent-verifier guard and supporting `--dry-run` and `--owner-approved`.
-- [x] Add bulk `tasks close --verified [--dry-run] [--expect-plan-hash <hash>]` to preview and close all tasks in `verified` state with a single batch plan hash.
-- [x] Normalise state spellings (`in-progress`, `In Progress`, `in_progress`, etc.) on read in `normalize_state`, accept them in `list`, `transition`, and `close`, and emit a warning with the canonical spelling in `validate` without rewriting files on read.
-- [x] Record a `## Log` line (or `PROGRESS.md` entry for folder tasks) for every intermediate transition step during `close` and `transition` walks.
-- [x] Add unit tests in `test_tasks_engine.py` covering all four reopened points.
+- [x] Far avanzare `tasks transition <id> done --verifier X [--reason R]` attraverso gli stati intermedi validi (`in progress -> delivered -> verified -> done`) da qualsiasi stato non terminale, applicando la guardia del verificatore indipendente e supportando `--dry-run` e `--owner-approved`.
+- [x] Aggiungere il comando massivo `tasks close --verified [--dry-run] [--expect-plan-hash <hash>]` per visualizzare in anteprima e chiudere tutti i task nello stato `verified` con un unico hash del piano batch.
+- [x] Normalizzare le grafie dello stato (`in-progress`, `In Progress`, `in_progress`, ecc.) in lettura in `normalize_state`, accettarle in `list`, `transition` e `close`, ed emettere un avviso con la grafia canonica in `validate` senza riscrivere i file in lettura.
+- [x] Registrare una riga in `## Log` (o una voce in `PROGRESS.md` per i task a cartella) per ogni passo di transizione intermedio durante le esecuzioni di `close` e `transition`.
+- [x] Aggiungere unit test in `test_tasks_engine.py` a copertura di tutti e quattro i punti riaperti.
 
 ## Verification
 
-- [x] Full pytest suite passes (`563 passed`): `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/ plugins/architect-side/skills/task-pipeline/scripts/ plugins/shared/skills/orchestration-setup/scripts/`.
-- [x] Live verification on a scratch `git init` copy of `tasks/` in the OS temp dir reproduces and validates all four `gcube-audit` scenarios (`transition <id> done`, `close --verified`, hyphenated `- state: in-progress` in `list`/`validate`/`close`, and per-step `## Log` lines).
+- [x] L'intera suite pytest passa (`563 passed`): `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/ plugins/architect-side/skills/task-pipeline/scripts/ plugins/shared/skills/orchestration-setup/scripts/`.
+- [x] La verifica dal vivo su una copia temporanea `git init` di `tasks/` nella directory temporanea di sistema riproduce e valida tutti e quattro gli scenari di `gcube-audit` (`transition <id> done`, `close --verified`, `- state: in-progress` con trattino in `list`/`validate`/`close`, e righe `## Log` per ogni passo).
 
 ## Log (newest first)
 
-- 2026-10-25, owner: state `verified` -> `done` — Reopened points verified in test_tasks_engine.py + scratch repo live check; closure approved by owner
-- 2026-10-25, owner: state `delivered` -> `verified` — Reopened points verified in test_tasks_engine.py + scratch repo live check; closure approved by owner
-- 2026-10-25, kilo: state `in progress` -> `delivered` — Implemented transition walk to done, bulk close --verified, state spelling normalisation, and per-step Log entries; 563 tests pass
+- 2026-10-25, owner: state `verified` -> `done` — Punti riaperti verificati in test_tasks_engine.py + controllo dal vivo su repo temporaneo; chiusura approvata dall'owner
+- 2026-10-25, owner: state `delivered` -> `verified` — Punti riaperti verificati in test_tasks_engine.py + controllo dal vivo su repo temporaneo; chiusura approvata dall'owner
+- 2026-10-25, kilo: state `in progress` -> `delivered` — Implementati l'avanzamento di transizione fino a done, la chiusura massiva close --verified, la normalizzazione della grafia dello stato e le voci di Log per ogni passo; 563 test passati
 - 2026-10-25, kilo: state `open` -> `in progress`
-- 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged 76391c4 + N041 single-file ## Log recording; 12 new unit tests pass
+- 2026-10-23, owner: state `verified` -> `done` — Validato dalle suite di test automatizzati e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzati e approvato dall'owner per la pulizia
+- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Eseguito merge di 76391c4 + N041 registrazione su file singolo in ## Log; 12 nuovi unit test passano
 
-## Reopened 2026-10-25 (requester validation, gcube-audit)
+## Riapertura 2026-10-25 (validazione del richiedente, gcube-audit)
 
-Works: `tasks close <id> --verifier owner --reason r` from 'in progress' reaches done and writes a Log line.
-NOT OK:
-1. `tasks transition <id> done --verifier owner --reason r` is refused ("must pass through 'delivered' first" from in
-   progress; from delivered the allowed list omits done). The goal promised the one-call walk on `transition` too.
-2. `tasks close <id> --verified` (bulk close of verified items) does not exist ("unrecognized arguments").
-3. A header `- state: in-progress` (hyphenated, 6 tasks in their tree) is not normalised: close and transition refuse
-   it, and list shows canonical_state 'in-progress'. Normalise state spellings on read (and offer a fix in validate).
-4. The Log records only the last step (verified -> done), not each intermediate step.
-Verify again with the requester before closing.
+Funziona: `tasks close <id> --verifier owner --reason r` da 'in progress' raggiunge done e scrive una riga di Log.
+NON OK:
+1. `tasks transition <id> done --verifier owner --reason r` viene rifiutato ("must pass through 'delivered' first" da in
+   progress; da delivered l'elenco degli stati consentiti omette done). L'obiettivo prometteva l'avanzamento in una sola chiamata anche su `transition`.
+2. `tasks close <id> --verified` (chiusura massiva degli elementi verificati) non esiste ("unrecognized arguments").
+3. Un header `- state: in-progress` (con trattino, 6 task nel loro albero) non viene normalizzato: close e transition lo rifiutano,
+   e list mostra canonical_state 'in-progress'. Normalizzare le grafie dello stato in lettura (e offrire una correzione in validate).
+4. Il Log registra solo l'ultimo passo (verified -> done), non ciascuno dei passi intermedi.
+Verificare di nuovo con il richiedente prima di chiudere.

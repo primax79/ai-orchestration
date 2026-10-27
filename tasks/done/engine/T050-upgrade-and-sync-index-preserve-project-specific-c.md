@@ -1,10 +1,10 @@
-# T050 upgrade and sync-index preserve project-specific content; per-project extension fields
+# T050 upgrade e sync-index preservano i contenuti specifici del progetto; campi di estensione per progetto
 
 - id: T050
-- title: upgrade and sync-index preserve project-specific content; per-project extension fields
+- title: upgrade e sync-index preservano i contenuti specifici del progetto; campi di estensione per progetto
 - category: engine
 - priority: P1
-- priority-reason: upgrade/sync-index destroy project rules and registry columns; porting_liferay cannot adopt the current engine and warns its sessions not to run them
+- priority-reason: upgrade/sync-index distruggono le regole del progetto e le colonne del registro; porting_liferay non può adottare il motore attuale e avvisa le proprie sessioni di non eseguirli
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,82 +12,82 @@
 - decider: -
 - sources: inbox N049 (porting_liferay, T124 there)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py, plugins/architect-side/skills/task-pipeline/SKILL.md
-- handoff: Read tasks/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggi tasks/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: porting_liferay
 - verify-by: porting_liferay
-- short: Non-destructive upgrade
+- short: Upgrade non distruttivo
 
 ## Goal
 
-upgrade never replaces an existing tasks/AGENTS.md: it adds or refreshes a managed block between markers and keeps everything else; sync-index rewrites only its generated regions, keeps extra columns a project defined (e.g. Owner) and the project's Next up order unless asked, and never turns companion files into task rows; upgrade exits 0 on success with a clear plan; a per-project config ([tasks] extension_fields in the project's orchestration.toml, or a declaration in tasks/AGENTS.md) lets validate accept project-specific header fields such as 'area'. Verified on a scratch copy of ~/works/gcube/porting_liferay/tasks (read-only on the original): the diff keeps their rules and columns.
+upgrade non sostituisce mai un file tasks/AGENTS.md esistente: aggiunge o aggiorna un blocco gestito tra marcatori e mantiene tutto il resto; sync-index riscrive solo le proprie sezioni generate, mantiene le colonne aggiuntive definite da un progetto (es. Owner) e l'ordine di Next up del progetto salvo diversa richiesta, e non trasforma mai i file accessori in righe di task; upgrade termina con codice 0 in caso di successo mostrando un piano chiaro; una configurazione per progetto ([tasks] extension_fields nel file orchestration.toml del progetto, o una dichiarazione in tasks/AGENTS.md) permette a validate di accettare campi header specifici del progetto come 'area'. Verificato su una copia temporanea di ~/works/gcube/porting_liferay/tasks (in sola lettura sull'originale): il diff preserva le loro regole e colonne.
 
 ## Steps
 
-- [x] Non-destructive `tasks/AGENTS.md` in `upgrade`: wrap managed convention in `<!-- ai-orch:managed begin -->` ... `<!-- ai-orch:managed end -->`, preserving all project-specific content outside markers byte-for-byte; support `--dry-run`/`--preview` and `--apply --expect-hash`.
-- [x] Non-destructive `sync-index`: preserve extra columns in tables (such as `Owner` in category tables), preserve existing `Next up` and category row order unless `--reorder` is passed, preserve bare `Id` cell format when the existing index uses it, and ignore companion files (`T###-*.md`) that lack a task header block.
-- [x] Per-project header extension fields and `upgrade` exit code: allow `[tasks] extension_fields = ["area", ...]` in `orchestration.toml` or fenced `toml` blocks in `tasks/AGENTS.md`; `upgrade` exits `0` when its own work succeeds and surfaces pre-existing validation issues as warnings.
-- [x] Add regression tests in `test_tasks_engine.py` and verify on a temporary copy of `~/works/gcube/porting_liferay/tasks`.
-- [x] Bounce fixes (2026-10-25): parse prose `Extra header fields:` declarations in `tasks/AGENTS.md` and document accepted forms in the managed block; omit decider-only blocked/waiting tasks without an explicit question from `Decisions waiting`; honour `short:` headers and hand-curated short labels as `T### (short)` in category tables; add per-section table/Next-up diff summaries in `upgrade`/`sync-index` previews and print `[ok] already in sync, nothing written` when `sync-index --apply` has no changes.
+- [x] `tasks/AGENTS.md` non distruttivo in `upgrade`: racchiudere la convenzione gestita tra `<!-- ai-orch:managed begin -->` ... `<!-- ai-orch:managed end -->`, preservando byte per byte tutto il contenuto specifico del progetto esterno ai marcatori; supportare `--dry-run`/`--preview` e `--apply --expect-hash`.
+- [x] `sync-index` non distruttivo: preservare le colonne aggiuntive nelle tabelle (come `Owner` nelle tabelle di categoria), preservare l'ordine esistente delle righe di `Next up` e delle categorie a meno che non venga passato `--reorder`, preservare il formato semplice della cella `Id` quando l'indice esistente lo usa, e ignorare i file accessori (`T###-*.md`) privi di blocco header del task.
+- [x] Campi di estensione dell'header per progetto e codice di uscita di `upgrade`: consentire `[tasks] extension_fields = ["area", ...]` in `orchestration.toml` o in blocchi `toml` delimitati in `tasks/AGENTS.md`; `upgrade` termina con `0` quando il proprio lavoro ha successo e segnala i problemi di validazione preesistenti come avvisi.
+- [x] Aggiungere test di regressione in `test_tasks_engine.py` e verificare su una copia temporanea di `~/works/gcube/porting_liferay/tasks`.
+- [x] Correzioni post-bounce (2026-10-25): analizzare le dichiarazioni in prosa `Extra header fields:` in `tasks/AGENTS.md` e documentare le forme accettate nel blocco gestito; omettere da `Decisions waiting` i task bloccati/in attesa con solo decider ma senza una domanda esplicita; rispettare gli header `short:` e le etichette brevi curate a mano come `T### (short)` nelle tabelle di categoria; aggiungere riepiloghi dei diff per sezione delle tabelle/Next-up nelle anteprime di `upgrade`/`sync-index` e stampare `[ok] already in sync, nothing written` quando `sync-index --apply` non produce modifiche.
 
 ## Verification
 
 - `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py -k "test_t050"`
 - `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider scripts/ plugins/architect-side/skills/task-pipeline/scripts/ plugins/shared/skills/orchestration-setup/scripts/`
-- Live check on a scratch copy of `~/works/gcube/porting_liferay/tasks` (`upgrade` preview + `--apply --expect-plan-hash`, `sync-index --apply`, `validate`): 0 `unknown header field(s): area` warnings, no `T038` row in `Decisions waiting`, `T154 (client/model compatibility check)` preserved in category table, per-section preview summary printed, and `[ok] already in sync, nothing written` on subsequent `sync-index --apply`.
+- Verifica dal vivo su una copia temporanea di `~/works/gcube/porting_liferay/tasks` (anteprima di `upgrade` + `--apply --expect-plan-hash`, `sync-index --apply`, `validate`): 0 avvisi `unknown header field(s): area`, nessuna riga `T038` in `Decisions waiting`, `T154 (client/model compatibility check)` preservato nella tabella di categoria, riepilogo dell'anteprima per sezione stampato, e `[ok] already in sync, nothing written` al successivo `sync-index --apply`.
 - `python3 plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py validate --tasks-dir tasks`
 - `python3 plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py sync-index --tasks-dir tasks --check`
 
-## Bounced 2026-10-25 (requester validation, porting-liferay-8c, on a throwaway copy of their tree)
+## Respinto 2026-10-25 (validazione del richiedente, porting-liferay-8c, su una copia usa e getta del loro albero)
 
-OK: the preview writes nothing and the plan hash works; tasks/AGENTS.md project rules intact, managed block only
-appended; Owner column and Id format kept; no companion-file rows; no row lost; sync-index after upgrade idempotent.
-NOT OK:
-1. **`area` declared in prose is not recognised.** Their tasks/AGENTS.md says ``**Extra header fields: `area`** (free-text
-   topic label)``; validate warns 100x "unknown header field(s): area". get_project_extension_fields claims (comment) to
-   read "Extra header fields: `area`" but only matches `extension_fields = [...]`. A fenced ```toml [tasks]
-   extension_fields = ["area"]``` works. Parse the prose form (with or without bold), or drop the claim and document
-   the fence form in the managed block.
-2. **Spurious Decisions row.** After upgrade the decisions table gets `| T038 | P2 | Alfredo | Alfredo | - |` (decider
-   name in the "Question (exact)" column) for a blocked task with `decider: Alfredo` and no question. Expected: no
-   row, or the question text from the body.
-3. **`short` ignored in the category tables.** Rows that used the short label (e.g. T154 `- short: client/model
-   compatibility check`) become full titles; honour `short` (as elsewhere: `ID (short)` or a short column), or flag it
-   in the plan.
-4. Minor: the preview summarises only "+94/-67 lines"; give a per-section summary (rows added/removed/changed per
-   table, Next up changes). sync-index prints "[ok] updated" even when nothing changed.
-Delivery: `~/.local/bin/ai-orch` resolves an older installed plugin copy without --apply/--expect-plan-hash, so T054
-and T050 are not live for projects using the launcher until the plugins are released and reinstalled.
-Re-ping porting_liferay when fixed; they re-run on the copy.
+OK: l'anteprima non scrive nulla e l'hash del piano funziona; regole del progetto in tasks/AGENTS.md intatte, blocco gestito solo
+accodato; colonna Owner e formato Id mantenuti; nessuna riga da file accessori; nessuna riga persa; sync-index dopo upgrade è idempotente.
+NON OK:
+1. **`area` dichiarato in prosa non viene riconosciuto.** Il loro tasks/AGENTS.md dice ``**Extra header fields: `area`** (free-text
+   topic label)``; validate avvisa 100 volte "unknown header field(s): area". get_project_extension_fields dichiara (nel commento) di
+   leggere "Extra header fields: `area`" ma riconosce solo `extension_fields = [...]`. Un blocco delimitato ```toml [tasks]
+   extension_fields = ["area"]``` funziona. Analizzare la forma in prosa (con o senza grassetto), oppure rimuovere l'affermazione e documentare
+   la forma delimitata nel blocco gestito.
+2. **Riga Decisions spuria.** Dopo upgrade la tabella delle decisioni ottiene `| T038 | P2 | Alfredo | Alfredo | - |` (il nome del decider
+   nella colonna "Question (exact)") per un task bloccato con `decider: Alfredo` e nessuna domanda. Atteso: nessuna
+   riga, oppure il testo della domanda estratto dal corpo.
+3. **`short` ignorato nelle tabelle di categoria.** Le righe che usavano l'etichetta breve (es. T154 `- short: client/model
+   compatibility check`) diventano titoli completi; rispettare `short` (come altrove: `ID (short)` o una colonna short), oppure segnalarlo
+   nel piano.
+4. Minore: l'anteprima riassume solo "+94/-67 lines"; fornire un riepilogo per sezione (righe aggiunte/rimosse/modificate per
+   tabella, modifiche a Next up). sync-index stampa "[ok] updated" anche quando non è cambiato nulla.
+Consegna: `~/.local/bin/ai-orch` risolve una copia più vecchia del plugin installato priva di --apply/--expect-plan-hash, quindi T054
+e T050 non sono attivi per i progetti che usano il launcher finché i plugin non vengono rilasciati e reinstallati.
+Ricontattare porting_liferay una volta corretto; rieseguiranno il test sulla copia.
 
-### Fixed 2026-10-25 (kilo)
+### Corretto 2026-10-25 (kilo)
 
-1. **Prose declaration of extension fields:** `get_project_extension_fields` now parses prose/bullet declarations ``Extra header fields: `area` `` (with or without bold, one or several backticked field names separated by commas or `and`/`or`), alongside fenced `toml` blocks and `orchestration.toml`. Documented all accepted forms in `MANAGED_TASKS_AGENTS_BLOCK` and `SKILL.md`.
-2. **No spurious Decisions rows:** `_extract_task_decision_question` requires an explicit question (either `<who>: <question>` in `decider` where the question differs from the decider name, or an explicit `Question:` / `## Question(s)` in the body, or an open `Q###` question file) and never falls back to putting the decider's name in `Question (exact)`. Blocked/waiting tasks with `decider: Alfredo` and no question (such as `T038`) produce no Decisions row.
-3. **Short titles in category tables:** `_format_index_id_cell` honours explicit `short:` headers and hand-curated short labels in `[label](path)` cells by formatting the `Id` cell as `T### (short)` (e.g. `T154 (client/model compatibility check)`) consistently across `Next up`, `Tasks by category`, and `Done`, while keeping bare `T###` IDs for tasks without `short:` in bare-ID indices.
-4. **Per-section plan summary and no-change message:** `summarize_index_changes` reports rows added/removed/changed per section and per category table plus `Next up` membership changes in `upgrade` and `sync-index` previews; `sync-index --apply` prints `[ok] already in sync, nothing written` when no changes are needed.
+1. **Dichiarazione in prosa dei campi di estensione:** `get_project_extension_fields` ora analizza le dichiarazioni in prosa/elenchi puntati ``Extra header fields: `area` `` (con o senza grassetto, uno o più nomi di campo tra backtick separati da virgole o `and`/`or`), oltre ai blocchi delimitati `toml` e a `orchestration.toml`. Documentate tutte le forme accettate in `MANAGED_TASKS_AGENTS_BLOCK` e `SKILL.md`.
+2. **Nessuna riga Decisions spuria:** `_extract_task_decision_question` richiede una domanda esplicita (nella forma `<who>: <question>` in `decider` dove la domanda differisce dal nome del decider, oppure un `Question:` / `## Question(s)` esplicito nel corpo, o un file di domanda `Q###` aperto) e non ripiega mai sull'inserimento del nome del decider in `Question (exact)`. I task bloccati/in attesa con `decider: Alfredo` e senza domanda (come `T038`) non producono alcuna riga Decisions.
+3. **Titoli brevi nelle tabelle di categoria:** `_format_index_id_cell` rispetta gli header `short:` espliciti e le etichette brevi curate a mano nelle celle `[label](path)` formattando la cella `Id` come `T### (short)` (es. `T154 (client/model compatibility check)`) in modo uniforme tra `Next up`, `Tasks by category` e `Done`, mantenendo gli ID semplici `T###` per i task privi di `short:` negli indici a ID semplice.
+4. **Riepilogo del piano per sezione e messaggio di nessuna modifica:** `summarize_index_changes` riporta le righe aggiunte/rimosse/modificate per sezione e per tabella di categoria più le variazioni di appartenenza a `Next up` nelle anteprime di `upgrade` e `sync-index`; `sync-index --apply` stampa `[ok] already in sync, nothing written` quando non sono necessarie modifiche.
 
 ## Log (newest first)
 
 - 2026-10-25, porting_liferay: state `verified` -> `done`
 - 2026-10-25, porting_liferay: state `delivered` -> `verified`
-- 2026-10-25, kilo: state `bounced` -> `delivered` — KO3 fixed: Id-cell format kept per table; short goes into the Task link text in bare-id tables
-- 2026-10-25, porting-liferay-8c: state `delivered` -> `bounced` — Re-check NOT OK on KO3 only: short label placed in the Id cell instead of the Task link text (57 Id cells changed)
-- 2026-10-25, kilo: state `bounced` -> `delivered` — Fixed all 4 bounce items, added 5 regression tests, verified on scratch copy of porting_liferay/tasks
-- 2026-10-25, porting-liferay-8c: state `delivered` -> `bounced` — Requester validation NOT OK: prose extension_fields not parsed, spurious Decisions row, short titles dropped in category tables (details in the task)
+- 2026-10-25, kilo: state `bounced` -> `delivered` — KO3 corretto: formato della cella Id mantenuto per tabella; short va nel testo del link Task nelle tabelle a id semplice
+- 2026-10-25, porting-liferay-8c: state `delivered` -> `bounced` — Ricontrollo NON OK solo su KO3: etichetta short inserita nella cella Id invece che nel testo del link Task (57 celle Id modificate)
+- 2026-10-25, kilo: state `bounced` -> `delivered` — Corretti tutti i 4 punti del bounce, aggiunti 5 test di regressione, verificato su copia temporanea di porting_liferay/tasks
+- 2026-10-25, porting-liferay-8c: state `delivered` -> `bounced` — Validazione del richiedente NON OK: extension_fields in prosa non analizzato, riga Decisions spuria, titoli brevi persi nelle tabelle di categoria (dettagli nel task)
 
-## Re-check 2026-10-25 (porting-liferay-8c, architect-side 0.7.2): one point left
+## Ricontrollo 2026-10-25 (porting-liferay-8c, architect-side 0.7.2): resta un punto
 
-OK: preview writes nothing, per-section summary, AGENTS.md 0 lines removed, KO1 (0 area warnings), KO2 (no T038 Decisions
-row), "already in sync" message, no row lost.
-NOT OK, KO3: the short label went into the **Id** cell (`| T154 (client/model compatibility check) | … | [full title](…)`),
-changing 57 Id cells and breaking lookups like `grep '^| T154 |'`. The project's convention is a bare Id and the short
-label as the **Task link text** (`| T154 | P0 | [client/model compatibility check](social-sg4/T154-….md) |`). Fix: keep
-the Id cell exactly in the format the table already uses (bare `T###` here), and put `short`, when present, into the
-Task link text; never change an existing Id-cell format. (The previous spec suggested the Id-cell form; that was wrong
-for tables whose Id column is bare.)
+OK: l'anteprima non scrive nulla, riepilogo per sezione, 0 righe rimosse da AGENTS.md, KO1 (0 avvisi su area), KO2 (nessuna riga Decisions per T038),
+messaggio "already in sync", nessuna riga persa.
+NON OK, KO3: l'etichetta breve è finita nella cella **Id** (`| T154 (client/model compatibility check) | … | [full title](…)`),
+modificando 57 celle Id e rompendo ricerche come `grep '^| T154 |'`. La convenzione del progetto prevede un Id semplice e l'etichetta
+breve come **testo del link Task** (`| T154 | P0 | [client/model compatibility check](social-sg4/T154-….md) |`). Correzione: mantenere
+la cella Id esattamente nel formato già usato dalla tabella (`T###` semplice in questo caso), e inserire `short`, quando presente, nel
+testo del link Task; non modificare mai il formato esistente della cella Id. (La specifica precedente suggeriva la forma nella cella Id; era sbagliato
+per le tabelle la cui colonna Id è semplice.)
 
-### Fixed 2026-10-25 (kilo), KO3
+### Corretto 2026-10-25 (kilo), KO3
 
-- `_table_uses_bare_id_format` determines per-table `Id`-cell format from each table's existing rows (falling back to index-level `_index_uses_bare_id_format` for empty or newly created tables, and to `T### (short)` when the index has no `T###` rows).
-- When a table uses bare `T###` IDs (`prefer_bare=True`), `_format_index_id_cell` always emits bare `T###` (even when `short:` is present), and `_format_index_task_cell` puts `short` (or an existing hand-curated short label passing `_extract_hand_curated_short_label`) into the `Task` link text `[short](rel_path)` while keeping the full title otherwise.
-- When a table uses `T### (short)` IDs (`prefer_bare=False`), `_format_index_id_cell` keeps `T### (short)` in the `Id` cell and `_format_index_task_cell` keeps `[title](rel_path)` as the `Task` link text.
+- `_table_uses_bare_id_format` determina per ciascuna tabella il formato della cella `Id` a partire dalle righe esistenti della tabella (ripiegando su `_index_uses_bare_id_format` a livello di indice per le tabelle vuote o appena create, e su `T### (short)` quando l'indice non ha righe `T###`).
+- Quando una tabella usa ID semplici `T###` (`prefer_bare=True`), `_format_index_id_cell` emette sempre `T###` semplice (anche quando `short:` è presente), e `_format_index_task_cell` inserisce `short` (o un'etichetta breve esistente curata a mano che supera `_extract_hand_curated_short_label`) nel testo del link `Task` `[short](rel_path)`, mantenendo altrimenti il titolo completo.
+- Quando una tabella usa ID `T### (short)` (`prefer_bare=False`), `_format_index_id_cell` mantiene `T### (short)` nella cella `Id` e `_format_index_task_cell` mantiene `[title](rel_path)` come testo del link `Task`.

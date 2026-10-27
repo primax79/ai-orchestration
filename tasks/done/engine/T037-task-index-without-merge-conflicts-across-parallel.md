@@ -1,10 +1,10 @@
-# T037 Task index without merge conflicts across parallel branches
+# T037 Indice dei task senza conflitti di merge tra branch paralleli
 
 - id: T037
-- title: Task index without merge conflicts across parallel branches
+- title: Indice dei task senza conflitti di merge tra branch paralleli
 - category: engine
 - priority: P1
-- priority-reason: Top change of gcube-audit: every parallel merge conflicts in 00-INDEX.md, with duplicate rows and once a lost answer
+- priority-reason: Modifica prioritaria per gcube-audit: ogni merge parallelo va in conflitto su 00-INDEX.md, con righe duplicate e in un caso una risposta persa
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,48 +12,48 @@
 - decider: -
 - sources: feedback round 2026-10-21: inbox N002
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py, plugins/architect-side/skills/task-pipeline/SKILL.md
-- handoff: Read tasks/tasks/T037-task-index-without-merge-conflicts-across-parallel.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggi tasks/tasks/T037-task-index-without-merge-conflicts-across-parallel.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
 - verify-by: gcube_audit
-- short: Conflict-free task index
+- short: Indice senza conflitti
 
 ## Goal
 
-Merging two branches that each added tasks never needs a hand-resolved 00-INDEX.md: e.g. a git merge driver registered by 'tasks upgrade' (.gitattributes + local git config) that regenerates the generated regions with sync-index after the merge, or index regions rebuilt on demand. Design first (short spec section, options compared), then implement; question files are never touched by index regeneration. Also (inbox N037): a delegated task is registered in the shared tree (row visible, state in progress) before the run starts, not only at merge. sync-index rebuilds generated tables from headers, so duplicate rows left by a merge disappear (inbox N040, gcube_audit; seen with a vendored copy, check current behaviour first).
+Il merge di due branch che hanno ciascuno aggiunto dei task non richiede mai di risolvere a mano 00-INDEX.md: ad es. un merge driver di git registrato da 'tasks upgrade' (.gitattributes + git config locale) che rigenera le sezioni generate con sync-index dopo il merge, oppure sezioni dell'indice ricostruite su richiesta. Prima progettare (breve sezione di specifica con confronto tra le opzioni), poi implementare; i file delle domande non vengono mai toccati dalla rigenerazione dell'indice. Inoltre (inbox N037): un task delegato viene registrato nell'albero condiviso (riga visibile, stato in progress) prima dell'avvio dell'esecuzione, non solo al momento del merge. sync-index ricostruisce le tabelle generate a partire dagli header, così le righe duplicate lasciate da un merge scompaiono (inbox N040, gcube_audit; osservato con una copia vendored, verificare prima il comportamento attuale).
 
 ## Steps
 
-- [x] Register `merge.ai-orch-index.driver` and `merge.ai-orch-index.name` in local git config during `upgrade` (shown in plan preview and applied with `--apply --expect-plan-hash`), warn in `validate` when `.gitattributes` names `merge=ai-orch-index` without the git config driver, and document the setup in `task-pipeline/SKILL.md`.
-- [x] Implement 3-way row-level table merge + non-generated 3-way text merge in `merge_index_three_way` / `cmd_merge_index` (`%O %A %B`).
-- [x] Print the dry-run footer `"preview only, nothing written; re-run with --apply"` in `sync-index` without `--apply`.
+- [x] Registrare `merge.ai-orch-index.driver` e `merge.ai-orch-index.name` nella configurazione git locale durante `upgrade` (mostrato nell'anteprima del piano e applicato con `--apply --expect-plan-hash`), emettere un avviso in `validate` quando `.gitattributes` indica `merge=ai-orch-index` senza il driver nella configurazione git, e documentare la configurazione in `task-pipeline/SKILL.md`.
+- [x] Implementare il merge a 3 vie a livello di riga per le tabelle + il merge testuale a 3 vie per le parti non generate in `merge_index_three_way` / `cmd_merge_index` (`%O %A %B`).
+- [x] Stampare il piè di pagina di dry-run `"preview only, nothing written; re-run with --apply"` in `sync-index` senza `--apply`.
 
 ## Verification
 
-- [x] Unit and integration tests in `test_tasks_engine.py` pass (`209 passed`).
-- [x] Live check in a scratch git repo under the OS temp dir with two branches adding tasks and running `sync-index --apply` merges cleanly with zero conflicts, both rows present, and zero duplicates.
+- [x] I test unitari e di integrazione in `test_tasks_engine.py` passano (`209 passed`).
+- [x] La verifica dal vivo in un repo git temporaneo nella directory temporanea di sistema con due branch che aggiungono task ed eseguono `sync-index --apply` esegue il merge in modo pulito con zero conflitti, entrambe le righe presenti e zero duplicati.
 
 ## Log (newest first)
 
-- 2026-10-25, owner: state `verified` -> `done` — Reopened points verified in test_tasks_engine.py + scratch repo live check; closure approved by owner
-- 2026-10-25, owner: state `delivered` -> `verified` — Reopened points verified in test_tasks_engine.py + scratch repo live check; closure approved by owner
-- 2026-10-25, kilo: state `open` -> `delivered` — Fixed reopen findings: `upgrade` registers `merge.ai-orch-index.driver` and `merge.ai-orch-index.name` in local git config (and shows it in the plan), `validate` warns when `.gitattributes` has `merge=ai-orch-index` without the git config driver, `merge-index %O %A %B` performs a 3-way row-level union merge of generated tables and 3-way text merge outside generated regions, and `sync-index` without `--apply` prints the dry-run footer (209 passed)
+- 2026-10-25, owner: state `verified` -> `done` — Punti riaperti verificati in test_tasks_engine.py + controllo dal vivo su repo temporaneo; chiusura approvata dall'owner
+- 2026-10-25, owner: state `delivered` -> `verified` — Punti riaperti verificati in test_tasks_engine.py + controllo dal vivo su repo temporaneo; chiusura approvata dall'owner
+- 2026-10-25, kilo: state `open` -> `delivered` — Risolti i rilievi della riapertura: `upgrade` registra `merge.ai-orch-index.driver` e `merge.ai-orch-index.name` nella configurazione git locale (e lo mostra nel piano), `validate` avvisa quando `.gitattributes` contiene `merge=ai-orch-index` senza il driver nella configurazione git, `merge-index %O %A %B` esegue un merge di unione a 3 vie a livello di riga delle tabelle generate e un merge testuale a 3 vie fuori dalle regioni generate, e `sync-index` senza `--apply` stampa il piè di pagina di dry-run (209 passati)
 
-- 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged d70d453; conflict-free 00-INDEX.md, merge-index driver, and tasks/.gitattributes on upgrade verified (169 passed)
-- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T037 (Conflict-free index across parallel worktrees) to Kilo
+- 2026-10-23, owner: state `verified` -> `done` — Validato dalle suite di test automatizzati e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzati e approvato dall'owner per la pulizia
+- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Eseguito merge di d70d453; verificati 00-INDEX.md senza conflitti, il driver merge-index e tasks/.gitattributes durante upgrade (169 passati)
+- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Assegnazione di T037 (Indice senza conflitti tra worktree paralleli) a Kilo
 
-## Reopened 2026-10-25 (requester validation, gcube-audit)
+## Riapertura 2026-10-25 (validazione del richiedente, gcube-audit)
 
-Setup: two branches each add one valid task + `sync-index --apply`; tasks/.gitattributes has `00-INDEX.md merge=ai-orch-index`.
-NOT OK:
-1. Nothing sets the git config `merge.ai-orch-index.driver` and no doc mentions it, so the merge still CONFLICTs.
-   `upgrade` writes only .gitattributes. Register the driver (upgrade, with preview; or document a one-line setup)
-   and make `validate` warn when .gitattributes names the driver but git config lacks it.
-2. With the driver configured by hand (`ai-orch tasks merge-index %O %A %B`) the merge has no conflict but drops
-   theirs' row (only ours' row kept); a later `sync-index --apply` restores it. The driver must regenerate from the
-   merged headers, not keep one side.
-OK: duplicate rows are collapsed by `sync-index --apply`.
-Minor: `sync-index` without `--apply` prints the whole index as a dry run; easy to mistake for "done". Print a one-line
-"preview only, nothing written; re-run with --apply" footer.
-Verify again with the requester before closing.
+Configurazione: due branch aggiungono ciascuno un task valido + `sync-index --apply`; tasks/.gitattributes contiene `00-INDEX.md merge=ai-orch-index`.
+NON OK:
+1. Nulla imposta la configurazione git `merge.ai-orch-index.driver` e nessun documento la menziona, quindi il merge va comunque in CONFLITTO.
+   `upgrade` scrive solo .gitattributes. Registrare il driver (in upgrade, con anteprima; oppure documentare una configurazione di una riga)
+   e fare in modo che `validate` avvisi quando .gitattributes indica il driver ma questo manca nella configurazione git.
+2. Configurando il driver a mano (`ai-orch tasks merge-index %O %A %B`), il merge non presenta conflitti ma scarta
+   la riga di theirs (viene mantenuta solo la riga di ours); un successivo `sync-index --apply` la ripristina. Il driver deve rigenerare a partire dagli
+   header uniti, non mantenere un solo lato.
+OK: le righe duplicate vengono collassate da `sync-index --apply`.
+Minore: `sync-index` senza `--apply` stampa l'intero indice come dry run; è facile scambiarlo per "fatto". Stampare un piè di pagina di una riga
+"preview only, nothing written; re-run with --apply".
+Verificare di nuovo con il richiedente prima di chiudere.

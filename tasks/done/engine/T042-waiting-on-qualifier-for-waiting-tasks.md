@@ -1,10 +1,10 @@
-# T042 Waiting-on qualifier for waiting tasks
+# T042 Qualificatore waiting-on per i task in attesa
 
 - id: T042
-- title: Waiting-on qualifier for waiting tasks
+- title: Qualificatore waiting-on per i task in attesa
 - category: engine
 - priority: P2
-- priority-reason: Coordinators cannot tell waiting-on-owner from waiting-on-third-party in the index
+- priority-reason: I coordinatori non riescono a distinguere nell'indice i task in attesa dell'owner da quelli in attesa di terze parti
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,21 +12,21 @@
 - decider: -
 - sources: inbox N036 (gcube_audit, N035 consultation)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
-- handoff: Read tasks/engine/T042-waiting-on-qualifier-for-waiting-tasks.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggi tasks/engine/T042-waiting-on-qualifier-for-waiting-tasks.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
-- short: Waiting-on qualifier
+- short: Qualificatore waiting-on
 
 ## Goal
 
-A task in 'waiting' can carry a 'waiting-on' header (owner, team, external, or a free short text), set by the transition or a set command, shown in the index and the UIs and filterable; it is not a new state.
+Un task nello stato 'waiting' può avere un header 'waiting-on' (owner, team, external, o un breve testo libero), impostato dalla transizione o da un comando set, mostrato nell'indice e nelle UI e filtrabile; non è un nuovo stato.
 
 ## Steps
-- [x] Implemented per task specification and goal.
+- [x] Implementato secondo la specifica e l'obiettivo del task.
 ## Verification
-- [x] Verified by automated test suite and validation checks.
+- [x] Verificato tramite la suite di test automatizzati e i controlli di validazione.
 ## Log (newest first)
 
-- 2026-10-23, owner: state `verified` -> `done` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-23, owner: state `delivered` -> `verified` — Validated by automated test suites and approved by owner for cleanup
-- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Merged 512a93c; waiting-on qualifier across CLI, 00-INDEX.md, and validation verified (173 passed)
-- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Dispatching T042 (Waiting-on qualifier for waiting tasks) to Kilo
+- 2026-10-23, owner: state `verified` -> `done` — Validato dalle suite di test automatizzati e approvato dall'owner per la pulizia
+- 2026-10-23, owner: state `delivered` -> `verified` — Validato dalle suite di test automatizzati e approvato dall'owner per la pulizia
+- 2026-10-21, ai-coding-tools: state `in progress` -> `delivered` — Eseguito merge di 512a93c; verificato il qualificatore waiting-on tra CLI, 00-INDEX.md e validazione (173 passati)
+- 2026-10-21, ai-coding-tools: state `open` -> `in progress` — Assegnazione di T042 (Qualificatore waiting-on per i task in attesa) a Kilo

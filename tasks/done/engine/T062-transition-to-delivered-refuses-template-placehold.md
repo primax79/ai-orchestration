@@ -1,10 +1,10 @@
-# T062 transition to delivered refuses template placeholder sections
+# T062 La transizione a delivered rifiuta le sezioni con segnaposto del template
 
 - id: T062
-- title: transition to delivered refuses template placeholder sections
+- title: La transizione a delivered rifiuta le sezioni con segnaposto del template
 - category: engine
 - priority: P2
-- priority-reason: Tasks reach delivered with empty Steps/Verification; only validate catches it later
+- priority-reason: I task raggiungono lo stato delivered con Steps/Verification vuoti; solo validate lo intercetta in seguito
 - next-up: no
 - state: done
 - executor: kilo
@@ -12,18 +12,18 @@
 - decider: -
 - sources: _inbox/analyzed/20261025-145247-transition-to-delivered-accepts-template/note.md
 - paths: -
-- handoff: Read tasks/engine/T062-transition-to-delivered-refuses-template-placehold.md, do the open steps, run the Verification, update the task and the registry.
+- handoff: Leggi tasks/engine/T062-transition-to-delivered-refuses-template-placehold.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
 - verify-by: ai-coding-tools
-- short: No delivery with placeholders
+- short: No consegna con segnaposto
 
 ## Goal
 
-On 2026-10-25 T032-T034 (ai-coding-tools workspace) moved to delivered with '- [ ] Step 1' and '- Command or check that proves completion' still in place; only a later 'tasks validate' flagged it (found by ai-coding-tools-2c). Expected: 'transition <id> delivered' (and the done walk) refuses while either section is still the template placeholder, naming the section, like validate does.
+Il 2026-10-25 i task T032-T034 (workspace ai-coding-tools) sono passati a delivered con '- [ ] Step 1' e '- Command or check that proves completion' ancora presenti; solo un successivo 'tasks validate' lo ha segnalato (rilevato da ai-coding-tools-2c). Comportamento atteso: 'transition <id> delivered' (e l'avanzamento automatico fino a done) rifiuta l'operazione finché una delle due sezioni contiene ancora il segnaposto del template, indicando la sezione, proprio come fa validate.
 
 ## Steps
 
-- [x] Refuse `transition <id> delivered` when `## Steps` or `## Verification` still contains template placeholder lines.
+- [x] Rifiutare `transition <id> delivered` quando `## Steps` o `## Verification` contiene ancora righe segnaposto del template.
 
 ## Verification
 
@@ -31,7 +31,7 @@ On 2026-10-25 T032-T034 (ai-coding-tools workspace) moved to delivered with '- [
 
 ## Log (newest first)
 
-- 2026-10-25, owner: state `verified` -> `done` — Implemented and verified with automated pytest regression tests
-- 2026-10-25, owner: state `delivered` -> `verified` — Implemented and verified with automated pytest regression tests
+- 2026-10-25, owner: state `verified` -> `done` — Implementato e verificato con test di regressione pytest automatizzati
+- 2026-10-25, owner: state `delivered` -> `verified` — Implementato e verificato con test di regressione pytest automatizzati
 - 2026-10-25, kilo: state `in progress` -> `delivered`
 - 2026-10-25, kilo: state `open` -> `in progress`
