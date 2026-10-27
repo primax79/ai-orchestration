@@ -12488,10 +12488,10 @@ def test_t035_log_records_every_intermediate_step_for_single_and_folder_tasks(tm
     done_progress = tasks_dir / "done" / "features" / "T002-folder-log" / "PROGRESS.md"
     assert done_progress.is_file()
     prog_text = done_progress.read_text(encoding="utf-8")
-    assert "state `open` -> `in progress` — walked from open" in prog_text
-    assert "state `in progress` -> `delivered` — walked from open" in prog_text
-    assert "state `delivered` -> `verified` — walked from open" in prog_text
-    assert "state `verified` -> `done` — walked from open" in prog_text
+    assert "kilo: state `open` -> `in progress`" in prog_text
+    assert "kilo: state `in progress` -> `delivered`" in prog_text
+    assert "reviewer: state `delivered` -> `verified` — walked from open" in prog_text
+    assert "reviewer: state `verified` -> `done` — walked from open" in prog_text
 
 
 # ===========================================================================
@@ -13355,7 +13355,7 @@ def test_t057_t061_t062_t063_t052_and_n064(tmp_path: pathlib.Path) -> None:
     res_mv_force = run_cli("questions", "move", qid, "--to", "https://example.org/1", "--force", "--tasks-dir", str(tasks_dir), "--json")
     assert res_mv_force.returncode == 0
 
-    # N064: Italian use-case creation with --lang it and --criteria, plus clean Italian short-title derivation
+    # N064 / T066: Italian use-case creation with --lang it and --criteria, plus clean Italian short-title derivation
     res_uc = run_cli(
         "use-cases", "create",
         "--title", "Tenere una cartella del progetto sincronizzata",
@@ -13370,6 +13370,269 @@ def test_t057_t061_t062_t063_t052_and_n064(tmp_path: pathlib.Path) -> None:
     assert uc_show["short_title"] == "Tenere cartella progetto sincronizzata"
     assert "La cartella viene indicizzata" in uc_show["acceptance_criteria"]
     assert "I file eliminati spariscono" in uc_show["acceptance_criteria"]
-    assert "## Descrizione" in uc_show["content"]
-    assert "## Criteri di accettazione" in uc_show["content"]
+    assert "## Description & Business Value" in uc_show["content"]
+    assert "## Acceptance Criteria" in uc_show["content"]
+    assert "Descrivere il valore per l'utente e il contesto." in uc_show["content"]
+
+
+def test_t066_project_languages_and_english_headings_keywords(tmp_path: pathlib.Path) -> None:
+    """T066:
+    - languages declared it/it: tasks new and questions ask emit English headings; AGENTS.md managed block states the languages and the keyword rule; validate clean.
+    - nothing declared: output of tasks new / questions ask byte-identical to current main.
+    - use-cases create --lang it: English headings, Italian placeholder prose; an existing file with Italian headings still parses (show/record-validation) and validate warns to normalize.
+    - old T065 key: still read, deprecation warning.
+    - tasks config / show-config reports effective languages and their source.
+    """
+    # 1. Nothing declared: default en, output of tasks new / questions ask byte-identical
+    tasks_default = tmp_path / "default_proj" / "tasks"
+    tasks_default.mkdir(parents=True)
+    cfg_def = json.loads(run_cli("config", "--tasks-dir", str(tasks_default), "--json").stdout)
+    assert cfg_def["ok"] is True
+    assert cfg_def["languages"] == {"tasks": "en", "questions": "en", "use_cases": "en"}
+    assert cfg_def["declared"] is False
+    assert cfg_def["language_sources"] == {"tasks": "default", "questions": "default", "use_cases": "default (from tasks)"}
+
+    res_tn_def = run_cli(
+        "new",
+        "--category", "engine",
+        "--title", "Default task",
+        "--priority", "P2",
+        "--priority-reason", "Testing default output",
+        "--goal", "Verify byte-identical output.",
+        "--step", "Do step one",
+        "--verification", "pytest -q",
+        "--tasks-dir", str(tasks_default),
+        "--json",
+    )
+    assert res_tn_def.returncode == 0, res_tn_def.stdout + res_tn_def.stderr
+    t_def_path = pathlib.Path(json.loads(res_tn_def.stdout)["file_path"])
+    t_def_bytes = t_def_path.read_bytes()
+    expected_task_text = (
+        "# T001 Default task\n\n"
+        "- id: T001\n"
+        "- title: Default task\n"
+        "- category: engine\n"
+        "- priority: P2\n"
+        "- priority-reason: Testing default output\n"
+        "- next-up: no\n"
+        "- state: open\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: Read tasks/engine/T001-default-task.md, do the open steps, run the Verification, update the task and the registry.\n"
+        "- short: Default task\n\n"
+        "## Goal\n\n"
+        "Verify byte-identical output.\n\n"
+        "## Steps\n\n"
+        "- [ ] Do step one\n\n"
+        "## Verification\n\n"
+        "- pytest -q\n"
+    )
+    assert t_def_bytes == expected_task_text.encode("utf-8")
+
+    res_qa_def = run_cli(
+        "questions", "ask",
+        "--question", "Should we keep English headings?",
+        "--context", "Checking byte-identical question output.",
+        "--option", "A=Yes: keep fixed English headings",
+        "--option", "B=No: translate headings",
+        "--recommended", "A",
+        "--tasks-dir", str(tasks_default),
+        "--json",
+    )
+    assert res_qa_def.returncode == 0, res_qa_def.stdout + res_qa_def.stderr
+    q_def_path = pathlib.Path(json.loads(res_qa_def.stdout)["file_path"])
+    q_def_text = q_def_path.read_text(encoding="utf-8")
+    assert "\n## Context\n\nChecking byte-identical question output.\n\n## Options\n\n- **A** — Yes: keep fixed English headings\n- **B** — No: translate headings\n\n## Answer\n\n- choice: -\n- answered-by: -\n- answered: -\n" in q_def_text
+
+    # Managed block without language declaration still states fixed English keywords rule
+    upg_def = te.render_upgraded_agents_md("", tasks_dir=tasks_default)
+    assert "Section headings" in upg_def and "fixed English keywords: never translate them." in upg_def
+    assert "Effective project content languages:" not in upg_def
+
+    # 2. Languages declared it/it in tasks/AGENTS.md fenced toml
+    tasks_it = tmp_path / "it_proj" / "tasks"
+    tasks_it.mkdir(parents=True)
+    agents_it = tasks_it / "AGENTS.md"
+    agents_it.write_text(
+        "# Project tasks rules\n\n"
+        "```toml\n"
+        "[tasks]\n"
+        'language = "it"\n\n'
+        "[questions]\n"
+        'language = "it"\n'
+        "```\n",
+        encoding="utf-8",
+    )
+
+    cfg_it = json.loads(run_cli("show-config", "--tasks-dir", str(tasks_it), "--json").stdout)
+    assert cfg_it["ok"] is True
+    assert cfg_it["declared"] is True
+    assert cfg_it["languages"] == {"tasks": "it", "questions": "it", "use_cases": "it"}
+    assert cfg_it["language_sources"]["tasks"] == "tasks/AGENTS.md [tasks].language"
+    assert cfg_it["language_sources"]["questions"] == "tasks/AGENTS.md [questions].language"
+    assert "tasks/AGENTS.md [tasks].language" in cfg_it["language_sources"]["use_cases"]
+
+    # Upgrade writes managed block stating the languages and the keyword rule
+    upgraded_it = te.render_upgraded_agents_md(agents_it.read_text(encoding="utf-8"), tasks_dir=tasks_it)
+    agents_it.write_text(upgraded_it, encoding="utf-8")
+    assert "Content language: tasks `it`, questions `it`, use cases `it`. Section headings and header field names are fixed English keywords: never translate them." in upgraded_it
+
+    # tasks new and questions ask emit English headings even when languages are it/it
+    res_tn_it = run_cli(
+        "new",
+        "--category", "engine",
+        "--title", "Compito in italiano",
+        "--priority", "P2",
+        "--priority-reason", "Richiesta del proprietario",
+        "--goal", "Verificare che le intestazioni restino in inglese.",
+        "--step", "Primo passo",
+        "--verification", "pytest -q",
+        "--tasks-dir", str(tasks_it),
+        "--json",
+    )
+    assert res_tn_it.returncode == 0, res_tn_it.stdout + res_tn_it.stderr
+    t_it_text = pathlib.Path(json.loads(res_tn_it.stdout)["file_path"]).read_text(encoding="utf-8")
+    assert "## Goal\n" in t_it_text
+    assert "## Steps\n" in t_it_text
+    assert "## Verification\n" in t_it_text
+
+    res_qa_it = run_cli(
+        "questions", "ask",
+        "--question", "Quale opzione scegliamo?",
+        "--context", "Contesto della domanda in italiano.",
+        "--option", "A=Prima opzione: conseguenza A",
+        "--option", "B=Seconda opzione: conseguenza B",
+        "--recommended", "A",
+        "--tasks-dir", str(tasks_it),
+        "--json",
+    )
+    assert res_qa_it.returncode == 0, res_qa_it.stdout + res_qa_it.stderr
+    q_it_text = pathlib.Path(json.loads(res_qa_it.stdout)["file_path"]).read_text(encoding="utf-8")
+    assert "## Context\n" in q_it_text
+    assert "## Options\n" in q_it_text
+    assert "## Answer\n" in q_it_text
+
+    val_it = json.loads(run_cli("validate", "--tasks-dir", str(tasks_it), "--json").stdout)
+    assert val_it["ok"] is True
+    assert val_it["errors"] == []
+    assert val_it["warnings"] == []
+
+    # 3. use-cases create --lang it: English headings, Italian placeholder prose;
+    # existing file with Italian headings still parses (show/record-validation) and validate warns to normalize
+    res_uc_it = run_cli(
+        "use-cases", "create",
+        "--title", " Ricerca semantica nei documenti ",
+        "--lang", "it",
+        "--tasks-dir", str(tasks_it),
+        "--json",
+    )
+    assert res_uc_it.returncode == 0, res_uc_it.stdout + res_uc_it.stderr
+    uc1_path = pathlib.Path(json.loads(res_uc_it.stdout)["file_path"])
+    uc1_text = uc1_path.read_text(encoding="utf-8")
+    assert "## Description & Business Value\nDescrivere il valore per l'utente e il contesto." in uc1_text
+    assert "## Preconditions\n- Sistema avviato e inizializzato." in uc1_text
+    assert "## Scenario / Interaction Steps\n1. L'utente avvia l'azione.\n2. Il sistema risponde." in uc1_text
+    assert "## Automated Verification Command\n" in uc1_text
+    assert "## Acceptance Criteria\n- [ ] Il flusso principale funziona come previsto." in uc1_text
+    assert "## AI Validation Log\n" in uc1_text
+
+    # Write an existing use case with Italian headings (legacy T065 file)
+    uc2_path = tasks_it / "use-cases" / "UC002-caso-legacy.md"
+    uc2_path.write_text(
+        "# UC002 - Caso legacy con intestazioni italiane\n\n"
+        "- id: UC002\n"
+        "- title: Caso legacy con intestazioni italiane\n"
+        "- actor: Utente\n"
+        "- status: active\n"
+        "- priority: P1\n"
+        "- linked-tasks: -\n"
+        "- verification-type: e2e\n"
+        "- last-tested: -\n"
+        "- last-verdict: -\n"
+        "- short: Caso legacy italiano\n\n"
+        "## Descrizione\n"
+        "Valore del caso d'uso.\n\n"
+        "## Precondizioni\n"
+        "- Utente autenticato.\n\n"
+        "## Scenario\n"
+        "1. L'utente apre la pagina.\n\n"
+        "## Comando di verifica\n"
+        "```bash\n"
+        "echo ok\n"
+        "```\n\n"
+        "## Criteri di accettazione\n"
+        "- [ ] Funziona.\n\n"
+        "## Registro delle verifiche\n",
+        encoding="utf-8",
+    )
+    uc2_show = json.loads(run_cli("use-cases", "show", "UC002", "--tasks-dir", str(tasks_it), "--json").stdout)["use_case"]
+    assert uc2_show["description"] == "Valore del caso d'uso."
+    assert uc2_show["preconditions"] == "- Utente autenticato."
+    assert uc2_show["scenario"] == "1. L'utente apre la pagina."
+    assert uc2_show["verification_command"] == "echo ok"
+    assert uc2_show["acceptance_criteria"] == "- [ ] Funziona."
+
+    res_rec = run_cli(
+        "use-cases", "record-validation", "UC002",
+        "--verdict", "pass",
+        "--summary", "Verificato con successo",
+        "--tasks-dir", str(tasks_it),
+        "--json",
+    )
+    assert res_rec.returncode == 0, res_rec.stdout + res_rec.stderr
+    uc2_after = json.loads(run_cli("use-cases", "show", "UC002", "--tasks-dir", str(tasks_it), "--json").stdout)["use_case"]
+    assert uc2_after["status"] == "verified"
+    assert "Verificato con successo" in uc2_after["validation_log"]
+
+    val_uc_warn = json.loads(run_cli("validate", "--tasks-dir", str(tasks_it), "--json").stdout)
+    assert val_uc_warn["ok"] is True
+    assert any("non-standard heading 'Descrizione' (use 'Description & Business Value')" in w for w in val_uc_warn["warnings"])
+    assert any("non-standard heading 'Precondizioni' (use 'Preconditions')" in w for w in val_uc_warn["warnings"])
+    assert any("non-standard heading 'Comando di verifica' (use 'Automated Verification Command')" in w for w in val_uc_warn["warnings"])
+    assert any("non-standard heading 'Criteri di accettazione' (use 'Acceptance Criteria')" in w for w in val_uc_warn["warnings"])
+    assert any("non-standard heading 'Registro delle verifiche' (use 'AI Validation Log')" in w for w in val_uc_warn["warnings"])
+
+    # 4. Old T065 key in .ai-orchestration.local.toml: still read, deprecation warning in validate
+    legacy_proj = tmp_path / "legacy_proj"
+    tasks_leg = legacy_proj / "tasks"
+    tasks_leg.mkdir(parents=True)
+    (legacy_proj / ".ai-orchestration.local.toml").write_text(
+        'use_case_language = "it"\n',
+        encoding="utf-8",
+    )
+    cfg_leg = json.loads(run_cli("config", "--tasks-dir", str(tasks_leg), "--json").stdout)
+    assert cfg_leg["languages"]["use_cases"] == "it"
+    assert any("deprecated language key 'use_case_language'" in w for w in cfg_leg["warnings"])
+
+    res_uc_leg = run_cli(
+        "use-cases", "create",
+        "--title", "Caso con chiave legacy",
+        "--tasks-dir", str(tasks_leg),
+        "--json",
+    )
+    assert res_uc_leg.returncode == 0
+    uc_leg_text = pathlib.Path(json.loads(res_uc_leg.stdout)["file_path"]).read_text(encoding="utf-8")
+    assert "## Description & Business Value\nDescrivere il valore per l'utente e il contesto." in uc_leg_text
+
+    val_leg = json.loads(run_cli("validate", "--tasks-dir", str(tasks_leg), "--json").stdout)
+    assert val_leg["ok"] is True
+    assert any("deprecated language key 'use_case_language'" in w for w in val_leg["warnings"])
+
+    # 5. Malformed language code warns and falls back to en
+    bad_proj = tmp_path / "bad_proj" / "tasks"
+    bad_proj.mkdir(parents=True)
+    (bad_proj / "AGENTS.md").write_text(
+        "# Rules\n\n```toml\n[tasks]\nlanguage = \"\"\n[questions]\nlanguage = \"123_bad!\"\n```\n",
+        encoding="utf-8",
+    )
+    val_bad = json.loads(run_cli("validate", "--tasks-dir", str(bad_proj), "--json").stdout)
+    assert val_bad["ok"] is True
+    assert any("empty or non-string language value" in w for w in val_bad["warnings"])
+    assert any("malformed language code" in w for w in val_bad["warnings"])
+    cfg_bad = json.loads(run_cli("config", "--tasks-dir", str(bad_proj), "--json").stdout)
+    assert cfg_bad["languages"] == {"tasks": "en", "questions": "en", "use_cases": "en"}
+
 

@@ -273,6 +273,23 @@ path. A "next steps" paragraph in the chat is not a substitute.
   check, and by whom>` goes right after the header (when `verify-by` is set:
   `verification pending: <what-to-check or 'run Verification checks'> (verify-by: <target>)`).
 
+  **Per-project content languages & fixed English keywords:**
+  Section headings (`## Goal`, `## Steps`, `## Verification`, `## Log`; question `## Context`, `## Options`, `## Answer`, `## Notes`; use-case `## Description & Business Value`, `## Preconditions`, `## Scenario / Interaction Steps`, `## Automated Verification Command`, `## Acceptance Criteria`, `## AI Validation Log`) and header field names are a formal **English vocabulary** of the format and are never translated.
+  A project declares the language for the **prose content** written by sessions in a fenced `toml` block in `tasks/AGENTS.md` (versioned with `tasks/`):
+  ```toml
+  [tasks]
+  language = "it"
+
+  [questions]
+  language = "en"
+
+  [use_cases]
+  language = "it"
+  ```
+  - `[use_cases] language` defaults to `[tasks] language` when omitted; overall default is `"en"`.
+  - `tasks upgrade` writes the effective content languages and the fixed-English-keywords rule into the managed block of `tasks/AGENTS.md`.
+  - `ai-orch tasks config` (or `show-config`) reports the effective languages and their sources.
+
 ### States
 
 `open`, `in progress`, `waiting` (on a blocking question `decider: Q###` or external party),
@@ -660,6 +677,7 @@ When a session has no broker MCP tools, use the version-free launcher (`~/.local
 ```bash
 # List, show, or validate tasks
 ai-orch tasks list [--tasks-dir tasks] [--json]
+ai-orch tasks config [--tasks-dir tasks] [--json]
 ai-orch tasks validate [--tasks-dir tasks] [--json]
 ai-orch tasks sync-index [--tasks-dir tasks] [--apply | --check] [--json]
 ai-orch tasks merge-index [<base> <ours> <theirs>] [--tasks-dir tasks] [--json]

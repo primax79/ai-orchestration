@@ -6,7 +6,7 @@
 - priority: P2
 - priority-reason: Owner request 2026-10-27; projects write tasks in one language and ask the owner in another (dave_agent: Italian tasks)
 - next-up: no
-- state: in progress
+- state: delivered
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -30,11 +30,16 @@ A project declares, in its versioned tasks tree, the language of its tasks and, 
 
 ## Steps
 
-- [ ] One resolver for project languages (tasks, questions, use cases) from tasks/AGENTS.md fenced toml; compatibility with orchestration.toml/.ai-orchestration.local.toml keys used by T065
-- [ ] Managed AGENTS.md block states the languages; upgrade/sync writes them
-- [ ] Localized templates for questions ask and tasks new (it/en), headings aliases accepted by validate and parsers
-- [ ] Tests: tasks en + questions it in one project; default en; old key still read with warning
+- [x] One resolver `resolve_project_languages` for project languages (`[tasks] language`, `[questions] language`, `[use_cases] language`, defaulting use cases to tasks language and overall default `en`) from `tasks/AGENTS.md` fenced `toml` block; BCP-47 validation with warning on empty/malformed values; compatibility with legacy T065 keys (`use_case_language`/`language` in `orchestration.toml` / `.ai-orchestration.local.toml`) with deprecation warning in `validate`; `tasks config` / `show-config` subcommands and `tasks show --json` language reporting.
+- [x] Managed `AGENTS.md` block (`CANONICAL_TASKS_AGENTS_MD` / `build_managed_tasks_agents_block` / `render_upgraded_agents_md`) always states that section headings and header field names are fixed English keywords, and when languages are declared appends the effective content languages line (`Content language: tasks ..., questions ..., use cases ...`); documented in `task-pipeline/SKILL.md`.
+- [x] Templates (`tasks new`, `questions ask`, `use-cases create`) always emit fixed English headings; `use-cases create --lang it` (and project `it` use-case language) keeps localized Italian default prose while emitting English headings; existing use-case files with Italian headings remain readable and `validate` warns `non-standard heading '<it>' (use '<en>')`.
+- [x] Added unit tests in `test_tasks_engine.py` (`test_t066_project_languages_and_english_headings_keywords` and updated `test_t057_t061_t062_t063_t052_and_n064`) covering `it`/`it` declarations, byte-identical default outputs, `use-cases create --lang it` English headings + Italian prose + legacy Italian heading normalization warnings, legacy T065 key deprecation warning, and `config`/`show-config`.
 
 ## Verification
 
-- Tests above green; on a scratch copy of dave_agent tasks/: declare tasks it, questions en; tasks new and questions ask produce the right language; validate clean
+- [x] `~/.pyenv/shims/python3 -m pytest -q -p no:cacheprovider plugins/architect-side/skills/task-pipeline/scripts/` -> `233 passed`.
+- [x] Scratch copy check of `/Users/Alfredo/works/dave_agent/tasks`: before changes `0 errors, 21 warnings`; after declaring `[tasks] language = "it"`, `[questions] language = "en"` in `AGENTS.md` fenced `toml`, `config` resolves `tasks=it, questions=en, use_cases=it` and `validate` has `0 errors, 21 warnings` (0 new warnings on English-headed files); on a use case with T065 Italian headings (`Descrizione`, `Precondizioni`, `Scenario`, `Comando di verifica`, `Criteri di accettazione`, `Registro delle verifiche`), `validate` emits `0 errors` and only the 6 normalization warnings (`non-standard heading '...' (use '...')`).
+
+## Log (newest first)
+
+- 2026-10-27, kilo: state `open` -> `delivered` — Implemented per-project content language resolver, fixed English keyword rules in AGENTS.md/SKILL.md, English headings on use-cases create with normalization warnings on legacy Italian headings, and `tasks config`/`show-config`.

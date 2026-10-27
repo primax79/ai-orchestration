@@ -272,7 +272,8 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
 - **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
 - **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
-- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Per-project extra fields after `handoff` can be declared via `[tasks] extension_fields = ["area"]` in `orchestration.toml` (or `.ai-orchestration.local.toml`), a fenced `toml` block in `tasks/AGENTS.md`, or a prose/bullet line ``Extra header fields: `area` `` (with or without bold, comma or `and` separated) in `tasks/AGENTS.md`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
+- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Per-project extra fields after `handoff` can be declared via `[tasks] extension_fields = ["area"]` in `orchestration.toml` (or `.ai-orchestration.local.toml`), a fenced `toml` block in `tasks/AGENTS.md`, or a prose/bullet line ``Extra header fields: `area` `` (with or without bold, comma or `and` separated) in `tasks/AGENTS.md`. Required body sections: `## Goal`, `## Steps`, `## Verification`. Section headings (`## Goal`, `## Steps`, `## Verification`, `## Log`; question `## Context`, `## Options`, `## Answer`, `## Notes`; use-case `## Description & Business Value`, `## Preconditions`, `## Scenario / Interaction Steps`, `## Automated Verification Command`, `## Acceptance Criteria`, `## AI Validation Log`) and header field names are fixed English keywords: never translate them.
+- **Content languages (per-project, versioned in `tasks/AGENTS.md`):** Declare the prose language for tasks, questions to the owner, and use cases in a fenced `toml` block in `tasks/AGENTS.md`: `[tasks] language = "en"`, `[questions] language = "it"`, `[use_cases] language = "en"` (use cases follow `[tasks] language` unless `[use_cases] language` is set; default `en`). Language settings govern only the prose content written by sessions; section headings and header field names are fixed English keywords and are never translated.
 - **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
 - **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
@@ -286,29 +287,276 @@ MANAGED_AGENTS_END = "<!-- ai-orch:managed end -->"
 _MANAGED_AGENTS_BODY = "\n".join(CANONICAL_TASKS_AGENTS_MD.strip().splitlines()[1:]).strip()
 MANAGED_TASKS_AGENTS_BLOCK = f"{MANAGED_AGENTS_BEGIN}\n## task-pipeline managed convention\n\n{_MANAGED_AGENTS_BODY}\n{MANAGED_AGENTS_END}\n"
 
+BCP47_LANG_RE = re.compile(r"^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$")
 
-def render_upgraded_agents_md(existing_agents: str) -> str:
+
+def _extract_unmanaged_agents_md(raw_agents: str) -> str:
+    if not raw_agents or raw_agents.strip() == CANONICAL_TASKS_AGENTS_MD.strip():
+        return ""
+    return re.sub(
+        r"<!--\s*ai-orch:managed\s+begin\s*-->.*?<!--\s*ai-orch:managed\s+end\s*-->",
+        "",
+        raw_agents,
+        flags=re.DOTALL,
+    )
+
+
+def resolve_project_languages(
+    tasks_dir: pathlib.Path | None = None,
+    agents_md_text: str | None = None,
+) -> dict[str, Any]:
+    """Resolve per-project content languages for tasks, questions, and use_cases.
+    Reads from:
+      1. Fenced `toml` / `tasks-config` blocks in `tasks/AGENTS.md` (outside managed markers):
+         `[tasks] language`, `[questions] language`, `[use_cases] language`.
+      2. Legacy T065 keys (`use_case_language` / `language` in `orchestration.toml`,
+         `.ai-orchestration/orchestration.toml`, `.ai-orchestration.local.toml`),
+         emitting a deprecation warning in `warnings`.
+    Defaults: `tasks` = "en", `questions` = "en", `use_cases` = tasks language.
+    """
+    t_dir = pathlib.Path(tasks_dir).resolve() if tasks_dir is not None else None
+    warnings: list[str] = []
+
+    raw_tasks: tuple[Any, str] | None = None
+    raw_questions: tuple[Any, str] | None = None
+    raw_use_cases: tuple[Any, str] | None = None
+
+    # 1. Check tasks/AGENTS.md fenced toml blocks
+    unmanaged = ""
+    agents_src_label = "tasks/AGENTS.md"
+    if agents_md_text is not None:
+        unmanaged = _extract_unmanaged_agents_md(agents_md_text)
+    elif t_dir is not None:
+        agents_md = t_dir / "AGENTS.md"
+        if agents_md.is_file():
+            try:
+                unmanaged = _extract_unmanaged_agents_md(agents_md.read_text(encoding="utf-8"))
+            except Exception:
+                unmanaged = ""
+
+    if unmanaged:
+        for m_fence in re.finditer(r"```(?:toml|tasks-config)\s*\n(.*?)```", unmanaged, re.DOTALL):
+            block_body = m_fence.group(1)
+            bdata: dict[str, Any] | None = None
+            if tomllib is not None:
+                try:
+                    bdata = tomllib.loads(block_body)
+                except Exception:
+                    bdata = None
+            if isinstance(bdata, dict):
+                t_sec = bdata.get("tasks")
+                if isinstance(t_sec, dict) and "language" in t_sec:
+                    raw_tasks = (t_sec["language"], f"{agents_src_label} [tasks].language")
+                q_sec = bdata.get("questions")
+                if isinstance(q_sec, dict) and "language" in q_sec:
+                    raw_questions = (q_sec["language"], f"{agents_src_label} [questions].language")
+                uc_sec = bdata.get("use_cases")
+                if not isinstance(uc_sec, dict):
+                    uc_sec = bdata.get("use-cases")
+                if isinstance(uc_sec, dict) and "language" in uc_sec:
+                    raw_use_cases = (uc_sec["language"], f"{agents_src_label} [use_cases].language")
+            else:
+                # Fallback line parser if tomllib failed or is unavailable
+                current_sec: str | None = None
+                for raw_line in block_body.splitlines():
+                    line = raw_line.split("#", 1)[0].strip()
+                    if not line:
+                        continue
+                    m_sec = re.match(r"^\[([a-zA-Z0-9_-]+)\]$", line)
+                    if m_sec:
+                        current_sec = m_sec.group(1).lower().replace("-", "_")
+                        continue
+                    m_kv = re.match(r"^language\s*=\s*(.+)$", line)
+                    if m_kv and current_sec in ("tasks", "questions", "use_cases"):
+                        val_raw = m_kv.group(1).strip()
+                        if (val_raw.startswith('"') and val_raw.endswith('"')) or (val_raw.startswith("'") and val_raw.endswith("'")):
+                            val_parsed: Any = val_raw[1:-1]
+                        else:
+                            val_parsed = val_raw
+                        if current_sec == "tasks":
+                            raw_tasks = (val_parsed, f"{agents_src_label} [tasks].language")
+                        elif current_sec == "questions":
+                            raw_questions = (val_parsed, f"{agents_src_label} [questions].language")
+                        elif current_sec == "use_cases":
+                            raw_use_cases = (val_parsed, f"{agents_src_label} [use_cases].language")
+
+    # 2. Check legacy T065 keys in orchestration.toml / .ai-orchestration.local.toml
+    legacy_lang: tuple[str, str, str] | None = None  # (val, file_name, key_name)
+    if t_dir is not None:
+        ws_root = t_dir.parent if t_dir.name == "tasks" else t_dir
+        cand_legacy = [
+            (ws_root / "orchestration.toml", "orchestration.toml"),
+            (ws_root / ".ai-orchestration" / "orchestration.toml", ".ai-orchestration/orchestration.toml"),
+            (ws_root / ".ai-orchestration.local.toml", ".ai-orchestration.local.toml"),
+            (t_dir / "orchestration.toml", "tasks/orchestration.toml"),
+        ]
+        seen_paths: set[pathlib.Path] = set()
+        for cfg_path, cfg_label in cand_legacy:
+            resolved_cfg = cfg_path.resolve()
+            if resolved_cfg in seen_paths or not cfg_path.is_file():
+                continue
+            seen_paths.add(resolved_cfg)
+            try:
+                raw_cfg = cfg_path.read_text(encoding="utf-8")
+                parsed_cfg = tomllib.loads(raw_cfg) if tomllib is not None else {}
+            except Exception:
+                raw_cfg = ""
+                parsed_cfg = {}
+
+            # Also check if [tasks]/[questions]/[use_cases] language is in orchestration.toml when not in AGENTS.md
+            if isinstance(parsed_cfg, dict):
+                t_sec = parsed_cfg.get("tasks")
+                if isinstance(t_sec, dict) and "language" in t_sec and raw_tasks is None:
+                    raw_tasks = (t_sec["language"], f"{cfg_label} [tasks].language")
+                q_sec = parsed_cfg.get("questions")
+                if isinstance(q_sec, dict) and "language" in q_sec and raw_questions is None:
+                    raw_questions = (q_sec["language"], f"{cfg_label} [questions].language")
+                uc_sec = parsed_cfg.get("use_cases") or parsed_cfg.get("use-cases")
+                if isinstance(uc_sec, dict) and "language" in uc_sec and raw_use_cases is None:
+                    raw_use_cases = (uc_sec["language"], f"{cfg_label} [use_cases].language")
+
+            # Check legacy T065 top-level or regex `use_case_language` / `language`
+            # Strip `[tasks]`, `[questions]`, `[use_cases]` sections before matching bare `language = ...`
+            m_uc_legacy = re.search(
+                r'^\s*use_case_language\s*=\s*["\']([^"\']*)["\']',
+                raw_cfg,
+                re.MULTILINE,
+            )
+            if m_uc_legacy:
+                if legacy_lang is None:
+                    legacy_lang = (m_uc_legacy.group(1).strip(), cfg_label, "use_case_language")
+                warnings.append(
+                    f"{cfg_label}: deprecated language key 'use_case_language'; "
+                    "declare '[tasks] language' / '[use_cases] language' in a fenced toml block in tasks/AGENTS.md instead."
+                )
+            else:
+                # Check top-level or non-[tasks]/[questions]/[use_cases] `language = "..."`
+                curr_s: str | None = None
+                for rline in raw_cfg.splitlines():
+                    sline = rline.split("#", 1)[0].strip()
+                    if not sline:
+                        continue
+                    ms = re.match(r"^\[([^\]]+)\]$", sline)
+                    if ms:
+                        curr_s = ms.group(1).strip().lower().replace("-", "_")
+                        continue
+                    if curr_s not in ("tasks", "questions", "use_cases"):
+                        ml = re.match(r'^language\s*=\s*["\']([^"\']*)["\']', sline)
+                        if ml:
+                            if legacy_lang is None:
+                                legacy_lang = (ml.group(1).strip(), cfg_label, "language")
+                            warnings.append(
+                                f"{cfg_label}: deprecated language key 'language'; "
+                                "declare '[tasks] language' / '[use_cases] language' in a fenced toml block in tasks/AGENTS.md instead."
+                            )
+                            break
+
+    def _validate_lang(raw_entry: tuple[Any, str] | None, scope_label: str) -> tuple[str | None, str | None]:
+        if raw_entry is None:
+            return None, None
+        val, src = raw_entry
+        if not isinstance(val, str) or not val.strip():
+            warnings.append(
+                f"{src}: empty or non-string language value {val!r} for {scope_label}; falling back to 'en'."
+            )
+            return "en", f"default (invalid in {src})"
+        cleaned = val.strip()
+        if not BCP47_LANG_RE.match(cleaned):
+            warnings.append(
+                f"{src}: malformed language code {val!r} for {scope_label} (expected BCP-47 tag like 'en' or 'it'); falling back to 'en'."
+            )
+            return "en", f"default (invalid in {src})"
+        # Normalize primary subtag to lowercase
+        parts = cleaned.split("-")
+        norm = parts[0].lower() + (("-" + "-".join(parts[1:])) if len(parts) > 1 else "")
+        return norm, src
+
+    tasks_val, tasks_src = _validate_lang(raw_tasks, "tasks")
+    questions_val, questions_src = _validate_lang(raw_questions, "questions")
+    uc_val, uc_src = _validate_lang(raw_use_cases, "use_cases")
+
+    declared = any(x is not None for x in (raw_tasks, raw_questions, raw_use_cases))
+
+    if tasks_val is None:
+        tasks_val = "en"
+        tasks_src = "default"
+
+    if questions_val is None:
+        questions_val = "en"
+        questions_src = "default"
+
+    if uc_val is None:
+        if legacy_lang is not None and raw_tasks is None:
+            leg_v, leg_file, leg_key = legacy_lang
+            v_norm, _ = _validate_lang((leg_v, f"{leg_file} {leg_key}"), "use_cases")
+            uc_val = v_norm or "en"
+            uc_src = f"{leg_file} ({leg_key}, deprecated)"
+        elif raw_tasks is not None:
+            uc_val = tasks_val
+            uc_src = f"tasks ({tasks_src})"
+        elif legacy_lang is not None:
+            leg_v, leg_file, leg_key = legacy_lang
+            v_norm, _ = _validate_lang((leg_v, f"{leg_file} {leg_key}"), "use_cases")
+            uc_val = v_norm or tasks_val
+            uc_src = f"{leg_file} ({leg_key}, deprecated)"
+        else:
+            uc_val = tasks_val
+            uc_src = "default (from tasks)"
+
+    return {
+        "tasks": tasks_val,
+        "questions": questions_val,
+        "use_cases": uc_val,
+        "sources": {
+            "tasks": tasks_src,
+            "questions": questions_src,
+            "use_cases": uc_src,
+        },
+        "declared": declared,
+        "warnings": warnings,
+    }
+
+
+def build_managed_tasks_agents_block(
+    tasks_dir: pathlib.Path | None = None,
+    existing_agents: str | None = None,
+) -> str:
+    """Build the managed AGENTS.md block, including the effective content-language line when languages are declared."""
+    info = resolve_project_languages(tasks_dir=tasks_dir, agents_md_text=existing_agents)
+    body = _MANAGED_AGENTS_BODY
+    if info.get("declared"):
+        lang_line = (
+            f"- **Effective project content languages:** Content language: "
+            f"tasks `{info['tasks']}`, questions `{info['questions']}`, use cases `{info['use_cases']}`. "
+            f"Section headings and header field names are fixed English keywords: never translate them."
+        )
+        body = f"{body}\n{lang_line}"
+    return f"{MANAGED_AGENTS_BEGIN}\n## task-pipeline managed convention\n\n{body}\n{MANAGED_AGENTS_END}\n"
+
+
+def render_upgraded_agents_md(existing_agents: str, tasks_dir: pathlib.Path | None = None) -> str:
     """Render tasks/AGENTS.md preserving all project-specific content outside managed markers.
     If existing_agents is empty, returns CANONICAL_TASKS_AGENTS_MD with the managed block wrapped.
     If existing_agents already has markers, refreshes only the block between markers.
     Otherwise, appends the managed block at the end while keeping existing content byte-for-byte.
     """
+    managed_block = build_managed_tasks_agents_block(tasks_dir=tasks_dir, existing_agents=existing_agents)
     if not existing_agents:
-        return f"# tasks/ convention (task-pipeline + emergent tasks)\n\n{MANAGED_TASKS_AGENTS_BLOCK}"
+        return f"# tasks/ convention (task-pipeline + emergent tasks)\n\n{managed_block}"
     pat = re.compile(
         r"<!--\s*ai-orch:managed\s+begin\s*-->.*?<!--\s*ai-orch:managed\s+end\s*-->\n?",
         re.DOTALL,
     )
     m = pat.search(existing_agents)
     if m:
-        replacement = MANAGED_TASKS_AGENTS_BLOCK
+        replacement = managed_block
         if not existing_agents[m.start():m.end()].endswith("\n"):
             replacement = replacement.rstrip("\n")
         return existing_agents[:m.start()] + replacement + existing_agents[m.end():]
     if existing_agents.strip() == CANONICAL_TASKS_AGENTS_MD.strip():
-        return f"# tasks/ convention (task-pipeline + emergent tasks)\n\n{MANAGED_TASKS_AGENTS_BLOCK}"
+        return f"# tasks/ convention (task-pipeline + emergent tasks)\n\n{managed_block}"
     sep = "" if existing_agents.endswith("\n\n") else ("\n" if existing_agents.endswith("\n") else "\n\n")
-    return existing_agents + sep + MANAGED_TASKS_AGENTS_BLOCK
+    return existing_agents + sep + managed_block
 
 
 def get_project_extension_fields(tasks_dir: pathlib.Path) -> tuple[str, ...]:
@@ -6685,24 +6933,35 @@ def _next_use_case_id(tasks_dir: pathlib.Path) -> str:
     return f"UC{highest + 1:03d}"
 
 
+USE_CASE_ITALIAN_HEADING_NORMALIZATION: dict[str, str] = {
+    "descrizione e valore": "Description & Business Value",
+    "descrizione": "Description & Business Value",
+    "innesco": "Description & Business Value",
+    "attore": "Actor",
+    "precondizioni": "Preconditions",
+    "scenario": "Scenario / Interaction Steps",
+    "scenario principale": "Scenario / Interaction Steps",
+    "flusso principale": "Scenario / Interaction Steps",
+    "flusso": "Scenario / Interaction Steps",
+    "passi dello scenario": "Scenario / Interaction Steps",
+    "comando di verifica automatico": "Automated Verification Command",
+    "comando di verifica": "Automated Verification Command",
+    "criteri di accettazione": "Acceptance Criteria",
+    "risultato": "Acceptance Criteria",
+    "postcondizioni": "Acceptance Criteria",
+    "registro delle verifiche": "AI Validation Log",
+    "log di validazione ai": "AI Validation Log",
+    "task collegati": "Linked Tasks",
+}
+
+
 def _detect_use_case_language(tasks_dir: pathlib.Path, explicit_lang: str | None = None) -> str:
-    if explicit_lang and explicit_lang.strip().lower() in ("it", "en"):
-        return explicit_lang.strip().lower()
-    ws_root = tasks_dir.parent
-    for cfg in (
-        ws_root / "orchestration.toml",
-        ws_root / ".ai-orchestration" / "orchestration.toml",
-        ws_root / ".ai-orchestration.local.toml",
-    ):
-        if cfg.is_file():
-            try:
-                raw = cfg.read_text(encoding="utf-8")
-                m = re.search(r'^\s*(?:use_case_language|language)\s*=\s*["\']([a-zA-Z-]+)["\']', raw, re.MULTILINE)
-                if m and m.group(1).lower().startswith("it"):
-                    return "it"
-            except Exception:
-                pass
-    return "en"
+    if explicit_lang and explicit_lang.strip():
+        cleaned = explicit_lang.strip().lower()
+        return "it" if cleaned.startswith("it") else cleaned.split("-")[0]
+    info = resolve_project_languages(tasks_dir)
+    uc_lang = str(info.get("use_cases") or "en").strip().lower()
+    return "it" if uc_lang.startswith("it") else uc_lang.split("-")[0]
 
 
 def _format_acceptance_criteria(raw_criteria: Any, lang: str = "en") -> str:
@@ -6766,43 +7025,13 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
             scenario_text = data.get("scenario") or "1. L'utente avvia l'azione.\n2. Il sistema risponde."
             desc_text = data.get("description") or "Descrivere il valore per l'utente e il contesto."
             pre_text = data.get("preconditions") or "- Sistema avviato e inizializzato."
-            cmd_text = data.get("verification_command") or "echo 'No verification command specified'"
-            content = f"""# {uc_id} - {title}
-
-- id: {uc_id}
-- title: {title}
-- actor: {data.get("actor", "End-User")}
-- status: {data.get("status", "draft")}
-- priority: {data.get("priority", "P1")}
-- linked-tasks: {linked_tasks_str}
-- verification-type: {data.get("verification_type", "automated-probe")}
-- last-tested: {data.get("last_tested") or "-"}
-- last-verdict: {data.get("last_verdict") or "-"}
-- short: {short_val}
-
-## Descrizione
-{desc_text}
-
-## Precondizioni
-{pre_text}
-
-## Scenario
-{scenario_text}
-
-## Comando di verifica
-```bash
-{cmd_text}
-```
-
-## Criteri di accettazione
-{criteria_text}
-
-## Registro delle verifiche
-{data.get("validation_log", "")}
-"""
         else:
             scenario_text = data.get("scenario") or "1. User initiates action.\n2. System responds."
-            content = f"""# {uc_id} - {title}
+            desc_text = data.get("description") or "Describe user value and business context."
+            pre_text = data.get("preconditions") or "- System running and initialized."
+
+        cmd_text = data.get("verification_command") or "echo 'No verification command specified'"
+        content = f"""# {uc_id} - {title}
 
 - id: {uc_id}
 - title: {title}
@@ -6816,17 +7045,17 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
 - short: {short_val}
 
 ## Description & Business Value
-{data.get("description") or "Describe user value and business context."}
+{desc_text}
 
 ## Preconditions
-{data.get("preconditions") or "- System running and initialized."}
+{pre_text}
 
 ## Scenario / Interaction Steps
 {scenario_text}
 
 ## Automated Verification Command
 ```bash
-{data.get("verification_command") or "echo 'No verification command specified'"}
+{cmd_text}
 ```
 
 ## Acceptance Criteria
@@ -7371,6 +7600,8 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
     warnings: list[str] = []
 
     project_ext_fields = get_project_extension_fields(tasks_dir)
+    lang_info = resolve_project_languages(tasks_dir)
+    warnings.extend(lang_info.get("warnings", []))
     effective_ext_fields: tuple[str, ...] = OPTIONAL_EXTENSION_FIELDS + tuple(
         k for k in project_ext_fields if k not in OPTIONAL_EXTENSION_FIELDS
     )
@@ -8275,6 +8506,20 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
             for ltid in uc.get("linked_tasks", []):
                 if ltid not in tree:
                     warnings.append(f"{uc_rel}: linked task {ltid!r} not found in tasks tree.")
+
+            # Warn on non-standard (Italian/localized) use-case headings
+            uc_text = uc.get("content", "")
+            if uc_text:
+                uc_scanned, _ = scan_markdown_blocks(uc_text)
+                for sline in uc_scanned:
+                    if not sline.is_fenced and sline.text.startswith("## "):
+                        h_name = sline.text[3:].strip()
+                        h_key = h_name.lower()
+                        if h_key in USE_CASE_ITALIAN_HEADING_NORMALIZATION:
+                            std_name = USE_CASE_ITALIAN_HEADING_NORMALIZATION[h_key]
+                            warnings.append(
+                                f"{uc_rel}: non-standard heading '{h_name}' (use '{std_name}')"
+                            )
 
     # Warn if a task references an unknown use case
     for nid, node in tree.items():
@@ -13468,9 +13713,9 @@ def cmd_show(args: argparse.Namespace) -> int:
             "session": executor_val[len("session:"):].strip(),
         }
 
-    args._last_result = {"ok": True, "task": task_data}
+    args._last_result = {"ok": True, "task": task_data, "languages": resolve_project_languages(tasks_dir)}
     if getattr(args, "json", False):
-        print(json.dumps({"ok": True, "task": task_data}, indent=2))
+        print(json.dumps({"ok": True, "task": task_data, "languages": resolve_project_languages(tasks_dir)}, indent=2))
     else:
         print(f"Task: {task_data.get('id')} - {task_data.get('title')}")
         print(f"State: {task_data.get('state')} (canonical: {task_data.get('canonical_state')})")
@@ -14836,7 +15081,7 @@ def upgrade_tasks_tree(
             # 1. Update tasks/AGENTS.md (managed block, never overwrite project rules)
             agents_md = tasks_dir / "AGENTS.md"
             existing_agents = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
-            new_agents = render_upgraded_agents_md(existing_agents)
+            new_agents = render_upgraded_agents_md(existing_agents, tasks_dir=tasks_dir)
             if existing_agents != new_agents:
                 if not agents_md.is_file():
                     created.append(str(agents_md))
@@ -20803,6 +21048,38 @@ def cmd_labels(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_config(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(getattr(args, "tasks_dir", "tasks")).resolve()
+    lang_info = resolve_project_languages(tasks_dir)
+    ext_fields = list(get_project_extension_fields(tasks_dir))
+    payload = {
+        "ok": True,
+        "tasks_dir": str(tasks_dir),
+        "languages": {
+            "tasks": lang_info["tasks"],
+            "questions": lang_info["questions"],
+            "use_cases": lang_info["use_cases"],
+        },
+        "language_sources": lang_info["sources"],
+        "declared": lang_info["declared"],
+        "extension_fields": ext_fields,
+        "warnings": lang_info["warnings"],
+    }
+    args._last_result = payload
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Tasks directory : {tasks_dir}")
+        print("Languages:")
+        print(f"  tasks     : {lang_info['tasks']} (source: {lang_info['sources']['tasks']})")
+        print(f"  questions : {lang_info['questions']} (source: {lang_info['sources']['questions']})")
+        print(f"  use_cases : {lang_info['use_cases']} (source: {lang_info['sources']['use_cases']})")
+        print(f"Extension fields: {', '.join(ext_fields) if ext_fields else '-'}")
+        for w in lang_info["warnings"]:
+            print(f"[WARN] {w}")
+    return 0
+
+
 def _instrument_subparsers(sub_action: Any) -> Any:
     orig = sub_action.add_parser
 
@@ -21513,6 +21790,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_fb.set_defaults(func=cmd_feedback)
 
+    for cfg_cmd_name in ("config", "show-config"):
+        p_cfg = sub.add_parser(cfg_cmd_name, help="Show project tasks configuration (languages, extension fields, sources)")
+        p_cfg.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+        p_cfg.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+        p_cfg.set_defaults(func=cmd_config)
+
     return ap
 
 
@@ -21527,7 +21810,7 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
         return False
     if cmd == "sync-index":
         return bool(getattr(args, "apply", False)) and not bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
-    if cmd in ("list", "validate", "graph", "next", "labels", "next-id", "verification-queue"):
+    if cmd in ("list", "validate", "graph", "next", "labels", "next-id", "verification-queue", "config", "show-config"):
         return False
     if cmd == "questions":
         q_cmd = getattr(args, "q_cmd", None)
