@@ -81,10 +81,8 @@ def test_install_skills_and_status_across_kilo_claude_codex(tmp_path: pathlib.Pa
     for assistant in ("kilo", "claude", "codex"):
         g_env = st["environments"][assistant]["global"]
         assert g_env["installed_count"] == 8
-        if assistant in ("claude", "codex"):
-            assert g_env["conflicts"] == []
-        else:
-            assert len(g_env["conflicts"]) == 8  # kilo sees cross-root duplicates with claude
+        # T064: one identical copy per assistant root (kilo also reads ~/.claude/skills) is not a duplicate.
+        assert g_env["conflicts"] == []
         for sname, sdata in g_env["skills"].items():
             assert sdata["state"] == "up-to-date", f"{assistant}/{sname} not up-to-date"
 
