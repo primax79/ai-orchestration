@@ -717,15 +717,30 @@ NODE_TYPES: set[str] = {"initiative", "container", "leaf", "microtask"}
 INHERITED_FIELDS: tuple[str, ...] = ("executor", "priority", "profile", "repo", "paths")
 
 
-def normalize_waiting_on(qualifier: str | None) -> str | None:
+def parse_waiting_on(qualifier: str | None) -> list[str]:
+    """Parse a comma-separated waiting-on string into a list of normalized entries."""
     if not qualifier or not isinstance(qualifier, str):
-        return None
+        return []
     val = qualifier.strip().strip("`").strip()
     if not val or val == "-":
+        return []
+    entries: list[str] = []
+    for item in val.split(","):
+        clean = item.strip().strip("`").strip()
+        if not clean or clean == "-":
+            continue
+        if re.match(r"^Q\d{3,}$", clean):
+            clean = f"question:{clean}"
+        if clean not in entries:
+            entries.append(clean)
+    return entries
+
+
+def normalize_waiting_on(qualifier: str | None) -> str | None:
+    entries = parse_waiting_on(qualifier)
+    if not entries:
         return None
-    if re.match(r"^Q\d{3,}$", val):
-        return f"question:{val}"
-    return val
+    return ", ".join(entries)
 
 
 def extract_waiting_on(raw_state: str | None) -> str | None:
@@ -2900,6 +2915,7 @@ def move_block_to_closed(
     clear_waiting_on: bool = False,
     new_verify_by: str | None = None,
     clear_verify_by: bool = False,
+    new_decider: str | None = None,
 ) -> tuple[str, str]:
     """Move a block ### task_id to the ## Closed section of file_path.
     If new_status is given, the status line is updated first.
@@ -2917,7 +2933,7 @@ def move_block_to_closed(
             clear_waiting_on=clear_waiting_on,
             new_verify_by=new_verify_by,
             clear_verify_by=clear_verify_by,
-            dry_run=True,
+            new_decider=new_decider,
         )
 
     text = file_path.read_text(encoding="utf-8")
@@ -12007,6 +12023,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
     initiatives = discover_initiatives(tasks_dir)
     all_questions = discover_questions(tasks_dir)
     known_question_ids = {q["id"] for q in all_questions}
+    q_status_map = {q["id"]: q.get("status") for q in all_questions}
 
     seen_ids: dict[str, str] = {}
     known_task_ids: set[str] = set()
@@ -12111,7 +12128,7 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 for v in validate_short_title(s_val):
                     warnings.append(f"{rel}: short title {s_val!r} on node {nid} violates conventions ({v}).")
 
-        if node.is_leaf and node.canonical_state == "waiting":
+        if node.is_leaf and node.canonical_state == "waiting" and node.block_text is not None:
             raw_wo = node.own_fields.get("waiting_on") or node.own_fields.get("waiting-on") or getattr(node, "waiting_on", None)
             has_wo = bool(raw_wo and str(raw_wo).strip() and str(raw_wo).strip() != "-")
             raw_dec = str(node.own_fields.get("decider") or node.fields.get("decider", {}).get("value") or "").strip()
@@ -12124,6 +12141,15 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                         f"{rel}: task {nid} in waiting state has no waiting-on, decider, or conditions; "
                         f"set --waiting-on <question:Q###|owner:...|external:...|session:...>."
                     )
+            raw_wo_str = str(raw_wo) if raw_wo and str(raw_wo).strip() != "-" else ""
+            raw_dec_str = str(raw_dec) if raw_dec and str(raw_dec).strip() != "-" else ""
+            q_ids = sorted(set(re.findall(r"Q\d{3,}", f"{raw_wo_str} {raw_dec_str}")))
+            for qid in q_ids:
+                q_st = q_status_map.get(qid)
+                if q_st in ("answered", "withdrawn"):
+                    msg = f"{rel}: task {nid} in waiting state lists question {qid} that is already {q_st} (stale entry)."
+                    if msg not in warnings:
+                        warnings.append(msg)
 
         # Check conditions on plan task node
         if "conditions" in node.own_fields and node.own_fields["conditions"]:
@@ -12507,6 +12533,15 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                         f"{rel}: task {tid} in waiting state has no waiting-on, decider, or conditions; "
                         f"set --waiting-on <question:Q###|owner:...|external:...|session:...>."
                     )
+                raw_wo_str = str(raw_wo) if raw_wo and str(raw_wo).strip() != "-" else ""
+                raw_dec_str = str(raw_dec) if raw_dec and str(raw_dec).strip() != "-" else ""
+                q_ids = sorted(set(re.findall(r"Q\d{3,}", f"{raw_wo_str} {raw_dec_str}")))
+                for qid in q_ids:
+                    q_st = q_status_map.get(qid)
+                    if q_st in ("answered", "withdrawn"):
+                        msg = f"{rel}: task {tid} in waiting state lists question {qid} that is already {q_st} (stale entry)."
+                        if msg not in warnings:
+                            warnings.append(msg)
 
             # Required sections
             if not is_pointer:
@@ -13799,6 +13834,45 @@ def transition_task(
                 else:
                     clear_wo = (waiting_on is None)
 
+                plan_decider_to_set: str | None = None
+                if old_canon == "waiting":
+                    raw_dec = str(node.own_fields.get("decider") or node.fields.get("decider", {}).get("value") or "").strip()
+                    raw_wo = str(node.own_fields.get("waiting-on") or node.own_fields.get("waiting_on") or node.waiting_on or "").strip()
+                    q_ids = sorted(set(re.findall(r"Q\d{3,}", f"{raw_dec} {raw_wo}")))
+                    if q_ids:
+                        all_questions = discover_questions(tasks_dir)
+                        q_map = {q["id"]: q for q in all_questions}
+                        open_q = [qid for qid in q_ids if qid in q_map and q_map[qid]["status"] == "open"]
+                        if open_q:
+                            if not force_unblock:
+                                return False, {
+                                    "ok": False,
+                                    "task_id": task_id,
+                                    "old_state": old_state,
+                                    "new_state": new_state,
+                                    "error": (
+                                        f"Waiting invariant violated: task {task_id!r} is waiting on open question(s): "
+                                        f"{', '.join(open_q)}. Resolve them via 'questions answer' or 'questions withdraw', "
+                                        "or pass --force-unblock --reason TEXT."
+                                    ),
+                                }
+                            if not (reason and reason.strip()):
+                                return False, {
+                                    "ok": False,
+                                    "task_id": task_id,
+                                    "old_state": old_state,
+                                    "new_state": new_state,
+                                    "error": "Transitioning with --force-unblock requires non-empty --reason TEXT.",
+                                }
+                            for qid in open_q:
+                                _withdraw_question_file_only(
+                                    tasks_dir,
+                                    q_map[qid],
+                                    reason=reason.strip(),
+                                    by=actor or "owner",
+                                )
+                            plan_decider_to_set = "-"
+
                 if old_canon in ("open", "in progress") and new_canon in ("done", "done with a caveat", "verified"):
                     return False, {
                         "ok": False,
@@ -13947,6 +14021,7 @@ def transition_task(
                             expect_task_hash=expect_task_hash,
                             new_waiting_on=waiting_on,
                             clear_waiting_on=clear_wo,
+                            new_decider=plan_decider_to_set,
                         )
                         if node.parent and node.parent in tree:
                             parent_node = tree[node.parent]
@@ -13968,6 +14043,7 @@ def transition_task(
                             new_waiting_on=waiting_on,
                             clear_waiting_on=clear_wo,
                             new_verify_by=verify_by,
+                            new_decider=plan_decider_to_set,
                         )
                     for item in reval_items:
                         if item["changed"]:
@@ -14058,7 +14134,8 @@ def transition_task(
             decider_to_set: str | None = None
             if old_canon == "waiting":
                 raw_dec = target.get("decider", "").strip()
-                q_ids = re.findall(r"Q\d{3,}", raw_dec)
+                raw_wo = target.get("waiting_on") or target.get("headers", {}).get("waiting-on") or target.get("headers", {}).get("waiting_on") or ""
+                q_ids = sorted(set(re.findall(r"Q\d{3,}", f"{raw_dec} {raw_wo}")))
                 if q_ids:
                     all_questions = discover_questions(tasks_dir)
                     q_map = {q["id"]: q for q in all_questions}
@@ -14438,25 +14515,46 @@ def close_task(
                         "actual": current_hash,
                     }
 
-            if curr_canon == "waiting" and target is not None:
-                raw_dec = target.get("decider", "").strip()
-                q_ids = re.findall(r"Q\d{3,}", raw_dec)
+            if curr_canon == "waiting":
+                if target is not None:
+                    raw_dec = target.get("decider", "").strip()
+                    raw_wo = target.get("waiting_on") or target.get("headers", {}).get("waiting-on") or target.get("headers", {}).get("waiting_on") or ""
+                else:
+                    raw_dec = str(node.own_fields.get("decider") or node.fields.get("decider", {}).get("value") or "").strip()
+                    raw_wo = str(node.own_fields.get("waiting-on") or node.own_fields.get("waiting_on") or node.waiting_on or "").strip()
+                q_ids = sorted(set(re.findall(r"Q\d{3,}", f"{raw_dec} {raw_wo}")))
                 if q_ids:
                     all_questions = discover_questions(tasks_dir)
                     q_map = {q["id"]: q for q in all_questions}
                     open_q = [qid for qid in q_ids if qid in q_map and q_map[qid]["status"] == "open"]
-                    if open_q and not force_unblock:
-                        return False, {
-                            "ok": False,
-                            "task_id": task_id,
-                            "old_state": curr_state,
-                            "new_state": "done",
-                            "error": (
-                                f"Waiting invariant violated: task {task_id!r} is waiting on open question(s): "
-                                f"{', '.join(open_q)}. Resolve them via 'questions answer' or 'questions withdraw', "
-                                "or pass --force-unblock --reason TEXT."
-                            ),
-                        }
+                    if open_q:
+                        if not force_unblock:
+                            return False, {
+                                "ok": False,
+                                "task_id": task_id,
+                                "old_state": curr_state,
+                                "new_state": "done",
+                                "error": (
+                                    f"Waiting invariant violated: task {task_id!r} is waiting on open question(s): "
+                                    f"{', '.join(open_q)}. Resolve them via 'questions answer' or 'questions withdraw', "
+                                    "or pass --force-unblock --reason TEXT."
+                                ),
+                            }
+                        if not (reason and reason.strip()):
+                            return False, {
+                                "ok": False,
+                                "task_id": task_id,
+                                "old_state": curr_state,
+                                "new_state": "done",
+                                "error": "Transitioning with --force-unblock requires non-empty --reason TEXT.",
+                            }
+                        for qid in open_q:
+                            _withdraw_question_file_only(
+                                tasks_dir,
+                                q_map[qid],
+                                reason=reason.strip(),
+                                by=actor or "owner",
+                            )
 
             is_already_verified = (curr_canon == "verified")
             is_self_vmode = (vmode == "self") or self_verified
@@ -21087,13 +21185,30 @@ def ask_question(
 
                 # Update tasks
                 for t, new_st, dec_mode in tasks_to_update:
+                    curr_wo = None
+                    if hasattr(t, "waiting_on") and t.waiting_on:
+                        curr_wo = t.waiting_on
+                    elif hasattr(t, "own_fields"):
+                        curr_wo = t.own_fields.get("waiting_on") or t.own_fields.get("waiting-on")
+                    elif isinstance(t, dict):
+                        curr_wo = t.get("waiting_on") or t.get("headers", {}).get("waiting-on") or t.get("headers", {}).get("waiting_on")
+
+                    wo_entries = parse_waiting_on(curr_wo)
+                    new_q_entry = f"question:{q_id}"
+                    if new_q_entry not in wo_entries:
+                        wo_entries.append(new_q_entry)
+                    new_waiting_on = ", ".join(wo_entries)
+
                     if hasattr(t, "block_text") and t.block_text is not None:
                         curr_dec = str(t.own_fields.get("decider", "") or t.fields.get("decider", {}).get("value", "")).strip() if hasattr(t, "own_fields") else ""
                         if dec_mode == "SET":
                             new_dec = q_id
                         else:
-                            new_dec = f"{curr_dec}, {q_id}" if curr_dec and curr_dec != "-" else q_id
-                        rewrite_block_in_file(pathlib.Path(t.file_path), t.id, new_status=new_st, new_decider=new_dec, new_waiting_on=f"question:{q_id}")
+                            dec_entries = [d.strip() for d in curr_dec.split(",") if d.strip() and d.strip() != "-"]
+                            if q_id not in dec_entries:
+                                dec_entries.append(q_id)
+                            new_dec = ", ".join(dec_entries) if dec_entries else q_id
+                        rewrite_block_in_file(pathlib.Path(t.file_path), t.id, new_status=new_st, new_decider=new_dec, new_waiting_on=new_waiting_on)
                     else:
                         tp = pathlib.Path(t.file_path if hasattr(t, "file_path") else t["file_path"])
                         curr_dec = (t.fields.get("decider", {}).get("value", "") or t.own_fields.get("decider", "")) if hasattr(t, "own_fields") else t.get("decider", "")
@@ -21102,8 +21217,11 @@ def ask_question(
                         if dec_mode == "SET":
                             new_dec = q_id
                         else:
-                            new_dec = f"{curr_dec}, {q_id}" if curr_dec and curr_dec != "-" else q_id
-                        _update_task_file_headers_and_state(tp, new_st, decider=new_dec, waiting_on=f"question:{q_id}")
+                            dec_entries = [d.strip() for d in str(curr_dec).split(",") if d.strip() and d.strip() != "-"]
+                            if q_id not in dec_entries:
+                                dec_entries.append(q_id)
+                            new_dec = ", ".join(dec_entries) if dec_entries else q_id
+                        _update_task_file_headers_and_state(tp, new_st, decider=new_dec, waiting_on=new_waiting_on)
                         _append_progress_log(
                             t_dict,
                             old_st,
@@ -21171,6 +21289,131 @@ def ask_question(
         }
 
 
+def _resolve_question_on_blocked_tasks(
+    tasks_dir: pathlib.Path,
+    target_q: dict[str, Any],
+    unblock_reason: str,
+    actor: str,
+    questions: list[dict[str, Any]],
+    emergent_map: dict[str, dict[str, Any]],
+    tree: dict[str, TaskNode],
+    modified_files: dict[pathlib.Path, str],
+) -> tuple[list[str], dict[str, str]]:
+    question_id = target_q["id"]
+    q_entry = f"question:{question_id}"
+    unblocked: list[str] = []
+    unblocked_states: dict[str, str] = {}
+
+    candidate_tids: list[str] = [tid for tid, _ in target_q.get("blocks_parsed", [])]
+    for n_id, n_node in tree.items():
+        if n_id not in candidate_tids:
+            raw_wo = n_node.own_fields.get("waiting_on") or n_node.own_fields.get("waiting-on") or n_node.waiting_on or ""
+            raw_dec = n_node.own_fields.get("decider") or n_node.fields.get("decider", {}).get("value") or ""
+            wo_list = parse_waiting_on(str(raw_wo))
+            dec_list = [d.strip() for d in str(raw_dec).split(",") if d.strip() and d.strip() != "-"]
+            if q_entry in wo_list or question_id in wo_list or question_id in dec_list:
+                candidate_tids.append(n_id)
+    for et_id, et_item in emergent_map.items():
+        if et_id not in candidate_tids:
+            raw_wo = et_item.get("waiting_on") or et_item.get("headers", {}).get("waiting-on") or et_item.get("headers", {}).get("waiting_on") or ""
+            raw_dec = et_item.get("decider") or et_item.get("headers", {}).get("decider") or ""
+            wo_list = parse_waiting_on(str(raw_wo))
+            dec_list = [d.strip() for d in str(raw_dec).split(",") if d.strip() and d.strip() != "-"]
+            if q_entry in wo_list or question_id in wo_list or question_id in dec_list:
+                candidate_tids.append(et_id)
+
+    for tid in candidate_tids:
+        if tid in tree and tree[tid].block_text is not None:
+            t_node = tree[tid]
+            fp = pathlib.Path(t_node.file_path)
+            if fp not in modified_files and fp.is_file():
+                modified_files[fp] = fp.read_text(encoding="utf-8")
+            curr_canon = t_node.canonical_state
+            curr_wo = t_node.own_fields.get("waiting_on") or t_node.own_fields.get("waiting-on") or t_node.waiting_on or ""
+            if not curr_wo:
+                curr_wo = extract_waiting_on(t_node.state) or ""
+            curr_dec = str(t_node.own_fields.get("decider") or t_node.fields.get("decider", {}).get("value") or "").strip()
+
+            wo_entries = parse_waiting_on(str(curr_wo))
+            rem_wo = [e for e in wo_entries if e != q_entry and e != question_id]
+            dec_entries = [d.strip() for d in curr_dec.split(",") if d.strip() and d.strip() != "-"]
+            rem_dec = [d for d in dec_entries if d != question_id]
+            for q in rem_dec:
+                q_item = f"question:{q}"
+                if q_item not in rem_wo:
+                    rem_wo.append(q_item)
+
+            has_q_in_wo = any(e.startswith("question:") or re.match(r"^Q\d{3,}$", e) for e in rem_wo)
+            has_q_in_dec = bool(rem_dec)
+            has_question_remaining = has_q_in_wo or has_q_in_dec
+            has_other_waiting = any(not (e.startswith("question:") or re.match(r"^Q\d{3,}$", e)) for e in rem_wo)
+
+            if curr_canon == "waiting":
+                if has_question_remaining or has_other_waiting:
+                    new_dec = ", ".join(rem_dec) if rem_dec else "-"
+                    new_wo = ", ".join(rem_wo) if rem_wo else "-"
+                    rewrite_block_in_file(fp, tid, new_status="waiting", new_decider=new_dec, new_waiting_on=new_wo, clear_waiting_on=(not rem_wo))
+                else:
+                    all_blocking_qids = [q["id"] for q in questions if any(b_tid == tid for b_tid, _ in q.get("blocks_parsed", []))]
+                    restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, all_blocking_qids or [question_id])
+                    rewrite_block_in_file(fp, tid, new_status=restored_state, new_decider="-", clear_waiting_on=True)
+                    unblocked.append(tid)
+                    unblocked_states[tid] = restored_state
+            else:
+                new_dec = ", ".join(rem_dec) if rem_dec else "-"
+                new_wo = ", ".join(rem_wo) if rem_wo else "-"
+                rewrite_block_in_file(fp, tid, new_status=None, new_decider=new_dec, new_waiting_on=new_wo, clear_waiting_on=(not rem_wo))
+
+        elif tid in emergent_map or tid in tree:
+            t = emergent_map[tid] if tid in emergent_map else tree[tid].to_dict()
+            fp = pathlib.Path(t["file_path"])
+            if fp not in modified_files and fp.is_file():
+                modified_files[fp] = fp.read_text(encoding="utf-8")
+            if t.get("is_folder"):
+                pp = fp.parent / "PROGRESS.md"
+                if pp.is_file() and pp not in modified_files:
+                    modified_files[pp] = pp.read_text(encoding="utf-8")
+
+            curr_canon = t.get("canonical_state") or normalize_state(t.get("state", "open"))
+            curr_wo = t.get("waiting_on") or t.get("headers", {}).get("waiting-on") or t.get("headers", {}).get("waiting_on") or ""
+            if not curr_wo:
+                curr_wo = extract_waiting_on(t.get("state")) or ""
+            curr_dec = str(t.get("decider") or t.get("headers", {}).get("decider") or "").strip()
+
+            wo_entries = parse_waiting_on(str(curr_wo))
+            rem_wo = [e for e in wo_entries if e != q_entry and e != question_id]
+            dec_entries = [d.strip() for d in curr_dec.split(",") if d.strip() and d.strip() != "-"]
+            rem_dec = [d for d in dec_entries if d != question_id]
+            for q in rem_dec:
+                q_item = f"question:{q}"
+                if q_item not in rem_wo:
+                    rem_wo.append(q_item)
+
+            has_q_in_wo = any(e.startswith("question:") or re.match(r"^Q\d{3,}$", e) for e in rem_wo)
+            has_q_in_dec = bool(rem_dec)
+            has_question_remaining = has_q_in_wo or has_q_in_dec
+            has_other_waiting = any(not (e.startswith("question:") or re.match(r"^Q\d{3,}$", e)) for e in rem_wo)
+
+            if curr_canon == "waiting":
+                if has_question_remaining or has_other_waiting:
+                    new_dec = ", ".join(rem_dec) if rem_dec else "-"
+                    new_wo = ", ".join(rem_wo) if rem_wo else "-"
+                    _update_task_file_headers_and_state(fp, new_state="waiting", decider=new_dec, waiting_on=new_wo, clear_waiting_on=(not rem_wo))
+                else:
+                    all_blocking_qids = [q["id"] for q in questions if any(b_tid == tid for b_tid, _ in q.get("blocks_parsed", []))]
+                    restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, all_blocking_qids or [question_id])
+                    _update_task_file_headers_and_state(fp, new_state=restored_state, decider="-", clear_waiting_on=True)
+                    _append_progress_log(t, "waiting", restored_state, actor or "owner", verifier=None, reason=unblock_reason)
+                    unblocked.append(tid)
+                    unblocked_states[tid] = restored_state
+            else:
+                new_dec = ", ".join(rem_dec) if rem_dec else "-"
+                new_wo = ", ".join(rem_wo) if rem_wo else "-"
+                _update_task_file_headers_and_state(fp, new_state=None, decider=new_dec, waiting_on=new_wo, clear_waiting_on=(not rem_wo))
+
+    return unblocked, unblocked_states
+
+
 def answer_question(
     tasks_dir: pathlib.Path,
     question_id: str,
@@ -21212,14 +21455,19 @@ def answer_question(
             q_file = pathlib.Path(target_q["file_path"])
             modified_files: dict[pathlib.Path, str] = {q_file: q_file.read_text(encoding="utf-8")}
 
+            tree = discover_task_tree(tasks_dir)
             emergent = discover_emergent_tasks(tasks_dir)
             emergent_map = {t["id"]: t for t in emergent}
 
-            for tid, _ in target_q["blocks_parsed"]:
+            for tid, _ in target_q.get("blocks_parsed", []):
+                if tid in tree and tree[tid].block_text is not None:
+                    fp = pathlib.Path(tree[tid].file_path)
+                    if fp not in modified_files and fp.is_file():
+                        modified_files[fp] = fp.read_text(encoding="utf-8")
                 if tid in emergent_map:
                     t = emergent_map[tid]
                     tp = pathlib.Path(t["file_path"])
-                    if tp not in modified_files:
+                    if tp not in modified_files and tp.is_file():
                         modified_files[tp] = tp.read_text(encoding="utf-8")
                     if t["is_folder"]:
                         pp = tp.parent / "PROGRESS.md"
@@ -21255,39 +21503,16 @@ def answer_question(
                 q_status_map = {q["id"]: q["status"] for q in questions}
                 q_status_map[question_id] = "answered"
 
-                unblocked: list[str] = []
-                unblocked_states: dict[str, str] = {}
-                tree = discover_task_tree(tasks_dir)
-                for tid, _ in target_q["blocks_parsed"]:
-                    if tid in tree:
-                        t_node = tree[tid]
-                        if t_node.block_text is not None:
-                            restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, [question_id])
-                            rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state, new_decider="-")
-                            unblocked.append(tid)
-                            unblocked_states[tid] = restored_state
-                            continue
-                    if tid not in emergent_map:
-                        continue
-                    t = emergent_map[tid]
-                    tp = pathlib.Path(t["file_path"])
-                    t_dec = t.get("decider", "").strip()
-                    linked_qids = [qid.strip() for qid in t_dec.split(",") if qid.strip()]
-
-                    all_resolved = all(q_status_map.get(qid) in ("answered", "withdrawn", "moved") for qid in linked_qids)
-                    if all_resolved:
-                        restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, linked_qids)
-                        _update_task_file_headers_and_state(tp, restored_state, decider="-")
-                        _append_progress_log(
-                            t,
-                            "waiting",
-                            restored_state,
-                            by or "owner",
-                            verifier=None,
-                            reason=f"Unblocked: question {question_id} answered",
-                        )
-                        unblocked.append(tid)
-                        unblocked_states[tid] = restored_state
+                unblocked, unblocked_states = _resolve_question_on_blocked_tasks(
+                    tasks_dir=tasks_dir,
+                    target_q=target_q,
+                    unblock_reason=f"Unblocked: question {question_id} answered",
+                    actor=by or "owner",
+                    questions=questions,
+                    emergent_map=emergent_map,
+                    tree=tree,
+                    modified_files=modified_files,
+                )
 
                 _emit_event(
                     tasks_dir,
@@ -21465,14 +21690,19 @@ def withdraw_question(
             q_file = pathlib.Path(target_q["file_path"])
             modified_files: dict[pathlib.Path, str] = {q_file: q_file.read_text(encoding="utf-8")}
 
+            tree = discover_task_tree(tasks_dir)
             emergent = discover_emergent_tasks(tasks_dir)
             emergent_map = {t["id"]: t for t in emergent}
 
-            for tid, _ in target_q["blocks_parsed"]:
+            for tid, _ in target_q.get("blocks_parsed", []):
+                if tid in tree and tree[tid].block_text is not None:
+                    fp = pathlib.Path(tree[tid].file_path)
+                    if fp not in modified_files and fp.is_file():
+                        modified_files[fp] = fp.read_text(encoding="utf-8")
                 if tid in emergent_map:
                     t = emergent_map[tid]
                     tp = pathlib.Path(t["file_path"])
-                    if tp not in modified_files:
+                    if tp not in modified_files and tp.is_file():
                         modified_files[tp] = tp.read_text(encoding="utf-8")
                     if t["is_folder"]:
                         pp = tp.parent / "PROGRESS.md"
@@ -21485,39 +21715,16 @@ def withdraw_question(
                 q_status_map = {q["id"]: q["status"] for q in questions}
                 q_status_map[question_id] = "withdrawn"
 
-                unblocked: list[str] = []
-                unblocked_states: dict[str, str] = {}
-                tree = discover_task_tree(tasks_dir)
-                for tid, _ in target_q["blocks_parsed"]:
-                    if tid in tree:
-                        t_node = tree[tid]
-                        if t_node.block_text is not None:
-                            restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, [question_id])
-                            rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state, new_decider="-")
-                            unblocked.append(tid)
-                            unblocked_states[tid] = restored_state
-                            continue
-                    if tid not in emergent_map:
-                        continue
-                    t = emergent_map[tid]
-                    tp = pathlib.Path(t["file_path"])
-                    t_dec = t.get("decider", "").strip()
-                    linked_qids = [qid.strip() for qid in t_dec.split(",") if qid.strip()]
-
-                    all_resolved = all(q_status_map.get(qid) in ("answered", "withdrawn", "moved") for qid in linked_qids)
-                    if all_resolved:
-                        restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, linked_qids)
-                        _update_task_file_headers_and_state(tp, restored_state, decider="-")
-                        _append_progress_log(
-                            t,
-                            "waiting",
-                            restored_state,
-                            by or "owner",
-                            verifier=None,
-                            reason=f"Unblocked: question {question_id} withdrawn: {reason.strip()}",
-                        )
-                        unblocked.append(tid)
-                        unblocked_states[tid] = restored_state
+                unblocked, unblocked_states = _resolve_question_on_blocked_tasks(
+                    tasks_dir=tasks_dir,
+                    target_q=target_q,
+                    unblock_reason=f"Unblocked: question {question_id} withdrawn: {reason.strip()}",
+                    actor=by or "owner",
+                    questions=questions,
+                    emergent_map=emergent_map,
+                    tree=tree,
+                    modified_files=modified_files,
+                )
 
                 _emit_event(
                     tasks_dir,
@@ -21809,15 +22016,20 @@ def move_question(
             modified_files: dict[pathlib.Path, str] = {q_file: q_file.read_text(encoding="utf-8")}
             created_files: list[pathlib.Path] = []
 
+            tree = discover_task_tree(tasks_dir)
             emergent = discover_emergent_tasks(tasks_dir)
             emergent_map = {t["id"]: t for t in emergent}
 
             # Backup affected task files for rollback
-            for tid, _ in target_q["blocks_parsed"]:
+            for tid, _ in target_q.get("blocks_parsed", []):
+                if tid in tree and tree[tid].block_text is not None:
+                    fp = pathlib.Path(tree[tid].file_path)
+                    if fp not in modified_files and fp.is_file():
+                        modified_files[fp] = fp.read_text(encoding="utf-8")
                 if tid in emergent_map:
                     t = emergent_map[tid]
                     tp = pathlib.Path(t["file_path"])
-                    if tp not in modified_files:
+                    if tp not in modified_files and tp.is_file():
                         modified_files[tp] = tp.read_text(encoding="utf-8")
                     if t["is_folder"]:
                         pp = tp.parent / "PROGRESS.md"
@@ -21864,40 +22076,16 @@ def move_question(
                 q_status_map = {q["id"]: q["status"] for q in questions}
                 q_status_map[question_id] = "moved"
 
-                unblocked: list[str] = []
-                unblocked_states: dict[str, str] = {}
-                tree = discover_task_tree(tasks_dir)
-
-                for tid, _ in target_q["blocks_parsed"]:
-                    if tid in tree:
-                        t_node = tree[tid]
-                        if t_node.block_text is not None:
-                            restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, [question_id])
-                            rewrite_block_in_file(pathlib.Path(t_node.file_path), tid, new_status=restored_state, new_decider="-")
-                            unblocked.append(tid)
-                            unblocked_states[tid] = restored_state
-                            continue
-                    if tid not in emergent_map:
-                        continue
-                    t = emergent_map[tid]
-                    tp = pathlib.Path(t["file_path"])
-                    t_dec = t.get("decider", "").strip()
-                    linked_qids = [qid.strip() for qid in t_dec.split(",") if qid.strip()]
-
-                    all_resolved = all(q_status_map.get(qid) in ("answered", "withdrawn", "moved") for qid in linked_qids)
-                    if all_resolved:
-                        restored_state = _find_earliest_prior_state_for_task(tasks_dir, tid, linked_qids)
-                        _update_task_file_headers_and_state(tp, restored_state, decider="-")
-                        _append_progress_log(
-                            t,
-                            "waiting",
-                            restored_state,
-                            by or "owner",
-                            verifier=None,
-                            reason=f"Unblocked: question {question_id} moved to tracker ({to.strip()})",
-                        )
-                        unblocked.append(tid)
-                        unblocked_states[tid] = restored_state
+                unblocked, unblocked_states = _resolve_question_on_blocked_tasks(
+                    tasks_dir=tasks_dir,
+                    target_q=target_q,
+                    unblock_reason=f"Unblocked: question {question_id} moved to tracker ({to.strip()})",
+                    actor=by or "owner",
+                    questions=questions,
+                    emergent_map=emergent_map,
+                    tree=tree,
+                    modified_files=modified_files,
+                )
 
                 # Clear question_id from conditions of tasks
                 for et_item in emergent:
