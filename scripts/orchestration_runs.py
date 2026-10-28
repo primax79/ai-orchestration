@@ -6543,6 +6543,12 @@ def cmd_accept_triage(args: argparse.Namespace) -> int:
         selected_tasks = [proposed_tasks[i] for i in selected_indices]
 
         created_task_ids: list[str] = []
+        note_kind_raw = str((note or {}).get("kind") or "").strip().lower()
+        note_default_kind = (
+            "fix"
+            if note_kind_raw == "bug"
+            else ("feature" if note_kind_raw in ("feature", "request") else ("investigation" if note_kind_raw in ("idea", "question") else "chore"))
+        )
         for t_spec in selected_tasks:
             title = t_spec.get("title", "").strip()
             category = t_spec.get("category", "").strip()
@@ -6553,6 +6559,14 @@ def cmd_accept_triage(args: argparse.Namespace) -> int:
             depends_on = (t_spec.get("depends-on") or t_spec.get("depends_on") or "-").strip()
             decider = (t_spec.get("decider") or "-").strip()
             paths = (t_spec.get("paths") or "-").strip()
+            raw_spec_kind = t_spec.get("kind")
+            eff_spec_kind = (
+                str(raw_spec_kind).strip().lower()
+                if (raw_spec_kind and str(raw_spec_kind).strip() and str(raw_spec_kind).strip() != "-")
+                else note_default_kind
+            )
+            if eff_spec_kind not in VALID_KINDS:
+                eff_spec_kind = note_default_kind
 
             ok_task, res_task = tasks_new_from_note(
                 tasks_dir=tasks_dir,
@@ -6566,6 +6580,7 @@ def cmd_accept_triage(args: argparse.Namespace) -> int:
                 decider=decider,
                 goal=goal,
                 paths=paths if paths != "-" else None,
+                kind=eff_spec_kind,
             )
             if not ok_task:
                 print_error(
@@ -6580,7 +6595,7 @@ def cmd_accept_triage(args: argparse.Namespace) -> int:
 
             steps = t_spec.get("steps")
             verification = t_spec.get("verification")
-            kind = t_spec.get("kind")
+            kind = eff_spec_kind
             labels = t_spec.get("labels")
             if steps or verification or kind or labels:
                 task_file = pathlib.Path(res_task["file_path"])

@@ -235,8 +235,13 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "Preview next available emergent task ID (highest_id, next_id) across active, micro, and done tasks.",
                 },
                 "new": {
-                    "usage": "ai-orch tasks new --from-note <id> [--category <cat>] --title <title> [--step <step>...] [--verification <check>...] [--short <words>] [--parent <id>] [--priority <P0-P3>] [--priority-reason <reason>] [--tasks-dir <dir>] [--json]",
-                    "description": "Create a new emergent task from an inbox note under the task-write lock.",
+                    "usage": (
+                        "ai-orch tasks new [--from-note <id>] [--use-case <UC###[,UC###]>] [--from-use-case <UC###> [--steps <range>]] "
+                        "[--kind <feature|fix|chore|docs|investigation>] [--category <cat>] [--title <title>] [--goal <text>] "
+                        "[--step <step>...] [--verification <check>...] [--short <words>] [--parent <id>] [--priority <P0-P3>] "
+                        "[--priority-reason <reason>] [--tasks-dir <dir>] [--json]"
+                    ),
+                    "description": "Create a new emergent or child task from a use case, an inbox note, or standalone under the task-write lock.",
                 },
                 "step": {
                     "usage": "ai-orch tasks step <list|add|check|uncheck> <task_id> [args...] [--tasks-dir <dir>] [--json]",
@@ -255,8 +260,13 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "Move an emergent task from the workspace tree into a project tree.",
                 },
                 "child": {
-                    "usage": "ai-orch tasks child add <parent> --title <title> [--short <words>] [--kind <kind>] [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
-                    "description": "Add a child task under a container or convert an open leaf to a container.",
+                    "usage": (
+                        "ai-orch tasks child add <parent> [--title <title>] [--short <words>] "
+                        "[--kind <feature|fix|chore|docs|investigation>] [--use-case <UC###[,UC###]>] "
+                        "[--from-use-case <UC###> [--steps <range>]] [--goal <text>] [--verification <check>...] "
+                        "[--depends-on <ids>] [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]"
+                    ),
+                    "description": "Add a child task under a container or convert an open leaf to a container (optionally prefilled from a use case).",
                 },
                 "expand": {
                     "usage": "ai-orch tasks expand <id> [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",

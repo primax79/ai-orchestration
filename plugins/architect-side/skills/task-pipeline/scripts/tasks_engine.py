@@ -4248,21 +4248,289 @@ def compute_operation_plan(operations: list[dict[str, Any]]) -> tuple[list[dict[
     return plan_sorted, plan_hash
 
 
+def _extract_use_case_scenario_steps(scenario_text: str) -> list[tuple[int, str]]:
+    """Extract numbered or bulleted scenario steps from a use case's `## Scenario / Interaction Steps` section."""
+    if not scenario_text or not scenario_text.strip():
+        return []
+    lines = scenario_text.splitlines()
+    steps: list[tuple[int, str]] = []
+    cur_num: int | None = None
+    cur_lines: list[str] = []
+
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            continue
+        m_num = re.match(r"^(\d+)[\.\)]\s+(.+)$", s)
+        if m_num:
+            if cur_num is not None and cur_lines:
+                steps.append((cur_num, " ".join(cur_lines)))
+            cur_num = int(m_num.group(1))
+            cur_lines = [f"{cur_num}. {m_num.group(2).strip()}"]
+            continue
+        m_bul = re.match(r"^[-*]\s+(.+)$", s)
+        if m_bul and cur_num is None:
+            idx = len(steps) + 1
+            steps.append((idx, f"{idx}. {m_bul.group(1).strip()}"))
+            continue
+        if cur_num is not None:
+            cur_lines.append(s)
+        else:
+            idx = len(steps) + 1
+            steps.append((idx, s))
+
+    if cur_num is not None and cur_lines:
+        steps.append((cur_num, " ".join(cur_lines)))
+    return steps
+
+
+def _parse_steps_range_spec(steps_range: str, available_steps: list[tuple[int, str]]) -> tuple[bool, list[str], str]:
+    """Select scenario steps according to `--steps` range (e.g. '2-3', '2', '1,3-4')."""
+    raw = (steps_range or "").strip()
+    if not raw:
+        return True, [txt for _, txt in available_steps], ""
+    if not available_steps:
+        return False, [], f"Cannot filter --steps '{raw}': use case has no scenario steps."
+
+    step_by_num = {num: txt for num, txt in available_steps}
+    step_by_pos = {i + 1: txt for i, (_, txt) in enumerate(available_steps)}
+    max_step = max(max(step_by_num.keys(), default=0), len(available_steps))
+
+    selected_nums: list[int] = []
+    for part in raw.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        m_rng = re.match(r"^(\d+)\s*-\s*(\d+)$", p)
+        if m_rng:
+            start_n = int(m_rng.group(1))
+            end_n = int(m_rng.group(2))
+            if start_n < 1 or end_n < start_n:
+                return False, [], f"Invalid --steps range '{raw}' (expected start <= end, >= 1)."
+            for n in range(start_n, end_n + 1):
+                if n not in step_by_num and n not in step_by_pos:
+                    return False, [], f"Step {n} in --steps '{raw}' is out of range (use case has {max_step} step(s))."
+                if n not in selected_nums:
+                    selected_nums.append(n)
+        elif re.match(r"^\d+$", p):
+            n = int(p)
+            if n < 1 or (n not in step_by_num and n not in step_by_pos):
+                return False, [], f"Step {n} in --steps '{raw}' is out of range (use case has {max_step} step(s))."
+            if n not in selected_nums:
+                selected_nums.append(n)
+        else:
+            return False, [], f"Invalid --steps range '{raw}' (expected format like '2-3' or '1,3')."
+
+    if not selected_nums:
+        return False, [], f"Invalid --steps range '{raw}'."
+
+    chosen: list[str] = []
+    for n in selected_nums:
+        chosen.append(step_by_num.get(n) or step_by_pos[n])
+    return True, chosen, ""
+
+
+def _resolve_and_prefill_from_use_cases(
+    tasks_dir: pathlib.Path,
+    use_cases_arg: list[str] | str | None = None,
+    from_use_case: str | None = None,
+    steps_range: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """Validate `--use-case` / `--from-use-case` against `tasks/use-cases/` (refusing unknown or deprecated)
+    and compute prefilled title, goal, verifications, steps, and merged use_cases list.
+    """
+    req_ucs = parse_use_cases_field(use_cases_arg)
+    from_uc = (from_use_case or "").strip()
+    if from_uc:
+        from_uc_list = parse_use_cases_field(from_uc)
+        if len(from_uc_list) != 1:
+            return False, {"ok": False, "error": f"--from-use-case expects a single use case ID, got {from_use_case!r}."}
+        from_uc = from_uc_list[0]
+        if from_uc not in req_ucs:
+            req_ucs = [from_uc] + req_ucs
+
+    if steps_range and str(steps_range).strip() and not from_uc:
+        return False, {"ok": False, "error": "--steps can only be used together with --from-use-case."}
+
+    if not req_ucs:
+        return True, {
+            "ok": True,
+            "use_cases": [],
+            "from_use_case": None,
+            "prefill_title": None,
+            "prefill_goal": None,
+            "prefill_steps": None,
+            "prefill_verifications": None,
+        }
+
+    all_ucs = discover_use_cases(tasks_dir)
+    ucs_by_id = {u["id"]: u for u in all_ucs if u.get("id")}
+
+    for ref in req_ucs:
+        if ref.startswith("workspace:"):
+            if ref == from_uc:
+                return False, {"ok": False, "error": f"--from-use-case requires a local use case in {tasks_dir / 'use-cases'}, got {ref!r}."}
+            continue
+        if not USE_CASE_ID_RE.match(ref) or ref not in ucs_by_id:
+            return False, {"ok": False, "error": f"Unknown use case '{ref}'."}
+        uc_obj = ucs_by_id[ref]
+        if uc_obj.get("status") == "deprecated" or uc_obj.get("approval") == "deprecated":
+            return False, {"ok": False, "error": f"Use case '{ref}' is deprecated and cannot be linked to a new task."}
+
+    prefill_title: str | None = None
+    prefill_goal: str | None = None
+    prefill_steps: list[str] | None = None
+    prefill_verifs: list[str] | None = None
+
+    if from_uc:
+        uc_obj = ucs_by_id[from_uc]
+        prefill_title = (uc_obj.get("title") or "").strip() or None
+        raw_scenario = (uc_obj.get("scenario") or "").strip()
+        parsed_steps = _extract_use_case_scenario_steps(raw_scenario)
+        if steps_range and str(steps_range).strip():
+            ok_rng, chosen_steps, err_rng = _parse_steps_range_spec(str(steps_range).strip(), parsed_steps)
+            if not ok_rng:
+                return False, {"ok": False, "error": err_rng}
+            prefill_goal = "\n".join(chosen_steps)
+            prefill_steps = [re.sub(r"^\d+[\.\)]\s+", "", s).strip() for s in chosen_steps]
+        else:
+            if parsed_steps:
+                prefill_goal = "\n".join(txt for _, txt in parsed_steps)
+                prefill_steps = [re.sub(r"^\d+[\.\)]\s+", "", txt).strip() for _, txt in parsed_steps]
+            elif raw_scenario:
+                prefill_goal = raw_scenario
+            else:
+                prefill_goal = (uc_obj.get("description") or prefill_title or f"Implement {from_uc}.").strip()
+
+        verif_items: list[str] = []
+        raw_criteria = (uc_obj.get("acceptance_criteria") or "").strip()
+        if raw_criteria:
+            for ln in raw_criteria.splitlines():
+                s = ln.strip()
+                if not s:
+                    continue
+                s_clean = re.sub(r"^[-*]\s+(?:\[[ xX]\]\s+)?", "", s).strip()
+                if s_clean:
+                    verif_items.append(s_clean)
+        raw_cmd = (uc_obj.get("verification_command") or "").strip()
+        if raw_cmd and raw_cmd != "-":
+            verif_items.append(f"Automated verification command: `{raw_cmd}`")
+        if verif_items:
+            prefill_verifs = verif_items
+
+    return True, {
+        "ok": True,
+        "use_cases": req_ucs,
+        "from_use_case": from_uc or None,
+        "prefill_title": prefill_title,
+        "prefill_goal": prefill_goal,
+        "prefill_steps": prefill_steps,
+        "prefill_verifications": prefill_verifs,
+    }
+
+
+def _build_initiative_task_block(
+    new_id: str,
+    title: str,
+    *,
+    short_val: str | None = None,
+    kind: str | None = None,
+    depends_on: str | None = None,
+    use_cases: list[str] | None = None,
+    goal: str | None = None,
+    verifications: list[str] | None = None,
+    include_short: bool = True,
+) -> str:
+    """Format a canonical `### NN.T - <title>` initiative block respecting Spec 17 §1-2 segment order."""
+    segments: list[str] = ["**Status:** `open`"]
+    if include_short and short_val:
+        segments.append(f"**Short:** {short_val}")
+    if kind and kind.strip() and kind.strip() != "-":
+        segments.append(f"**Kind:** {kind.strip()}")
+    if use_cases:
+        deps_str = (depends_on or "-").strip() or "-"
+        segments.append(f"**Depends on:** {deps_str}")
+        segments.append(f"**Use cases:** {', '.join(use_cases)}")
+    elif depends_on and depends_on.strip() and depends_on.strip() != "-":
+        segments.append(f"**Depends on:** {depends_on.strip()}")
+
+    status_line = "- " + " · ".join(segments)
+    goal_text = (goal or title).strip()
+    if "\n" in goal_text:
+        goal_lines = [ln.strip() for ln in goal_text.splitlines() if ln.strip()]
+        goal_bullet = "- **Goal:** " + "; ".join(goal_lines)
+    else:
+        goal_bullet = f"- **Goal:** {goal_text}"
+
+    lines = [
+        f"\n### {new_id} - {title}",
+        "",
+        status_line,
+        goal_bullet,
+    ]
+    if verifications:
+        ver_clean = [re.sub(r"^[-*]\s+", "", v.strip()) for v in verifications if v and v.strip()]
+        if ver_clean:
+            lines.append("- **Verification:** " + "; ".join(ver_clean))
+    return "\n".join(lines) + "\n"
+
+
 def child_add(
     tasks_dir: pathlib.Path,
     parent_id: str,
-    title: str,
-    kind: str = "feature",
+    title: str | None = None,
+    kind: str | None = "feature",
     dry_run: bool = False,
     expect_plan_hash: str | None = None,
     short: str | None = None,
+    use_cases: list[str] | str | None = None,
+    from_use_case: str | None = None,
+    steps_range: str | None = None,
+    goal: str | None = None,
+    verifications: list[str] | None = None,
+    depends_on: str | None = None,
+    warn_missing_kind: bool = False,
 ) -> dict[str, Any]:
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    ok_uc, uc_info = _resolve_and_prefill_from_use_cases(
+        tasks_dir,
+        use_cases_arg=use_cases,
+        from_use_case=from_use_case,
+        steps_range=steps_range,
+    )
+    if not ok_uc:
+        return {"ok": False, "error": uc_info.get("error", "Invalid use case reference.")}
+
+    resolved_ucs: list[str] = uc_info["use_cases"]
+    eff_title = (title or "").strip() or (uc_info.get("prefill_title") or "")
+    if not eff_title:
+        return {"ok": False, "error": "Missing required --title (or --from-use-case)."}
+
+    eff_goal = (goal or "").strip() or (uc_info.get("prefill_goal") or eff_title)
+    eff_verifs = verifications if verifications else uc_info.get("prefill_verifications")
+
+    warnings_list: list[str] = []
+    if kind is not None and str(kind).strip() and str(kind).strip() != "-":
+        eff_kind: str | None = str(kind).strip().lower()
+        if eff_kind not in VALID_KINDS:
+            return {"ok": False, "error": f"Invalid kind '{kind}' (expected one of {', '.join(sorted(VALID_KINDS))})."}
+    elif resolved_ucs:
+        eff_kind = "feature"
+    else:
+        eff_kind = None
+        if warn_missing_kind:
+            w_msg = "Warning: --kind not specified; creating task without kind (pass --kind feature|fix|chore|docs|investigation)."
+            warnings_list.append(w_msg)
+            print(w_msg, file=sys.stderr)
+
     if short and short.strip() and short.strip() != "-":
         issues = validate_short_title(short.strip())
         if issues:
             return {"ok": False, "error": f"Invalid short title {short!r}: {'; '.join(issues)}."}
 
-    short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(title.strip())
+    short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(eff_title)
+    title = eff_title
+    kind = eff_kind or ""
 
     with task_write_lock(tasks_dir):
         tree = discover_task_tree(tasks_dir)
@@ -4336,6 +4604,17 @@ def child_add(
                 new_parent_text = old_text.replace(parent.block_text, expanded_block, 1)
                 _atomic_write_text(parent_file, new_parent_text)
 
+                child_block_inline = _build_initiative_task_block(
+                    new_id,
+                    title,
+                    short_val=short_val,
+                    kind=kind,
+                    depends_on=depends_on,
+                    use_cases=resolved_ucs,
+                    goal=eff_goal,
+                    verifications=eff_verifs,
+                    include_short=True,
+                )
                 readme_lines = [
                     f"# {parent_id} - {parent.title}",
                     "",
@@ -4343,15 +4622,10 @@ def child_add(
                 if body_content:
                     readme_lines.append(body_content)
                     readme_lines.append("")
-                    readme_lines.extend([
-                        "## Subtasks",
-                        "",
-                        f"### {new_id} - {title}",
-                        "",
-                        f"- **Status:** `open` · **Short:** {short_val} · **Kind:** {kind}",
-                        f"- **Goal:** {title}",
-                        "",
-                    ])
+                readme_lines.append("## Subtasks")
+                readme_lines.append("")
+                readme_lines.extend(child_block_inline.lstrip("\n").splitlines())
+                readme_lines.append("")
                 new_folder.mkdir(parents=True, exist_ok=True)
                 _atomic_write_text(new_readme, "\n".join(readme_lines))
 
@@ -4369,12 +4643,17 @@ def child_add(
                     subject=new_id,
                     actor="owner",
                 )
-                return {
+                res_out: dict[str, Any] = {
                     "ok": True,
                     "allocated_id": new_id,
                     "plan_hash": plan_hash,
                     "folder": str(new_folder),
                 }
+                if resolved_ucs:
+                    res_out["use_cases"] = resolved_ucs
+                if eff_kind:
+                    res_out["kind"] = eff_kind
+                return res_out
             else:
                 parent_dir = parent_file.parent
                 if not parent.is_folder:
@@ -4414,10 +4693,16 @@ def child_add(
                         }
 
                     old_text = parent_file.read_text(encoding="utf-8")
-                    child_block = (
-                        f"\n### {new_id} - {title}\n\n"
-                        f"- **Status:** `open` · **Short:** {short_val} · **Kind:** {kind}\n"
-                        f"- **Goal:** {title}\n"
+                    child_block = _build_initiative_task_block(
+                        new_id,
+                        title,
+                        short_val=short_val,
+                        kind=kind,
+                        depends_on=depends_on,
+                        use_cases=resolved_ucs,
+                        goal=eff_goal,
+                        verifications=eff_verifs,
+                        include_short=True,
                     )
                     new_readme_text = old_text.rstrip() + f"\n\n## Subtasks\n{child_block}"
                     new_folder.mkdir(parents=True, exist_ok=True)
@@ -4437,12 +4722,17 @@ def child_add(
                         subject=new_id,
                         actor="owner",
                     )
-                    return {
+                    res_out2: dict[str, Any] = {
                         "ok": True,
                         "allocated_id": new_id,
                         "plan_hash": plan_hash,
                         "folder": str(new_folder),
                     }
+                    if resolved_ucs:
+                        res_out2["use_cases"] = resolved_ucs
+                    if eff_kind:
+                        res_out2["kind"] = eff_kind
+                    return res_out2
                 else:
                     # Folder leaf
                     operations.append({
@@ -4473,10 +4763,16 @@ def child_add(
                         }
 
                     old_text = parent_file.read_text(encoding="utf-8")
-                    child_block = (
-                        f"\n### {new_id} - {title}\n\n"
-                        f"- **Status:** `open` · **Short:** {short_val} · **Kind:** {kind}\n"
-                        f"- **Goal:** {title}\n"
+                    child_block = _build_initiative_task_block(
+                        new_id,
+                        title,
+                        short_val=short_val,
+                        kind=kind,
+                        depends_on=depends_on,
+                        use_cases=resolved_ucs,
+                        goal=eff_goal,
+                        verifications=eff_verifs,
+                        include_short=True,
                     )
                     if re.search(r"^##\s+Subtasks\b", old_text, re.MULTILINE):
                         closed_m = re.search(r"^##\s+Closed\b", old_text, re.MULTILINE)
@@ -4505,11 +4801,16 @@ def child_add(
                         subject=new_id,
                         actor="owner",
                     )
-                    return {
+                    res_out3: dict[str, Any] = {
                         "ok": True,
                         "allocated_id": new_id,
                         "plan_hash": plan_hash,
                     }
+                    if resolved_ucs:
+                        res_out3["use_cases"] = resolved_ucs
+                    if eff_kind:
+                        res_out3["kind"] = eff_kind
+                    return res_out3
 
         else:
             parent_file = pathlib.Path(parent.file_path)
@@ -4541,10 +4842,16 @@ def child_add(
                     "plan_hash": plan_hash,
                 }
 
-            child_block = (
-                f"\n### {new_id} - {title}\n\n"
-                f"- **Status:** `open` · **Kind:** {kind}\n"
-                f"- **Goal:** {title}\n"
+            child_block = _build_initiative_task_block(
+                new_id,
+                title,
+                short_val=short_val if short else None,
+                kind=kind,
+                depends_on=depends_on,
+                use_cases=resolved_ucs,
+                goal=eff_goal,
+                verifications=eff_verifs,
+                include_short=bool(short and short.strip() and short.strip() != "-"),
             )
             old_text = parent_file.read_text(encoding="utf-8")
             if parent_file.name == "README.md" and not re.search(r"^##\s+Subtasks\b", old_text, re.MULTILINE):
@@ -4575,11 +4882,16 @@ def child_add(
                 subject=new_id,
                 actor="owner",
             )
-            return {
+            res_out4: dict[str, Any] = {
                 "ok": True,
                 "allocated_id": new_id,
                 "plan_hash": plan_hash,
             }
+            if resolved_ucs:
+                res_out4["use_cases"] = resolved_ucs
+            if eff_kind:
+                res_out4["kind"] = eff_kind
+            return res_out4
 
 
 def expand_node(
@@ -11624,8 +11936,14 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 f"{uc_rel}: use case {ucid} written linked-tasks [{written_fmt}] ({written_lt}) "
                 f"differs from derived [{derived_fmt}] ({derived_lt})."
             )
+        if uc.get("approval") == "approved":
+            active_linked = [t for t in derived_lt if not uc_link_projection.is_dropped(t)]
+            if not active_linked and not written_lt:
+                warnings.append(
+                    f"{uc_rel}: approved use case {ucid} has no linked task."
+                )
 
-    # Warn if a task references an unknown or deprecated use case
+    # Warn if a task references an unknown or deprecated use case, or if a feature/fix task has no use cases
     for nid, node in tree.items():
         node_ucs = list(node.use_cases) if node.use_cases else parse_use_cases_field(
             (node.own_fields or {}).get("use-cases") or (node.own_fields or {}).get("use_cases")
@@ -11641,6 +11959,19 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                     warnings.append(
                         f"{node.rel_path}: task {nid} references deprecated use case {ref!r} (status: deprecated)."
                     )
+        if (
+            node.is_leaf
+            and not node.in_done
+            and not node.in_closed_section
+            and node.canonical_state not in ("done", "done with a caveat", "dropped", "moved")
+            and node.node_type != "microtask"
+            and node.category != "micro"
+        ):
+            raw_kind = str(node.kind or (node.own_fields or {}).get("kind") or "").strip().lower()
+            if raw_kind in ("feature", "fix", "bug") and not node_ucs:
+                warnings.append(
+                    f"{node.rel_path}: {raw_kind} task {nid} has no linked use cases (link with 'ai-orch tasks link {nid} UC###')."
+                )
 
     # Placement warnings (Requirement 3)
     is_ws, ws_projects = is_workspace_task_tree(tasks_dir)
@@ -16470,14 +16801,33 @@ def cmd_child_add(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     dry_run = getattr(args, "dry_run", False)
     expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    raw_kind = getattr(args, "kind", None)
+    use_cases = getattr(args, "use_cases", None)
+    from_use_case = getattr(args, "from_use_case", None)
+    steps_range = getattr(args, "steps_range", None)
+    if raw_kind is None and not use_cases and not from_use_case:
+        print(
+            "Warning: --kind not specified; defaulting child task kind to 'feature' (pass --kind feature|fix|chore|docs|investigation).",
+            file=sys.stderr,
+        )
+        eff_kind = "feature"
+    else:
+        eff_kind = raw_kind or "feature"
     res = child_add(
         tasks_dir=tasks_dir,
         parent_id=args.parent,
-        title=args.title,
-        kind=getattr(args, "kind", "feature"),
+        title=getattr(args, "title", None),
+        kind=eff_kind,
         dry_run=dry_run,
         expect_plan_hash=expect_plan_hash,
         short=getattr(args, "short", None),
+        use_cases=use_cases,
+        from_use_case=from_use_case,
+        steps_range=steps_range,
+        goal=getattr(args, "goal", None),
+        verifications=getattr(args, "verifications", None),
+        depends_on=getattr(args, "depends_on", None),
+        warn_missing_kind=False,
     )
     args._last_result = res
     if getattr(args, "json", False):
@@ -19976,6 +20326,8 @@ def answer_question(
                                 "title": n_node.title,
                                 "category": n_node.category,
                                 "rel_path": n_node.rel_path,
+                                "kind": n_node.kind or n_node.own_fields.get("kind"),
+                                "use_cases": list(n_node.use_cases) if n_node.use_cases else [],
                             })
 
                 follow_up_tasks: list[str] = []
@@ -19991,6 +20343,9 @@ def answer_question(
                         sources_val = f"{rt['id']}, {question_id}"
                         goal_val = f"Address changes to finished result of {rt['id']} after {question_id} was answered ({choice})."
                         pri_reason = f"Follow-up required because {question_id} answer changes result of {rt['id']}."
+                        rt_kind = (rt.get("kind") or (rt.get("headers") or {}).get("kind") or "").strip().lower()
+                        fu_kind = rt_kind if rt_kind in VALID_KINDS else "chore"
+                        rt_ucs = rt.get("use_cases") or parse_use_cases_field((rt.get("headers") or {}).get("use-cases"))
                         ok_fu, res_fu = tasks_new_from_note(
                             tasks_dir=tasks_dir,
                             from_note=None,
@@ -20000,6 +20355,8 @@ def answer_question(
                             priority_reason=pri_reason,
                             goal=goal_val,
                             sources=sources_val,
+                            kind=fu_kind,
+                            use_cases=rt_ucs if rt_ucs else None,
                         )
                         if ok_fu:
                             follow_up_tasks.append(res_fu["id"])
@@ -22615,7 +22972,7 @@ def tasks_new_from_note(
     tasks_dir: pathlib.Path,
     from_note: str | None,
     category: str | None,
-    title: str,
+    title: str | None = None,
     priority: str = "P2",
     priority_reason: str | None = None,
     executor: str = "kilo",
@@ -22629,9 +22986,14 @@ def tasks_new_from_note(
     short: str | None = None,
     steps: list[str] | None = None,
     verifications: list[str] | None = None,
+    kind: str | None = None,
+    use_cases: list[str] | str | None = None,
+    from_use_case: str | None = None,
+    steps_range: str | None = None,
+    warn_missing_kind: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
-    """Create an emergent task `T###`, from an inbox note (`from_note`) or standalone
-    (then `goal` and `priority_reason` are required), or as a child under `parent`."""
+    """Create an emergent task `T###`, from an inbox note (`from_note`), from a use case (`from_use_case`),
+    or standalone (then `goal` and `priority_reason` are required), or as a child under `parent`."""
     if not is_platform_supported():
         return False, {
             "ok": False,
@@ -22648,6 +23010,25 @@ def tasks_new_from_note(
     from_note = (from_note or "").strip()
     category = (category or "").strip()
     parent = (parent or "").strip() if parent else None
+
+    ok_uc, uc_info = _resolve_and_prefill_from_use_cases(
+        tasks_dir,
+        use_cases_arg=use_cases,
+        from_use_case=from_use_case,
+        steps_range=steps_range,
+    )
+    if not ok_uc:
+        return False, {"ok": False, "error": uc_info.get("error", "Invalid use case reference.")}
+
+    resolved_ucs: list[str] = uc_info["use_cases"]
+    from_uc_id: str | None = uc_info.get("from_use_case")
+
+    if kind is not None and str(kind).strip() and str(kind).strip() != "-":
+        explicit_kind: str | None = str(kind).strip().lower()
+        if explicit_kind not in VALID_KINDS:
+            return False, {"ok": False, "error": f"Invalid kind '{kind}' (expected one of {', '.join(sorted(VALID_KINDS))})."}
+    else:
+        explicit_kind = None
 
     if parent:
         with task_write_lock(tasks_dir):
@@ -22666,15 +23047,32 @@ def tasks_new_from_note(
                 if not note:
                     return False, {"ok": False, "error": f"Inbox note {from_note!r} not found."}
 
-            kind = note.get("kind", "feature") if note else "feature"
-            if kind not in VALID_KINDS:
-                kind = "feature"
-            t_title = title.strip() if title and title.strip() else (note.get("title") if note else "")
+            if explicit_kind is not None:
+                eff_child_kind: str | None = explicit_kind
+            elif resolved_ucs:
+                eff_child_kind = "feature"
+            elif note and note.get("kind") in VALID_KINDS:
+                eff_child_kind = note.get("kind")
+            else:
+                eff_child_kind = "feature"
+                if warn_missing_kind:
+                    print(
+                        "Warning: --kind not specified; defaulting child task kind to 'feature' (pass --kind feature|fix|chore|docs|investigation).",
+                        file=sys.stderr,
+                    )
+
+            t_title = (
+                title.strip()
+                if title and title.strip()
+                else ((uc_info.get("prefill_title") or "") if from_uc_id else (note.get("title") if note else ""))
+            )
             if not t_title:
                 return False, {"ok": False, "error": "Missing required --title."}
 
             if goal and goal.strip():
                 g_text = goal.strip()
+            elif from_uc_id and uc_info.get("prefill_goal"):
+                g_text = uc_info["prefill_goal"].strip()
             elif note:
                 body = note.get("body", "").strip()
                 paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
@@ -22682,11 +23080,23 @@ def tasks_new_from_note(
             else:
                 g_text = t_title
 
+            eff_child_verifs = verifications if verifications else uc_info.get("prefill_verifications")
+
             new_id = allocate_child_id(tree, parent, tasks_dir)
             parent_file = pathlib.Path(p_node.file_path)
             slug = slugify(p_node.title)
             short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(t_title)
-            child_block = f"\n### {new_id} - {t_title}\n\n- **Status:** `open` · **Short:** {short_val} · **Kind:** {kind}\n- **Goal:** {g_text}\n"
+            child_block = _build_initiative_task_block(
+                new_id,
+                t_title,
+                short_val=short_val,
+                kind=eff_child_kind,
+                depends_on=depends_on,
+                use_cases=resolved_ucs,
+                goal=g_text,
+                verifications=eff_child_verifs,
+                include_short=True,
+            )
 
             if p_node.is_leaf:
                 if p_node.block_text is not None:
@@ -22709,15 +23119,10 @@ def tasks_new_from_note(
                     if body_content:
                         readme_lines.append(body_content)
                         readme_lines.append("")
-                    readme_lines.extend([
-                        "## Subtasks",
-                        "",
-                        f"### {new_id} - {t_title}",
-                        "",
-                        f"- **Status:** `open` · **Short:** {short_val} · **Kind:** {kind}",
-                        f"- **Goal:** {g_text}",
-                        "",
-                    ])
+                    readme_lines.append("## Subtasks")
+                    readme_lines.append("")
+                    readme_lines.extend(child_block.lstrip("\n").splitlines())
+                    readme_lines.append("")
                     new_folder.mkdir(parents=True, exist_ok=True)
                     _atomic_write_text(new_readme, "\n".join(readme_lines))
                     target_file = new_readme
@@ -22766,29 +23171,71 @@ def tasks_new_from_note(
                 target_file = parent_file
 
             rel_path = target_file.relative_to(tasks_dir).as_posix()
-            return True, {
+            child_res: dict[str, Any] = {
                 "ok": True,
                 "id": new_id,
                 "parent": parent,
                 "file_path": str(target_file),
                 "rel_path": rel_path,
-                "sources": note["rel_path"] if note else (sources or "-"),
+                "sources": note["rel_path"] if note else (sources or (f"tasks/use-cases/{from_uc_id}" if from_uc_id else "-")),
                 "paths": paths or "-",
             }
-    if from_note and not category:
+            if eff_child_kind:
+                child_res["kind"] = eff_child_kind
+            if resolved_ucs:
+                child_res["use_cases"] = resolved_ucs
+            return True, child_res
+
+    note_for_hint = None
+    if from_note:
         note_for_hint = find_inbox_note(tasks_dir, from_note)
-        if note_for_hint:
+        if note_for_hint and not category:
             nk = note_for_hint.get("kind", "")
             if nk == "bug":
                 category = "bugfix"
             elif nk in ("feature", "request"):
                 category = "feature"
 
-    if not from_note:
+    if explicit_kind is not None:
+        eff_kind: str | None = explicit_kind
+    elif resolved_ucs:
+        eff_kind = "feature"
+    elif note_for_hint and note_for_hint.get("kind") in VALID_KINDS:
+        eff_kind = note_for_hint.get("kind")
+    else:
+        eff_kind = None
+        if warn_missing_kind:
+            print(
+                "Warning: --kind not specified; creating task without kind (pass --kind feature|fix|chore|docs|investigation).",
+                file=sys.stderr,
+            )
+
+    if not (title and title.strip()) and uc_info.get("prefill_title"):
+        title = uc_info["prefill_title"]
+
+    if not (goal and goal.strip()) and uc_info.get("prefill_goal"):
+        goal = uc_info["prefill_goal"]
+
+    if not steps and uc_info.get("prefill_steps"):
+        steps = uc_info["prefill_steps"]
+
+    if not verifications and uc_info.get("prefill_verifications"):
+        verifications = uc_info["prefill_verifications"]
+
+    if not (priority_reason and priority_reason.strip()) and from_uc_id:
+        priority_reason = f"Implements use case {from_uc_id}."
+
+    if not from_note and not from_uc_id:
         if not goal or not goal.strip():
             return False, {"ok": False, "error": "Without --from-note, --goal is required."}
         if not priority_reason or not priority_reason.strip():
             return False, {"ok": False, "error": "Without --from-note, --priority-reason is required."}
+    elif from_uc_id and not from_note:
+        if not goal or not goal.strip():
+            goal = title or f"Implement {from_uc_id}."
+        if not priority_reason or not priority_reason.strip():
+            priority_reason = f"Implements use case {from_uc_id}."
+
     if not category:
         return False, {"ok": False, "error": "Missing required --category."}
     if not title or not title.strip():
@@ -22895,7 +23342,14 @@ def tasks_new_from_note(
                     goal = paragraphs[0] if paragraphs else f"Goal derived from inbox note {from_note}."
             else:
                 p_reason = priority_reason.strip()
-                sources = (sources or "").strip() or "-"
+                if sources and sources.strip() and sources.strip() != "-":
+                    sources = sources.strip()
+                elif from_uc_id:
+                    all_ucs_for_src = {u["id"]: u for u in discover_use_cases(tasks_dir) if u.get("id")}
+                    uc_src_obj = all_ucs_for_src.get(from_uc_id)
+                    sources = uc_src_obj.get("rel_path", from_uc_id) if uc_src_obj else from_uc_id
+                else:
+                    sources = "-"
                 paths = (paths or "").strip() or "-"
             goal = _rewrite_attachment_references_to_local(goal.strip())
 
@@ -22931,6 +23385,14 @@ def tasks_new_from_note(
             else:
                 verifs_block = "- Command or check that proves completion"
 
+            opt_headers: list[str] = []
+            if eff_kind:
+                opt_headers.append(f"- kind: {eff_kind}")
+            if resolved_ucs:
+                opt_headers.append(f"- use-cases: {', '.join(resolved_ucs)}")
+            opt_headers.append(f"- short: {short_val}")
+            opt_headers_str = "\n".join(opt_headers)
+
             task_content = f"""# {t_id} {title.strip()}
 
 - id: {t_id}
@@ -22946,7 +23408,7 @@ def tasks_new_from_note(
 - sources: {sources}
 - paths: {paths}
 - handoff: {handoff}
-- short: {short_val}
+{opt_headers_str}
 
 ## Goal
 
@@ -22984,24 +23446,30 @@ def tasks_new_from_note(
                     pass
                 return False, {"ok": False, "error": f"Created task failed validation: {'; '.join(task_errors)}"}
 
+            ev_data: dict[str, Any] = {
+                "title": title,
+                "category": category,
+                "state": "open",
+                "from": None,
+                "to": "open",
+                "actor": executor or "owner",
+                "sources": sources,
+                "paths": paths,
+            }
+            if eff_kind:
+                ev_data["kind"] = eff_kind
+            if resolved_ucs:
+                ev_data["use_cases"] = resolved_ucs
+
             _emit_event(
                 tasks_dir,
                 "task.created",
-                {
-                    "title": title,
-                    "category": category,
-                    "state": "open",
-                    "from": None,
-                    "to": "open",
-                    "actor": executor or "owner",
-                    "sources": sources,
-                    "paths": paths,
-                },
+                ev_data,
                 subject=t_id,
                 actor=executor or "owner",
             )
 
-            return True, {
+            ret_res: dict[str, Any] = {
                 "ok": True,
                 "id": t_id,
                 "file_path": str(task_file_path),
@@ -23009,6 +23477,11 @@ def tasks_new_from_note(
                 "sources": sources,
                 "paths": paths,
             }
+            if eff_kind:
+                ret_res["kind"] = eff_kind
+            if resolved_ucs:
+                ret_res["use_cases"] = resolved_ucs
+            return True, ret_res
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
 
@@ -24799,9 +25272,9 @@ def cmd_tasks_new(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     ok, res = tasks_new_from_note(
         tasks_dir=tasks_dir,
-        from_note=args.from_note,
-        category=args.category,
-        title=args.title,
+        from_note=getattr(args, "from_note", None),
+        category=getattr(args, "category", None),
+        title=getattr(args, "title", None),
         priority=getattr(args, "priority", "P2"),
         priority_reason=getattr(args, "priority_reason", None),
         executor=getattr(args, "executor", "kilo"),
@@ -24815,6 +25288,11 @@ def cmd_tasks_new(args: argparse.Namespace) -> int:
         short=getattr(args, "short", None),
         steps=getattr(args, "steps", None),
         verifications=getattr(args, "verifications", None),
+        kind=getattr(args, "kind", None),
+        use_cases=getattr(args, "use_cases", None),
+        from_use_case=getattr(args, "from_use_case", None),
+        steps_range=getattr(args, "steps_range", None),
+        warn_missing_kind=True,
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -25532,14 +26010,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_move.set_defaults(func=cmd_tasks_move)
 
     # tasks new
-    p_new = sub.add_parser("new", help="Create a new task from an inbox note")
+    p_new = sub.add_parser("new", help="Create a new task from an inbox note, use case, or standalone")
     p_new.add_argument("--from-note", default=None, help="Source inbox note ID (e.g. N001) or filename; omit to create a standalone task")
+    p_new.add_argument("--use-case", "--use-cases", action="append", dest="use_cases", metavar="UC", default=None, help="Link task to one or more use cases at creation (e.g. UC001,UC004)")
+    p_new.add_argument("--from-use-case", dest="from_use_case", default=None, help="Pre-fill title, Goal, and Verification from a use case (e.g. UC001) and link it")
+    p_new.add_argument("--steps", dest="steps_range", default=None, help="Scenario step range to cover with --from-use-case (e.g. 2-3)")
+    p_new.add_argument("--kind", default=None, help="Task kind (feature, fix, chore, docs, investigation; defaults to feature when linked to a use case)")
     p_new.add_argument("--parent", default=None, help="Parent task/initiative ID to create task as a child")
-    p_new.add_argument("--goal", default=None, help="Goal paragraph (required without --from-note)")
+    p_new.add_argument("--goal", default=None, help="Goal paragraph (required without --from-note or --from-use-case)")
     p_new.add_argument("--sources", default=None, help="Sources header value (standalone tasks)")
     p_new.add_argument("--paths", default=None, help="Paths header value (standalone tasks)")
     p_new.add_argument("--category", default=None, help="Category folder name (defaults to kind hint if --from-note given)")
-    p_new.add_argument("--title", required=True, help="Task title")
+    p_new.add_argument("--title", default=None, help="Task title (defaults to use case title with --from-use-case)")
     p_new.add_argument("--priority", choices=sorted(PRIORITIES), default="P2", help="Priority (default P2)")
     p_new.add_argument("--priority-reason", default=None, help="Priority explanation")
     p_new.add_argument("--executor", default="kilo", help="Assigned executor")
@@ -25580,8 +26062,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_cadd = child_sub.add_parser("add", help="Add a child task under a parent")
     p_cadd.add_argument("parent", help="Parent ID (e.g. '07' or '07.4')")
-    p_cadd.add_argument("--title", required=True, help="Child task title")
-    p_cadd.add_argument("--kind", default="feature", help="Child task kind")
+    p_cadd.add_argument("--title", default=None, help="Child task title (defaults to use case title with --from-use-case)")
+    p_cadd.add_argument("--kind", default=None, help="Child task kind (feature, fix, chore, docs, investigation; default feature)")
+    p_cadd.add_argument("--use-case", "--use-cases", action="append", dest="use_cases", metavar="UC", default=None, help="Link child task to one or more use cases at creation (e.g. UC001,UC004)")
+    p_cadd.add_argument("--from-use-case", dest="from_use_case", default=None, help="Pre-fill title, Goal, and Verification from a use case (e.g. UC001) and link it")
+    p_cadd.add_argument("--steps", dest="steps_range", default=None, help="Scenario step range to cover with --from-use-case (e.g. 2-3)")
+    p_cadd.add_argument("--goal", default=None, help="Child task Goal override")
+    p_cadd.add_argument("--verification", action="append", dest="verifications", metavar="VERIFICATION", default=None, help="Child task Verification item (repeatable)")
+    p_cadd.add_argument("--depends-on", default=None, help="Child task dependencies")
     p_cadd.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
     p_cadd.add_argument("--dry-run", action="store_true", help="Compute plan without writing")
     p_cadd.add_argument("--expect-plan-hash", default=None, help="Expected plan hash")
