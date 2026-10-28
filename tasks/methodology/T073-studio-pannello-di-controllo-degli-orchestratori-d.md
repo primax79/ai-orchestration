@@ -9,11 +9,11 @@
 - state: waiting
 - executor: kilo
 - depends-on: -
-- decider: Q025, Q026, Q027, Q028, Q029, Q030, Q031
+- decider: Q026, Q028
 - sources: _inbox/analyzed/20261027-144545-in-depth-study-orchestrator-feedback-han/note.md
 - paths: N068; N069; specs ui-multi-project.md, orchestration-broker-mcp.md, orchestration-extension-spec.md, events-and-triggers.md; UC028, UC030, UC033, UC037
 - handoff: Read tasks/methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md, do the open steps, run the Verification, update the task and the registry.
-- waiting-on: question:Q031
+- waiting-on: question:Q026, question:Q028
 - short: Studio pannello orchestratori
 
 ## Goal
