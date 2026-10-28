@@ -15211,5 +15211,54 @@ def test_17_3_adopt_links_unknown_noncanonical_cross_workspace_refusal_and_skip_
     assert [u["task_id"] for u in manifest["unresolved_ids"]] == ["T999", "workspace:other/T002", "not-a-task-id", "01"]
 
 
+def test_orchestrator_missing_hint_on_mutating_commands(tmp_path: pathlib.Path) -> None:
+    """T071: task-modifying commands print a one-line hint when orchestrator role is missing."""
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    t_path = tasks_dir / "features" / "T001-sample.md"
+    _write_sample_task(t_path, task_id="T001", state="open")
+
+    # 1. Role missing -> hint appears on mutating command
+    res = run_cli("transition", "T001", "in progress", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "[hint]" in res.stderr
+    assert "Orchestrator role is missing in this workspace" in res.stderr
+    assert "sessions register --role orchestrator" in res.stderr
+
+    # Non-mutating command (e.g. list) does not print hint
+    res_list = run_cli("list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_list.returncode == 0
+    assert "[hint]" not in res_list.stderr
+
+    # 2. Registered orchestrator -> no hint
+    orch_dir = tmp_path / ".ai-orchestration"
+    orch_dir.mkdir(parents=True, exist_ok=True)
+    orch_file = orch_dir / "orchestrator.json"
+    orch_doc = {
+        "role_id": "orchestrator",
+        "generation": 1,
+        "status": "active",
+        "current": {
+            "role_id": "orchestrator",
+            "generation": 1,
+            "session_id": "test-session-123",
+            "status": "active",
+        },
+    }
+    orch_file.write_text(json.dumps(orch_doc, indent=2), encoding="utf-8")
+
+    res2 = run_cli("transition", "T001", "delivered", "--tasks-dir", str(tasks_dir), "--json")
+    assert res2.returncode == 0, res2.stdout + res2.stderr
+    assert "[hint]" not in res2.stderr
+    assert "sessions register --role orchestrator" not in res2.stderr
+
+    # 3. Without --json: mutating command when role missing prints hint to stderr
+    orch_file.unlink()
+    res3 = run_cli("transition", "T001", "verified", "--verifier", "owner", "--reason", "OK", "--tasks-dir", str(tasks_dir))
+    assert res3.returncode == 0, res3.stdout + res3.stderr
+    assert "[hint]" in res3.stderr
+    assert "sessions register --role orchestrator" in res3.stderr
+
+
 
 

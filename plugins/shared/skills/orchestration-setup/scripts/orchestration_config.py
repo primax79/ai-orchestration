@@ -1210,7 +1210,12 @@ def render_agents_md_block(
             "- **Capture emergent work immediately:** If a bug, follow-up, or side requirement "
             "surfaces mid-conversation and won't be finished in the current turn, record it in "
             "`tasks/` (`task-pipeline`) and update `tasks/00-INDEX.md` before continuing. "
-            "Keep the main session's context lean."
+            "Keep the main session's context lean.\n"
+            "- **Register as Orchestrator & Heartbeat:** When orchestrating in a workspace "
+            "with `ai-orch` installed, register this session with `ai-orch sessions register --role orchestrator` "
+            "and send periodic heartbeats (`ai-orch sessions heartbeat <session_id>`). Interactive sessions (e.g. Claude Code) "
+            "do not send automatic heartbeats: emit a heartbeat on each turn or periodic check. Note that a "
+            '"stale" status for an active interactive holder indicates idle time between prompts, not absence.'
         )
     else:
         main_role_phrase = (
@@ -1229,7 +1234,12 @@ def render_agents_md_block(
             "- **Capture emergent work immediately:** If a bug, follow-up, or side requirement "
             "surfaces mid-conversation and won't be finished in the current turn, record it in "
             "`tasks/` (`task-pipeline`) and update `tasks/00-INDEX.md` before continuing. "
-            "Keep the main session's context lean."
+            "Keep the main session's context lean.\n"
+            "- **Register as Orchestrator & Heartbeat:** When orchestrating in a workspace "
+            "with `ai-orch` installed, register this session with `ai-orch sessions register --role orchestrator` "
+            "and send periodic heartbeats (`ai-orch sessions heartbeat <session_id>`). Interactive sessions (e.g. Claude Code) "
+            "do not send automatic heartbeats: emit a heartbeat on each turn or periodic check. Note that a "
+            '"stale" status for an active interactive holder indicates idle time between prompts, not absence.'
         )
 
     if same_framework:

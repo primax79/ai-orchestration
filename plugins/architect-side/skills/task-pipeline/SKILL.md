@@ -460,6 +460,11 @@ about one project** is kept in that project, not in the workspace tree:
 - Only a category's owner session edits that category's task files and
   `README.md`. Other sessions add dated notes under "Shared notes", or create
   new `T###` tasks.
+- **Orchestrator registration & heartbeat:** When orchestrating with `ai-orch` installed,
+  register the session with `ai-orch sessions register --role orchestrator` and heartbeat
+  periodically (`ai-orch sessions heartbeat <session_id>`). Interactive sessions (e.g. Claude Code)
+  do not send heartbeats automatically: emit a heartbeat on each turn or periodic check;
+  a "stale" interactive holder reflects idle time, not absence.
 - Re-check facts with git before acting on a task file: other sessions edit the
   repository too.
 - **Validation round.** When the queue is built in bulk from documents (notes,

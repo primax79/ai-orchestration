@@ -17,6 +17,7 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
 - **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
 - **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+- **Orchestrator registration & heartbeat:** When orchestrating with `ai-orch` installed, register the session with `ai-orch sessions register --role orchestrator` and heartbeat periodically (`ai-orch sessions heartbeat <session_id>`). Interactive sessions (e.g. Claude Code) do not send heartbeats automatically: emit a heartbeat on each turn or periodic check; a "stale" interactive holder reflects idle time, not absence.
 - **Tooling feedback:** when `ai-orch` is installed, report friction, defects, or improvements at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."` (without `ai-orch`, drop a Markdown note in `tasks/_inbox/to-analyze/`). Do not work around tooling issues silently; maintainers triage notes into tasks.
 
 ## Project settings
@@ -56,6 +57,7 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
 - **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
 - **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+- **Orchestrator registration & heartbeat:** When orchestrating with `ai-orch` installed, register the session with `ai-orch sessions register --role orchestrator` and heartbeat periodically (`ai-orch sessions heartbeat <session_id>`). Interactive sessions (e.g. Claude Code) do not send heartbeats automatically: emit a heartbeat on each turn or periodic check; a "stale" interactive holder reflects idle time, not absence.
 - **Tooling feedback:** when `ai-orch` is installed, report friction, defects, or improvements at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."` (without `ai-orch`, drop a Markdown note in `tasks/_inbox/to-analyze/`). Do not work around tooling issues silently; maintainers triage notes into tasks.
 - **Effective project content languages:** Content language: tasks `it`, questions `it`, use cases `en`. Section headings and header field names are fixed English keywords: never translate them.
 <!-- ai-orch:managed end -->
