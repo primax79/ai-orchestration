@@ -17,7 +17,7 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.6 - Validazione solo sugli use case pronti
 
-- **Status:** `in progress` (2026-10-28; kilo ab052f9872b2) · **Short:** Validazione solo se pronti · **Size:** M · **Depends on:** 17.5, T069
+- **Status:** `delivered` (2026-10-28, kilo, commit `e538a28`: rifiuto exit 2 in `use-cases validate` se non pronto salvo `--force` registrato e con evento `use_case.validated`, campagne limitate agli use case pronti con sezione "Not ready (N/M)" ed esclusione di `untested` dal denominatore di prontezza) · **Short:** Validazione solo se pronti · **Size:** M · **Depends on:** 17.5, T069
 - **Goal:** spec §5: `use-cases validate` rifiuta se non pronto (salvo `--force` registrato); campagne solo sugli use case in ambito, gli altri "Not ready (N/M)"; sostituisce l'ambito di T069 tenendo la regola `untested`; il punteggio di prontezza esclude gli `untested` dal denominatore o li mostra a parte (osservazione di ai-coding-tools-ea nella validazione di T069: 75% = 24/32 con 7 untested).
 
 ### 17.7 - Regressione: rivalidazione e chiusura sicura dei task

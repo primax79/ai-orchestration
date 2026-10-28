@@ -9034,6 +9034,7 @@ def record_use_case_validation(
     evidence: str = "",
     actor: str = "ai-validator",
     gaps: list[str] | None = None,
+    forced: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     with task_write_lock(tasks_dir):
@@ -9054,7 +9055,11 @@ def record_use_case_validation(
         else:
             new_status = "partial"
 
-        log_entry = f"\n### [{now_iso}] AI Validation by {actor}\n- **Verdict:** `{verdict.upper()}`\n- **Summary:** {summary}\n"
+        forced_tag = " (forced)" if forced else ""
+        log_entry = f"\n### [{now_iso}] AI Validation by {actor}{forced_tag}\n- **Verdict:** `{verdict.upper()}`\n"
+        if forced:
+            log_entry += "- **Forced:** `true`\n"
+        log_entry += f"- **Summary:** {summary}\n"
         if evidence:
             log_entry += f"- **Evidence:**\n{evidence}\n"
         if gaps:
@@ -9075,15 +9080,125 @@ def record_use_case_validation(
 
         fpath = pathlib.Path(target["file_path"])
         _atomic_write_text(fpath, updated_content)
+
+        tree = discover_task_tree(tasks_dir)
+        updated_ucs = discover_use_cases(tasks_dir)
+        projection = compute_use_case_links(tasks_dir, tree=tree, use_cases=updated_ucs)
+        updated_target = next((u for u in updated_ucs if u["id"] == uc_id), target)
+        enriched = enrich_use_case_with_stage_and_links(updated_target, projection)
+        derived_stage = enriched.get("stage", new_status)
+
+        _emit_event(
+            tasks_dir,
+            "use_case.validated",
+            {
+                "use_case_id": uc_id,
+                "verdict": verdict_clean,
+                "stage": derived_stage,
+                "status": new_status,
+                "forced": bool(forced),
+                "summary": summary,
+            },
+            subject=uc_id,
+            actor=actor,
+        )
+
         return True, {
             "ok": True,
             "id": uc_id,
             "verdict": verdict_clean,
+            "stage": derived_stage,
             "status": new_status,
+            "forced": bool(forced),
             "summary": summary,
             "file_path": str(fpath),
             "rel_path": str(fpath.relative_to(tasks_dir)),
         }
+
+
+UC_READY_VALIDATION_STAGES: set[str] = {
+    "ready",
+    "verified",
+    "failing",
+    "partial",
+    "untested",
+    "ready (revalidation pending)",
+}
+
+
+def compute_use_case_task_readiness(
+    uc: dict[str, Any],
+    projection: UseCaseLinkProjection,
+    tree: dict[str, "TaskNode"] | None = None,
+) -> dict[str, Any]:
+    """Compute task readiness counts (N/M non-dropped tasks done/delivered/verified),
+    derived stage, and whether the use case is in scope for validation (Spec 17 §5).
+
+    Supports both post-adoption task->UC links (`projection`) and legacy pre-adoption
+    written `linked-tasks:` on the use case when `projection` has no derived links for it.
+    """
+    uc_id = uc.get("id", "")
+    derived_details = list(projection.details.get(uc_id, []))
+    written_lt = [
+        t.strip()
+        for t in (uc.get("written_linked_tasks") or uc.get("linked_tasks") or [])
+        if t and str(t).strip() and str(t).strip() != "-"
+    ]
+
+    effective_details = list(derived_details)
+    if not effective_details and written_lt and tree is not None:
+        for tid in written_lt:
+            node = tree.get(tid)
+            if node is not None and node.canonical_state != "moved":
+                effective_details.append({
+                    "id": tid,
+                    "title": node.title,
+                    "short_title": node.short_title,
+                    "state": node.state,
+                    "canonical_state": node.canonical_state,
+                    "dropped": node.canonical_state == "dropped",
+                })
+            else:
+                effective_details.append({
+                    "id": tid,
+                    "title": tid,
+                    "short_title": tid,
+                    "state": "open",
+                    "canonical_state": "open",
+                    "dropped": False,
+                })
+
+    active_tasks = [
+        t for t in effective_details
+        if not t.get("dropped") and str(t.get("canonical_state") or t.get("state") or "").strip().lower() != "dropped"
+    ]
+    tasks_total = len(active_tasks)
+    tasks_done = sum(
+        1
+        for t in active_tasks
+        if normalize_state(str(t.get("canonical_state") or t.get("state") or "open")) in UC_STAGE_DELIVERED_OR_LATER_STATES
+    )
+    stage = compute_use_case_stage(
+        effective_details,
+        last_verdict=uc.get("last_verdict"),
+        revalidation=uc.get("revalidation"),
+    )
+    approval = (uc.get("approval") or "proposed").strip().lower()
+    written_status = (uc.get("written_status") or uc.get("status") or "draft").strip().lower()
+    is_deprecated = approval == "deprecated" or written_status == "deprecated"
+    is_ready = (not is_deprecated) and (stage in UC_READY_VALIDATION_STAGES) and (tasks_total > 0) and (tasks_done == tasks_total)
+
+    return {
+        "id": uc_id,
+        "stage": stage,
+        "approval": approval,
+        "deprecated": is_deprecated,
+        "is_ready": is_ready,
+        "tasks_done": tasks_done,
+        "tasks_total": tasks_total,
+        "progress": f"{tasks_done}/{tasks_total}",
+        "linked_tasks_details": effective_details,
+    }
 
 
 def _detect_probe_untested_reason(
@@ -9135,12 +9250,41 @@ def validate_use_case_probe(
     uc_id: str,
     timeout_seconds: int = 60,
     actor: str = "automated-probe",
+    force: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
-    """Execute the automated verification command of a use case and record the verdict."""
+    """Execute the automated verification command of a use case and record the verdict.
+
+    Refuses with `exit_code=2` and message `"not ready (N/M tasks done)"` unless the use case
+    is in a ready stage (`ready`, `verified`, `failing`, `partial`, `untested`,
+    `ready (revalidation pending)`) or `force=True` is passed (recorded as forced in the log).
+    """
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
     use_cases = discover_use_cases(tasks_dir)
     target = next((u for u in use_cases if u["id"] == uc_id), None)
     if not target:
-        return False, {"error": f"Use case {uc_id} not found"}
+        return False, {"ok": False, "error": f"Use case {uc_id} not found", "exit_code": 1}
+
+    tree = discover_task_tree(tasks_dir)
+    projection = compute_use_case_links(tasks_dir, tree=tree, use_cases=use_cases)
+    readiness = compute_use_case_task_readiness(target, projection, tree=tree)
+    stage = readiness["stage"]
+    n_done = readiness["tasks_done"]
+    m_total = readiness["tasks_total"]
+
+    if not readiness["is_ready"] and not force:
+        err_msg = f"Use case {uc_id} is not ready ({n_done}/{m_total} tasks done; stage: {stage}). Pass --force to override."
+        return False, {
+            "ok": False,
+            "id": uc_id,
+            "error": err_msg,
+            "reason": "not_ready",
+            "stage": stage,
+            "approval": readiness["approval"],
+            "tasks_done": n_done,
+            "tasks_total": m_total,
+            "progress": readiness["progress"],
+            "exit_code": 2,
+        }
 
     cmd = target.get("verification_command", "").strip()
     if not cmd or cmd.startswith("echo 'No verification command"):
@@ -9148,7 +9292,11 @@ def validate_use_case_probe(
             "ok": True,
             "id": uc_id,
             "verdict": target.get("last_verdict") or "untested",
+            "stage": stage,
             "status": target.get("status"),
+            "forced": bool(force),
+            "tasks_done": n_done,
+            "tasks_total": m_total,
             "message": "No runnable verification command specified; manual or AI agent audit required.",
         }
 
@@ -9187,6 +9335,9 @@ def validate_use_case_probe(
                 evidence = f"```\n$ {cmd}\n(exit code {exit_code})\nSTDOUT:\n{out[:300]}\nSTDERR:\n{err[:300]}\n```"
                 gaps = [err or out or f"Command failed with exit code {exit_code}"]
 
+        if force:
+            summary = f"{summary} (forced)"
+
         ok, res = record_use_case_validation(
             tasks_dir=tasks_dir,
             uc_id=uc_id,
@@ -9195,14 +9346,19 @@ def validate_use_case_probe(
             evidence=evidence,
             actor=actor,
             gaps=gaps,
+            forced=bool(force),
         )
         res["exit_code"] = exit_code
         res["elapsed_seconds"] = round(elapsed, 2)
         res["command"] = cmd
+        res["tasks_done"] = n_done
+        res["tasks_total"] = m_total
         return ok, res
     except subprocess.TimeoutExpired:
         elapsed = time.time() - start_t
         summary = f"Automated probe could not run: timed out after {timeout_seconds}s"
+        if force:
+            summary = f"{summary} (forced)"
         evidence = f"Command timed out: `{cmd}`"
         ok, res = record_use_case_validation(
             tasks_dir=tasks_dir,
@@ -9212,13 +9368,16 @@ def validate_use_case_probe(
             evidence=evidence,
             actor=actor,
             gaps=[f"Timeout after {timeout_seconds}s"],
+            forced=bool(force),
         )
         res["exit_code"] = -1
         res["elapsed_seconds"] = round(elapsed, 2)
         res["command"] = cmd
+        res["tasks_done"] = n_done
+        res["tasks_total"] = m_total
         return ok, res
     except Exception as e:
-        return False, {"error": f"Failed to execute probe: {e}"}
+        return False, {"ok": False, "error": f"Failed to execute probe: {e}", "exit_code": 1}
 
 
 def run_validation_campaign(
@@ -9227,20 +9386,30 @@ def run_validation_campaign(
     actor_filter: str | None = None,
     actor_name: str = "campaign-runner",
 ) -> dict[str, Any]:
-    """Execute all active use cases, compute product functional readiness, and detect regressions."""
+    """Execute all ready use cases, compute product functional readiness, and detect regressions (Spec 17 §5)."""
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
     use_cases = discover_use_cases(tasks_dir)
+    tree = discover_task_tree(tasks_dir)
+    projection = compute_use_case_links(tasks_dir, tree=tree, use_cases=use_cases)
+
     if actor_filter:
         use_cases = [u for u in use_cases if u.get("actor", "").lower() == actor_filter.lower()]
 
     in_scope: list[dict[str, Any]] = []
-    out_of_scope: list[dict[str, Any]] = []
+    not_ready: list[dict[str, Any]] = []
 
     for uc in use_cases:
-        st = (uc.get("status") or "draft").strip().lower()
-        if st in ("draft", "deprecated"):
-            out_of_scope.append(uc)
+        readiness = compute_use_case_task_readiness(uc, projection, tree=tree)
+        uc_enriched = dict(uc)
+        uc_enriched["stage"] = readiness["stage"]
+        uc_enriched["approval"] = readiness["approval"]
+        uc_enriched["tasks_done"] = readiness["tasks_done"]
+        uc_enriched["tasks_total"] = readiness["tasks_total"]
+        uc_enriched["progress"] = readiness["progress"]
+        if readiness["is_ready"]:
+            in_scope.append(uc_enriched)
         else:
-            in_scope.append(uc)
+            not_ready.append(uc_enriched)
 
     results: list[dict[str, Any]] = []
     regressions: list[dict[str, Any]] = []
@@ -9260,23 +9429,29 @@ def run_validation_campaign(
     passed = sum(1 for r in results if r.get("verdict") == "pass")
     failed = sum(1 for r in results if r.get("verdict") == "fail")
     untested = sum(1 for r in results if r.get("verdict") == "untested")
-    out_of_scope_count = len(out_of_scope)
-    score_pct = round((passed / total * 100), 1) if total > 0 else 0.0
+    evaluated = total - untested
+    not_ready_count = len(not_ready)
+    score_pct = round((passed / evaluated * 100), 1) if evaluated > 0 else 0.0
+    score_in_scope_pct = round((passed / total * 100), 1) if total > 0 else 0.0
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     reports_dir = tasks_dir / "_reviews"
     reports_dir.mkdir(parents=True, exist_ok=True)
     report_file = reports_dir / f"validation-campaign-{int(time.time())}.md"
 
+    untested_suffix = f"; {untested} untested excluded from denominator" if untested > 0 else ""
     report_lines = [
         f"# Product Validation Campaign Report — {now_iso}",
         "",
-        f"- **Readiness Score:** `{score_pct}%` ({passed}/{total} Use Cases Verified)",
+        f"- **Readiness Score:** `{score_pct}%` ({passed}/{evaluated} evaluated, {passed}/{total} in-scope Use Cases Verified{untested_suffix})",
+        f"- **In-Scope Readiness Score:** `{score_in_scope_pct}%` ({passed}/{total})",
         f"- **Total Tested:** {total}",
+        f"- **Evaluated:** {evaluated}",
         f"- **Passed:** {passed}",
         f"- **Failed:** {failed}",
         f"- **Untested:** {untested}",
-        f"- **Out of scope:** {out_of_scope_count}",
+        f"- **Not ready:** {not_ready_count}",
+        f"- **Out of scope:** {not_ready_count}",
         f"- **Regressions Detected:** {len(regressions)}",
         "",
         "## Compliance Matrix by Use Case",
@@ -9290,16 +9465,18 @@ def run_validation_campaign(
         cmd_snippet = f"`{r.get('command')[:40]}...`" if r.get("command") else "-"
         report_lines.append(f"| **{r['id']}** | {r['title']} | {r['actor']} | `{v_badge}` | {cmd_snippet} |")
 
-    if out_of_scope:
+    if not_ready:
         report_lines.extend([
             "",
-            "## Out of scope (draft)",
+            "## Not ready",
             "",
-            "The following use cases were skipped because they are in draft status:",
+            "The following use cases were skipped because their linked tasks are not all delivered/verified/done:",
             "",
         ])
-        for uc in out_of_scope:
-            report_lines.append(f"- **{uc['id']}**: {uc['title']} (status: `{uc.get('status', 'draft')}`)")
+        for uc in not_ready:
+            report_lines.append(
+                f"- **{uc['id']}**: {uc['title']} (Not ready ({uc['tasks_done']}/{uc['tasks_total']}), stage: `{uc.get('stage', 'draft')}`)"
+            )
 
     if regressions:
         report_lines.extend([
@@ -9315,15 +9492,33 @@ def run_validation_campaign(
     report_content = "\n".join(report_lines) + "\n"
     _atomic_write_text(report_file, report_content)
 
+    not_ready_items = [
+        {
+            "id": uc["id"],
+            "title": uc["title"],
+            "actor": uc.get("actor", ""),
+            "stage": uc.get("stage", "draft"),
+            "approval": uc.get("approval", "proposed"),
+            "tasks_done": uc["tasks_done"],
+            "tasks_total": uc["tasks_total"],
+            "progress": uc["progress"],
+        }
+        for uc in not_ready
+    ]
+
     return {
         "ok": True,
         "timestamp": now_iso,
         "readiness_score": score_pct,
+        "readiness_score_in_scope": score_in_scope_pct,
         "total": total,
+        "evaluated": evaluated,
         "passed": passed,
         "failed": failed,
         "untested": untested,
-        "out_of_scope": out_of_scope_count,
+        "not_ready_count": not_ready_count,
+        "not_ready": not_ready_items,
+        "out_of_scope": not_ready_count,
         "regressions_count": len(regressions),
         "regressions": regressions,
         "report_file": str(report_file),
@@ -19748,6 +19943,7 @@ def cmd_use_cases_record_validation(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     gaps_raw = getattr(args, "gaps", None)
     gaps = [g.strip() for g in gaps_raw.split(";") if g.strip()] if gaps_raw else None
+    forced = bool(getattr(args, "force", False))
     ok, res = record_use_case_validation(
         tasks_dir=tasks_dir,
         uc_id=args.uc_id,
@@ -19756,7 +19952,9 @@ def cmd_use_cases_record_validation(args: argparse.Namespace) -> int:
         evidence=getattr(args, "evidence", ""),
         actor=getattr(args, "actor", "ai-validator"),
         gaps=gaps,
+        forced=forced,
     )
+    args._last_result = res
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
@@ -19771,20 +19969,25 @@ def cmd_use_cases_validate(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     timeout = getattr(args, "timeout", 60)
     actor = getattr(args, "actor", "ai-validator")
-    ok, res = validate_use_case_probe(tasks_dir, args.uc_id, timeout_seconds=timeout, actor=actor)
+    force = bool(getattr(args, "force", False))
+    ok, res = validate_use_case_probe(tasks_dir, args.uc_id, timeout_seconds=timeout, actor=actor, force=force)
+    args._last_result = res
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
         if ok:
             v = res.get("verdict", "unknown").upper()
-            print(f"[{v}] {args.uc_id}: {res.get('summary')}")
+            forced_str = " (forced)" if res.get("forced") else ""
+            print(f"[{v}]{forced_str} {args.uc_id}: {res.get('summary')}")
             if res.get("command"):
                 print(f"  Command: {res['command']}")
             if res.get("exit_code") is not None:
                 print(f"  Exit code: {res['exit_code']} ({res.get('elapsed_seconds')}s)")
         else:
-            print(f"[FAIL] {res.get('error')}")
-    return 0 if ok and res.get("verdict") == "pass" else 1
+            print(f"[FAIL] {res.get('error')}", file=sys.stderr)
+    if not ok:
+        return int(res.get("exit_code") or 1)
+    return 0 if res.get("verdict") == "pass" else 1
 
 
 def cmd_use_cases_campaign(args: argparse.Namespace) -> int:
@@ -19793,12 +19996,19 @@ def cmd_use_cases_campaign(args: argparse.Namespace) -> int:
     actor = getattr(args, "actor", "campaign-runner")
     actor_filter = getattr(args, "filter_actor", None)
     res = run_validation_campaign(tasks_dir, timeout_seconds=timeout, actor_filter=actor_filter, actor_name=actor)
+    args._last_result = res
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
     else:
         print(f"Product Validation Campaign ({res['timestamp']}):")
-        print(f"  Readiness Score: {res['readiness_score']}% ({res['passed']}/{res['total']} verified)")
-        print(f"  Passed: {res['passed']}, Failed: {res['failed']}, Untested: {res.get('untested', 0)}, Out of scope: {res.get('out_of_scope', 0)}, Regressions: {res['regressions_count']}")
+        print(
+            f"  Readiness Score: {res['readiness_score']}% "
+            f"({res['passed']}/{res.get('evaluated', res['total'])} evaluated, {res['passed']}/{res['total']} in-scope verified)"
+        )
+        print(
+            f"  Passed: {res['passed']}, Failed: {res['failed']}, Untested: {res.get('untested', 0)}, "
+            f"Not ready: {res.get('not_ready_count', res.get('out_of_scope', 0))}, Regressions: {res['regressions_count']}"
+        )
         print(f"  Report: {res['report_file']}")
         if res["regressions"]:
             print("\n  REGRESSIONS:")
@@ -24669,14 +24879,16 @@ def build_parser() -> argparse.ArgumentParser:
     uc_rec.add_argument("--evidence", default="", help="Execution evidence / output snippet")
     uc_rec.add_argument("--gaps", default="", help="Semicolon-separated list of gaps found")
     uc_rec.add_argument("--actor", default="ai-validator", help="Validating agent name / model")
+    uc_rec.add_argument("--force", action="store_true", default=False, help="Record validation as forced")
     uc_rec.add_argument("--tasks-dir", default="tasks")
     uc_rec.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     uc_rec.set_defaults(func=cmd_use_cases_record_validation)
 
-    uc_val = uc_sub.add_parser("validate", help="Run automated probe/validation on a use case")
+    uc_val = uc_sub.add_parser("validate", help="Run automated probe/validation on a ready use case (or pass --force)")
     uc_val.add_argument("uc_id", help="Use case ID (e.g. UC001)")
     uc_val.add_argument("--timeout", type=int, default=60, help="Timeout in seconds")
     uc_val.add_argument("--actor", default="automated-probe")
+    uc_val.add_argument("--force", action="store_true", default=False, help="Force validation even when linked tasks are not all delivered/done (recorded as forced)")
     uc_val.add_argument("--tasks-dir", default="tasks")
     uc_val.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     uc_val.set_defaults(func=cmd_use_cases_validate)

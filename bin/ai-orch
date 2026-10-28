@@ -336,12 +336,24 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "List all labels currently in use with their occurrence counts.",
                 },
                 "use-cases": {
-                    "usage": "ai-orch tasks use-cases <list|show|create|record-validation|validate|campaign|adopt-links> [options] [--json]",
-                    "description": "Manage use cases, AI validations, and one-time adopt-links migration.",
+                    "usage": "ai-orch tasks use-cases <list|show|create|record-validation|validate|campaign|adopt-links|migrate-lifecycle> [options] [--json]",
+                    "description": "Manage use cases, readiness-gated AI validations (--force override), campaigns, and lifecycle/link migrations.",
                     "subcommands": {
+                        "validate": {
+                            "usage": "ai-orch tasks use-cases validate <UC###> [--force] [--timeout <sec>] [--actor <name>] [--tasks-dir <dir>] [--json]",
+                            "description": "Run automated probe on a ready use case (refuses with exit 2 if not ready unless --force is passed).",
+                        },
+                        "campaign": {
+                            "usage": "ai-orch tasks use-cases campaign [--filter-actor <actor>] [--timeout <sec>] [--actor <name>] [--tasks-dir <dir>] [--json]",
+                            "description": "Run validation campaign on ready use cases, listing non-ready ones under 'Not ready (N/M)' and excluding untested from the readiness denominator.",
+                        },
                         "adopt-links": {
                             "usage": "ai-orch tasks use-cases adopt-links [--apply --expect-plan-hash <hash>] [--preview] [--skip-unknown] [--tasks-dir <dir>] [--json]",
                             "description": "Copy written linked-tasks from use cases onto referenced tasks' use-cases (union, fail-closed, snapshot under tasks/_reviews/).",
+                        },
+                        "migrate-lifecycle": {
+                            "usage": "ai-orch tasks use-cases migrate-lifecycle [--apply --expect-plan-hash <hash>] [--preview] [--tasks-dir <dir>] [--json]",
+                            "description": "Migrate hand-written use-case status to approval and backfill last-verdict (snapshot under tasks/_reviews/).",
                         },
                     },
                 },
