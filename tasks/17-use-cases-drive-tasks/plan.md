@@ -42,13 +42,8 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.13 - Migrazione ai-swissknife
 
-- **Status:** `in progress` (2026-10-28; operator) · **Short:** Migrazione ai-swissknife · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
+- **Status:** `waiting` (2026-10-28; operator; 2026-10-28; Gli use case di ai-swissknife puntano a iniziative intere: serve T085 (Espansione iniziative)) · **Short:** Migrazione ai-swissknife · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
 - **Goal:** come 17.12 per UC001-UC034 di ai-swissknife.
-
-### 17.14 - Migrazione git-code-rag (con la sua sessione)
-
-- **Status:** `in progress` (2026-10-28; operator) · **Short:** Migrazione git-code-rag · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
-- **Goal:** la sessione di git-code-rag applica la migrazione ai suoi 41 use case e la valida; spec §7 punto 7.
 
 ## Closed
 
@@ -84,3 +79,8 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 - **Status:** `done` (2026-10-28, kilo, commit `75c49e4`: scrittura transazionale di `revalidation: pending` con evento `use_case.revalidation_requested`, coda `use-cases queue` ordinata dal più vecchio e guardia di chiusura sicura su `verified`/`done` con rifiuto exit 2, evento `task.transition_refused` e override `--owner-approved`; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Regressione use case · **Size:** M · **Depends on:** 17.5
 - **Goal:** spec §5: `revalidation: pending` e coda `use-cases queue`; un task si chiude con uno use case fallito solo se questo è passato dopo la sua consegna (o `--owner-approved`); eventi registrati.
+
+### 17.14 - Migrazione git-code-rag (con la sua sessione)
+
+- **Status:** `done` (2026-10-28; guardia di validate verificata su UC031; done 2026-10-28, verifier ai-coding-tools-58) · **Short:** Migrazione git-code-rag · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
+- **Goal:** la sessione di git-code-rag applica la migrazione ai suoi 41 use case e la valida; spec §7 punto 7.

@@ -23,7 +23,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 13 | 13 | [Rielaborazione del Doctor: rilievi reali, azionabili e risolvibili](done/13-doctor-rework/plan.md) | done with a caveat (done: 13.1–13.7) | 06 | M |
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
-| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | in progress (done: 17.1–17.3, 17.5–17.7; running: 17.4, 17.9, 17.13–17.14; to verify: 17.12) | - | M |
+| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | in progress (done: 17.1–17.3, 17.5–17.7, 17.14; running: 17.4, 17.9; to verify: 17.12) | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -139,6 +139,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T079 (Workspace da sottocartella) | P2 | [I comandi lanciati da una sottocartella risolvono il workspace che la contiene](engine/T079-i-comandi-lanciati-da-una-sottocartella-risolvono.md) | open | kilo | - |
 | T081 (Branch e sblocco dipendenti) | P2 | [tasks_engine: list --branches, sblocco dei dipendenti e validate --branch](engine/T081-tasks-engine-list-branches-sblocco-dei-dipendenti.md) | open | kilo | - |
 | T083 (Rinomina sessione per provider) | P3 | [L'id del provider identifica la sessione: un nome nuovo rinomina il record invece di crearne un altro](engine/T083-l-id-del-provider-identifica-la-sessione-un-nome-n.md) | open | kilo | - |
+| T085 (Espansione iniziative) | P1 | [adopt-links espande i collegamenti a iniziative nei loro task](engine/T085-adopt-links-espande-i-collegamenti-a-iniziative-ne.md) | open | kilo | 17.4 |
 
 ### methodology
 
