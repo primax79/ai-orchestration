@@ -26,6 +26,7 @@ ai-orch tasks use-cases approve|deprecate|propose UC###[,UC###...] (anteprima, -
 - [ ] Backend UI: endpoint preview/apply
 - [ ] UI: pulsanti singoli e in blocco con conferma
 - [ ] Estensione: handler del bridge
+- [ ] docs/use-case-migration.md passo 5 e SKILL.md: citare il nuovo comando di approvazione
 
 ## Verification
 

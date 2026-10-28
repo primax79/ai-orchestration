@@ -15,11 +15,6 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 - **Status:** `delivered` (2026-10-28; manca l'approvazione (T086)) · **Verify-by:** owner · **Short:** UI use case e task · **Size:** M · **Depends on:** 17.9
 - **Goal:** badge di stadio e approvazione, task collegati, filtro per use case, coda di rivalidazione, nella UI web e nell'estensione (sync del webview); il proprietario la valida usandola.
 
-### 17.11 - Documentazione e spec superata
-
-- **Status:** `delivered` (2026-10-28, kilo: aggiunta sezione "Superseded fields" nella spec, help allineato in tasks_engine e bin/ai-orch, documentate regole use case in task-pipeline e redatta guida di migrazione in docs/use-case-migration.md) · **Short:** Documentazione use case · **Size:** S · **Depends on:** 17.5, 17.7
-- **Goal:** nota "Superseded fields" in `use-case-management-and-ai-validation.md`, help dei comandi, regole di task-pipeline, guida di migrazione.
-
 ### 17.12 - Migrazione ai-orchestration
 
 - **Status:** `delivered` (2026-10-28; operator; 2026-10-28; Applicata (76506eb): 109 collegamenti su 91 task, 37 use case con approval proposed; validate ok. Al proprietario: approvare gli use case) · **Verify-by:** owner · **Short:** Migrazione ai-orchestration · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
@@ -86,3 +81,8 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 - **Status:** `done` (2026-10-28, kilo: implementato `ai-orch tasks use-cases search <text> [--actor A] [--json]` in sola lettura con ranking per testo, attore, spec citate e percorsi/sorgenti dei task collegati, aggiornato `CLI_DESCRIPTION` in `bin/ai-orch` e documentato il flusso use-case-first in `task-pipeline/SKILL.md` e `orchestration-workflow/SKILL.template.md` con rigenerazione verificata tramite `--check`; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Skill use-case-first · **Size:** M · **Depends on:** 17.4
 - **Goal:** spec §4: `use-cases search` (testo, attore, spec citate, task sugli stessi percorsi); task-pipeline e orchestration-workflow dai template, rigenerati con `--check`, rigenerata la skill legata di kilo-mcp.
 - **Verification:** `ai-orch tasks use-cases search <text> [--actor A] [--json]` ordina gli use case in sola lettura per corrispondenza testuale (tutte le parole, case-insensitive, in titolo/descrizione/scenario/criteri), attore, spec citate (`Source: tasks/specs/...`) e sovrapposizione con `paths`/`sources` dei task collegati restituendo `id`, `title`, `stage`, `approval`, `score` e `reasons`; `task-pipeline/SKILL.md` e `orchestration-workflow/SKILL.template.md` (con `SKILL.md` rigenerato e verificato con `regenerate_generic_skills.py --check`) includono i passi use-case-first di §4 con esenzione per `chore`, `docs` e `investigation`.
+
+### 17.11 - Documentazione e spec superata
+
+- **Status:** `done` (2026-10-28, kilo: aggiunta sezione "Superseded fields" nella spec, help allineato in tasks_engine e bin/ai-orch, documentate regole use case in task-pipeline e redatta guida di migrazione in docs/use-case-migration.md; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Documentazione use case · **Size:** S · **Depends on:** 17.5, 17.7
+- **Goal:** nota "Superseded fields" in `use-case-management-and-ai-validation.md`, help dei comandi, regole di task-pipeline, guida di migrazione.
