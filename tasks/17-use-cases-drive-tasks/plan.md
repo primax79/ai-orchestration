@@ -17,7 +17,7 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.10 - UI web ed estensione VS Code
 
-- **Status:** `open` · **Short:** UI use case e task · **Size:** M · **Depends on:** 17.9
+- **Status:** `in progress` (2026-10-28; kilo (UI web); estensione dopo) · **Short:** UI use case e task · **Size:** M · **Depends on:** 17.9
 - **Goal:** badge di stadio e approvazione, task collegati, filtro per use case, coda di rivalidazione, nella UI web e nell'estensione (sync del webview); il proprietario la valida usandola.
 
 ### 17.11 - Documentazione e spec superata
