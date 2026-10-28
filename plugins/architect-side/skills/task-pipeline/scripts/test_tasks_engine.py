@@ -15262,3 +15262,22 @@ def test_orchestrator_missing_hint_on_mutating_commands(tmp_path: pathlib.Path) 
 
 
 
+def test_orchestrator_missing_hint_uses_enclosing_workspace(tmp_path: pathlib.Path) -> None:
+    """T071: a project tree with its own .ai-orchestration/ (runs, events) uses the enclosing workspace's role."""
+    project = tmp_path / "project"
+    tasks_dir = project / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (project / ".ai-orchestration" / "runs").mkdir(parents=True)
+    _write_sample_task(tasks_dir / "features" / "T001-sample.md", task_id="T001", state="open")
+    orch_dir = tmp_path / ".ai-orchestration"
+    orch_dir.mkdir()
+    (orch_dir / "orchestrator.json").write_text(
+        json.dumps({"current": {"session_id": "ws-session", "status": "active"}}), encoding="utf-8"
+    )
+
+    res = run_cli("transition", "T001", "in progress", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "[hint]" not in res.stderr
+
+
+

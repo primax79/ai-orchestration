@@ -23874,6 +23874,12 @@ def _maybe_print_orchestrator_missing_hint(args: argparse.Namespace) -> None:
         tasks_dir = pathlib.Path(getattr(args, "tasks_dir", "tasks")).resolve()
         workspace = _resolve_workspace_from_tasks_dir(tasks_dir)
 
+    # A project tree may carry its own .ai-orchestration/ (runs, events) while the role lives in the enclosing
+    # workspace: use the nearest ancestor that has an orchestrator.json.
+    for candidate in (workspace, *workspace.parents):
+        if (candidate / ".ai-orchestration" / "orchestrator.json").is_file():
+            workspace = candidate
+            break
     if _is_orchestrator_role_missing(workspace):
         try:
             print(
