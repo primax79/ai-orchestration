@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Blocca 17.13: i 34 use case di ai-swissknife puntano a iniziative intere (62 collegamenti rifiutati)
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: 17.4
 - decider: -
@@ -29,3 +29,7 @@ use-cases adopt-links --expand-initiatives: un id di iniziativa nel linked-tasks
 ## Verification
 
 - Anteprima su copia di ai-swissknife: nessun riferimento non canonico; stadi derivati coerenti
+
+## Log (newest first)
+
+- 2026-10-28, orchestrator: state `open` -> `in progress` — kilo 7e7002a32e79
