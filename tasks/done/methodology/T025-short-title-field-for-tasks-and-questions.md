@@ -14,6 +14,7 @@
 - paths: -
 - handoff: Leggere tasks/methodology/T025-short-title-field-for-tasks-and-questions.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC001, UC004
 - short: Campo titolo breve
 
 ## Goal

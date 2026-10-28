@@ -15,6 +15,7 @@
 - handoff: Leggi tasks/engine/T055-campaign-reports-never-become-categories-sync-inde.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: ai-coding-tools-2c
 - verify-by: ai-coding-tools
+- use-cases: UC003
 - short: Nessuna categoria fantasma
 
 ## Goal

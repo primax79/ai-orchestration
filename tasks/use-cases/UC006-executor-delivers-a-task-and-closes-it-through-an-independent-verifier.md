@@ -3,7 +3,7 @@
 - id: UC006
 - title: Executor delivers a task and closes it through an independent verifier
 - actor: Executor agent
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 02.1, 03.2, T035
 - verification-type: automated-probe

@@ -14,6 +14,7 @@
 - paths: -
 - handoff: Leggere tasks/server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC029
 - short: Sicurezza turni non presidiati
 
 ## Goal

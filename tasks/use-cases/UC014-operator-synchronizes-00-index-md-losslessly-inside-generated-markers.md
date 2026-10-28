@@ -3,7 +3,7 @@
 - id: UC014
 - title: Operator synchronizes 00-INDEX.md losslessly inside generated markers
 - actor: Operator (CLI)
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 06.1, T050
 - verification-type: automated-probe

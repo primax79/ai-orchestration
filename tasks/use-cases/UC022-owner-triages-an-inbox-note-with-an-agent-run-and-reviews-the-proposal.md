@@ -3,7 +3,7 @@
 - id: UC022
 - title: Owner triages an inbox note with an agent run and reviews the proposal
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: 09.4, 09.5, 09.10
 - verification-type: automated-probe

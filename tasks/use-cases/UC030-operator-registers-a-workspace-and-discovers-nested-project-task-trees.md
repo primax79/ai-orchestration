@@ -3,7 +3,7 @@
 - id: UC030
 - title: Operator registers a workspace and discovers nested project task trees
 - actor: Operator (CLI)
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 16.3, T039, T049
 - verification-type: automated-probe

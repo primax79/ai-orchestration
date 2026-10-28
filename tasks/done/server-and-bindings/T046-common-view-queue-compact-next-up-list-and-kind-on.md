@@ -14,6 +14,7 @@
 - paths: ../ai-orchestration-ui/frontend/src
 - handoff: Leggere tasks/server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC033
 - short: Coda comune compatta
 
 ## Goal

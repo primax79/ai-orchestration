@@ -3,7 +3,7 @@
 - id: UC036
 - title: Architect links tasks to Redmine issues and synchronizes progress
 - actor: Architect session
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: -
 - verification-type: code-audit

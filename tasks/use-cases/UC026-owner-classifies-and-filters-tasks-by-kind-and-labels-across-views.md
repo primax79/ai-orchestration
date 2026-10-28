@@ -3,7 +3,7 @@
 - id: UC026
 - title: Owner classifies and filters tasks by kind and labels across views
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: 10.4, 10.5
 - verification-type: automated-probe

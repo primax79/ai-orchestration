@@ -8,7 +8,7 @@
 
 ### 02.1 - Allineare `macroplan-authoring` e `orchestration-methodology` con la specifica unificata dei task e della verifica
 - **Profile:** `deep-reasoning`
-- **Status:** `done` (2026-10-15) · **Short:** Allineare skill metodologiche
+- **Status:** `done` (2026-10-15) · **Short:** Allineare skill metodologiche · **Use cases:** UC004, UC006, UC007, UC008
 - **Focus files:** `tasks/specs/task-and-state-model.md`, `plugins/architect-side/skills/macroplan-authoring/SKILL.md`, `plugins/architect-side/skills/macroplan-authoring/references/template.md`, `plugins/architect-side/skills/orchestration-methodology/SKILL.template.md`
 - **Steps:**
   1. Aggiornare `macroplan-authoring/SKILL.md` e `references/template.md` per includere la macchina a stati unificata (transizione `bounced`, campi opzionali `profile`, `verification-mode: self | cross-agent | panel | owner`, `verifier` dopo `handoff`).

@@ -30,7 +30,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (Q1–Q10). Da e
 
 ### 08.1 - Motore: file delle domande, validatore, `ai-orch questions list|show|ask|answer|withdraw`, regione Decisions dalle domande aperte
 
-- **Status:** `done` (2026-10-17) · **Short:** Motore delle domande · **Profile:** `deep-reasoning` · **Depends on:** 06.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Motore delle domande · **Profile:** `deep-reasoning` · **Depends on:** 06.1 · **Use cases:** UC019 · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../scripts/test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md` (aggiunta della sezione sul modello delle domande)
 - **Goal:** Specifica §2 e §3 integralmente:
   - il formato e il validatore;
@@ -49,7 +49,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (Q1–Q10). Da e
 
 ### 08.2 - Skill: gli agenti registrano le domande bloccanti nel formato previsto
 
-- **Status:** `done` (2026-10-17) · **Short:** Domande dagli agenti · **Profile:** `bulk-execution` · **Depends on:** 08.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Domande dagli agenti · **Profile:** `bulk-execution` · **Depends on:** 08.1 · **Use cases:** UC019 · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/SKILL.md`, `.../task-pipeline/references/template.md`, `plugins/architect-side/skills/orchestration-workflow/SKILL.template.md`, `plugins/executor-side/skills/executor-contract/SKILL.template.md`, i file `SKILL.md` generati (rigenerare, mai modificare a mano), i file `index.json`
 - **Goal:** Specifica §4. Mantenere le skill indipendenti dal protocollo: nominare `ai-orch questions ask` come CLI di questo kit (consentito), mai un tool MCP concreto. Rigenerare le skill generiche.
 - **Verification:**
@@ -58,7 +58,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (Q1–Q10). Da e
 
 ### 08.3 - Backend UI: endpoint delle domande
 
-- **Status:** `done` (2026-10-17) · **Short:** Endpoint delle domande · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 08.1, 06.7 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Short:** Endpoint delle domande · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 08.1, 06.7 · **Use cases:** UC019 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Aggiungere questi endpoint come sottili wrapper asincroni:
   - `GET /api/questions?status&blocks`
@@ -72,7 +72,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (Q1–Q10). Da e
 
 ### 08.4 - Frontend: scheda Decisions, badge nella navbar, sezione Questions nella modale del task, modulo di invio domanda
 
-- **Status:** `done` (2026-10-17) · **Short:** Scheda Decisions · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 08.3, 06.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Short:** Scheda Decisions · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 08.3, 06.8 · **Use cases:** UC019 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Specifica §5, ad eccezione di "Answer and resume run".
 - **Verification:**

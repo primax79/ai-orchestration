@@ -14,6 +14,7 @@
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, scripts/orchestration_registry.py
 - handoff: Leggi tasks/tasks/T039-adopting-existing-trees-legacy-plans-next-id-previ.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
+- use-cases: UC030
 - short: Supporto adozione alberi
 
 ## Goal

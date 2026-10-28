@@ -56,7 +56,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (R1–R14). Da e
 
 ### 07.1 - `config set-routing`, aggiornatore TOML chirurgico, schema `[tools.<t>.headless]`, testo corretto per il percorso di configurazione del progetto
 
-- **Status:** `done` (2026-10-16) · **Short:** Configurazione del routing · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-16) · **Short:** Configurazione del routing · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/` · **Use cases:** UC016
 - **Focus files:** `plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py`, `.../scripts/test_orchestration_config.py`, `bin/ai-orch` (testo del catalogo), `docs/05-orchestration-config-schema.md`
 - **Goal:** Implementare il §9 della specifica:
   - un aggiornatore chirurgico usato sia da `set-routing` sia da `set-profile`;
@@ -69,7 +69,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (R1–R14). Da e
 
 ### 07.2 - Motore di esecuzione A: registro, locking, record, validazione delle richieste, prompt, `options`/`preview`/`list`/`show`
 
-- **Status:** `done` (2026-10-17) · **Short:** Registro motore di esecuzione · **Profile:** `deep-reasoning` · **Depends on:** 07.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Registro motore di esecuzione · **Profile:** `deep-reasoning` · **Depends on:** 07.1 · **Use cases:** UC016 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py` (nuovo), `scripts/test_orchestration_runs.py` (nuovo), `bin/ai-orch`
 - **Goal:** Specifica §3 (risoluzione, modalità, prompt, ambito limitato a `T###`), §4 (`options`, `preview`, `list`, `show`), §5.1, §5.2 (lock, guardie, record monotoni). Ancora nessuna creazione di processi.
 - **Verification:** Test:
@@ -81,7 +81,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (R1–R14). Da e
 
 ### 07.3 - Motore di esecuzione B: supervisore, adapter (prompt via stdin/file), annullamento e riconciliazione delle esecuzioni perse con terminazione del gruppo di processi
 
-- **Status:** `done` (2026-10-17) · **Short:** Supervisore e adapter esecuzioni · **Profile:** `deep-reasoning` · **Depends on:** 07.2 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Supervisore e adapter esecuzioni · **Profile:** `deep-reasoning` · **Depends on:** 07.2 · **Use cases:** UC016 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`, `scripts/fixtures/runs/stub_agent.py` (nuovo)
 - **Goal:** Specifica §4 (`start`, `logs`, `cancel`), §5.3, §5.7 (adapter, con l'agente stub configurato tramite `[tools.<t>.headless]`), e la transizione del task a `in progress` all'avvio riuscito di un'esecuzione execute (§3 "Task state ownership").
 - **Verification:** Test contro l'agente stub (che può attendere in sleep, generare un processo nipote, scrivere eventi e terminare con codice 0 o 1):
@@ -94,7 +94,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (R1–R14). Da e
 
 ### 07.4 - Motore di esecuzione C: isolamento worktree, target di verifica, parsing del verdetto e `apply-verdict`, invarianti di continuazione, `cleanup`
 
-- **Status:** `done` (2026-10-17) · **Short:** Worktree e verdetti esecuzioni · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 07.3 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Worktree e verdetti esecuzioni · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 07.3 · **Use cases:** UC016, UC017 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:** Specifica §5.4, §5.5, §5.6 e `run cleanup`.
 - **Verification:** Test in repository git temporanei:
@@ -110,7 +110,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (R1–R14). Da e
 
 ### 07.6 - Backend UI: endpoint di esecuzione e di configurazione
 
-- **Status:** `done` (2026-10-17) · **Short:** Endpoint esecuzioni e config · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 07.4, 06.7 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Short:** Endpoint esecuzioni e config · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 07.4, 06.7 · **Use cases:** UC017 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Specifica §6.
 - **Verification:**
@@ -119,7 +119,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (R1–R14). Da e
 
 ### 07.7 - Frontend: finestra di dialogo Run con anteprima dal vivo, pannello delle esecuzioni del task, scheda Runs
 
-- **Status:** `done` (2026-10-17) · **Short:** Dialogo Run e scheda Runs · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Short:** Dialogo Run e scheda Runs · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 07.6, 06.8 · **Use cases:** UC016, UC017 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Specifica §7, ad eccezione della scheda Config.
 - **Verification:**
@@ -140,7 +140,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (R1–R14). Da e
 
 ### 07.10 - Core: il supervisore delle esecuzioni registra le domande bloccanti (R14, specifica 08 Q8)
 
-- **Status:** `done` (2026-10-17) · **Short:** Domande dalle esecuzioni · **Size:** S · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 08.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Domande dalle esecuzioni · **Size:** S · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 08.1 · **Use cases:** UC019 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:**
   - Al termine di un'esecuzione, analizzare i blocchi ` ```ai-orch-question ` dal messaggio **finale** dell'assistente.
@@ -151,7 +151,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (R1–R14). Da e
 
 ### 07.12 - Allow-list integrata per modalità per Claude (decisione A di Q001)
 
-- **Status:** `done` (2026-10-17) · **Short:** Allow-list di Claude · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.10 (stesso file) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Allow-list di Claude · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 07.10 (stesso file) · **Use cases:** UC017 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`, `plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py` (schema headless: `allowed_tools` può essere per modalità), `docs/05-orchestration-config-schema.md`
 - **Goal:**
   - Risposta A di Q001: l'adapter Claude fornisce un `allowed_tools` predefinito per modalità, usato quando la configurazione non ne imposta alcuno, cosicché l'avvio non viene più rifiutato (R11) per assenza di allow-list.
@@ -187,7 +187,7 @@ La specifica ora si apre con il §0 "Amendments after review 2" (R1–R14). Da e
 
 ### 07.11 - Esecuzioni batch per i microtask
 
-- **Status:** `done with a caveat: validated by the architect, no user yet` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Esecuzioni batch microtask · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 10.4 · **Repo:** `ai-orchestration/`
+- **Status:** `done with a caveat: validated by the architect, no user yet` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Esecuzioni batch microtask · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 07.4, 10.4 · **Use cases:** UC018 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:** `../specs/timeline-gantt.md` §5 "Batch runs":
   - `run start --batch IDS` accetta microtask appartenenti a un solo repository target (rifiutato altrimenti);

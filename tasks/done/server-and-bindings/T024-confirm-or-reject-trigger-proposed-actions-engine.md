@@ -14,6 +14,7 @@
 - paths: scripts/orchestration_triggers.py, ../ai-orchestration-ui/backend/server.py
 - handoff: Leggere tasks/server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC029
 - short: Motore conferma proposte
 
 ## Goal

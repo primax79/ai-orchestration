@@ -3,7 +3,7 @@
 - id: UC016
 - title: Owner previews and launches an isolated execute run for a task
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 07.1, 07.2, 07.3, 07.4, 07.7
 - verification-type: automated-probe

@@ -3,7 +3,7 @@
 - id: UC025
 - title: Owner inspects the abstract timeline graph and updates dependencies
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 10.1, 10.2, 10.3, 10.6
 - verification-type: automated-probe

@@ -14,6 +14,7 @@
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Leggi tasks/tasks/T036-steps-and-verification-authored-by-command-placeho.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
+- use-cases: UC004
 - short: Passi da comando
 
 ## Goal

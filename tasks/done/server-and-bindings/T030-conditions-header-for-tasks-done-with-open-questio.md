@@ -14,6 +14,7 @@
 - paths: -
 - handoff: Leggere tasks/server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC020
 - short: Completamento condizionato
 
 ## Goal

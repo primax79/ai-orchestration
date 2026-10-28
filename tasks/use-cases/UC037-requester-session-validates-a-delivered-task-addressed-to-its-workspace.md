@@ -3,7 +3,7 @@
 - id: UC037
 - title: Requester session validates a delivered task addressed to it
 - actor: Requester session
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: T044, T047
 - verification-type: automated-probe

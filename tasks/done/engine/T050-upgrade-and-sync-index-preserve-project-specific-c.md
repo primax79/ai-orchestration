@@ -15,6 +15,7 @@
 - handoff: Leggi tasks/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: porting_liferay
 - verify-by: porting_liferay
+- use-cases: UC014
 - short: Upgrade non distruttivo
 
 ## Goal

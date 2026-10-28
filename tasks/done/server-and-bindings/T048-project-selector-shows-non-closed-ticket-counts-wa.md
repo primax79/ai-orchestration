@@ -14,6 +14,7 @@
 - paths: ../ai-orchestration-ui/frontend/src/components/Navbar.tsx, ../vscode-ai-orchestration/src/extension.ts
 - handoff: Leggere tasks/server-and-bindings/T048-project-selector-shows-non-closed-ticket-counts-wa.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC033
 - short: Conteggi attivi selettore progetti
 
 ## Goal

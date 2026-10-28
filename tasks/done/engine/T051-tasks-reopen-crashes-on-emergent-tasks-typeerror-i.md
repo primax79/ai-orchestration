@@ -14,6 +14,7 @@
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Leggi tasks/engine/T051-tasks-reopen-crashes-on-emergent-tasks-typeerror-i.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: ai-coding-tools-c1
+- use-cases: UC024
 - short: Crash su reopen
 
 ## Goal

@@ -14,6 +14,7 @@
 - paths: scripts/orchestration_broker_lock.py, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, bin/ai-orch
 - handoff: Leggere tasks/server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC032
 - short: Scritture CLI tramite broker
 
 ## Goal

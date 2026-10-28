@@ -3,7 +3,7 @@
 - id: UC023
 - title: Architect decomposes a task into subtasks with inherited fields
 - actor: Architect session
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 11.1, 11.2, 11.3, 11.6, T035
 - verification-type: automated-probe

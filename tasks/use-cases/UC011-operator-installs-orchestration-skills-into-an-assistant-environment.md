@@ -3,7 +3,7 @@
 - id: UC011
 - title: Operator installs orchestration skills into an assistant environment
 - actor: Operator (CLI)
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: 05.2, 05.4, T056
 - verification-type: automated-probe

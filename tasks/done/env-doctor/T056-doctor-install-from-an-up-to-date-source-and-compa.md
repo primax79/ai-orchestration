@@ -14,6 +14,7 @@
 - paths: scripts/orchestration_env.py
 - handoff: Leggere tasks/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: ai-coding-tools-c1
+- use-cases: UC011, UC012
 - short: Installazione skill aggiornate
 
 ## Goal

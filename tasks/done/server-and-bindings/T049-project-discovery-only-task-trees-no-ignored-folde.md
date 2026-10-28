@@ -14,6 +14,7 @@
 - paths: ../vscode-ai-orchestration/src/project-resolver.ts, ../vscode-ai-orchestration/src/extension.ts, ../ai-orchestration-ui/backend/projects.py, ../ai-orchestration-ui/frontend/src/components/Navbar.tsx, scripts/orchestration_registry.py
 - handoff: Leggere tasks/server-and-bindings/T049-project-discovery-only-task-trees-no-ignored-folde.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC030
 - short: Igiene rilevamento progetti
 
 ## Goal

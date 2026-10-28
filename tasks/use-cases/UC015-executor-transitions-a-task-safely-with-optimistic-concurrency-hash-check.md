@@ -3,7 +3,7 @@
 - id: UC015
 - title: Executor transitions a task safely with optimistic concurrency hash
 - actor: Executor agent
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 06.10
 - verification-type: automated-probe

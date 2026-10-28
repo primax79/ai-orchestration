@@ -14,6 +14,7 @@
 - paths: conftest.py, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Leggere tasks/server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC008
 - short: Isolamento config nei test
 
 ## Goal

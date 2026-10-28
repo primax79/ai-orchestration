@@ -3,7 +3,7 @@
 - id: UC029
 - title: Operator evaluates event triggers and confirms proposed actions
 - actor: Operator (CLI)
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: 12.4, 12.6, 12.16, T024, T028
 - verification-type: automated-probe

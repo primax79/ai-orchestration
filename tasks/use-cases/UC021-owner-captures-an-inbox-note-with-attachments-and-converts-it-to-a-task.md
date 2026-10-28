@@ -3,7 +3,7 @@
 - id: UC021
 - title: Owner captures an inbox note with attachments and converts to task
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 09.1, 09.2, 09.3, 09.7, T034
 - verification-type: automated-probe

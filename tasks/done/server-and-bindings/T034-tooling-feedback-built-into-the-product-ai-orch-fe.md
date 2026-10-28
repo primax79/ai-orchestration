@@ -14,6 +14,7 @@
 - paths: bin/ai-orch, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, plugins/*/skills/*/SKILL.template.md, bindings
 - handoff: Leggere tasks/server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: gcube-atlas-83
+- use-cases: UC021
 - short: Canale feedback integrato
 
 ## Goal

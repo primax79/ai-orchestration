@@ -3,7 +3,7 @@
 - id: UC018
 - title: Operator batch-executes multiple microtasks in a shared worktree
 - actor: Operator (CLI)
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: 07.11
 - verification-type: automated-probe

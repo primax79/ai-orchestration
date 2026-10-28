@@ -15,6 +15,7 @@
 - handoff: Leggi tasks/tasks/T035-one-shot-close-clearer-derived-state-refusal-bulk.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
 - verify-by: gcube_audit
+- use-cases: UC006, UC023
 - short: Chiusura in un comando
 
 

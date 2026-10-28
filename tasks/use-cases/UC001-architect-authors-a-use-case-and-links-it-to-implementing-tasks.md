@@ -3,7 +3,7 @@
 - id: UC001
 - title: Architect authors a use case and links it to implementing tasks
 - actor: Architect session
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 15.1, 15.2, T025
 - verification-type: automated-probe

@@ -24,7 +24,7 @@ Fornire supporto end-to-end per i **casi d'uso (`tasks/use-cases/UC###-<slug>.md
 ## Closed
 
 ### 15.1 - Motore e modello dei dati (`tasks/use-cases/`, parser, validatore, intestazione dei task `- use-cases:`)
-- **Status:** `done` (2026-10-17)
+- **Status:** `done` (2026-10-17) · **Use cases:** UC001
 - **Profile:** `deep-reasoning`
 - **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `tasks/specs/task-and-state-model.md`
@@ -38,7 +38,7 @@ Fornire supporto end-to-end per i **casi d'uso (`tasks/use-cases/UC###-<slug>.md
 - **Verification:** `pytest test_tasks_engine.py` passa al 100% (74 passati).
 
 ### 15.2 - Integrazione top-down nelle skill (`task-spec-authoring` e `task-pipeline`)
-- **Status:** `done` (2026-10-17)
+- **Status:** `done` (2026-10-17) · **Use cases:** UC001
 - **Profile:** `deep-reasoning`
 - **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-spec-authoring/SKILL.md`, `plugins/architect-side/skills/task-pipeline/SKILL.md`, `plugins/architect-side/skills/task-pipeline/references/template.md`
@@ -49,7 +49,7 @@ Fornire supporto end-to-end per i **casi d'uso (`tasks/use-cases/UC###-<slug>.md
 - **Verification:** `python3 scripts/regenerate_generic_skills.py --check` e `python3 scripts/generate_skill_indices.py` passano.
 
 ### 15.3 - Esecutore di validazione AI autonoma (`ai-orch use-cases validate UC###`)
-- **Status:** `done` (2026-10-17)
+- **Status:** `done` (2026-10-17) · **Use cases:** UC002
 - **Profile:** `deep-reasoning`
 - **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`
@@ -59,7 +59,7 @@ Fornire supporto end-to-end per i **casi d'uso (`tasks/use-cases/UC###-<slug>.md
 - **Verification:** Lo unit test `test_use_cases_validate_probe_and_campaign` passa.
 
 ### 15.4 - Esecutore della campagna di validazione a livello di prodotto (`ai-orch use-cases campaign`)
-- **Status:** `done` (2026-10-17)
+- **Status:** `done` (2026-10-17) · **Use cases:** UC003
 - **Profile:** `deep-reasoning`
 - **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `bin/ai-orch`

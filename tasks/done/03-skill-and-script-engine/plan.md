@@ -8,7 +8,7 @@
 
 ### 03.1 - Completare `orchestration_config.py`, gli unit test e l'aggiornamento della skill `interactive-role-setup`
 - **Profile:** `bulk-execution`
-- **Status:** `done` (2026-10-15) · **Short:** Completamento motore config
+- **Status:** `done` (2026-10-15) · **Short:** Completamento motore config · **Use cases:** UC008, UC009
 - **Focus files:** `plugins/shared/skills/interactive-role-setup/scripts/orchestration_config.py`, `plugins/shared/skills/interactive-role-setup/scripts/test_orchestration_config.py`, `plugins/shared/skills/interactive-role-setup/SKILL.md`
 - **Steps:**
   1. Scrivere unit test `pytest` completi in `plugins/shared/skills/interactive-role-setup/scripts/test_orchestration_config.py` per verificare:
@@ -24,7 +24,7 @@
 
 ### 03.2 - Implementare `tasks_engine.py` (parser deterministico dei task, validatore, transizioni di stato e sincronizzazione di `00-INDEX.md`)
 - **Profile:** `deep-reasoning`
-- **Status:** `done` (2026-10-15) · **Short:** Motore dei task
+- **Status:** `done` (2026-10-15) · **Short:** Motore dei task · **Use cases:** UC004, UC005, UC006, UC007
 - **Focus files:** `plugins/architect-side/skills/macroplan-authoring/scripts/tasks_engine.py`, `plugins/architect-side/skills/macroplan-authoring/scripts/test_tasks_engine.py`
 - **Steps:**
   1. Implementare `tasks_engine.py` (Python con sola libreria standard, supporto a `--json` su tutti i sottocomandi):

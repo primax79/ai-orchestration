@@ -14,6 +14,7 @@
 - paths: -
 - handoff: Leggere tasks/server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC028
 - short: Race accodamento trigger
 
 ## Goal

@@ -3,7 +3,7 @@
 - id: UC020
 - title: Owner answers a conditional question that spawns a follow-up task
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: T030, T031
 - verification-type: automated-probe

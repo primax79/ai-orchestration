@@ -3,7 +3,7 @@
 - id: UC002
 - title: Operator validates a single use case probe and records the verdict
 - actor: Operator (CLI)
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 15.3
 - verification-type: automated-probe

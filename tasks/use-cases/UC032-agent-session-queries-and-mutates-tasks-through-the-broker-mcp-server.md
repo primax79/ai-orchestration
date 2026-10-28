@@ -3,7 +3,7 @@
 - id: UC032
 - title: Agent session queries and mutates tasks through the broker MCP server
 - actor: Architect session
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 16.1, 16.2, 16.5, 16.6, T032, T045
 - verification-type: automated-probe

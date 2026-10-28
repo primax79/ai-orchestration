@@ -3,7 +3,7 @@
 - id: UC004
 - title: Architect creates a full emergent task with validated header and steps
 - actor: Architect session
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 02.1, 03.2, T025, T036
 - verification-type: automated-probe

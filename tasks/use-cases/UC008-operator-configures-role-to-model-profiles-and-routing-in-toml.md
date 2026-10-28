@@ -3,7 +3,7 @@
 - id: UC008
 - title: Operator configures role-to-model profiles and routing in TOML
 - actor: Operator (CLI)
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 02.1, 03.1, T033
 - verification-type: automated-probe

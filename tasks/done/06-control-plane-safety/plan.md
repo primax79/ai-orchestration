@@ -53,7 +53,7 @@ Corsie principali (core):
 
 ### 06.1 - `sync-index` senza perdita di dati con marcatori delle regioni generate (I1–I4)
 
-- **Status:** `done` (2026-10-16) · **Short:** sync-index senza perdite · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-16) · **Short:** sync-index senza perdite · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/` · **Use cases:** UC014
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../scripts/test_tasks_engine.py`, `.../scripts/fixtures/index-regression/` (nuovo), `tasks/00-INDEX.md` (adozione marcatori)
 - **Goal:** Implementare integralmente il §2.2 della specifica:
   - marcatori, più `--adopt`;
@@ -74,7 +74,7 @@ Corsie principali (core):
 
 ### 06.2 - Doctor: piani `--dry-run` con hash, installazione senza sovrascrittura, cestino invece di eliminazione, pulizia esplicita degli obsoleti (E4, E6, E7)
 
-- **Status:** `done` (2026-10-16) · **Short:** Piani sicuri del Doctor · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-16) · **Short:** Piani sicuri del Doctor · **Profile:** `deep-reasoning` · **Repo:** `ai-orchestration/` · **Use cases:** UC013
 - **Focus files:** `scripts/orchestration_env.py`, `scripts/test_orchestration_env.py`
 - **Goal:** Implementare il §2.1 della specifica:
   - i punti "Every mutating `env` command" e "No clobbering": `--dry-run` con `plan` + `plan_hash`, `--expect-plan-hash`, `--overwrite`, `.ai-orch-trash/`;
@@ -93,7 +93,7 @@ Corsie principali (core):
 
 ### 06.3 - Doctor: inventario e conflitti consapevoli dei plugin (E5)
 
-- **Status:** `done` (2026-10-17) · **Short:** Inventario con plugin · **Profile:** `deep-reasoning` · **Depends on:** 06.2 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Inventario con plugin · **Profile:** `deep-reasoning` · **Depends on:** 06.2 · **Use cases:** UC013 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_env.py`, `scripts/test_orchestration_env.py`
 - **Goal:** Implementare il §2.1 "Plugin-aware inventory" della specifica:
   - skill dei plugin Claude da `~/.claude/plugins/installed_plugins.json`;
@@ -107,7 +107,7 @@ Corsie principali (core):
 
 ### 06.4 - Doctor: registrazione e stato MCP tramite i veri file di configurazione (E3)
 
-- **Status:** `done` (2026-10-17) · **Short:** Stato registrazione MCP · **Profile:** `deep-reasoning` · **Depends on:** 06.3 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Stato registrazione MCP · **Profile:** `deep-reasoning` · **Depends on:** 06.3 · **Use cases:** UC013 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_env.py`, `scripts/test_orchestration_env.py`
 - **Goal:** Implementare il §2.1 "MCP registration through the real configs" della specifica:
   - Claude tramite `claude mcp add`;
@@ -175,7 +175,7 @@ Corsie principali (core):
 
 ### 06.10 - Core: lock di scrittura sui task, `--expect-task-hash`, scritture atomiche (A9)
 
-- **Status:** `done` (2026-10-17) · **Short:** Lock scrittura task · **Profile:** `deep-reasoning` · **Depends on:** 06.1 (stesso file) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Lock scrittura task · **Profile:** `deep-reasoning` · **Depends on:** 06.1 (stesso file) · **Use cases:** UC015 · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../scripts/test_tasks_engine.py`, `README.md` (nota sulla piattaforma)
 - **Goal:**
   - Specifica A9: un `flock` esclusivo su `<tasks_dir>/.ai-orch.lock` attorno a ogni comando mutante;

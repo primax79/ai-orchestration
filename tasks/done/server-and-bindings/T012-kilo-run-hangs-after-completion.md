@@ -14,6 +14,7 @@
 - paths: ../kilo-mcp/server.py
 - handoff: Leggere tasks/server-and-bindings/T012-kilo-run-hangs-after-completion.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: claude:orchestration
+- use-cases: UC035
 - short: Processi kilo run bloccati
 
 ## Goal

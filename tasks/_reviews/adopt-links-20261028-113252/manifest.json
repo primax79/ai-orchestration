@@ -1,0 +1,461 @@
+{
+  "timestamp": "2026-10-28T11:32:52Z",
+  "tasks_dir": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks",
+  "snapshot_dir": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252",
+  "plan_hash": "d0ec8e942df19681159c255866b7849d033e374b072b5d255c8c4a6d63c166c2",
+  "files_count": 40,
+  "files": [
+    {
+      "path": "16-orchestration-broker/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/16-orchestration-broker/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/16-orchestration-broker/plan.md",
+      "sha256": "bd67b2c3fa8571ee04278920557ea374cfa980b9525ae6c9e6a2d3edc87c7004",
+      "size_bytes": 8563,
+      "tasks": [
+        "16.1",
+        "16.2",
+        "16.3",
+        "16.4",
+        "16.5",
+        "16.6",
+        "16.9"
+      ]
+    },
+    {
+      "path": "done/02-task-and-config-spec/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/02-task-and-config-spec/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/02-task-and-config-spec/plan.md",
+      "sha256": "9db5346d0a5eb9718114e13cee2eaaf8002f06b3c89b3de63062b1b9811b6974",
+      "size_bytes": 1745,
+      "tasks": [
+        "02.1"
+      ]
+    },
+    {
+      "path": "done/03-skill-and-script-engine/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/03-skill-and-script-engine/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/03-skill-and-script-engine/plan.md",
+      "sha256": "36d39ef9ad456e5bfa685775acb17c58e3cff58ce05d61413b58f3ef6cdc01b5",
+      "size_bytes": 4106,
+      "tasks": [
+        "03.1",
+        "03.2"
+      ]
+    },
+    {
+      "path": "done/05-cli-and-ui-handoff/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/05-cli-and-ui-handoff/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/05-cli-and-ui-handoff/plan.md",
+      "sha256": "6eb5e0de8814f519135bd4b589eb31a76dbfa5143db533c43a5f287975634f0b",
+      "size_bytes": 4248,
+      "tasks": [
+        "05.1",
+        "05.2",
+        "05.3",
+        "05.4"
+      ]
+    },
+    {
+      "path": "done/06-control-plane-safety/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/06-control-plane-safety/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/06-control-plane-safety/plan.md",
+      "sha256": "e0dbc3f1af153cfd0cf0cb6f739dbfd4e2b40e99689a5188c9bdf105776f094f",
+      "size_bytes": 14839,
+      "tasks": [
+        "06.1",
+        "06.2",
+        "06.3",
+        "06.4",
+        "06.10"
+      ]
+    },
+    {
+      "path": "done/07-agent-runs-from-ui/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/07-agent-runs-from-ui/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/07-agent-runs-from-ui/plan.md",
+      "sha256": "b301132cc7b131f8cfaa64e24d0cba25a614565cad0c1e6de45335c57070bd95",
+      "size_bytes": 15696,
+      "tasks": [
+        "07.1",
+        "07.2",
+        "07.3",
+        "07.4",
+        "07.6",
+        "07.7",
+        "07.10",
+        "07.11",
+        "07.12"
+      ]
+    },
+    {
+      "path": "done/08-blocking-questions/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/08-blocking-questions/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/08-blocking-questions/plan.md",
+      "sha256": "a4dc8a69f298de9e99147e5584f3a9905f9845f87eb999a76e9a0bdf955690f3",
+      "size_bytes": 8922,
+      "tasks": [
+        "08.1",
+        "08.2",
+        "08.3",
+        "08.4"
+      ]
+    },
+    {
+      "path": "done/09-inbox-notes/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/09-inbox-notes/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/09-inbox-notes/plan.md",
+      "sha256": "a901f94cd5d357b6313efb3962e4ef63aaa2b36488e288a7e32e85ea5c259bf3",
+      "size_bytes": 10907,
+      "tasks": [
+        "09.1",
+        "09.2",
+        "09.3",
+        "09.4",
+        "09.5",
+        "09.7",
+        "09.10"
+      ]
+    },
+    {
+      "path": "done/10-timeline-gantt/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/10-timeline-gantt/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/10-timeline-gantt/plan.md",
+      "sha256": "ef898ea7f598563e6a682903dc4057b180493c197f12c8dfb53f513a9651f8ac",
+      "size_bytes": 8020,
+      "tasks": [
+        "10.1",
+        "10.2",
+        "10.3",
+        "10.4",
+        "10.5",
+        "10.6"
+      ]
+    },
+    {
+      "path": "done/11-subtasks/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/11-subtasks/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/11-subtasks/plan.md",
+      "sha256": "971f596e2e97e328a5251dc47a840b1f9c3a63dc747c7f2945169be15e63f815",
+      "size_bytes": 8481,
+      "tasks": [
+        "11.1",
+        "11.2",
+        "11.3",
+        "11.4",
+        "11.6"
+      ]
+    },
+    {
+      "path": "done/12-events-and-triggers/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/12-events-and-triggers/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/12-events-and-triggers/plan.md",
+      "sha256": "021f3dda8bbba9095363e8ddde2a52e2a0de610cf173aa5feba4420683659f02",
+      "size_bytes": 9104,
+      "tasks": [
+        "12.4",
+        "12.5",
+        "12.6",
+        "12.8",
+        "12.9",
+        "12.10",
+        "12.11",
+        "12.12",
+        "12.16"
+      ]
+    },
+    {
+      "path": "done/13-doctor-rework/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/13-doctor-rework/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/13-doctor-rework/plan.md",
+      "sha256": "971683a0afab6bde34b988cbf670268f6d70561523441ad654d1da916149002e",
+      "size_bytes": 4440,
+      "tasks": [
+        "13.1"
+      ]
+    },
+    {
+      "path": "done/15-use-case-driven-validation/plan.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/15-use-case-driven-validation/plan.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/15-use-case-driven-validation/plan.md",
+      "sha256": "72987e398b245c6df38a431bd2ba5d4dd522a29f16472046d9e8b91dae2d0ab4",
+      "size_bytes": 7788,
+      "tasks": [
+        "15.1",
+        "15.2",
+        "15.3",
+        "15.4"
+      ]
+    },
+    {
+      "path": "done/engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/engine/T035-one-shot-close-clearer-derived-state-refusal-bulk.md",
+      "sha256": "31b4d44bcf178056d353278df98bab229115f07c6a16728cf28dc7a1e07bffc7",
+      "size_bytes": 5820,
+      "tasks": [
+        "T035"
+      ]
+    },
+    {
+      "path": "done/engine/T036-steps-and-verification-authored-by-command-placeho.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/engine/T036-steps-and-verification-authored-by-command-placeho.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/engine/T036-steps-and-verification-authored-by-command-placeho.md",
+      "sha256": "b110f5d6ec2c15b7d05676101f563e4b592739bae586ce8d19139c087011486a",
+      "size_bytes": 1899,
+      "tasks": [
+        "T036"
+      ]
+    },
+    {
+      "path": "done/engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/engine/T039-adopting-existing-trees-legacy-plans-next-id-previ.md",
+      "sha256": "b7877b303eea5dbd8cff547b6d0ff127262707bfa0e59bd06b10bd890ea61cec",
+      "size_bytes": 2341,
+      "tasks": [
+        "T039"
+      ]
+    },
+    {
+      "path": "done/engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/engine/T041-questions-unapplied-answers-surfaced-moved-to-trac.md",
+      "sha256": "cf098d5947998952081c0fa91904f1baeb2c6b43a5f61332981a580481db8c27",
+      "size_bytes": 2475,
+      "tasks": [
+        "T041"
+      ]
+    },
+    {
+      "path": "done/engine/T044-durable-verification-requests-addressed-to-a-works.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/engine/T044-durable-verification-requests-addressed-to-a-works.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/engine/T044-durable-verification-requests-addressed-to-a-works.md",
+      "sha256": "78487346e42c74deb582f230a80bebb7b2d395933e3cd25f88f9d15c0f08f179",
+      "size_bytes": 2410,
+      "tasks": [
+        "T044"
+      ]
+    },
+    {
+      "path": "done/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/engine/T050-upgrade-and-sync-index-preserve-project-specific-c.md",
+      "sha256": "e6ea369cc834e4ff84d5963364d4bf65c8eafc7f924718b41bce24056a6ada12",
+      "size_bytes": 11497,
+      "tasks": [
+        "T050"
+      ]
+    },
+    {
+      "path": "done/engine/T051-tasks-reopen-crashes-on-emergent-tasks-typeerror-i.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/engine/T051-tasks-reopen-crashes-on-emergent-tasks-typeerror-i.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/engine/T051-tasks-reopen-crashes-on-emergent-tasks-typeerror-i.md",
+      "sha256": "784abd1b82bda80b9cfaa63bfbbaf08613b9368e1f0ed058114011b632ae75f8",
+      "size_bytes": 2504,
+      "tasks": [
+        "T051"
+      ]
+    },
+    {
+      "path": "done/engine/T055-campaign-reports-never-become-categories-sync-inde.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/engine/T055-campaign-reports-never-become-categories-sync-inde.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/engine/T055-campaign-reports-never-become-categories-sync-inde.md",
+      "sha256": "5eba9af0c1879c88ccbc9f8d2492dc75ff6fe6b1259340851d0a058fab5a13b4",
+      "size_bytes": 3807,
+      "tasks": [
+        "T055"
+      ]
+    },
+    {
+      "path": "done/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/env-doctor/T056-doctor-install-from-an-up-to-date-source-and-compa.md",
+      "sha256": "f8e3f4db11ba41aeda6e182c71bbe47a4951c84819cc79db9d2d9eb631ce3b07",
+      "size_bytes": 5228,
+      "tasks": [
+        "T056"
+      ]
+    },
+    {
+      "path": "done/methodology/T011-render-agents-md-topology.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/methodology/T011-render-agents-md-topology.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/methodology/T011-render-agents-md-topology.md",
+      "sha256": "3e33a0793edf3116de9cfe7a5e2bcd2a6847056bdebfd77ad801181b77213ef9",
+      "size_bytes": 5039,
+      "tasks": [
+        "T011"
+      ]
+    },
+    {
+      "path": "done/methodology/T025-short-title-field-for-tasks-and-questions.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/methodology/T025-short-title-field-for-tasks-and-questions.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/methodology/T025-short-title-field-for-tasks-and-questions.md",
+      "sha256": "95bcbb8c7c234bd0cb0c956cbc3fab9f4a337d3cea214c04190a6164ce0e0607",
+      "size_bytes": 1463,
+      "tasks": [
+        "T025"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T012-kilo-run-hangs-after-completion.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T012-kilo-run-hangs-after-completion.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T012-kilo-run-hangs-after-completion.md",
+      "sha256": "7c11f29b6de094f418a89e274177178e6cccd1c6722b43ec00aeb3598d9db953",
+      "size_bytes": 2307,
+      "tasks": [
+        "T012"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T024-confirm-or-reject-trigger-proposed-actions-engine.md",
+      "sha256": "bf105c9a0034d5ff5fe67d3a16d0c07cf4ef999340d51543934cc60b1aa194ff",
+      "size_bytes": 1772,
+      "tasks": [
+        "T024"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T026-trigger-enqueue-races-the-orchestrator-queue-and-a.md",
+      "sha256": "67745ff5fe0aa805490d593af17c233fb94011329cc98f6491635ec3f89df12c",
+      "size_bytes": 2353,
+      "tasks": [
+        "T026"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md",
+      "sha256": "4dd3f0eda5ec335c0e7344b951c75f8f162f93541cd4a0dbf9168f87f2771405",
+      "size_bytes": 1962,
+      "tasks": [
+        "T027"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T028-unattended-turns-enforce-reduced-capability-on-eve.md",
+      "sha256": "55aacb95db9887137bd6bc397c9239691323d6b32097f98ef21d16be9573aaaf",
+      "size_bytes": 2211,
+      "tasks": [
+        "T028"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T030-conditions-header-for-tasks-done-with-open-questio.md",
+      "sha256": "5c12f8f74d173dec9d398c09495ab4b112485b4f9d9ca2ae1fea7dca66501bfa",
+      "size_bytes": 1705,
+      "tasks": [
+        "T030"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md",
+      "sha256": "0b51923afab261b522ba1a0259f16e440e27a89cf8c3df29f5c996f25187ceb4",
+      "size_bytes": 1625,
+      "tasks": [
+        "T031"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T032-cli-writes-reach-a-live-broker-guard-ignores-a-sta.md",
+      "sha256": "533f00991d6d23c784ebd19236eb41742e57f062a9c7dfdc224c0e2d25f58408",
+      "size_bytes": 1913,
+      "tasks": [
+        "T032"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T033-test-sessions-isolated-from-the-user-s-global-conf.md",
+      "sha256": "9e702efd76a509a9216b90f74f1b578a60cd038e8d3e80a7a7d6b2718a6ab1bc",
+      "size_bytes": 1664,
+      "tasks": [
+        "T033"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T034-tooling-feedback-built-into-the-product-ai-orch-fe.md",
+      "sha256": "bce3ea7d605b5987173cabc0ce89e120670a6248f3d2159c2ef55d331d75cf0a",
+      "size_bytes": 1610,
+      "tasks": [
+        "T034"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T040-workspace-wide-next-up-and-open-tasks-across-proje.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T040-workspace-wide-next-up-and-open-tasks-across-proje.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T040-workspace-wide-next-up-and-open-tasks-across-proje.md",
+      "sha256": "32d448af7876afe58653a74800e53add59a843bbd99a53a3abdcd72b1d6a8ee1",
+      "size_bytes": 1817,
+      "tasks": [
+        "T040"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md",
+      "sha256": "14d5ad99fb4c2ee848b5f4a102178a12c1f46d5f482a8bf8826b59aff99788ff",
+      "size_bytes": 1737,
+      "tasks": [
+        "T045"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T046-common-view-queue-compact-next-up-list-and-kind-on.md",
+      "sha256": "be7b2df5410ba55f4b862a0a90de06397a55cf06b6e9f001abd242c60d5996dc",
+      "size_bytes": 1428,
+      "tasks": [
+        "T046"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T047-architect-verification-of-delivered-items-that-hav.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T047-architect-verification-of-delivered-items-that-hav.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T047-architect-verification-of-delivered-items-that-hav.md",
+      "sha256": "ec8a831262f89a4947a657cc6b71e32d65896a044f08b8699e8ad6ade712c26a",
+      "size_bytes": 2051,
+      "tasks": [
+        "T047"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T048-project-selector-shows-non-closed-ticket-counts-wa.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T048-project-selector-shows-non-closed-ticket-counts-wa.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T048-project-selector-shows-non-closed-ticket-counts-wa.md",
+      "sha256": "5cf0ba1a197fd6d6522f73830f54bb5299b26791ef00ff11f7aa2fa430dc10cf",
+      "size_bytes": 1690,
+      "tasks": [
+        "T048"
+      ]
+    },
+    {
+      "path": "done/server-and-bindings/T049-project-discovery-only-task-trees-no-ignored-folde.md",
+      "file_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/done/server-and-bindings/T049-project-discovery-only-task-trees-no-ignored-folde.md",
+      "snapshot_path": "/Users/Alfredo/works/ai-coding-tools/ai-orchestration/tasks/_reviews/adopt-links-20261028-113252/done/server-and-bindings/T049-project-discovery-only-task-trees-no-ignored-folde.md",
+      "sha256": "6fef2004a408d721e48905d71998d9c1a882875b34215574d23365802fc6fbf3",
+      "size_bytes": 5997,
+      "tasks": [
+        "T049"
+      ]
+    }
+  ],
+  "unresolved_ids": []
+}

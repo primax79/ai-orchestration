@@ -3,7 +3,7 @@
 - id: UC033
 - title: Owner views unified ready queue across all projects in a workspace
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 16.9, T040, T046, T048
 - verification-type: automated-probe

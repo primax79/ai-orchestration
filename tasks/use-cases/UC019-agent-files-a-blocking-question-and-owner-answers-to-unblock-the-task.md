@@ -3,7 +3,7 @@
 - id: UC019
 - title: Agent files a blocking question and owner answers to unblock the task
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 08.1, 08.2, 08.3, 08.4, 07.10
 - verification-type: automated-probe

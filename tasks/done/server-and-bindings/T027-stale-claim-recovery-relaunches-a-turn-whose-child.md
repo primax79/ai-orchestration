@@ -14,6 +14,7 @@
 - paths: -
 - handoff: Leggere tasks/server-and-bindings/T027-stale-claim-recovery-relaunches-a-turn-whose-child.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC028
 - short: Ripresa duplicata del turno
 
 ## Goal

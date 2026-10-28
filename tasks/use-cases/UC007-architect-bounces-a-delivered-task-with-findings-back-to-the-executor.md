@@ -3,7 +3,7 @@
 - id: UC007
 - title: Architect bounces a delivered task with findings back to the executor
 - actor: Architect session
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 02.1, 03.2
 - verification-type: automated-probe

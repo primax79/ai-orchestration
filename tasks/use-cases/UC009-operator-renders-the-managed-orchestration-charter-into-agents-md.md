@@ -3,7 +3,7 @@
 - id: UC009
 - title: Operator renders the managed orchestration charter into AGENTS.md
 - actor: Operator (CLI)
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 03.1, T011
 - verification-type: automated-probe

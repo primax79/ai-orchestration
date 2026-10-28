@@ -10,7 +10,7 @@
 
 ### 10.1 - Motore: `tasks graph` (colonne, coda pronta, catena più pesante, Mermaid), campo `size`, `tasks set-priority`, `tasks set-size`, `tasks set-deps`, controllo dei cicli
 
-- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Motore del grafo task · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (parser dei nodi figli; stesso file, corsia `tasks_engine.py`) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Motore del grafo task · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (parser dei nodi figli; stesso file, corsia `tasks_engine.py`) · **Use cases:** UC025 · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md` (il campo di estensione `size`)
 - **Goal:** Specifica §2. Aggiungere inoltre `**Size:**` ai task aperti dei piani 06–10, usando queste stime: 06.8 L, 06.9 M, 07.4 L, 07.5 M, 07.6 M, 07.7 L, 07.8 M, 07.9 S, 07.10 S, 08.3 S, 08.4 M, 08.5 S, 08.6 S, 09.1 M, 09.2 M, 09.3 L, 09.4 M, 09.5 M, 09.6 S, 10.1 M, 10.2 L, 10.3 S.
 - **Verification:**
@@ -27,7 +27,7 @@
 
 ### 10.4 - Motore: microtask (categoria `micro`, schema ridotto, `tasks micro`, `tasks promote`, dimensione XS), tipo ed etichette
 
-- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Motore dei microtask · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 10.1 (stesso file) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Motore dei microtask · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 10.1 (stesso file) · **Use cases:** UC026 · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md`, `plugins/architect-side/skills/task-pipeline/SKILL.md` (documentare la forma dei microtask)
 - **Goal:** Specifica §5 (tutto tranne le esecuzioni batch e la UI) e parte motore della specifica §6:
   - campi `kind` e `labels` (estensioni dell'intestazione `T###`, punti elenco `NN.T`);
@@ -40,7 +40,7 @@
 
 ### 10.6 - Viste del Backlog: "Next up" compatto, selettore di vista separato (Queue, Kanban, Tree, Timeline)
 
-- **Status:** `done` (2026-10-21; Verificato da d4science-python-library-2e) · **Short:** Selettore vista Backlog · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 06.8 (corsia frontend; può girare prima di 10.1 ed essere arricchito una volta atterrati 10.1 e 11.3) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-21; Verificato da d4science-python-library-2e) · **Short:** Selettore vista Backlog · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 06.8 (corsia frontend; può girare prima di 10.1 ed essere arricchito una volta atterrati 10.1 e 11.3) · **Use cases:** UC025 · **Repo:** `ai-orchestration-ui/`
 - **Origin:** feedback dell'owner (2026-10-17). "Next Up Focus" era poco chiaro ed enorme: elencava ogni `NN.T`, poiché i task di iniziativa ereditavano lo stato dell'iniziativa, e si trovava nella stessa pagina della Kanban.
 - **Goal:**
   - La scheda Backlog riceve un selettore di vista: **Queue**, **Kanban**, **Tree** (11.3), **Timeline** (10.2). L'ultima vista scelta viene memorizzata (localStorage).
@@ -55,7 +55,7 @@
 
 ### 10.2 - UI: endpoint del grafo e di modifica e scheda Timeline (frecce, coda pronta, modifica di priorità e dipendenze)
 
-- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Scheda Timeline · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 10.1, 06.8 (corsia frontend; può girare prima di 08.4 quando 08.3 è in ritardo) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Scheda Timeline · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 10.1, 06.8 (corsia frontend; può girare prima di 08.4 quando 08.3 è in ritardo) · **Use cases:** UC025 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`, `frontend/src/**`
 - **Goal:** Specifica §3. Endpoint: `GET /api/tasks/graph`, e `POST /api/tasks/{id}/priority`, `/size` e `/deps`, ciascuno con una variante `/preview`.
 - **Verification:** Dal vivo con il server MCP Playwright su una copia temporanea di `tasks/` di questo repository:
@@ -69,14 +69,14 @@
 
 ### 10.3 - VS Code: Timeline nella webview
 
-- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Timeline in VS Code · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 10.2, 06.9 (corsia VS Code) · **Repo:** `vscode-ai-orchestration/`
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Timeline in VS Code · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 10.2, 06.9 (corsia VS Code) · **Use cases:** UC025 · **Repo:** `vscode-ai-orchestration/`
 - **Focus files:** `src/views/dashboard-panel.ts`, `src/cli-client.ts`, `dist-webview/**`
 - **Goal:** Specifica §3 "VS Code".
 - **Verification:** Dal vivo in un Extension Development Host.
 
 ### 10.5 - UI: aggiunta rapida di microtask, pillole XS, "Promote", tipo ed etichette, barra dei filtri condivisa
 
-- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** UI dei microtask · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 10.4, 10.2 (corsia frontend) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** UI dei microtask · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 10.4, 10.2 (corsia frontend) · **Use cases:** UC005, UC026 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `frontend/src/**`
 - **Goal:** Specifica §5 "Creation" (UI) e la pillola nella timeline, più la UI della specifica §6: icone di tipo, chip delle etichette, barra dei filtri condivisa, editor delle etichette con completamento automatico, raggruppamento per etichetta. Inoltre: nella scheda inbox (09.3), "Convert to microtask" per le note `bug`, una volta atterrato 09.3.
 - **Verification:** Dal vivo con Playwright: aggiungere rapidamente un microtask di tipo bug → compare come pillola XS nella coda pronta → Promote → diventa una scheda completa.

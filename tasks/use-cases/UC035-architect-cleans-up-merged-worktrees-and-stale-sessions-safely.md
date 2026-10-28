@@ -3,7 +3,7 @@
 - id: UC035
 - title: Architect cleans up merged worktrees and stale sessions safely
 - actor: Architect session
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: T012
 - verification-type: code-audit

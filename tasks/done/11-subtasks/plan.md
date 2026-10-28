@@ -10,7 +10,7 @@
 
 ### 11.1 - Motore: parser ricorsivo dei nodi, ereditarietà, transizioni solo sulle foglie, stato derivato dei contenitori, dipendenze sui contenitori, comandi strutturali (`child add`, `expand`, `collapse`, `reopen`; nessun `move`, specifica S1)
 
-- **Status:** `done` (2026-10-17; claude; unito in main) · **Short:** Parser ricorsivo dei nodi · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 09.1 (stesso file) · **Note:** il task del motore più grande finora; revisionare in due passaggi (prima parser e stato, poi comandi strutturali) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17; claude; unito in main) · **Short:** Parser ricorsivo dei nodi · **Size:** L · **Profile:** `deep-reasoning` · **Depends on:** 09.1 (stesso file) · **Use cases:** UC023 · **Note:** il task del motore più grande finora; revisionare in due passaggi (prima parser e stato, poi comandi strutturali) · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `tasks/specs/task-and-state-model.md`, `tasks/specs/blocking-questions.md` (`blocks` accetta id figli)
 - **Goal:** Specifica §1–§3 e §5:
   - le tre regole a qualsiasi profondità;
@@ -36,7 +36,7 @@
 
 ### 11.2 - Esecuzioni sui task figli
 
-- **Status:** `done` (2026-10-17) · **Short:** Esecuzioni sui task figli · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1, 07.4 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Esecuzioni sui task figli · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1, 07.4 · **Use cases:** UC023 · **Repo:** `ai-orchestration/`
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`, `tasks/specs/agent-runs-from-ui.md` (nota sull'ambito in §1)
 - **Goal:** Specifica §3: rimuovere la restrizione ai soli `T###` della specifica 07 §1. I prompt di esecuzione includono il contesto genitore (intestazione del `plan.md` dell'iniziativa o `README`/`CONTEXT` della cartella) più il blocco figlio.
 - **Verification:** Test con l'agente stub: un'esecuzione execute su `NN.T` porta il blocco a `in progress`; mark-delivered e verify sul blocco. Tutti gli unit test passano.
@@ -52,7 +52,7 @@
 
 ### 11.6 - Follow-up della revisione di 11.1: applicazione di S10, `reopen` completo, figli di `T###`, test CLI
 
-- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Follow-up revisione gerarchia · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Follow-up revisione gerarchia · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 · **Use cases:** UC023, UC024 · **Repo:** `ai-orchestration/`
 - **Origin:** revisione di 11.1 (2026-10-17), elementi non ancora coperti dal motore unito.
 - **Goal:**
   - S10: `--expect-plan-hash` obbligatorio in fase di applicazione per `child add`, `expand`, `collapse`, `reopen` (attualmente opzionale);
@@ -65,14 +65,14 @@
 
 ### 11.3 - UI: albero comprimibile a qualsiasi profondità, dettaglio del nodo con ereditarietà, aggiunta figlio, espansione, spostamento, breadcrumb
 
-- **Status:** `done` (2026-10-21; Verificato da d4science-python-library-2e) · **Short:** UI albero comprimibile · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 11.1, 06.8 (corsia frontend) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-21; Verificato da d4science-python-library-2e) · **Short:** UI albero comprimibile · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 11.1, 06.8 (corsia frontend) · **Use cases:** UC023 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `frontend/src/**`
 - **Goal:** Specifica §4.
 - **Verification:** Dal vivo con Playwright su una copia temporanea di `tasks/` di questo repository: l'albero mostra 06–11 con barre di avanzamento; la transizione di un figlio aggiorna il relativo blocco e il riepilogo padre; "Add subtask" su un task a cartella crea `T###.1`.
 
 ### 11.4 - Motore: collocazione separata dei chiusi a ogni livello (`tasks ship`, sezione `## Closed` per i blocchi, riscrittura dei link, `tasks archive`; le domande restano sul posto secondo S3)
 
-- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Collocazione separata chiusi · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (stesso file) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Collocazione separata chiusi · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 11.1 (stesso file) · **Use cases:** UC024 · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `plugins/architect-side/skills/task-pipeline/SKILL.md` (passo "Ship"), `tasks/specs/blocking-questions.md` (posizione delle domande chiuse)
 - **Goal:** Specifica §6.
 - **Verification:**

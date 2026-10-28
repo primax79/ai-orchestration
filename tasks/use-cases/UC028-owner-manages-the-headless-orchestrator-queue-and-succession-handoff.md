@@ -3,7 +3,7 @@
 - id: UC028
 - title: Owner manages the headless orchestrator queue and succession handoff
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: 12.5, 12.8, 12.9, 12.10, T026, T027
 - verification-type: automated-probe

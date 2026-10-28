@@ -3,7 +3,7 @@
 - id: UC027
 - title: Architect records an answered question as applied in the event ledger
 - actor: Architect session
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 12.11, 12.12, T041
 - verification-type: automated-probe

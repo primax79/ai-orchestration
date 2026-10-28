@@ -10,7 +10,7 @@
 
 ### 09.1 - Motore: cartelle delle note, `ai-orch inbox ...`, `tasks new --from-note`
 
-- **Status:** `done` (2026-10-17) · **Short:** Motore dell'inbox · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 06.10 (lock); gira nella corsia di `tasks_engine.py` dopo 06.10, prima o dopo 08.1 (mai in parallelo ad esso) · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17) · **Short:** Motore dell'inbox · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 06.10 (lock); gira nella corsia di `tasks_engine.py` dopo 06.10, prima o dopo 08.1 (mai in parallelo ad esso) · **Use cases:** UC021 · **Repo:** `ai-orchestration/`
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `.../test_tasks_engine.py`, `bin/ai-orch`, `plugins/architect-side/skills/task-pipeline/SKILL.md` (documentare la forma a cartella delle note sotto "Capture")
 - **Goal:** Specifica §2 e §3.
 - **Verification:**
@@ -22,7 +22,7 @@
 
 ### 09.2 - Backend UI: endpoint dell'inbox con caricamenti autenticati
 
-- **Status:** `done` (2026-10-17) · **Short:** Endpoint dell'inbox · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 09.1, 06.7 (corsia backend) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-17) · **Short:** Endpoint dell'inbox · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 09.1, 06.7 (corsia backend) · **Use cases:** UC021 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `backend/server.py`, `backend/test_server.py`
 - **Goal:** Specifica §5 "Safety", più endpoint sottili sopra `ai-orch inbox`: list / show / add / edit / attach (multipart, inviato in streaming su file temporaneo, poi `inbox attach`) / detach / resolve / discard / reopen / servizio degli allegati.
 - **Verification:**
@@ -30,7 +30,7 @@
 
 ### 09.3 - Frontend: scheda Inbox, editor con incolla e trascinamento di immagini, "Convert to task" manuale
 
-- **Status:** `done` (2026-10-18; claude; verificato e unito; T012 attivo dal riavvio del server kilo-mcp) · **Short:** Scheda Inbox · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 09.2, 06.8 (corsia frontend) · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-18; claude; verificato e unito; T012 attivo dal riavvio del server kilo-mcp) · **Short:** Scheda Inbox · **Size:** L · **Profile:** `bulk-execution` · **Depends on:** 09.2, 06.8 (corsia frontend) · **Use cases:** UC021 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `frontend/dist/**`
 - **Goal:** Specifica §5, ad eccezione di "Process with…".
 - **Verification:**
@@ -43,7 +43,7 @@
 
 ### 09.7 - Motore: allegati generici (testo, PDF), tipo `feature`, allegati dei task, la conversione copia gli allegati
 
-- **Status:** `done` (2026-10-17; claude; unito) · **Short:** Allegati generici · **Profile:** `deep-reasoning` · **Depends on:** 09.1 · **Repo:** `ai-orchestration/`
+- **Status:** `done` (2026-10-17; claude; unito) · **Short:** Allegati generici · **Profile:** `deep-reasoning` · **Depends on:** 09.1 · **Use cases:** UC021 · **Repo:** `ai-orchestration/`
 - **Origin:** richiesta dell'owner (2026-10-17): "come faccio a aprire una nuova feature/bug … servirebbe gestione allegati".
 - **Focus files:** `plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py`, `plugins/architect-side/skills/task-pipeline/scripts/test_tasks_engine.py`, il `SKILL.md` di task-pipeline (documentare gli allegati).
 - **Goal:** Specifica §7, lato motore: le classi di tipo e i controlli, `inbox attach` che le accetta, `kind: feature`, `tasks attach|detach`, `tasks new --from-note` che copia gli allegati riscrivendo i riferimenti, JSON di `tasks list`/`show` che espone `attachments: [{name, class, size}]` per task e note.
@@ -51,7 +51,7 @@
 
 ### 09.4 - Triage tramite agente: modalità di esecuzione `triage`, revisione della proposta, accettazione
 
-- **Status:** `done with a caveat: validated by the architect, no user yet` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Triage tramite agente · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 09.1, 07.4, 07.10 (domande) · **Repo:** `ai-orchestration/` (+ UI in 09.5)
+- **Status:** `done with a caveat: validated by the architect, no user yet` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Triage tramite agente · **Size:** M · **Profile:** `deep-reasoning` · **Depends on:** 09.1, 07.4, 07.10 (domande) · **Use cases:** UC022 · **Repo:** `ai-orchestration/` (+ UI in 09.5)
 - **Focus files:** `scripts/orchestration_runs.py`, `scripts/test_orchestration_runs.py`
 - **Goal:** Specifica §4 "By an agent":
   - la modalità `triage`, con il relativo prompt e il passaggio delle immagini specifico per-tool;
@@ -64,7 +64,7 @@
 
 ### 09.5 - Frontend: "Process with…" e revisione della proposta
 
-- **Status:** `done with a caveat: validated by the architect, no user yet` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Revisione Process-with · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 09.3, 09.4, 07.7 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done with a caveat: validated by the architect, no user yet` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Revisione Process-with · **Size:** M · **Profile:** `bulk-execution` · **Depends on:** 09.3, 09.4, 07.7 · **Use cases:** UC022 · **Repo:** `ai-orchestration-ui/`
 - **Focus files:** `frontend/src/**`, `backend/server.py` (endpoint di accettazione), `frontend/dist/**`
 - **Goal:** Flusso di revisione della specifica §4 nella UI.
 - **Verification:** Dal vivo: elaborare una nota con l'agente stub, modificare un task proposto, rifiutarne un altro, accettare → esiste solo quello accettato.
@@ -92,7 +92,7 @@
 
 ### 09.10 - Modifica dei task proposti prima di accettare una proposta di triage
 
-- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Proposte triage modificabili · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 09.4, 09.5 · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Proposte triage modificabili · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 09.4, 09.5 · **Use cases:** UC022 · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
 - **Origin:** avvio di 09.4/09.5 (2026-10-17): `run accept-triage` accetta `--only` ma nessuna modifica, mentre la specifica §4 prevede che ciascun task proposto possa essere modificato prima dell'accettazione.
 - **Goal:** `run accept-triage ... --edits-file F` (JSON: per indice del task proposto, override di title/category/priority/priority_reason/goal/steps/verification, validati come la proposta); le schede del pannello di revisione diventano modificabili e inviano le modifiche.
 - **Verification:** test del motore (i campi modificati finiscono nel task creato, le modifiche non valide vengono rifiutate); dal vivo: modificare un task proposto, accettare, il task presenta il titolo modificato.

@@ -3,7 +3,7 @@
 - id: UC034
 - title: Owner tracks cross-project coordination tasks with live child states
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: 16.4, 16.9
 - verification-type: automated-probe

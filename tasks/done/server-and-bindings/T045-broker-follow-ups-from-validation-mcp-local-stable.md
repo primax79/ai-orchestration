@@ -14,6 +14,7 @@
 - paths: bin/ai-orch, ../ai-orchestration-ui/backend/broker/
 - handoff: Leggere tasks/server-and-bindings/T045-broker-follow-ups-from-validation-mcp-local-stable.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC032
 - short: Follow-up validazione broker
 
 ## Goal

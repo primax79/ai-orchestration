@@ -3,7 +3,7 @@
 - id: UC003
 - title: Operator runs a product validation campaign with regression detection
 - actor: Operator (CLI)
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: 15.4, T055
 - verification-type: automated-probe

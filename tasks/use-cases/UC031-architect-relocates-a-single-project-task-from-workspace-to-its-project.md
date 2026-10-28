@@ -3,7 +3,7 @@
 - id: UC031
 - title: Architect relocates a single-project task from workspace to project
 - actor: Architect session
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: 16.4
 - verification-type: automated-probe

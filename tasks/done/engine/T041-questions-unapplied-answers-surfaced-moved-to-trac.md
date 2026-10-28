@@ -14,6 +14,7 @@
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Leggi tasks/tasks/T041-questions-unapplied-answers-surfaced-moved-to-trac.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
+- use-cases: UC027
 - short: Lacune flusso domande
 
 ## Goal

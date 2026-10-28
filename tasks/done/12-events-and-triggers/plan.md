@@ -10,12 +10,12 @@
 
 ### 12.11 - Core: archivio degli eventi (outbox, contatore, manifesto dei chunk, riconciliazione, `events tail`)
 
-- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Archivio degli eventi · **Size:** L · **Depends on:** 10.4 (fine corsia `tasks_engine.py`) · **Repo:** `ai-orchestration/` (nuovo modulo `scripts/orchestration_events.py`)
+- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Archivio degli eventi · **Size:** L · **Depends on:** 10.4 (fine corsia `tasks_engine.py`) · **Use cases:** UC027 · **Repo:** `ai-orchestration/` (nuovo modulo `scripts/orchestration_events.py`)
 - **Goal:** E1, E13 e lettura in §1.
 
 ### 12.12 - Emissione degli eventi da `tasks_engine.py`
 
-- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Eventi motore dei task · **Size:** M · **Depends on:** 12.11
+- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Eventi motore dei task · **Size:** M · **Depends on:** 12.11 · **Use cases:** UC027
 - **Goal:** Eventi per task, domande e inbox, tramite l'outbox; il registro di applicazione E11 con `questions apply`.
 
 ### 12.13 - Emissione degli eventi da `orchestration_runs.py` ed estrazione della primitiva di invocazione supervisionata
@@ -36,7 +36,7 @@
 
 ### 12.4 - Motore dei trigger
 
-- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Motore dei trigger · **Size:** L · **Depends on:** 12.3
+- **Status:** `done` (2026-10-18; claude; unito) · **Short:** Motore dei trigger · **Size:** L · **Depends on:** 12.3 · **Use cases:** UC029
 - **Goal:** §5, E7 e la policy a capacità ridotta per i turni non presidiati (E3).
 
 ### 12.1 - Dati sulla ripresa headless (unito in 07.5)
@@ -50,27 +50,27 @@
 
 ### 12.5 - Ruolo di orchestratore headless (sessioni, coda, turni, successione, limiti)
 
-- **Status:** `done with a caveat: validated by the architect, no user yet` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Ruolo orchestratore headless · **Size:** L · **Depends on:** 12.1, 12.3, 12.13
+- **Status:** `done with a caveat: validated by the architect, no user yet` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Ruolo orchestratore headless · **Size:** L · **Depends on:** 12.1, 12.3, 12.13 · **Use cases:** UC028
 - **Goal:** §0, E2, E4, E5, E6, E8 ed E9.
 
 ### 12.9 - Configurazione dell'orchestratore: riassegnazione come successione, motore `ai-orch setup` condiviso con la skill `orchestration-setup`
 
-- **Status:** `done with a caveat: validated by the architect, no user yet` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Riassegnazione orchestratore · **Size:** M · **Depends on:** 12.5
+- **Status:** `done with a caveat: validated by the architect, no user yet` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Riassegnazione orchestratore · **Size:** M · **Depends on:** 12.5 · **Use cases:** UC028
 - **Goal:** §0b, parte core.
 
 ### 12.6 - UI: flussi degli eventi e della coda, area notifiche, pagina Triggers, chip delle sessioni, gruppo "awaiting application"
 
-- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** UI flussi di eventi · **Size:** L · **Depends on:** 12.4, corsia frontend dopo 10.5
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** UI flussi di eventi · **Size:** L · **Depends on:** 12.4, corsia frontend dopo 10.5 · **Use cases:** UC029
 - **Goal:** §6 ed E12.
 
 ### 12.8 - UI: pannello chat dell'orchestratore
 
-- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Chat dell'orchestratore · **Size:** L · **Depends on:** 12.5, 12.6
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Chat dell'orchestratore · **Size:** L · **Depends on:** 12.5, 12.6 · **Use cases:** UC028
 - **Goal:** §0 "Owner chat in the UI" ed E12; conferme delle azioni proposte (E3).
 
 ### 12.10 - UI: scheda Orchestrator in Config (titolare attuale, Reassign…, pausa/rotazione) e procedura guidata di primo setup
 
-- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Scheda Config orchestratore · **Size:** M · **Depends on:** 12.9, 12.8
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Scheda Config orchestratore · **Size:** M · **Depends on:** 12.9, 12.8 · **Use cases:** UC028
 - **Goal:** §0b, parte UI.
 
 ### 12.7 - VS Code: watcher degli eventi e notifiche
@@ -89,7 +89,7 @@
 
 ### 12.16 - UI: conferma/rifiuto delle azioni proposte dai trigger (collegamento T024) e ordinamento dei turni della chat
 
-- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Conferma proposte nella UI · **Kind:** feature · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 12.8 · **Repo:** `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-23; owner; Validato dalle suite di test automatici e approvato dall'owner per la pulizia) · **Short:** Conferma proposte nella UI · **Kind:** feature · **Size:** S · **Profile:** `bulk-execution` · **Depends on:** 12.8 · **Use cases:** UC029 · **Repo:** `ai-orchestration-ui/`
 - **Origin:** revisione di 12.8 (2026-10-18): gli endpoint di conferma/rifiuto del backend restituiscono ancora `not-implemented` (scritti prima dell'unione di T024) e il pannello della chat mostra il turno di passaggio di consegne della rotazione sopra i turni precedenti.
 - **Goal:** `POST /api/triggers/proposed-actions/{id}/confirm|reject` invocano `ai-orch triggers confirm --expect-hash --actor ui` / `triggers reject --reason`; la pagina Triggers e il pannello della chat ricevono pulsanti Confirm/Reject funzionanti; la conversazione segue un ordine strettamente cronologico.
 - **Verification:** test del backend con CLI stub; dal vivo: una proposta `command` in sospeso confermata dalla UI passa a `confirmed`, una rifiutata a `rejected` con la motivazione; dopo una rotazione il turno di passaggio di consegne compare per ultimo.

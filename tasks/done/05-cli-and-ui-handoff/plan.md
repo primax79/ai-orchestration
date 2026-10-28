@@ -7,12 +7,12 @@
 ## Tasks (One Task = One Commit)
 
 ### 05.1 - Punto di ingresso unificato della CLI `bin/ai-orch` (`config`, `tasks`, `render-agents-md`, `describe`)
-- **Status:** `done` (2026-10-15) · **Short:** CLI ai-orch unificata
+- **Status:** `done` (2026-10-15) · **Short:** CLI ai-orch unificata · **Use cases:** UC010
 - **Goal:** Fornire un unico wrapper CLI `bin/ai-orch` sopra `orchestration_config.py` e `tasks_engine.py` con output `--json` e `describe`.
 
 ### 05.2 - Installatore da zero e Doctor dell'ambiente (`scripts/orchestration_env.py`, `install.sh`, `ai-orch env`)
 - **Profile:** `deep-reasoning`
-- **Status:** `done` (2026-10-15) · **Short:** Installatore e Doctor
+- **Status:** `done` (2026-10-15) · **Short:** Installatore e Doctor · **Use cases:** UC011, UC012
 - **Focus files:** `scripts/orchestration_env.py`, `scripts/test_orchestration_env.py`, `install.sh`, `bin/ai-orch`
 - **Goal:** Fornire uno script privo di dipendenze esterne (`scripts/orchestration_env.py`, esposto come `./bin/ai-orch env <status|install|register-mcp>` e `./install.sh`) per gli utenti che installano da zero e per i Macro-Task 2 e 3 dell'estensione:
   1. **Download / Clone / Update** di `ai-orchestration` e `kilo-mcp` (da GitHub in `~/.ai-orchestration/repos/` oppure usando i checkout locali quando presenti);
@@ -23,14 +23,14 @@
 
 ### 05.3 - Backend dell'estensione / Web UI e vista Backlog Manager (Macro-Task 1)
 - **Profile:** `bulk-execution`
-- **Status:** `done` (2026-10-15) · **Short:** Backend Backlog Manager
+- **Status:** `done` (2026-10-15) · **Short:** Backend Backlog Manager · **Use cases:** UC010
 - **Repo:** `ai-orchestration-ui/`
 - **Goal:** Costruire la UI del Backlog Manager (panoramica dell'avanzamento, coda `Next up`, bacheca Kanban per stato, albero Iniziativa/Categoria ed editor di dettaglio Task/Spec per priorità, assegnatario/esecutore, profilo, modalità di verifica e transizioni di stato) supportata da `ai-orch tasks --json`.
 - **Verification:** Gli unit test in `backend/test_server.py` passano e Vite compila `frontend/dist/` senza errori.
 
 ### 05.4 - Installatore dell'ambiente, Doctor e configuratore dell'orchestratore per estensione / Web UI (Macro-Task 2, 3, 4)
 - **Profile:** `bulk-execution`
-- **Status:** `done` (2026-10-15) · **Short:** UI installer e configuratore
+- **Status:** `done` (2026-10-15) · **Short:** UI installer e configuratore · **Use cases:** UC011, UC012
 - **Repo:** `ai-orchestration-ui/`
 - **Goal:** Costruire le viste UI per:
   - **Macro-Task 2 e 3 (Installatore di skill e MCP + Doctor dell'ambiente):** supportati da `ai-orch env status --json` e `ai-orch env install --json`;

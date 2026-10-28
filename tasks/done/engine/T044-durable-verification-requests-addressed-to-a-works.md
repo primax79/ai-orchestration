@@ -15,6 +15,7 @@
 - handoff: Leggi tasks/engine/T044-durable-verification-requests-addressed-to-a-works.md, esegui i passi aperti, lancia la Verification, aggiorna il task e il registro.
 - verifier: owner
 - verify-by: gcube_atlas
+- use-cases: UC037
 - short: Richieste verifica persistenti
 
 ## Goal

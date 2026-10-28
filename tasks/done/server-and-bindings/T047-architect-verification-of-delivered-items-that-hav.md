@@ -14,6 +14,7 @@
 - paths: tasks/_reviews/2026-10-21-validation-campaign.md
 - handoff: Leggere tasks/server-and-bindings/T047-architect-verification-of-delivered-items-that-hav.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC037
 - short: Verifica architetto senza utenti
 
 ## Goal

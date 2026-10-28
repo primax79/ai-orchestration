@@ -14,6 +14,7 @@
 - paths: scripts/orchestration_registry.py, plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Leggere tasks/server-and-bindings/T040-workspace-wide-next-up-and-open-tasks-across-proje.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: owner
+- use-cases: UC033
 - short: Next di workspace
 
 ## Goal

@@ -3,7 +3,7 @@
 - id: UC010
 - title: Owner manages task priority and assignee in the backlog control plane
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 05.1, 05.3
 - verification-type: automated-probe

@@ -3,7 +3,7 @@
 - id: UC005
 - title: Operator captures a microtask and promotes it to a full task
 - actor: Operator (CLI)
-- status: draft
+- approval: proposed
 - priority: P2
 - linked-tasks: 10.5, 03.2
 - verification-type: automated-probe

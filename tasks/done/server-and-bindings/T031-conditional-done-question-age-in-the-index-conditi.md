@@ -14,6 +14,7 @@
 - paths: -
 - handoff: Leggere tasks/server-and-bindings/T031-conditional-done-question-age-in-the-index-conditi.md, eseguire i passaggi aperti, lanciare la Verification, aggiornare il task e il registro.
 - verifier: d4science-evolution-assurance-37
+- use-cases: UC020
 - short: Follow-up done condizionato
 
 ## Goal

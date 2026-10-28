@@ -3,7 +3,7 @@
 - id: UC013
 - title: Operator safely previews and applies skill changes without clobbering
 - actor: Operator (CLI)
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 06.2, 06.3, 06.4
 - verification-type: automated-probe

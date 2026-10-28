@@ -3,7 +3,7 @@
 - id: UC017
 - title: Owner runs an independent cross-agent verification on a delivered task
 - actor: Owner
-- status: draft
+- approval: proposed
 - priority: P1
 - linked-tasks: 07.4, 07.6, 07.7, 07.12
 - verification-type: automated-probe

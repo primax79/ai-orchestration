@@ -12,7 +12,7 @@
 
 ### 13.1 - P1-a: interrompere il ciclo "Resolve" a vuoto (no-op)
 
-- **Status:** `done` (2026-10-18; claude; verificato e unito; T012 attivo dal riavvio del server kilo-mcp) · **Short:** Correzione ciclo Resolve · **Size:** S · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/`
+- **Status:** `done` (2026-10-18; claude; verificato e unito; T012 attivo dal riavvio del server kilo-mcp) · **Short:** Correzione ciclo Resolve · **Size:** S · **Repo:** `ai-orchestration/` + `ai-orchestration-ui/` · **Use cases:** UC012
 - **Goal:**
   - ogni conflitto porta `fixable: true|false`;
   - la UI mostra il rosso e "Resolve…" solo quando il piano contiene azioni eseguibili;
