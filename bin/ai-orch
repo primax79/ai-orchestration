@@ -207,9 +207,16 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "transition": {
                     "usage": (
                         "ai-orch tasks transition <task_id> <new_state> [--waiting-on <qualifier>] [--actor <actor>] "
-                        "[--verifier <verifier>] [--verify-by <target>] [--verify-check <what-to-check>] [--reason <text>] [--tasks-dir <dir>] [--json]"
+                        "[--verifier <verifier>] [--owner-approved] [--verify-by <target>] [--verify-check <what-to-check>] [--reason <text>] [--tasks-dir <dir>] [--json]"
                     ),
-                    "description": "Transition task state enforcing state-machine guards and moving closed tasks to tasks/done/.",
+                    "description": "Transition task state enforcing state-machine and use-case closing guards (--owner-approved override), and moving closed tasks to tasks/done/.",
+                },
+                "close": {
+                    "usage": (
+                        "ai-orch tasks close [<task_id> | --verified] [--verifier <verifier>] [--owner-approved] "
+                        "[--caveat <text>] [--self-verified] [--reason <text>] [--dry-run] [--expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]"
+                    ),
+                    "description": "Walk a task through legal transitions to done, enforcing independent-verifier and use-case closing guards (--owner-approved override).",
                 },
                 "sync-index": {
                     "usage": "ai-orch tasks sync-index [--tasks-dir <dir>] [--apply] [--check] [--json]",
@@ -336,8 +343,8 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "List all labels currently in use with their occurrence counts.",
                 },
                 "use-cases": {
-                    "usage": "ai-orch tasks use-cases <list|show|create|record-validation|validate|campaign|adopt-links|migrate-lifecycle> [options] [--json]",
-                    "description": "Manage use cases, readiness-gated AI validations (--force override), campaigns, and lifecycle/link migrations.",
+                    "usage": "ai-orch tasks use-cases <list|show|create|record-validation|validate|campaign|queue|adopt-links|migrate-lifecycle> [options] [--json]",
+                    "description": "Manage use cases, readiness-gated AI validations (--force override), campaigns, revalidation queue, and lifecycle/link migrations.",
                     "subcommands": {
                         "validate": {
                             "usage": "ai-orch tasks use-cases validate <UC###> [--force] [--timeout <sec>] [--actor <name>] [--tasks-dir <dir>] [--json]",
@@ -346,6 +353,10 @@ CLI_DESCRIPTION: dict[str, Any] = {
                         "campaign": {
                             "usage": "ai-orch tasks use-cases campaign [--filter-actor <actor>] [--timeout <sec>] [--actor <name>] [--tasks-dir <dir>] [--json]",
                             "description": "Run validation campaign on ready use cases, listing non-ready ones under 'Not ready (N/M)' and excluding untested from the readiness denominator.",
+                        },
+                        "queue": {
+                            "usage": "ai-orch tasks use-cases queue [--tasks-dir <dir>] [--json]",
+                            "description": "List use cases with revalidation: pending, with triggering task and date (oldest first).",
                         },
                         "adopt-links": {
                             "usage": "ai-orch tasks use-cases adopt-links [--apply --expect-plan-hash <hash>] [--preview] [--skip-unknown] [--tasks-dir <dir>] [--json]",

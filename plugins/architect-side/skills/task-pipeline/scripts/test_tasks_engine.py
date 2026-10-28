@@ -16095,6 +16095,469 @@ def test_17_6_git_code_rag_shape_fixture(tmp_path: pathlib.Path) -> None:
     assert "- **UC008**: Planned Three Open Tasks (Not ready (0/3), stage: `planned`)" in report_text
 
 
+def _write_17_7_use_case(
+    tasks_dir: pathlib.Path,
+    uc_id: str,
+    *,
+    title: str,
+    approval: str = "approved",
+    linked_tasks: str = "-",
+    last_tested: str = "2026-10-20",
+    last_verdict: str = "-",
+    verification_command: str = "python3 -c 'print(\"ok\")'",
+) -> pathlib.Path:
+    uc_dir = tasks_dir / "use-cases"
+    uc_dir.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "uc"
+    p = uc_dir / f"{uc_id}-{slug}.md"
+    p.write_text(
+        f"# {uc_id} — {title}\n\n"
+        f"- id: {uc_id}\n"
+        f"- title: {title}\n"
+        f"- actor: Operator\n"
+        f"- approval: {approval}\n"
+        f"- priority: P1\n"
+        f"- linked-tasks: {linked_tasks}\n"
+        f"- verification-type: automated-probe\n"
+        f"- last-tested: {last_tested}\n"
+        f"- last-verdict: {last_verdict}\n"
+        f"- short: {title[:30]}\n\n"
+        f"## Description\n\n{title} description.\n\n"
+        f"## Preconditions\n\n- Ready.\n\n"
+        f"## Main Scenario\n\n1. Run probe.\n\n"
+        f"## Acceptance Criteria\n\n- [ ] Passes.\n\n"
+        f"## Automated Verification Command\n\n```bash\n{verification_command}\n```\n\n"
+        f"## AI Validation Log\n\n_No validations recorded yet._\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def _write_17_7_task(
+    path: pathlib.Path,
+    *,
+    task_id: str,
+    title: str,
+    category: str = "features",
+    state: str = "open",
+    executor: str = "kilo",
+    use_cases: str = "-",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"# {task_id} {title}\n\n"
+        f"- id: {task_id}\n"
+        f"- title: {title}\n"
+        f"- category: {category}\n"
+        f"- priority: P1\n"
+        f"- priority-reason: Needed for 17.7\n"
+        f"- next-up: yes\n"
+        f"- state: {state}\n"
+        f"- executor: {executor}\n"
+        f"- depends-on: -\n"
+        f"- decider: -\n"
+        f"- sources: spec.md\n"
+        f"- paths: src/app.py\n"
+        f"- handoff: Read task, execute steps, verify.\n"
+        f"- profile: bulk-execution\n"
+        f"- verification-mode: cross-agent\n"
+        f"- verifier: -\n"
+        f"- use-cases: {use_cases}\n\n"
+        f"## Goal\n\nImplement {title}.\n\n"
+        f"## Steps\n\n1. Write `src/app.py`.\n\n"
+        f"## Verification\n\n- `pytest` passes.\n",
+        encoding="utf-8",
+    )
+
+
+def test_17_7_reopen_bounce_redeliver_sets_revalidation_pending_and_validate_clears(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Task 17.7 Deliverables 1 & 2:
+    - reopen/bounce/redeliver of a task linked to a verified use case sets `revalidation: pending`
+      (targeted header edit, files byte-identical except the header line), emits `use_case.revalidation_requested`,
+      and lists in `use-cases queue` (text and --json) with triggering task and date, oldest first.
+    - `use-cases validate` (pass or fail) and `use-cases campaign` clear `revalidation: pending`.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "01-core").mkdir(parents=True)
+
+    # Create 3 use cases: UC001 (linked to T001), UC002 (linked to T002), UC003 (linked to 01.1)
+    p_uc1 = _write_17_7_use_case(
+        tasks_dir,
+        "UC001",
+        title="Verified UC One",
+        approval="approved",
+        linked_tasks="T001",
+        last_verdict="pass",
+        verification_command="python3 -c 'print(\"uc1 pass\")'",
+    )
+    p_uc2 = _write_17_7_use_case(
+        tasks_dir,
+        "UC002",
+        title="Verified UC Two",
+        approval="approved",
+        linked_tasks="T002",
+        last_verdict="pass",
+        verification_command="python3 -c 'import sys; sys.exit(1)'",
+    )
+    p_uc3 = _write_17_7_use_case(
+        tasks_dir,
+        "UC003",
+        title="Verified UC Three",
+        approval="approved",
+        linked_tasks="01.1",
+        last_verdict="pass",
+        verification_command="python3 -c 'print(\"uc3 pass\")'",
+    )
+
+    # Create emergent task T001 (in done, state=done) linked to UC001
+    t1_done = tasks_dir / "done" / "features" / "T001-auth-flow.md"
+    _write_17_7_task(
+        t1_done,
+        task_id="T001",
+        title="Auth Flow",
+        category="features",
+        state="done",
+        executor="kilo",
+        use_cases="UC001",
+    )
+
+    # Create emergent task T002 (state=delivered) linked to UC002
+    t2_active = tasks_dir / "features" / "T002-token-refresh.md"
+    _write_17_7_task(
+        t2_active,
+        task_id="T002",
+        title="Token Refresh",
+        category="features",
+        state="delivered",
+        executor="kilo",
+        use_cases="UC002",
+    )
+
+    # Create initiative task 01.1 (state=delivered) linked to UC003
+    plan_p = tasks_dir / "01-core" / "plan.md"
+    plan_p.write_text(
+        "# 01 — Core Initiative\n\n"
+        "- **Status:** `in progress`\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Core Redeliver Task\n\n"
+        "- **Status:** `delivered` · **Short:** Core Redeliver · **Size:** S · **Depends on:** - · **Use cases:** UC003\n"
+        "- **Goal:** Core task.\n",
+        encoding="utf-8",
+    )
+
+    # Confirm all 3 use cases start in stage `verified` and queue is empty
+    for ucid in ("UC001", "UC002", "UC003"):
+        u_show = json.loads(run_cli("use-cases", "show", ucid, "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+        assert u_show["stage"] == "verified"
+        assert u_show["revalidation"] is None
+
+    res_q0 = run_cli("use-cases", "queue", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_q0.returncode == 0
+    assert json.loads(res_q0.stdout)["count"] == 0
+    res_q0_txt = run_cli("use-cases", "queue", "--tasks-dir", str(tasks_dir))
+    assert "No use cases pending revalidation" in res_q0_txt.stdout
+
+    uc1_before = p_uc1.read_text(encoding="utf-8")
+    uc2_before = p_uc2.read_text(encoding="utf-8")
+    uc3_before = p_uc3.read_text(encoding="utf-8")
+
+    # 1. Bounce T002 (`delivered -> bounced`) -> UC002 gets `revalidation: pending` (oldest in queue!)
+    res_bounce = run_cli(
+        "transition", "T002", "bounced",
+        "--reason", "Regression in token refresh",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_bounce.returncode == 0, res_bounce.stdout + res_bounce.stderr
+    uc2_after = p_uc2.read_text(encoding="utf-8")
+    assert "- revalidation: pending\n" in uc2_after
+    # File is byte-identical except the `- revalidation: pending` header line
+    assert uc2_after.replace("- revalidation: pending\n", "") == uc2_before
+
+    # 2. Reopen T001 (`done -> open`) -> UC001 gets `revalidation: pending` (second in queue)
+    res_reopen = run_cli(
+        "reopen", "T001",
+        "--reason", "Reopen auth flow",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_reopen.returncode == 0, res_reopen.stdout + res_reopen.stderr
+    uc1_after = p_uc1.read_text(encoding="utf-8")
+    assert "- revalidation: pending\n" in uc1_after
+    assert uc1_after.replace("- revalidation: pending\n", "") == uc1_before
+
+    # 3. Redeliver 01.1 (`delivered -> in progress -> delivered`) -> UC003 gets `revalidation: pending` (third in queue)
+    assert run_cli("transition", "01.1", "in progress", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    res_redeliver = run_cli("transition", "01.1", "delivered", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_redeliver.returncode == 0, res_redeliver.stdout + res_redeliver.stderr
+    uc3_after = p_uc3.read_text(encoding="utf-8")
+    assert "- revalidation: pending\n" in uc3_after
+    assert uc3_after.replace("- revalidation: pending\n", "") == uc3_before
+
+    uc3_show = json.loads(run_cli("use-cases", "show", "UC003", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc3_show["stage"] == "ready (revalidation pending)"
+    assert uc3_show["revalidation"] == "pending"
+
+    # Check emitted `use_case.revalidation_requested` events
+    ws_events = _read_ws_events(tmp_path)
+    reval_evs = [e for e in ws_events if e["type"] == "use_case.revalidation_requested"]
+    assert len(reval_evs) == 3
+    assert [e["data"]["use_case_id"] for e in reval_evs] == ["UC002", "UC001", "UC003"]
+    assert [e["data"]["task_id"] for e in reval_evs] == ["T002", "T001", "01.1"]
+    assert "bounced" in reval_evs[0]["data"]["transition"]
+    assert "open" in reval_evs[1]["data"]["transition"]
+    assert "delivered" in reval_evs[2]["data"]["transition"]
+
+    # Check `ai-orch tasks use-cases queue` (--json and text) lists them oldest first: UC002, UC001, UC003
+    res_q = run_cli("use-cases", "queue", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_q.returncode == 0
+    q_data = json.loads(res_q.stdout)
+    assert q_data["ok"] is True
+    assert q_data["count"] == 3
+    assert [item["id"] for item in q_data["queue"]] == ["UC002", "UC001", "UC003"]
+    assert [item["triggering_task"] for item in q_data["queue"]] == ["T002", "T001", "01.1"]
+    today_iso = datetime.date.today().isoformat()
+    assert all(item["date"] == today_iso for item in q_data["queue"])
+
+    res_q_txt = run_cli("use-cases", "queue", "--tasks-dir", str(tasks_dir))
+    assert res_q_txt.returncode == 0
+    assert "Use Case Revalidation Queue (3):" in res_q_txt.stdout
+    assert "UC002" in res_q_txt.stdout and "T002" in res_q_txt.stdout
+    assert res_q_txt.stdout.index("UC002") < res_q_txt.stdout.index("UC001") < res_q_txt.stdout.index("UC003")
+
+    # 4. Validate UC003 (passes) -> clears `revalidation: pending` and returns to `verified`
+    res_v3 = run_cli("use-cases", "validate", "UC003", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_v3.returncode == 0, res_v3.stdout + res_v3.stderr
+    assert "revalidation:" not in p_uc3.read_text(encoding="utf-8")
+    uc3_show2 = json.loads(run_cli("use-cases", "show", "UC003", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc3_show2["stage"] == "verified"
+    assert uc3_show2["revalidation"] is None
+
+    # 5. Deliver T002 again and validate UC002 (probe exits 1 -> fails) -> fail ALSO clears `revalidation: pending`!
+    assert run_cli("transition", "T002", "in progress", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    assert run_cli("transition", "T002", "delivered", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    res_v2 = run_cli("use-cases", "validate", "UC002", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_v2.returncode == 1
+    v2_data = json.loads(res_v2.stdout)
+    assert v2_data["verdict"] == "fail"
+    assert "revalidation:" not in p_uc2.read_text(encoding="utf-8")
+    uc2_show2 = json.loads(run_cli("use-cases", "show", "UC002", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc2_show2["stage"] == "failing"
+    assert uc2_show2["revalidation"] is None
+
+    # 6. Deliver T001 and run `use-cases campaign` -> clears UC001's `revalidation: pending` as well!
+    assert run_cli("transition", "T001", "in progress", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    assert run_cli("transition", "T001", "delivered", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+    run_cli("use-cases", "campaign", "--tasks-dir", str(tasks_dir), "--json")
+    assert "revalidation:" not in p_uc1.read_text(encoding="utf-8")
+    res_q_end = json.loads(run_cli("use-cases", "queue", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    assert res_q_end["count"] == 0
+
+
+def test_17_7_safe_closing_guard_refuses_failing_approved_allows_after_probe_and_owner_approved(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Task 17.7 Deliverable 3:
+    - Transition to `verified` or `done` refused with exit 2 when a linked `approved` use case has
+      `last-verdict: fail`, emitting `task.transition_refused` with reason `use_case_failing` and `use_case_ids`.
+    - Proposed and deprecated use cases never block even when `last-verdict: fail`.
+    - Allowed after a later probe run strictly after the task's last `delivered` transition.
+    - `--owner-approved` overrides the guard, recorded in the task log and in `task.transitioned` with `owner_approved: true`.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "features").mkdir(parents=True)
+
+    # UC001: approved, failing -> blocks T001
+    p_uc1 = _write_17_7_use_case(
+        tasks_dir,
+        "UC001",
+        title="Approved Failing UC",
+        approval="approved",
+        linked_tasks="T001",
+        last_verdict="fail",
+        verification_command="python3 -c 'print(\"fixed\")'",
+    )
+    # UC002: proposed, failing -> never blocks T002
+    _write_17_7_use_case(
+        tasks_dir,
+        "UC002",
+        title="Proposed Failing UC",
+        approval="proposed",
+        linked_tasks="T002",
+        last_verdict="fail",
+    )
+    # UC003: deprecated, failing -> never blocks T002
+    _write_17_7_use_case(
+        tasks_dir,
+        "UC003",
+        title="Deprecated Failing UC",
+        approval="deprecated",
+        linked_tasks="T002",
+        last_verdict="fail",
+    )
+    # UC004: approved, failing -> blocks T003 until --owner-approved override
+    _write_17_7_use_case(
+        tasks_dir,
+        "UC004",
+        title="Approved Failing Override UC",
+        approval="approved",
+        linked_tasks="T003",
+        last_verdict="fail",
+    )
+
+    t1 = tasks_dir / "features" / "T001-remediate.md"
+    _write_17_7_task(t1, task_id="T001", title="Remediate UC1", state="in progress", executor="kilo", use_cases="UC001")
+    t2 = tasks_dir / "features" / "T002-proposed.md"
+    _write_17_7_task(t2, task_id="T002", title="Proposed UC Task", state="in progress", executor="kilo", use_cases="UC002, UC003")
+    t3 = tasks_dir / "features" / "T003-override.md"
+    _write_17_7_task(t3, task_id="T003", title="Override UC Task", state="in progress", executor="kilo", use_cases="UC004")
+
+    # Deliver all 3 tasks
+    for tid in ("T001", "T002", "T003"):
+        assert run_cli("transition", tid, "delivered", "--tasks-dir", str(tasks_dir), "--json").returncode == 0
+
+    # 1. Proposed & deprecated failing use cases do NOT block T002 from verified or done
+    res_t2_ver = run_cli("transition", "T002", "verified", "--verifier", "claude", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_t2_ver.returncode == 0, res_t2_ver.stdout + res_t2_ver.stderr
+    res_t2_done = run_cli("transition", "T002", "done", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_t2_done.returncode == 0, res_t2_done.stdout + res_t2_done.stderr
+
+    # 2. Approved failing UC001 refuses T001 going to `verified` or `done` with exit code 2
+    res_t1_ver_refused = run_cli("transition", "T001", "verified", "--verifier", "claude", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_t1_ver_refused.returncode == 2
+    ref_data = json.loads(res_t1_ver_refused.stdout)
+    assert ref_data["ok"] is False
+    assert ref_data["reason"] == "use_case_failing"
+    assert ref_data["use_case_ids"] == ["UC001"]
+    assert "UC001" in ref_data["error"]
+    assert "--owner-approved" in ref_data["error"]
+
+    res_t1_done_refused = run_cli("transition", "T001", "done", "--verifier", "claude", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_t1_done_refused.returncode == 2
+
+    # Check `task.transition_refused` event was emitted with reason `use_case_failing` and `use_case_ids`
+    ws_events = _read_ws_events(tmp_path)
+    ref_evs = [e for e in ws_events if e["type"] == "task.transition_refused" and e["subject"] == "T001"]
+    assert len(ref_evs) >= 1
+    assert ref_evs[0]["data"]["reason"] == "use_case_failing"
+    assert ref_evs[0]["data"]["use_case_ids"] == ["UC001"]
+
+    # 3. After a later probe run (`use-cases validate UC001`) strictly after T001's `delivered` transition, T001 is allowed!
+    res_val1 = run_cli("use-cases", "validate", "UC001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val1.returncode == 0, res_val1.stdout + res_val1.stderr
+    res_t1_ver_ok = run_cli("transition", "T001", "verified", "--verifier", "claude", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_t1_ver_ok.returncode == 0, res_t1_ver_ok.stdout + res_t1_ver_ok.stderr
+    res_t1_done_ok = run_cli("transition", "T001", "done", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_t1_done_ok.returncode == 0, res_t1_done_ok.stdout + res_t1_done_ok.stderr
+
+    # 4. `--owner-approved` overrides the guard on T003 (while UC004 is still failing), recorded in task log & event
+    res_t3_refused = run_cli("transition", "T003", "verified", "--verifier", "claude", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_t3_refused.returncode == 2
+
+    res_t3_override = run_cli(
+        "transition", "T003", "done",
+        "--owner-approved",
+        "--reason", "Accepted known issue for hotfix",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    assert res_t3_override.returncode == 0, res_t3_override.stdout + res_t3_override.stderr
+    t3_done_path = tasks_dir / "done" / "features" / "T003-override.md"
+    assert t3_done_path.is_file()
+    t3_log_text = t3_done_path.read_text(encoding="utf-8")
+    assert "owner-approved" in t3_log_text
+
+    ws_events2 = _read_ws_events(tmp_path)
+    t3_trans_evs = [
+        e for e in ws_events2
+        if e["type"] == "task.transitioned" and e["subject"] == "T003" and e["data"].get("to") in ("verified", "done")
+    ]
+    assert len(t3_trans_evs) >= 1
+    assert any(e["data"].get("owner_approved") is True for e in t3_trans_evs)
+
+
+def test_17_7_revalidation_pending_atomicity_rollback_on_failure(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 17.7 Deliverable 4:
+    Failure injected after the task write (when writing the use case file) rolls back BOTH
+    the task file and the use case file byte-for-byte.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "features").mkdir(parents=True)
+
+    p_uc1 = _write_17_7_use_case(
+        tasks_dir,
+        "UC001",
+        title="Atomic Verified UC",
+        approval="approved",
+        linked_tasks="T001",
+        last_verdict="pass",
+    )
+    t1 = tasks_dir / "features" / "T001-atomic.md"
+    _write_17_7_task(t1, task_id="T001", title="Atomic Task", state="delivered", executor="kilo", use_cases="UC001")
+
+    t1_bytes_before = t1.read_bytes()
+    uc1_bytes_before = p_uc1.read_bytes()
+
+    real_atomic_write = te._atomic_write_text
+    call_count = {"n": 0}
+
+    def _failing_on_second_write(path: pathlib.Path, content: str, encoding: str = "utf-8") -> None:
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise OSError("Simulated disk failure after task write")
+        real_atomic_write(path, content, encoding=encoding)
+
+    monkeypatch.setattr(te, "_atomic_write_text", _failing_on_second_write)
+
+    with pytest.raises(OSError, match="Simulated disk failure after task write"):
+        te.transition_task(
+            tasks_dir=tasks_dir,
+            task_id="T001",
+            new_state="bounced",
+            reason="Failed check",
+        )
+
+    assert call_count["n"] >= 2
+    assert t1.read_bytes() == t1_bytes_before
+    assert p_uc1.read_bytes() == uc1_bytes_before
+
+    # Also test atomicity on `reopen_node` from `done/`
+    t2_done = tasks_dir / "done" / "features" / "T002-reopen-atomic.md"
+    _write_17_7_task(t2_done, task_id="T002", title="Reopen Atomic Task", state="done", executor="kilo", use_cases="UC002")
+    p_uc2 = _write_17_7_use_case(
+        tasks_dir,
+        "UC002",
+        title="Atomic Reopen UC",
+        approval="approved",
+        linked_tasks="T002",
+        last_verdict="pass",
+    )
+    t2_bytes_before = t2_done.read_bytes()
+    uc2_bytes_before = p_uc2.read_bytes()
+    call_count["n"] = 0
+
+    with pytest.raises(OSError, match="Simulated disk failure after task write"):
+        te.reopen_node(
+            tasks_dir=tasks_dir,
+            node_id="T002",
+            reason="Reopen atomic test",
+            apply_direct=True,
+        )
+
+    assert t2_done.is_file()
+    assert not (tasks_dir / "features" / "T002-reopen-atomic.md").exists()
+    assert t2_done.read_bytes() == t2_bytes_before
+    assert p_uc2.read_bytes() == uc2_bytes_before
+
+
+
+
 
 
 
