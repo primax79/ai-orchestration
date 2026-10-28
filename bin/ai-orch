@@ -369,8 +369,8 @@ CLI_DESCRIPTION: dict[str, Any] = {
                             "description": "List use cases with revalidation: pending, with triggering task and date (oldest first).",
                         },
                         "adopt-links": {
-                            "usage": "ai-orch tasks use-cases adopt-links [--apply --expect-plan-hash <hash>] [--preview] [--skip-unknown] [--tasks-dir <dir>] [--json]",
-                            "description": "Copy written linked-tasks from use cases onto referenced tasks' use-cases (union, fail-closed, snapshot under tasks/_reviews/).",
+                            "usage": "ai-orch tasks use-cases adopt-links [--expand-initiatives] [--apply --expect-plan-hash <hash>] [--preview] [--skip-unknown] [--tasks-dir <dir>] [--json]",
+                            "description": "Copy written linked-tasks from use cases onto referenced tasks' use-cases (union, fail-closed, optional --expand-initiatives, snapshot under tasks/_reviews/).",
                         },
                         "migrate-lifecycle": {
                             "usage": "ai-orch tasks use-cases migrate-lifecycle [--apply --expect-plan-hash <hash>] [--preview] [--tasks-dir <dir>] [--json]",

@@ -16959,6 +16959,265 @@ def test_17_4_optional_kind_warning_and_validate_warnings_and_callers(tmp_path: 
     assert "- kind: feature\n" in fu_files[0].read_text(encoding="utf-8")
 
 
+# ===========================================================================
+# Task T085: `use-cases adopt-links --expand-initiatives` and `use-cases validate` hints
+# ===========================================================================
+
+def test_t085_adopt_links_expand_initiatives_active_done_merged_dropped_preview_and_idempotent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Task T085:
+    - Without `--expand-initiatives`, initiative IDs in `linked-tasks` are refused as
+      'non-canonical task target (initiative container ID, not a task)' (fail-closed).
+    - With `--expand-initiatives`, initiative IDs expand to all leaf, non-dropped tasks across
+      active (`NN-<slug>/plan.md`), `done/NN-<slug>/plan.md`, and `merged/NN-<slug>/plan.md`.
+    - Dropped tasks in those initiatives are excluded from the expansion.
+    - Preview output lists each expansion (`UC001: 01 -> 01.1, 01.2`, etc.).
+    - Snapshot/atomic/idempotent rules of 17.3 apply (second run is a no-op with 0 changed tasks/files).
+    - Unknown initiative IDs (e.g. `99`) are still refused even with `--expand-initiatives`.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "01-active").mkdir(parents=True)
+    (tasks_dir / "done" / "02-shipped").mkdir(parents=True)
+    (tasks_dir / "merged" / "03-archived").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # Active initiative 01: 01.1 (open), 01.2 (delivered), 01.3 (dropped -> excluded)
+    active_plan = tasks_dir / "01-active" / "plan.md"
+    active_plan.write_text(
+        "# 01 — Active Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - First active task\n\n"
+        "- **Status:** `open` · **Short:** First active · **Size:** S · **Depends on:** -\n"
+        "- **Goal:** First active.\n\n"
+        "### 01.2 - Second active task\n\n"
+        "- **Status:** `delivered` · **Short:** Second active · **Size:** M · **Depends on:** 01.1 · **Use cases:** UC099\n"
+        "- **Goal:** Second active.\n\n"
+        "### 01.3 - Dropped active task\n\n"
+        "- **Status:** `dropped` · **Short:** Dropped active · **Size:** S · **Depends on:** -\n"
+        "- **Goal:** Dropped active.\n",
+        encoding="utf-8",
+    )
+
+    # Done initiative 02: 02.1 (done), 02.2 (dropped -> excluded), 02.3 (done)
+    done_plan = tasks_dir / "done" / "02-shipped" / "plan.md"
+    done_plan.write_text(
+        "# 02 — Shipped Initiative\n\n"
+        "## Tasks\n\n"
+        "### 02.1 - Done task one\n\n"
+        "- **Status:** `done` · **Short:** Done one · **Size:** S · **Depends on:** -\n"
+        "- **Goal:** Done one.\n\n"
+        "### 02.2 - Dropped task two\n\n"
+        "- **Status:** `dropped` · **Short:** Dropped two · **Size:** S · **Depends on:** -\n"
+        "- **Goal:** Dropped two.\n\n"
+        "### 02.3 - Done task three\n\n"
+        "- **Status:** `done` · **Short:** Done three · **Size:** S · **Depends on:** 02.1\n"
+        "- **Goal:** Done three.\n",
+        encoding="utf-8",
+    )
+
+    # Merged initiative 03: 03.1 (done)
+    merged_plan = tasks_dir / "merged" / "03-archived" / "plan.md"
+    merged_plan.write_text(
+        "# 03 — Archived Initiative\n\n"
+        "## Tasks\n\n"
+        "### 03.1 - Merged task one\n\n"
+        "- **Status:** `done` · **Short:** Merged one · **Size:** S · **Depends on:** -\n"
+        "- **Goal:** Merged one.\n",
+        encoding="utf-8",
+    )
+
+    def _write_uc(uc_id: str, linked: str) -> None:
+        (tasks_dir / "use-cases" / f"{uc_id}-test.md").write_text(
+            f"# {uc_id} - Test {uc_id}\n\n"
+            f"- id: {uc_id}\n"
+            f"- title: Test {uc_id}\n"
+            f"- actor: Operator\n"
+            f"- approval: approved\n"
+            f"- priority: P1\n"
+            f"- linked-tasks: {linked}\n"
+            f"- verification-type: automated-probe\n"
+            f"- last-tested: -\n"
+            f"- last-verdict: -\n\n"
+            f"## Description & Business Value\nDesc.\n\n"
+            f"## Preconditions\n- None.\n\n"
+            f"## Scenario / Interaction Steps\n1. Step.\n\n"
+            f"## Automated Verification Command\n```bash\necho ok\n```\n\n"
+            f"## Acceptance Criteria\n- [ ] Ok.\n\n"
+            f"## AI Validation Log\n",
+            encoding="utf-8",
+        )
+
+    _write_uc("UC001", "01, 02")
+    _write_uc("UC002", "02, 03")
+    _write_uc("UC099", "01.2")
+
+    # 1. Without --expand-initiatives: refused as non-canonical task target (initiative container ID, not a task)
+    res_no_opt = run_cli("use-cases", "adopt-links", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_no_opt.returncode == 1
+    no_opt_data = json.loads(res_no_opt.stdout)
+    assert no_opt_data["ok"] is False
+    assert no_opt_data["applied"] is False
+    assert [(u["use_case_id"], u["task_id"], u["reason"]) for u in no_opt_data["unknown_ids"]] == [
+        ("UC001", "01", "non-canonical task target (initiative container ID, not a task)"),
+        ("UC001", "02", "non-canonical task target (initiative container ID, not a task)"),
+        ("UC002", "02", "non-canonical task target (initiative container ID, not a task)"),
+        ("UC002", "03", "non-canonical task target (initiative container ID, not a task)"),
+    ]
+
+    # 2. Preview with --expand-initiatives: lists each expansion in text and JSON, writes nothing
+    active_orig = active_plan.read_bytes()
+    done_orig = done_plan.read_bytes()
+    merged_orig = merged_plan.read_bytes()
+
+    res_prev_txt = run_cli("use-cases", "adopt-links", "--expand-initiatives", "--tasks-dir", str(tasks_dir))
+    assert res_prev_txt.returncode == 0, res_prev_txt.stdout + res_prev_txt.stderr
+    assert "UC001: 01 -> 01.1, 01.2" in res_prev_txt.stdout
+    assert "UC001: 02 -> 02.1, 02.3" in res_prev_txt.stdout
+    assert "UC002: 02 -> 02.1, 02.3" in res_prev_txt.stdout
+    assert "UC002: 03 -> 03.1" in res_prev_txt.stdout
+    assert "[task] 01.3" not in res_prev_txt.stdout
+    assert "[task] 02.2" not in res_prev_txt.stdout
+
+    res_prev_json = run_cli("use-cases", "adopt-links", "--expand-initiatives", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_prev_json.returncode == 0
+    prev_data = json.loads(res_prev_json.stdout)
+    assert prev_data["ok"] is True
+    assert prev_data["expand_initiatives"] is True
+    assert prev_data["expansions_count"] == 4
+    assert prev_data["unknown_ids"] == []
+    assert prev_data["tasks_changed_count"] == 5
+    assert prev_data["files_changed_count"] == 3
+    assert active_plan.read_bytes() == active_orig
+    assert done_plan.read_bytes() == done_orig
+    assert merged_plan.read_bytes() == merged_orig
+
+    # 3. Apply with --expand-initiatives: snapshots touched files and updates all non-dropped leaf tasks
+    plan_hash = prev_data["plan_hash"]
+    res_app = run_cli(
+        "use-cases", "adopt-links",
+        "--expand-initiatives",
+        "--apply", "--expect-plan-hash", plan_hash,
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_app.returncode == 0, res_app.stdout + res_app.stderr
+    app_data = json.loads(res_app.stdout)
+    assert app_data["ok"] is True
+    assert app_data["applied"] is True
+    assert app_data["changed"] is True
+    snap_dir = pathlib.Path(app_data["snapshot_dir"])
+    assert snap_dir.is_dir()
+    manifest = json.loads(pathlib.Path(app_data["manifest_path"]).read_text(encoding="utf-8"))
+    assert len(manifest["expansions"]) == 4
+
+    active_after = active_plan.read_text(encoding="utf-8")
+    assert "### 01.1 - First active task\n\n- **Status:** `open` · **Short:** First active · **Size:** S · **Depends on:** - · **Use cases:** UC001\n" in active_after
+    assert "### 01.2 - Second active task\n\n- **Status:** `delivered` · **Short:** Second active · **Size:** M · **Depends on:** 01.1 · **Use cases:** UC001, UC099\n" in active_after
+    assert "### 01.3 - Dropped active task\n\n- **Status:** `dropped` · **Short:** Dropped active · **Size:** S · **Depends on:** -\n" in active_after
+
+    done_after = done_plan.read_text(encoding="utf-8")
+    assert "### 02.1 - Done task one\n\n- **Status:** `done` · **Short:** Done one · **Size:** S · **Depends on:** - · **Use cases:** UC001, UC002\n" in done_after
+    assert "### 02.2 - Dropped task two\n\n- **Status:** `dropped` · **Short:** Dropped two · **Size:** S · **Depends on:** -\n" in done_after
+    assert "### 02.3 - Done task three\n\n- **Status:** `done` · **Short:** Done three · **Size:** S · **Depends on:** 02.1 · **Use cases:** UC001, UC002\n" in done_after
+
+    merged_after = merged_plan.read_text(encoding="utf-8")
+    assert "### 03.1 - Merged task one\n\n- **Status:** `done` · **Short:** Merged one · **Size:** S · **Depends on:** - · **Use cases:** UC002\n" in merged_after
+
+    # 4. Idempotent second run
+    res_second_prev = json.loads(
+        run_cli("use-cases", "adopt-links", "--expand-initiatives", "--tasks-dir", str(tasks_dir), "--json").stdout
+    )
+    assert res_second_prev["ok"] is True
+    assert res_second_prev["tasks_changed_count"] == 0
+    assert res_second_prev["files_changed_count"] == 0
+    assert res_second_prev["plan"] == []
+
+    res_second_app = json.loads(
+        run_cli(
+            "use-cases", "adopt-links", "--expand-initiatives",
+            "--apply", "--expect-plan-hash", res_second_prev["plan_hash"],
+            "--tasks-dir", str(tasks_dir), "--json",
+        ).stdout
+    )
+    assert res_second_app["ok"] is True
+    assert res_second_app["applied"] is True
+    assert res_second_app["changed"] is False
+
+    # 5. Unknown initiative ID (e.g. 99) is still refused even with --expand-initiatives
+    _write_uc("UC003", "99")
+    res_unk = run_cli("use-cases", "adopt-links", "--expand-initiatives", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_unk.returncode == 1
+    unk_data = json.loads(res_unk.stdout)
+    assert unk_data["ok"] is False
+    assert len(unk_data["unknown_ids"]) == 1
+    assert unk_data["unknown_ids"][0]["use_case_id"] == "UC003"
+    assert unk_data["unknown_ids"][0]["task_id"] == "99"
+    assert "unknown task ID" in unk_data["unknown_ids"][0]["reason"]
+
+
+def test_t085_validate_not_ready_messages_for_draft_and_planned(tmp_path: pathlib.Path) -> None:
+    """Task T085:
+    - `use-cases validate` not-ready refusal for `draft` includes
+      'approve the use case and link tasks first (ai-orch tasks link <task> <UC>)' before `--force` (exit 2).
+    - `use-cases validate` not-ready refusal for `planned` includes
+      'its linked tasks are not delivered yet' before `--force` (exit 2).
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "01-core").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    for ucid, title in (("UC001", "Draft UC"), ("UC002", "Planned UC")):
+        run_cli(
+            "use-cases", "create",
+            "--id", ucid,
+            "--title", title,
+            "--actor", "Operator",
+            "--approval", "proposed",
+            "--verification-command", "echo ok",
+            "--tasks-dir", str(tasks_dir),
+            "--json",
+        )
+
+    (tasks_dir / "01-core" / "plan.md").write_text(
+        "# 01 — Core Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Open task\n\n"
+        "- **Status:** `open` · **Short:** Open task · **Size:** S · **Depends on:** - · **Use cases:** UC002\n"
+        "- **Goal:** Open task.\n",
+        encoding="utf-8",
+    )
+
+    # Draft refusal message
+    res_draft = run_cli("use-cases", "validate", "UC001", "--tasks-dir", str(tasks_dir))
+    assert res_draft.returncode == 2
+    draft_hint = "approve the use case and link tasks first (ai-orch tasks link <task> <UC>)"
+    assert draft_hint in res_draft.stderr
+    assert res_draft.stderr.index(draft_hint) < res_draft.stderr.index("--force")
+
+    res_draft_json = json.loads(run_cli("use-cases", "validate", "UC001", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    assert res_draft_json["exit_code"] == 2
+    assert res_draft_json["stage"] == "draft"
+    assert draft_hint in res_draft_json["error"]
+    assert res_draft_json["error"].index(draft_hint) < res_draft_json["error"].index("--force")
+
+    # Planned refusal message
+    res_planned = run_cli("use-cases", "validate", "UC002", "--tasks-dir", str(tasks_dir))
+    assert res_planned.returncode == 2
+    planned_hint = "its linked tasks are not delivered yet"
+    assert planned_hint in res_planned.stderr
+    assert res_planned.stderr.index(planned_hint) < res_planned.stderr.index("--force")
+
+    res_planned_json = json.loads(run_cli("use-cases", "validate", "UC002", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    assert res_planned_json["exit_code"] == 2
+    assert res_planned_json["stage"] == "planned"
+    assert planned_hint in res_planned_json["error"]
+    assert res_planned_json["error"].index(planned_hint) < res_planned_json["error"].index("--force")
+
+
+
 
 
 
