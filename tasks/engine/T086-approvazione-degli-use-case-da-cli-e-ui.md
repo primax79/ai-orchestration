@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: 71 use case (ai-orchestration, ai-swissknife) sono proposed dopo la migrazione e oggi si approvano solo editando i file
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: 17.11
 - decider: -
@@ -31,3 +31,7 @@ ai-orch tasks use-cases approve|deprecate|propose UC###[,UC###...] (anteprima, -
 ## Verification
 
 - Approvare in blocco i use case untested di una copia di ai-orchestration: anteprima corretta, apply, stage invariato, approval approved
+
+## Log (newest first)
+
+- 2026-10-28, orchestrator: state `open` -> `in progress` — kilo (parte motore)
