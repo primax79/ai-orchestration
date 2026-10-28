@@ -15,11 +15,6 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 - **Status:** `in progress` (2026-10-28; kilo) · **Short:** Skill use-case-first · **Size:** M · **Depends on:** 17.4
 - **Goal:** spec §4: `use-cases search` (testo, attore, spec citate, task sugli stessi percorsi); task-pipeline e orchestration-workflow dai template, rigenerati con `--check`, rigenerata la skill legata di kilo-mcp.
 
-### 17.9 - API del backend UI per collegamenti e stadi
-
-- **Status:** `in progress` (2026-10-28; operator) · **Short:** API use case-task · **Size:** S · **Depends on:** 17.5, 17.7
-- **Goal:** backend di ai-orchestration-ui: campi stage/approval/collegamenti/coda in JSON, test di compatibilità del JSON.
-
 ### 17.10 - UI web ed estensione VS Code
 
 - **Status:** `open` · **Short:** UI use case e task · **Size:** M · **Depends on:** 17.9
@@ -85,3 +80,8 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 - **Status:** `done` (2026-10-28, kilo: implementati `--use-case` e `--from-use-case [--steps]` per `tasks new` e `tasks child add`, `--kind` facoltativo con predefinito `feature` o avviso su stderr, avvisi di `validate` e aggiornamento dei chiamanti interni e di `CLI_DESCRIPTION`; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Task da use case · **Size:** M · **Depends on:** 17.2
 - **Goal:** spec §2: `tasks new --use-case` / `--from-use-case` (precompilazione), anche per i task di iniziativa; `--kind` facoltativo con avviso; avvisi di validate; aggiornati i chiamanti (backend UI, broker `tasks.new`, `orchestration_runs.py`, follow-up interni) senza rompere chi non passa i nuovi campi.
 - **Verification:** `tasks new --use-case UC001,UC004` e `--from-use-case UC001 [--steps 2-3]` (anche per blocchi di iniziativa tramite `tasks child add` e `tasks new --parent`) collegano gli use case alla creazione nell'ordine canonico dei campi/segmenti, precompilano titolo, Goal e Verification, rifiutano use case sconosciuti o `deprecated`, impostano `kind: feature` come predefinito con `--use-case`/`--from-use-case` ed emettono avviso su stderr senza errore quando `kind` è omesso; `validate` emette avvisi (mai errori) per task `feature`/`fix` senza use case, use case `approved` senza task collegati e riferimenti a use case sconosciuti o `deprecated`; i chiamanti interni (`answer_question` follow-up, `orchestration_runs.py` triage) passano `kind` mantenendo la retrocompatibilità per chiamate senza `kind`.
+
+### 17.9 - API del backend UI per collegamenti e stadi
+
+- **Status:** `done` (2026-10-28; 104 test backend verdi, build ok; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** API use case-task · **Size:** S · **Depends on:** 17.5, 17.7
+- **Goal:** backend di ai-orchestration-ui: campi stage/approval/collegamenti/coda in JSON, test di compatibilità del JSON.
