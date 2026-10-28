@@ -17484,6 +17484,406 @@ def test_17_8_skills_use_case_first_and_regenerate_check() -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+# ===========================================================================
+# Task T086: Approve, deprecate, or re-propose use cases from the CLI
+# ===========================================================================
+
+def test_t086_use_cases_approve_deprecate_propose_preview_filters_headers_log_idempotent_rollback_events(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task T086 (engine part):
+    - `use-cases approve|deprecate|propose [UC###[,UC###...]] [--stage <stage>] [--approval <current>] [--all] [--reason TEXT] [--by NAME] [--json]`
+    - Preview by default (lists each use case with current -> new approval and its stage); `--apply --expect-plan-hash <h>` writes.
+    - Selection: explicit IDs (`UC001,UC002`), or filters (`--stage untested --approval proposed`), `--all` required when no ID and no filter.
+    - Targeted header edit of `approval` only, plus `approved-by: <by>` and `approved: <YYYY-MM-DD>` right after `approval` (before `priority`) when approving; removed on `deprecate`/`propose`.
+    - Validation log and body are preserved byte-for-byte.
+    - Snapshot under `tasks/_reviews/approval-<timestamp>/`, atomic apply with rollback on failure.
+    - Idempotent (already approved -> no change, listed as unchanged).
+    - Emits `use_case.approval_changed` event per modified use case (`from`, `to`, `by`, `reason`).
+    - `stage` is unaffected by `approve`/`deprecate`/`propose`.
+    - `use-cases list --approval <a>` filter works as expected.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    log_payload = (
+        "\n### [2026-10-27 14:30 UTC] AI Validation by campaign-runner\n"
+        "- **Verdict:** `PASS`\n"
+        "- **Summary:** Probe succeeded with exit code 0\n"
+        "- **Evidence:**\n"
+        "```\n$ pytest -q\n4 passed in 0.12s\n```\n"
+    )
+
+    def _write_uc(
+        uc_id: str,
+        title: str,
+        approval_val: str = "proposed",
+        last_verdict_val: str = "-",
+        extra_log: str = "",
+    ) -> pathlib.Path:
+        slug = title.lower().replace(" ", "-")
+        p = tasks_dir / "use-cases" / f"{uc_id}-{slug}.md"
+        p.write_text(
+            f"# {uc_id} - {title}\n\n"
+            f"- id: {uc_id}\n"
+            f"- title: {title}\n"
+            f"- actor: Operator\n"
+            f"- approval: {approval_val}\n"
+            f"- priority: P1\n"
+            f"- linked-tasks: -\n"
+            f"- verification-type: automated-probe\n"
+            f"- last-tested: 2026-10-27\n"
+            f"- last-verdict: {last_verdict_val}\n"
+            f"- short: {title}\n\n"
+            "## Description & Business Value\nExact description line 1.\nExact description line 2.\n\n"
+            "## Preconditions\n- Precondition alpha.\n\n"
+            "## Scenario / Interaction Steps\n1. Step alpha.\n2. Step beta.\n\n"
+            "## Automated Verification Command\n```bash\ntrue\n```\n\n"
+            "## Acceptance Criteria\n- [x] Criterion alpha.\n- [ ] Criterion beta.\n\n"
+            f"## AI Validation Log{extra_log}",
+            encoding="utf-8",
+        )
+        return p
+
+    # UC001: linked to delivered T001, last-verdict '-' -> stage 'untested', approval 'proposed'
+    # UC002: linked to delivered T001, last-verdict '-' -> stage 'untested', approval 'proposed'
+    # UC003: linked to delivered T001, last-verdict 'pass' -> stage 'verified', approval 'proposed'
+    # UC004: no linked tasks -> stage 'draft', approval 'proposed'
+    # UC005: linked to delivered T001, last-verdict '-' -> stage 'untested', approval 'approved' (already approved)
+    p_uc1 = _write_uc("UC001", "Untested Alpha", approval_val="proposed", last_verdict_val="-", extra_log=log_payload)
+    p_uc2 = _write_uc("UC002", "Untested Beta", approval_val="proposed", last_verdict_val="-", extra_log=log_payload)
+    p_uc3 = _write_uc("UC003", "Verified Gamma", approval_val="proposed", last_verdict_val="pass", extra_log=log_payload)
+    p_uc4 = _write_uc("UC004", "Draft Delta", approval_val="proposed", last_verdict_val="-")
+    p_uc5 = _write_uc("UC005", "Already Approved", approval_val="approved", last_verdict_val="-")
+
+    (tasks_dir / "features" / "T001-delivered-feature.md").write_text(
+        "# T001 Delivered feature\n\n"
+        "- id: T001\n"
+        "- title: Delivered feature\n"
+        "- category: features\n"
+        "- priority: P1\n"
+        "- priority-reason: test\n"
+        "- next-up: no\n"
+        "- state: delivered (2026-10-27)\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: src/app.py\n"
+        "- handoff: test\n"
+        "- kind: feature\n"
+        "- use-cases: UC001, UC002, UC003, UC005\n"
+        "- short: Delivered feat\n\n"
+        "## Goal\nGoal.\n\n## Steps\n- [x] Done.\n\n## Verification\n- Checked.\n",
+        encoding="utf-8",
+    )
+
+    # 1. `use-cases list --approval` filter
+    list_prop = json.loads(
+        run_cli("use-cases", "list", "--approval", "proposed", "--tasks-dir", str(tasks_dir), "--json").stdout
+    )
+    assert [u["id"] for u in list_prop["use_cases"]] == ["UC001", "UC002", "UC003", "UC004"]
+    list_app = json.loads(
+        run_cli("use-cases", "list", "--approval", "approved", "--tasks-dir", str(tasks_dir), "--json").stdout
+    )
+    assert [u["id"] for u in list_app["use_cases"]] == ["UC005"]
+
+    # 2. `--all` required when no explicit ID and no filter (never approve everything silently)
+    for cmd_name in ("approve", "deprecate", "propose"):
+        res_no_sel = run_cli("use-cases", cmd_name, "--tasks-dir", str(tasks_dir), "--json")
+        assert res_no_sel.returncode == 1
+        no_sel_data = json.loads(res_no_sel.stdout)
+        assert no_sel_data["ok"] is False
+        assert no_sel_data["applied"] is False
+        assert "--all" in no_sel_data["error"]
+
+    # Unknown explicit ID fails closed
+    res_unk = run_cli("use-cases", "approve", "UC001,UC999", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_unk.returncode == 1
+    unk_data = json.loads(res_unk.stdout)
+    assert unk_data["ok"] is False
+    assert unk_data["unknown_ids"] == ["UC999"]
+
+    # 3. Preview by default with `--stage untested --approval proposed` filter
+    orig_bytes = {p.name: p.read_bytes() for p in (p_uc1, p_uc2, p_uc3, p_uc4, p_uc5)}
+    res_prev_filter = run_cli(
+        "use-cases", "approve",
+        "--stage", "untested",
+        "--approval", "proposed",
+        "--by", "alfredo",
+        "--reason", "Batch approve untested after migration",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_prev_filter.returncode == 0
+    prev_filter_data = json.loads(res_prev_filter.stdout)
+    assert prev_filter_data["ok"] is True
+    assert prev_filter_data["applied"] is False
+    assert prev_filter_data["dry_run"] is True
+    assert [u["id"] for u in prev_filter_data["use_cases"]] == ["UC001", "UC002"]
+    assert [u["id"] for u in prev_filter_data["use_case_changes"]] == ["UC001", "UC002"]
+    assert prev_filter_data["unchanged"] == []
+    for item in prev_filter_data["use_case_changes"]:
+        assert item["old_approval"] == "proposed"
+        assert item["new_approval"] == "approved"
+        assert item["stage"] == "untested"
+    # Preview writes nothing to disk
+    for p in (p_uc1, p_uc2, p_uc3, p_uc4, p_uc5):
+        assert p.read_bytes() == orig_bytes[p.name]
+
+    # Also check human-readable preview output lists each use case with current -> new approval and stage
+    res_prev_txt = run_cli(
+        "use-cases", "approve", "UC001,UC005",
+        "--by", "alfredo",
+        "--tasks-dir", str(tasks_dir),
+    )
+    assert res_prev_txt.returncode == 0
+    assert "UC001" in res_prev_txt.stdout
+    assert "approval proposed -> approved (stage: untested)" in res_prev_txt.stdout
+    assert "UC005" in res_prev_txt.stdout
+    assert "already approved, stage: untested" in res_prev_txt.stdout
+
+    # 4. Rollback on injected write failure during `--apply`
+    real_atomic_write = te._atomic_write_text
+    uc_write_calls: list[pathlib.Path] = []
+
+    def _failing_uc_write(path: pathlib.Path, content: str, encoding: str = "utf-8") -> None:
+        if "use-cases" in path.parts:
+            uc_write_calls.append(path)
+            if len(uc_write_calls) == 2:
+                raise OSError("Simulated disk failure during use-cases approve")
+        real_atomic_write(path, content, encoding=encoding)
+
+    monkeypatch.setattr(te, "_atomic_write_text", _failing_uc_write)
+    with pytest.raises(OSError, match="Simulated disk failure during use-cases approve"):
+        te.set_use_cases_approval(
+            tasks_dir,
+            "approve",
+            stage="untested",
+            current_approval="proposed",
+            by="alfredo",
+            reason="Batch approve untested after migration",
+            dry_run=False,
+            expect_plan_hash=prev_filter_data["plan_hash"],
+        )
+    monkeypatch.setattr(te, "_atomic_write_text", real_atomic_write)
+
+    for p in (p_uc1, p_uc2, p_uc3, p_uc4, p_uc5):
+        assert p.read_bytes() == orig_bytes[p.name]
+
+    # 5. Apply with `--stage untested --approval proposed --apply --expect-plan-hash <h>`
+    today_iso = datetime.date.today().isoformat()
+    res_apply_filter = run_cli(
+        "use-cases", "approve",
+        "--stage", "untested",
+        "--approval", "proposed",
+        "--by", "alfredo",
+        "--reason", "Batch approve untested after migration",
+        "--apply",
+        "--expect-plan-hash", prev_filter_data["plan_hash"],
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_apply_filter.returncode == 0, res_apply_filter.stdout + res_apply_filter.stderr
+    app_filter_data = json.loads(res_apply_filter.stdout)
+    assert app_filter_data["ok"] is True
+    assert app_filter_data["applied"] is True
+    assert app_filter_data["changed"] is True
+    assert app_filter_data["files_changed_count"] == 2
+
+    # Snapshot created under `tasks/_reviews/approval-<timestamp>/`
+    snap_dir = pathlib.Path(app_filter_data["snapshot_dir"])
+    assert snap_dir.is_dir()
+    assert snap_dir.parent == tasks_dir / "_reviews"
+    assert snap_dir.name.startswith("approval-")
+    manifest = json.loads(pathlib.Path(app_filter_data["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["action"] == "approve"
+    assert manifest["target_approval"] == "approved"
+    assert manifest["by"] == "alfredo"
+    assert manifest["reason"] == "Batch approve untested after migration"
+    assert manifest["files_count"] == 2
+    assert (snap_dir / "use-cases" / p_uc1.name).read_bytes() == orig_bytes[p_uc1.name]
+    assert (snap_dir / "use-cases" / p_uc2.name).read_bytes() == orig_bytes[p_uc2.name]
+
+    # Verify header order (`approval`, `approved-by`, `approved` right before `priority`) and byte-identical validation log
+    for p in (p_uc1, p_uc2):
+        after_text = p.read_text(encoding="utf-8")
+        orig_text = orig_bytes[p.name].decode("utf-8")
+        assert (
+            f"- actor: Operator\n"
+            f"- approval: approved\n"
+            f"- approved-by: alfredo\n"
+            f"- approved: {today_iso}\n"
+            f"- priority: P1\n"
+        ) in after_text
+        # Everything from `- priority: P1` onwards (including body and `## AI Validation Log`) is byte-identical
+        assert after_text.split("- priority: P1\n", 1)[1] == orig_text.split("- priority: P1\n", 1)[1]
+
+    # Stage is unaffected (`untested` before and after)
+    uc1_show = json.loads(run_cli("use-cases", "show", "UC001", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc1_show["approval"] == "approved"
+    assert uc1_show["approved_by"] == "alfredo"
+    assert uc1_show["approved"] == today_iso
+    assert uc1_show["stage"] == "untested"
+
+    # Event `use_case.approval_changed` emitted per modified use case
+    orchestration_events = te._get_orchestration_events()
+    assert orchestration_events is not None
+    evs = orchestration_events.read_events(tmp_path, types=["use_case.approval_changed"])
+    assert len(evs) == 2
+    assert [e["subject"] for e in evs] == ["UC001", "UC002"]
+    for ev, exp_uc in zip(evs, ("UC001", "UC002")):
+        assert ev["actor"] == "alfredo"
+        assert ev["payload"]["use_case_id"] == exp_uc
+        assert ev["payload"]["from"] == "proposed"
+        assert ev["payload"]["to"] == "approved"
+        assert ev["payload"]["by"] == "alfredo"
+        assert ev["payload"]["reason"] == "Batch approve untested after migration"
+        assert ev["payload"]["stage"] == "untested"
+
+    # 6. Idempotency: approving explicit IDs `UC001,UC003` when UC001 is already approved -> UC001 unchanged, UC003 updated
+    uc1_approved_bytes = p_uc1.read_bytes()
+    res_prev_explicit = json.loads(
+        run_cli("use-cases", "approve", "UC001,UC003", "--by", "reviewer", "--tasks-dir", str(tasks_dir), "--json").stdout
+    )
+    assert res_prev_explicit["ok"] is True
+    assert [u["id"] for u in res_prev_explicit["use_case_changes"]] == ["UC003"]
+    assert [u["id"] for u in res_prev_explicit["unchanged"]] == ["UC001"]
+    assert res_prev_explicit["use_case_changes"][0]["stage"] == "verified"
+
+    res_app_explicit = json.loads(
+        run_cli(
+            "use-cases", "approve", "UC001,UC003",
+            "--by", "reviewer",
+            "--apply", "--expect-plan-hash", res_prev_explicit["plan_hash"],
+            "--tasks-dir", str(tasks_dir), "--json",
+        ).stdout
+    )
+    assert res_app_explicit["ok"] is True
+    assert res_app_explicit["applied"] is True
+    assert res_app_explicit["changed"] is True
+    assert res_app_explicit["files_changed_count"] == 1
+    assert [u["id"] for u in res_app_explicit["unchanged"]] == ["UC001"]
+    assert p_uc1.read_bytes() == uc1_approved_bytes  # UC001 untouched
+
+    # Re-running on already approved UC001,UC003 is a complete no-op
+    res_prev_noop = json.loads(
+        run_cli("use-cases", "approve", "UC001,UC003", "--tasks-dir", str(tasks_dir), "--json").stdout
+    )
+    assert res_prev_noop["files_changed_count"] == 0
+    assert [u["id"] for u in res_prev_noop["unchanged"]] == ["UC001", "UC003"]
+    res_app_noop = json.loads(
+        run_cli(
+            "use-cases", "approve", "UC001,UC003",
+            "--apply", "--expect-plan-hash", res_prev_noop["plan_hash"],
+            "--tasks-dir", str(tasks_dir), "--json",
+        ).stdout
+    )
+    assert res_app_noop["ok"] is True
+    assert res_app_noop["applied"] is True
+    assert res_app_noop["changed"] is False
+
+    # 7. `deprecate` and `propose` transitions remove `approved-by` and `approved`, preserve log and stage
+    res_prev_dep = json.loads(
+        run_cli(
+            "use-cases", "deprecate", "UC001",
+            "--by", "alfredo", "--reason", "Superseded capability",
+            "--tasks-dir", str(tasks_dir), "--json",
+        ).stdout
+    )
+    assert res_prev_dep["ok"] is True
+    assert res_prev_dep["use_case_changes"][0]["old_approval"] == "approved"
+    assert res_prev_dep["use_case_changes"][0]["new_approval"] == "deprecated"
+    res_app_dep = json.loads(
+        run_cli(
+            "use-cases", "deprecate", "UC001",
+            "--by", "alfredo", "--reason", "Superseded capability",
+            "--apply", "--expect-plan-hash", res_prev_dep["plan_hash"],
+            "--tasks-dir", str(tasks_dir), "--json",
+        ).stdout
+    )
+    assert res_app_dep["ok"] is True
+    assert res_app_dep["applied"] is True
+    uc1_dep_text = p_uc1.read_text(encoding="utf-8")
+    assert "- actor: Operator\n- approval: deprecated\n- priority: P1\n" in uc1_dep_text
+    assert "approved-by:" not in uc1_dep_text
+    assert f"- approved: {today_iso}" not in uc1_dep_text
+    assert uc1_dep_text.split("- priority: P1\n", 1)[1] == orig_bytes[p_uc1.name].decode("utf-8").split("- priority: P1\n", 1)[1]
+
+    # Now `propose` UC001 and UC002 (UC001: deprecated -> proposed, UC002: approved -> proposed)
+    res_prev_prop = json.loads(
+        run_cli(
+            "use-cases", "propose", "UC001,UC002",
+            "--by", "alfredo", "--reason", "Re-open for design review",
+            "--tasks-dir", str(tasks_dir), "--json",
+        ).stdout
+    )
+    assert res_prev_prop["ok"] is True
+    assert [(u["id"], u["from"], u["to"]) for u in res_prev_prop["use_case_changes"]] == [
+        ("UC001", "deprecated", "proposed"),
+        ("UC002", "approved", "proposed"),
+    ]
+    res_app_prop = json.loads(
+        run_cli(
+            "use-cases", "propose", "UC001,UC002",
+            "--by", "alfredo", "--reason", "Re-open for design review",
+            "--apply", "--expect-plan-hash", res_prev_prop["plan_hash"],
+            "--tasks-dir", str(tasks_dir), "--json",
+        ).stdout
+    )
+    assert res_app_prop["ok"] is True
+    assert res_app_prop["applied"] is True
+    # After propose, UC001 and UC002 are byte-for-byte identical to their initial `proposed` files!
+    assert p_uc1.read_bytes() == orig_bytes[p_uc1.name]
+    assert p_uc2.read_bytes() == orig_bytes[p_uc2.name]
+
+    # Verify `--all` via `bin/ai-orch` approves all remaining proposed use cases
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    res_all_prev = json.loads(
+        subprocess.run(
+            [sys.executable, str(bin_ai_orch), "tasks", "use-cases", "approve", "--all", "--by", "owner", "--tasks-dir", str(tasks_dir), "--json"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
+    assert [u["id"] for u in res_all_prev["use_case_changes"]] == ["UC001", "UC002", "UC004"]
+    assert [u["id"] for u in res_all_prev["unchanged"]] == ["UC003", "UC005"]
+
+    # Validate tree passes with 0 errors
+    res_val = json.loads(run_cli("validate", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    assert res_val["ok"] is True
+    assert res_val["errors"] == []
+
+    # 8. T086 Verification on a copy of ai-orchestration's tasks/:
+    # bulk approve untested use cases -> preview, apply, stage unchanged, approval approved
+    copy_tasks = tmp_path / "ai_orch_copy_tasks"
+    shutil.copytree(REPO_ROOT / "tasks", copy_tasks, ignore=shutil.ignore_patterns("_reviews"))
+    prev_copy = json.loads(
+        run_cli("use-cases", "approve", "--stage", "untested", "--tasks-dir", str(copy_tasks), "--json").stdout
+    )
+    assert prev_copy["ok"] is True
+    assert prev_copy["matched_count"] > 0
+    stages_before = {u["id"]: u["stage"] for u in prev_copy["use_cases"]}
+    assert all(st == "untested" for st in stages_before.values())
+    app_copy = json.loads(
+        run_cli(
+            "use-cases", "approve", "--stage", "untested",
+            "--apply", "--expect-plan-hash", prev_copy["plan_hash"],
+            "--tasks-dir", str(copy_tasks), "--json",
+        ).stdout
+    )
+    assert app_copy["ok"] is True
+    assert app_copy["applied"] is True
+    list_after = json.loads(
+        run_cli("use-cases", "list", "--stage", "untested", "--tasks-dir", str(copy_tasks), "--json").stdout
+    )
+    assert {u["id"]: u["stage"] for u in list_after["use_cases"]} == stages_before
+    assert all(u["approval"] == "approved" for u in list_after["use_cases"])
+
+
 
 
 

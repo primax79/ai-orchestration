@@ -184,6 +184,8 @@ USE_CASE_MANDATORY_HEADER_FIELDS: tuple[str, ...] = (
     "last-verdict",
 )
 USE_CASE_OPTIONAL_HEADER_FIELDS: tuple[str, ...] = (
+    "approved-by",
+    "approved",
     "status",
     "revalidation",
     "short",
@@ -8435,6 +8437,580 @@ def migrate_use_case_lifecycle(
         return base_result
 
 
+USE_CASE_APPROVAL_ACTION_MAP: dict[str, tuple[str, str]] = {
+    "approve": ("approve", "approved"),
+    "approved": ("approve", "approved"),
+    "deprecate": ("deprecate", "deprecated"),
+    "deprecated": ("deprecate", "deprecated"),
+    "propose": ("propose", "proposed"),
+    "proposed": ("propose", "proposed"),
+}
+
+
+def _rewrite_use_case_approval_in_text(
+    text: str,
+    target_approval: str,
+    *,
+    by: str = "owner",
+    approved_date: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Targeted header edit of `approval` on a use case markdown text (T086).
+
+    - When `target_approval == 'approved'`: writes `- approval: approved`, followed immediately
+      by `- approved-by: <by>` and `- approved: <YYYY-MM-DD>`.
+    - When `target_approval in ('deprecated', 'proposed')`: writes `- approval: <target_approval>`
+      and removes any `- approved-by:` / `- approved:` header lines.
+    - Idempotent: when the written `approval` already equals `target_approval`, returns `text`
+      unchanged (`changed=False`).
+    - Never touches any other header line, body text, or `## AI Validation Log` (byte-identical).
+    """
+    if target_approval not in USE_CASE_APPROVAL_VALUES:
+        raise ValueError(f"Invalid target_approval {target_approval!r} (expected one of {sorted(USE_CASE_APPROVAL_VALUES)})")
+
+    by_val = (by or "owner").strip() or "owner"
+    date_val = (approved_date or datetime.date.today().isoformat()).strip()
+
+    lines = text.splitlines(keepends=True)
+    h1_seen = False
+    in_header = False
+
+    approval_indices: list[int] = []
+    approved_by_indices: list[int] = []
+    approved_date_indices: list[int] = []
+    status_indices: list[int] = []
+    actor_idx = -1
+    last_header_idx = -1
+
+    raw_approval: str | None = None
+    raw_approved_by: str | None = None
+    raw_approved_date: str | None = None
+    raw_status: str | None = None
+    default_prefix = "- "
+    default_ending = "\n"
+
+    for idx, line in enumerate(lines):
+        clean = line.rstrip("\r\n")
+        ending = line[len(clean):] or "\n"
+        if not h1_seen:
+            if clean.startswith("# "):
+                h1_seen = True
+            continue
+        if clean.startswith("## "):
+            break
+        m = re.match(r"^(\s*-\s+)([a-zA-Z0-9_-]+)(:\s*)(.*)$", clean)
+        if m:
+            if not in_header:
+                default_prefix = m.group(1)
+                default_ending = ending
+            in_header = True
+            last_header_idx = idx
+            k_low = m.group(2).strip().lower()
+            v_str = m.group(4).strip()
+            if k_low == "actor":
+                actor_idx = idx
+            elif k_low == "approval":
+                approval_indices.append(idx)
+                if raw_approval is None:
+                    raw_approval = v_str
+            elif k_low in ("approved-by", "approved_by"):
+                approved_by_indices.append(idx)
+                if raw_approved_by is None:
+                    raw_approved_by = v_str
+            elif k_low == "approved":
+                approved_date_indices.append(idx)
+                if raw_approved_date is None:
+                    raw_approved_date = v_str
+            elif k_low == "status":
+                status_indices.append(idx)
+                if raw_status is None:
+                    raw_status = v_str
+        elif in_header and not clean.strip():
+            break
+
+    clean_approval = raw_approval if (raw_approval and raw_approval != "-") else None
+    clean_approved_by = raw_approved_by if (raw_approved_by and raw_approved_by != "-") else None
+    clean_approved_date = raw_approved_date if (raw_approved_date and raw_approved_date != "-") else None
+    clean_status = raw_status if (raw_status and raw_status != "-") else None
+
+    if clean_approval is not None:
+        old_approval = clean_approval
+    elif clean_status in USE_CASE_STATUS_TO_APPROVAL:
+        old_approval = USE_CASE_STATUS_TO_APPROVAL[clean_status]
+    else:
+        old_approval = "proposed"
+
+    # Idempotent: already in target approval state -> no change
+    if clean_approval == target_approval:
+        return text, {
+            "ok": True,
+            "old_approval": old_approval,
+            "new_approval": target_approval,
+            "old_approved_by": clean_approved_by,
+            "new_approved_by": clean_approved_by,
+            "old_approved": clean_approved_date,
+            "new_approved": clean_approved_date,
+            "changed": False,
+        }
+
+    new_lines = list(lines)
+    new_approved_by = by_val if target_approval == "approved" else None
+    new_approved_date = date_val if target_approval == "approved" else None
+
+    def _build_approval_block(prefix: str, ending: str) -> str:
+        if target_approval == "approved":
+            return (
+                f"{prefix}approval: approved{ending}"
+                f"{prefix}approved-by: {by_val}{ending}"
+                f"{prefix}approved: {date_val}{ending}"
+            )
+        return f"{prefix}approval: {target_approval}{ending}"
+
+    if approval_indices:
+        ap_idx = approval_indices[0]
+        ap_clean = new_lines[ap_idx].rstrip("\r\n")
+        ap_end = new_lines[ap_idx][len(ap_clean):] or default_ending
+        m_ap = re.match(r"^(\s*-\s+)approval(:\s*).*$", ap_clean, flags=re.IGNORECASE)
+        ap_pref = m_ap.group(1) if m_ap else default_prefix
+        new_lines[ap_idx] = _build_approval_block(ap_pref, ap_end)
+        rm_indices = sorted(set(approval_indices[1:] + approved_by_indices + approved_date_indices), reverse=True)
+        for rm_idx in rm_indices:
+            del new_lines[rm_idx]
+    elif status_indices:
+        st_idx = status_indices[0]
+        st_clean = new_lines[st_idx].rstrip("\r\n")
+        st_end = new_lines[st_idx][len(st_clean):] or default_ending
+        m_st = re.match(r"^(\s*-\s+)status(:\s*).*$", st_clean, flags=re.IGNORECASE)
+        st_pref = m_st.group(1) if m_st else default_prefix
+        new_lines[st_idx] = _build_approval_block(st_pref, st_end)
+        rm_indices = sorted(set(status_indices[1:] + approved_by_indices + approved_date_indices), reverse=True)
+        for rm_idx in rm_indices:
+            del new_lines[rm_idx]
+    else:
+        ins_ap_idx = (actor_idx + 1) if actor_idx >= 0 else (last_header_idx + 1 if last_header_idx >= 0 else len(new_lines))
+        rm_indices = sorted(set(approved_by_indices + approved_date_indices), reverse=True)
+        for rm_idx in rm_indices:
+            del new_lines[rm_idx]
+            if rm_idx < ins_ap_idx:
+                ins_ap_idx -= 1
+        new_lines.insert(ins_ap_idx, _build_approval_block(default_prefix, default_ending))
+
+    new_text = "".join(new_lines)
+    return new_text, {
+        "ok": True,
+        "old_approval": old_approval,
+        "new_approval": target_approval,
+        "old_approved_by": clean_approved_by,
+        "new_approved_by": new_approved_by,
+        "old_approved": clean_approved_date,
+        "new_approved": new_approved_date,
+        "changed": new_text != text,
+    }
+
+
+def _write_use_case_approval_snapshot(
+    tasks_dir: pathlib.Path,
+    file_records: list[dict[str, Any]],
+    *,
+    action: str,
+    target_approval: str,
+    by: str,
+    reason: str | None,
+    plan_hash: str,
+) -> tuple[pathlib.Path, dict[str, Any]]:
+    """Snapshot every use-case file that will change under `tasks/_reviews/approval-<timestamp>/`
+    (copies + `manifest.json` with sha256 + `report.md`).
+    """
+    reviews_dir = tasks_dir / "_reviews"
+    reviews_dir.mkdir(parents=True, exist_ok=True)
+    ts_base = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    snap_dir = reviews_dir / f"approval-{ts_base}"
+    suffix = 1
+    while snap_dir.exists():
+        snap_dir = reviews_dir / f"approval-{ts_base}-{suffix}"
+        suffix += 1
+    snap_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_files: list[dict[str, Any]] = []
+    for rec in file_records:
+        src_path = pathlib.Path(rec["file_path"])
+        rel_path = rec["path"]
+        dst_path = snap_dir / rel_path
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_bytes = src_path.read_bytes()
+        sha = hashlib.sha256(raw_bytes).hexdigest()
+        dst_path.write_bytes(raw_bytes)
+        manifest_files.append({
+            "use_case_id": rec["use_case_id"],
+            "path": rel_path,
+            "file_path": str(src_path),
+            "snapshot_path": str(dst_path),
+            "sha256": sha,
+            "size_bytes": len(raw_bytes),
+            "old_approval": rec.get("old_approval"),
+            "new_approval": rec.get("new_approval"),
+            "stage": rec.get("stage"),
+            "old_approved_by": rec.get("old_approved_by"),
+            "new_approved_by": rec.get("new_approved_by"),
+            "old_approved": rec.get("old_approved"),
+            "new_approved": rec.get("new_approved"),
+        })
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    manifest = {
+        "timestamp": now_iso,
+        "action": action,
+        "target_approval": target_approval,
+        "by": by,
+        "reason": reason,
+        "tasks_dir": str(tasks_dir),
+        "snapshot_dir": str(snap_dir),
+        "plan_hash": plan_hash,
+        "files_count": len(manifest_files),
+        "files": manifest_files,
+    }
+    manifest_path = snap_dir / "manifest.json"
+    _atomic_write_text(manifest_path, json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    report_lines = [
+        f"# Use Case Approval Report ({action}) — {now_iso}",
+        "",
+        f"- **Action:** `{action}` (`-> {target_approval}`)",
+        f"- **By:** `{by}`",
+        f"- **Reason:** {reason or '-'}",
+        f"- **Plan Hash:** `{plan_hash}`",
+        f"- **Files Snapshotted:** {len(manifest_files)}",
+        "",
+        "## Snapshotted Files (Before Apply)",
+        "",
+    ]
+    if manifest_files:
+        for mf in manifest_files:
+            report_lines.append(
+                f"- **{mf['use_case_id']}** (`{mf['path']}`, `sha256:{mf['sha256']}`): "
+                f"approval `{mf.get('old_approval')}` -> `{mf.get('new_approval')}` (stage: `{mf.get('stage')}`)"
+            )
+    else:
+        report_lines.append("- None")
+
+    _atomic_write_text(snap_dir / "report.md", "\n".join(report_lines) + "\n", encoding="utf-8")
+    return snap_dir, manifest
+
+
+def set_use_cases_approval(
+    tasks_dir: pathlib.Path,
+    target_approval: str,
+    *,
+    uc_ids: list[str] | str | None = None,
+    stage: str | None = None,
+    current_approval: str | None = None,
+    select_all: bool = False,
+    by: str = "owner",
+    reason: str | None = None,
+    approved_date: str | None = None,
+    dry_run: bool = True,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    """Approve, deprecate, or re-propose use cases (T086).
+
+    - Preview by default (`dry_run=True`); `--apply --expect-plan-hash <h>` writes.
+    - Selection: explicit `uc_ids`, or filters (`stage`, `current_approval`), or `select_all=True`.
+      Refuses when no id, no filter, and `select_all=False`.
+    - Targeted header edit of `approval` only, plus `approved-by: <by>` and `approved: <YYYY-MM-DD>`
+      right after `approval` when approving (removed on deprecate/propose).
+    - Validation log and body are preserved byte-for-byte; `stage` is unaffected.
+    - Snapshots touched files under `tasks/_reviews/approval-<timestamp>/`, writes atomically
+      with rollback on failure, and is idempotent (already in target approval -> unchanged).
+    - Emits `use_case.approval_changed` per modified use case (`from`, `to`, `by`, `reason`).
+    """
+    norm_key = str(target_approval or "").strip().lower()
+    if norm_key not in USE_CASE_APPROVAL_ACTION_MAP:
+        return {
+            "ok": False,
+            "applied": False,
+            "dry_run": dry_run,
+            "error": f"Invalid approval action/target {target_approval!r} (expected approve/deprecate/propose).",
+        }
+    action, target = USE_CASE_APPROVAL_ACTION_MAP[norm_key]
+
+    if not is_platform_supported() and not dry_run:
+        return {
+            "ok": False,
+            "applied": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    explicit_ids = parse_use_cases_field(uc_ids)
+    stage_filter = str(stage).strip() if (stage and str(stage).strip() and str(stage).strip() != "all") else None
+    approval_filter = (
+        str(current_approval).strip().lower()
+        if (current_approval and str(current_approval).strip() and str(current_approval).strip().lower() != "all")
+        else None
+    )
+    by_clean = (by or "owner").strip() or "owner"
+    reason_clean = str(reason).strip() if (reason and str(reason).strip()) else None
+    date_clean = (approved_date or datetime.date.today().isoformat()).strip() if target == "approved" else None
+
+    if stage_filter is not None and stage_filter not in USE_CASE_STAGES:
+        return {
+            "ok": False,
+            "applied": False,
+            "dry_run": dry_run,
+            "action": action,
+            "target_approval": target,
+            "error": f"Invalid stage filter {stage_filter!r} (allowed: {sorted(USE_CASE_STAGES)}).",
+        }
+
+    if approval_filter is not None and approval_filter not in USE_CASE_APPROVAL_VALUES:
+        return {
+            "ok": False,
+            "applied": False,
+            "dry_run": dry_run,
+            "action": action,
+            "target_approval": target,
+            "error": f"Invalid approval filter {approval_filter!r} (allowed: {sorted(USE_CASE_APPROVAL_VALUES)}).",
+        }
+
+    if not explicit_ids and not stage_filter and not approval_filter and not select_all:
+        return {
+            "ok": False,
+            "applied": False,
+            "dry_run": dry_run,
+            "action": action,
+            "target_approval": target,
+            "error": (
+                f"Refusing to {action} without selection: specify use case ID(s) (UC###), "
+                f"--stage <stage>, --approval <current>, or --all."
+            ),
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    lock_ctx = contextlib.nullcontext() if dry_run else task_write_lock(tasks_dir)
+    with lock_ctx:
+        raw_ucs = sorted(discover_use_cases(tasks_dir), key=lambda u: _natural_sort_key(u.get("id", "")))
+        projection = compute_use_case_links(tasks_dir, use_cases=raw_ucs)
+        all_ucs = [enrich_use_case_with_stage_and_links(u, projection) for u in raw_ucs]
+        ucs_by_id = {u["id"]: u for u in all_ucs if u.get("id")}
+
+        if explicit_ids:
+            missing_ids = [uid for uid in explicit_ids if uid not in ucs_by_id]
+            if missing_ids:
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "dry_run": dry_run,
+                    "action": action,
+                    "target_approval": target,
+                    "unknown_ids": missing_ids,
+                    "error": f"Unknown use case ID(s): {', '.join(missing_ids)}",
+                }
+            selected_ucs = [ucs_by_id[uid] for uid in explicit_ids]
+        else:
+            selected_ucs = list(all_ucs)
+
+        if stage_filter is not None:
+            selected_ucs = [u for u in selected_ucs if u.get("stage") == stage_filter]
+        if approval_filter is not None:
+            selected_ucs = [u for u in selected_ucs if u.get("approval") == approval_filter]
+
+        file_records: list[dict[str, Any]] = []
+        use_case_changes: list[dict[str, Any]] = []
+        unchanged_use_cases: list[dict[str, Any]] = []
+        all_selected_items: list[dict[str, Any]] = []
+
+        for uc in selected_ucs:
+            uc_id = uc["id"]
+            uc_path = pathlib.Path(uc["file_path"]).resolve()
+            rel_path = uc.get("rel_path") or (
+                uc_path.relative_to(tasks_dir).as_posix() if uc_path.is_relative_to(tasks_dir) else str(uc_path)
+            )
+            old_text = uc_path.read_text(encoding="utf-8")
+            new_text, info = _rewrite_use_case_approval_in_text(
+                old_text,
+                target,
+                by=by_clean,
+                approved_date=date_clean,
+            )
+            stage_val = uc.get("stage") or "draft"
+            old_app = info["old_approval"]
+            new_app = info["new_approval"]
+            changed = bool(info["changed"])
+            summary = f"{uc_id} approval '{old_app}' -> '{new_app}' (stage: {stage_val})"
+
+            item_rec = {
+                "id": uc_id,
+                "use_case_id": uc_id,
+                "title": uc.get("title", ""),
+                "path": rel_path,
+                "file_path": str(uc_path),
+                "old_approval": old_app,
+                "new_approval": new_app,
+                "from": old_app,
+                "to": new_app,
+                "stage": stage_val,
+                "changed": changed,
+                "old_approved_by": info.get("old_approved_by"),
+                "new_approved_by": info.get("new_approved_by"),
+                "approved_by": info.get("new_approved_by"),
+                "old_approved": info.get("old_approved"),
+                "new_approved": info.get("new_approved"),
+                "approved": info.get("new_approved"),
+                "by": by_clean,
+                "reason": reason_clean,
+                "summary": summary,
+            }
+            all_selected_items.append(item_rec)
+
+            if not changed:
+                unchanged_use_cases.append(item_rec)
+                continue
+
+            diff_lines = list(
+                difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    new_text.splitlines(keepends=True),
+                    fromfile=str(uc_path),
+                    tofile=f"{uc_path} (dry-run)" if dry_run else str(uc_path),
+                )
+            )
+            use_case_changes.append(item_rec)
+            file_records.append({
+                **item_rec,
+                "before_hash": _file_sha256(uc_path),
+                "old_text": old_text,
+                "new_text": new_text,
+                "diff": "".join(diff_lines),
+            })
+
+        operations: list[dict[str, Any]] = [
+            {
+                "action": "modify",
+                "path": rec["path"],
+                "before_hash": rec["before_hash"],
+                "summary": rec["summary"],
+            }
+            for rec in file_records
+        ]
+        plan, plan_hash = compute_operation_plan(operations)
+        combined_diff = "\n".join(rec["diff"] for rec in file_records if rec.get("diff"))
+
+        base_result: dict[str, Any] = {
+            "ok": True,
+            "applied": False,
+            "dry_run": dry_run,
+            "changed": False,
+            "action": action,
+            "target_approval": target,
+            "by": by_clean,
+            "reason": reason_clean,
+            "approved_date": date_clean,
+            "selection": {
+                "uc_ids": explicit_ids,
+                "stage": stage_filter,
+                "approval": approval_filter,
+                "all": bool(select_all),
+            },
+            "use_cases_total": len(all_ucs),
+            "matched_count": len(selected_ucs),
+            "files_changed_count": len(file_records),
+            "changed_count": len(use_case_changes),
+            "unchanged_count": len(unchanged_use_cases),
+            "use_cases": all_selected_items,
+            "use_case_changes": use_case_changes,
+            "unchanged": unchanged_use_cases,
+            "unchanged_use_cases": unchanged_use_cases,
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "diff": combined_diff,
+            "snapshot_dir": None,
+            "manifest_path": None,
+        }
+
+        if dry_run:
+            return base_result
+
+        if not expect_plan_hash:
+            base_result["ok"] = False
+            base_result["error"] = (
+                f"Applying use-cases {action} requires --expect-plan-hash <hash>. "
+                "Run without --apply to preview and obtain the plan hash."
+            )
+            return base_result
+
+        if expect_plan_hash.strip().lower() != plan_hash.lower():
+            base_result["ok"] = False
+            base_result["error"] = f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}"
+            return base_result
+
+        if not file_records:
+            base_result["ok"] = True
+            base_result["applied"] = True
+            base_result["changed"] = False
+            return base_result
+
+        snap_dir, manifest = _write_use_case_approval_snapshot(
+            tasks_dir,
+            file_records,
+            action=action,
+            target_approval=target,
+            by=by_clean,
+            reason=reason_clean,
+            plan_hash=plan_hash,
+        )
+        base_result["snapshot_dir"] = str(snap_dir)
+        base_result["manifest_path"] = str(snap_dir / "manifest.json")
+        base_result["manifest"] = manifest
+
+        writes: list[tuple[pathlib.Path, str]] = [
+            (pathlib.Path(rec["file_path"]), rec["new_text"])
+            for rec in file_records
+        ]
+        if writes:
+            _apply_file_writes_atomically(writes)
+
+        for rec in file_records:
+            _emit_event(
+                tasks_dir,
+                "use_case.approval_changed",
+                {
+                    "use_case_id": rec["use_case_id"],
+                    "id": rec["use_case_id"],
+                    "from": rec["old_approval"],
+                    "to": rec["new_approval"],
+                    "old_approval": rec["old_approval"],
+                    "new_approval": rec["new_approval"],
+                    "by": by_clean,
+                    "reason": reason_clean,
+                    "stage": rec["stage"],
+                    "approved_by": rec.get("new_approved_by"),
+                    "approved": rec.get("new_approved"),
+                },
+                subject=rec["use_case_id"],
+                actor=by_clean,
+            )
+
+        base_result["ok"] = True
+        base_result["applied"] = True
+        base_result["changed"] = len(writes) > 0
+        return base_result
+
+
+change_use_cases_approval = set_use_cases_approval
+update_use_cases_approval = set_use_cases_approval
+
+
+def approve_use_cases(tasks_dir: pathlib.Path, **kwargs: Any) -> dict[str, Any]:
+    return set_use_cases_approval(tasks_dir, "approved", **kwargs)
+
+
+def deprecate_use_cases(tasks_dir: pathlib.Path, **kwargs: Any) -> dict[str, Any]:
+    return set_use_cases_approval(tasks_dir, "deprecated", **kwargs)
+
+
+def propose_use_cases(tasks_dir: pathlib.Path, **kwargs: Any) -> dict[str, Any]:
+    return set_use_cases_approval(tasks_dir, "proposed", **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
@@ -9026,6 +9602,10 @@ def parse_use_case_file(file_path: pathlib.Path, tasks_dir: pathlib.Path) -> dic
     last_verdict = raw_last_verdict.strip() if (raw_last_verdict and raw_last_verdict.strip() and raw_last_verdict.strip() != "-") else None
     raw_reval = headers.get("revalidation")
     revalidation = raw_reval.strip().lower() if (raw_reval and raw_reval.strip() and raw_reval.strip() != "-") else None
+    raw_approved_by = headers.get("approved-by") or headers.get("approved_by")
+    approved_by = raw_approved_by.strip() if (raw_approved_by and raw_approved_by.strip() and raw_approved_by.strip() != "-") else None
+    raw_approved_date = headers.get("approved")
+    approved_date = raw_approved_date.strip() if (raw_approved_date and raw_approved_date.strip() and raw_approved_date.strip() != "-") else None
 
     def _extract_section(*headings: str) -> str:
         for heading in headings:
@@ -9119,6 +9699,9 @@ def parse_use_case_file(file_path: pathlib.Path, tasks_dir: pathlib.Path) -> dic
         "approval_source": approval_source,
         "written_approval": written_approval,
         "has_written_approval": has_written_approval,
+        "approved_by": approved_by,
+        "approved": approved_date,
+        "approved_date": approved_date,
         "status": status,
         "written_status": written_status,
         "has_written_status": has_written_status,
@@ -22048,6 +22631,122 @@ def cmd_use_cases_migrate_lifecycle(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_use_cases_approval(args: argparse.Namespace, target_approval: str | None = None) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    action_or_target = target_approval or getattr(args, "uc_cmd", None) or "approve"
+    apply_flag = bool(getattr(args, "apply", False))
+    preview_flag = bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
+    effective_dry_run = not (apply_flag and not preview_flag)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    uc_ids = getattr(args, "uc_ids", None)
+    stage = getattr(args, "stage", None)
+    current_approval = getattr(args, "approval", None)
+    select_all = bool(getattr(args, "select_all", False))
+    by = getattr(args, "by", None) or "owner"
+    reason = getattr(args, "reason", None)
+    is_json = bool(getattr(args, "json", False))
+
+    res = set_use_cases_approval(
+        tasks_dir=tasks_dir,
+        target_approval=action_or_target,
+        uc_ids=uc_ids,
+        stage=stage,
+        current_approval=current_approval,
+        select_all=select_all,
+        by=by,
+        reason=reason,
+        dry_run=effective_dry_run,
+        expect_plan_hash=expect_plan_hash,
+    )
+    args._last_result = res
+    if is_json:
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
+    action = res.get("action") or action_or_target
+    target = res.get("target_approval") or action_or_target
+    if not res.get("ok"):
+        print(f"[FAIL] {res.get('error', f'use-cases {action} failed')}", file=sys.stderr)
+        if res.get("plan_hash"):
+            print(f"Plan hash: {res['plan_hash']}", file=sys.stderr)
+        return 1
+
+    all_items = res.get("use_cases", [])
+    changes = res.get("use_case_changes", [])
+    unchanged = res.get("unchanged", [])
+
+    if effective_dry_run:
+        print(
+            f"[preview] use-cases {action}: {res.get('files_changed_count', 0)} to update, "
+            f"{res.get('unchanged_count', 0)} unchanged "
+            f"({res.get('matched_count', 0)} matched of {res.get('use_cases_total', 0)} total) "
+            f"(plan hash: {res.get('plan_hash', '')})"
+        )
+        for item in all_items:
+            if item.get("changed"):
+                print(
+                    f"  - [use-case] {item['use_case_id']} ({item['path']}): "
+                    f"approval {item['old_approval']} -> {item['new_approval']} (stage: {item['stage']})"
+                )
+            else:
+                print(
+                    f"  - [unchanged] {item['use_case_id']} ({item['path']}): "
+                    f"approval {item['old_approval']} -> {item['new_approval']} (already {item['new_approval']}, stage: {item['stage']})"
+                )
+        if res.get("diff"):
+            sys.stdout.write(res["diff"])
+            if not res["diff"].endswith("\n"):
+                print()
+        if not res.get("plan"):
+            print(f"[ok] all selected use cases already have approval={target}; nothing to change")
+        print(f"Plan hash: {res.get('plan_hash', '')}")
+        print(
+            f"[preview] apply with: --apply --expect-plan-hash {res.get('plan_hash', '')}",
+            file=sys.stderr,
+        )
+        print("[preview] nothing written; re-run with --apply to write these changes")
+        return 0
+
+    if not res.get("changed"):
+        print(f"[ok] all selected use cases already have approval={target}; nothing written")
+        for item in unchanged:
+            print(
+                f"  - [unchanged] {item['use_case_id']} ({item['path']}): "
+                f"approval {item['old_approval']} -> {item['new_approval']} (already {item['new_approval']}, stage: {item['stage']})"
+            )
+        return 0
+
+    print(
+        f"[ok] {action}: updated {res.get('files_changed_count', 0)} use case(s) to approval={target} "
+        f"({res.get('unchanged_count', 0)} unchanged)"
+    )
+    if res.get("snapshot_dir"):
+        print(f"  - snapshot: {res['snapshot_dir']} (manifest: {res.get('manifest_path')})")
+    for uc_c in changes:
+        print(
+            f"  - updated {uc_c['use_case_id']} ({uc_c['path']}): "
+            f"approval {uc_c['old_approval']} -> {uc_c['new_approval']} (stage: {uc_c['stage']})"
+        )
+    for item in unchanged:
+        print(
+            f"  - [unchanged] {item['use_case_id']} ({item['path']}): "
+            f"approval {item['old_approval']} -> {item['new_approval']} (already {item['new_approval']}, stage: {item['stage']})"
+        )
+    return 0
+
+
+def cmd_use_cases_approve(args: argparse.Namespace) -> int:
+    return cmd_use_cases_approval(args, "approve")
+
+
+def cmd_use_cases_deprecate(args: argparse.Namespace) -> int:
+    return cmd_use_cases_approval(args, "deprecate")
+
+
+def cmd_use_cases_propose(args: argparse.Namespace) -> int:
+    return cmd_use_cases_approval(args, "propose")
+
+
 # ---------------------------------------------------------------------------
 # Inbox Notes (N###) Data Model, Operations & Commands
 # ---------------------------------------------------------------------------
@@ -26923,6 +27622,35 @@ def build_parser() -> argparse.ArgumentParser:
     uc_search.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     uc_search.set_defaults(func=cmd_use_cases_search)
 
+    for _uc_app_cmd, _uc_app_target, _uc_app_func, _uc_app_help in (
+        ("approve", "approved", cmd_use_cases_approve, "Approve use case(s) (sets approval: approved, approved-by, approved date; preview by default)"),
+        ("deprecate", "deprecated", cmd_use_cases_deprecate, "Deprecate use case(s) (sets approval: deprecated and removes approved-by/approved; preview by default)"),
+        ("propose", "proposed", cmd_use_cases_propose, "Re-propose use case(s) (sets approval: proposed and removes approved-by/approved; preview by default)"),
+    ):
+        _p_uc_app = uc_sub.add_parser(_uc_app_cmd, help=_uc_app_help)
+        _p_uc_app.add_argument("uc_ids", nargs="*", default=[], metavar="UC###[,UC###...]", help="Explicit use case ID(s) (comma- or space-separated)")
+        _p_uc_app.add_argument(
+            "--stage",
+            choices=sorted(USE_CASE_STAGES),
+            default=None,
+            help="Filter use cases by derived stage (e.g. untested, ready, draft)",
+        )
+        _p_uc_app.add_argument(
+            "--approval",
+            choices=["proposed", "approved", "deprecated"],
+            default=None,
+            help="Filter use cases by current approval (proposed, approved, deprecated)",
+        )
+        _p_uc_app.add_argument("--all", dest="select_all", action="store_true", default=False, help="Select all use cases when no IDs or filters are provided")
+        _p_uc_app.add_argument("--reason", default=None, help="Reason for the approval change (recorded in event)")
+        _p_uc_app.add_argument("--by", "--actor", dest="by", default="owner", help="Who changed the approval (default: owner)")
+        _p_uc_app.add_argument("--apply", action="store_true", default=False, help="Apply changes after snapshotting touched files")
+        _p_uc_app.add_argument("--preview", "--dry-run", dest="preview", action="store_true", default=False, help="Preview changes without writing (default)")
+        _p_uc_app.add_argument("--expect-plan-hash", "--expect-hash", dest="expect_plan_hash", default=None, help="Expected plan hash from preview")
+        _p_uc_app.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+        _p_uc_app.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+        _p_uc_app.set_defaults(func=_uc_app_func)
+
     # tasks step
     p_step = sub.add_parser("step", help="Checklist commands for ## Steps of an emergent task")
     p_step.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
@@ -27013,7 +27741,7 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
         return inbox_cmd in ("add", "edit", "attach", "detach", "resolve", "discard", "reopen")
     if cmd == "use-cases":
         uc_cmd = getattr(args, "uc_cmd", None)
-        if uc_cmd in ("adopt-links", "migrate-lifecycle"):
+        if uc_cmd in ("adopt-links", "migrate-lifecycle", "approve", "deprecate", "propose"):
             return bool(getattr(args, "apply", False)) and not bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
         return uc_cmd in ("create", "record-validation")
     if cmd == "child":
