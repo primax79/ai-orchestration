@@ -22,7 +22,7 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.7 - Regressione: rivalidazione e chiusura sicura dei task
 
-- **Status:** `open` · **Short:** Regressione use case · **Size:** M · **Depends on:** 17.5
+- **Status:** `delivered` (2026-10-28, kilo, commit `75c49e4`: scrittura transazionale di `revalidation: pending` con evento `use_case.revalidation_requested`, coda `use-cases queue` ordinata dal più vecchio e guardia di chiusura sicura su `verified`/`done` con rifiuto exit 2, evento `task.transition_refused` e override `--owner-approved`) · **Short:** Regressione use case · **Size:** M · **Depends on:** 17.5
 - **Goal:** spec §5: `revalidation: pending` e coda `use-cases queue`; un task si chiude con uno use case fallito solo se questo è passato dopo la sua consegna (o `--owner-approved`); eventi registrati.
 
 ### 17.8 - Flusso use-case-first nelle skill e ricerca
