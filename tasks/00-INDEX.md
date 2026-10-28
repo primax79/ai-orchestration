@@ -23,7 +23,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 13 | 13 | [Rielaborazione del Doctor: rilievi reali, azionabili e risolvibili](done/13-doctor-rework/plan.md) | done with a caveat (done: 13.1–13.7) | 06 | M |
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
-| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | in progress (done: 17.1–17.3; running: 17.4–17.5, 17.9, 17.12–17.14) | - | M |
+| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | in progress (done: 17.1–17.3, 17.5; running: 17.4, 17.9, 17.12–17.14) | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -74,6 +74,50 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [ui-multi-project](specs/ui-multi-project.md) | - |
 | [use-case-management-and-ai-validation](specs/use-case-management-and-ai-validation.md) | 15 |
 
+
+## Use cases
+
+<!-- ai-orch:generated use-cases -->
+| Id | Priority | Use Case | Stage | Actor | Linked tasks |
+| --- | --- | --- | --- | --- | --- |
+| UC001 (Author use case) | P1 | [Architect authors a use case and links it to implementing tasks](use-cases/UC001-architect-authors-a-use-case-and-links-it-to-implementing-tasks.md) | draft (proposed) | Architect session | - |
+| UC002 (Validate use case probe) | P1 | [Operator validates a single use case probe and records the verdict](use-cases/UC002-operator-validates-a-single-use-case-probe-and-records-the-verdict.md) | draft (proposed) | Operator (CLI) | - |
+| UC003 (Run validation campaign) | P2 | [Operator runs a product validation campaign with regression detection](use-cases/UC003-operator-runs-a-product-validation-campaign-with-regression-detection.md) | draft (proposed) | Operator (CLI) | - |
+| UC004 (Create emergent task) | P1 | [Architect creates a full emergent task with validated header and steps](use-cases/UC004-architect-creates-a-full-emergent-task-with-validated-header-and-steps.md) | draft (proposed) | Architect session | - |
+| UC005 (Create and promote microtask) | P2 | [Operator captures a microtask and promotes it to a full task](use-cases/UC005-operator-captures-a-lightweight-microtask-and-promotes-it-to-a-full-task.md) | draft (proposed) | Operator (CLI) | - |
+| UC006 (Verify and close task) | P1 | [Executor delivers a task and closes it through an independent verifier](use-cases/UC006-executor-delivers-a-task-and-closes-it-through-an-independent-verifier.md) | draft (proposed) | Executor agent | - |
+| UC007 (Bounce delivered task) | P1 | [Architect bounces a delivered task with findings back to the executor](use-cases/UC007-architect-bounces-a-delivered-task-with-findings-back-to-the-executor.md) | draft (proposed) | Architect session | - |
+| UC008 (Configure role profiles) | P1 | [Operator configures role-to-model profiles and routing in TOML](use-cases/UC008-operator-configures-role-to-model-profiles-and-routing-in-toml.md) | draft (proposed) | Operator (CLI) | - |
+| UC009 (Render AGENTS.md block) | P1 | [Operator renders the managed orchestration charter into AGENTS.md](use-cases/UC009-operator-renders-the-managed-orchestration-charter-into-agents-md.md) | draft (proposed) | Operator (CLI) | - |
+| UC010 (Manage backlog priority) | P1 | [Owner manages task priority and assignee in the backlog control plane](use-cases/UC010-owner-manages-task-priority-and-assignee-in-the-backlog-control-plane.md) | draft (proposed) | Owner | - |
+| UC011 (Install assistant skills) | P2 | [Operator installs orchestration skills into an assistant environment](use-cases/UC011-operator-installs-orchestration-skills-into-an-assistant-environment.md) | draft (proposed) | Operator (CLI) | - |
+| UC012 (Inspect environment health) | P2 | [Operator inspects environment health and skill drift across assistants](use-cases/UC012-operator-inspects-environment-health-and-skill-drift-across-assistants.md) | draft (proposed) | Operator (CLI) | - |
+| UC013 (Safe skill install plan) | P1 | [Operator safely previews and applies skill changes without clobbering](use-cases/UC013-operator-safely-previews-and-applies-skill-changes-without-clobbering.md) | draft (proposed) | Operator (CLI) | - |
+| UC014 (Lossless index sync) | P1 | [Operator synchronizes 00-INDEX.md losslessly inside generated markers](use-cases/UC014-operator-synchronizes-00-index-md-losslessly-inside-generated-markers.md) | draft (proposed) | Operator (CLI) | - |
+| UC015 (Hash-guarded task transition) | P1 | [Executor transitions a task safely with optimistic concurrency hash](use-cases/UC015-executor-transitions-a-task-safely-with-optimistic-concurrency-hash-check.md) | draft (proposed) | Executor agent | - |
+| UC016 (Launch execute run) | P1 | [Owner previews and launches an isolated execute run for a task](use-cases/UC016-owner-previews-and-launches-an-isolated-execute-run-for-a-task.md) | draft (proposed) | Owner | - |
+| UC017 (Run cross-agent verification) | P1 | [Owner runs an independent cross-agent verification on a delivered task](use-cases/UC017-owner-runs-an-independent-cross-agent-verification-on-a-delivered-task.md) | draft (proposed) | Owner | - |
+| UC018 (Batch run microtasks) | P2 | [Operator batch-executes multiple microtasks in a shared worktree](use-cases/UC018-operator-batch-executes-multiple-microtasks-in-a-shared-worktree.md) | draft (proposed) | Operator (CLI) | - |
+| UC019 (Ask and answer question) | P1 | [Agent files a blocking question and owner answers to unblock the task](use-cases/UC019-agent-files-a-blocking-question-and-owner-answers-to-unblock-the-task.md) | draft (proposed) | Owner | - |
+| UC020 (Answer conditional question) | P2 | [Owner answers a conditional question that spawns a follow-up task](use-cases/UC020-owner-answers-a-conditional-question-that-spawns-a-follow-up-task.md) | draft (proposed) | Owner | - |
+| UC021 (Convert inbox note) | P1 | [Owner captures an inbox note with attachments and converts to task](use-cases/UC021-owner-captures-an-inbox-note-with-attachments-and-converts-it-to-a-task.md) | draft (proposed) | Owner | - |
+| UC022 (Agent triage inbox note) | P2 | [Owner triages an inbox note with an agent run and reviews the proposal](use-cases/UC022-owner-triages-an-inbox-note-with-an-agent-run-and-reviews-the-proposal.md) | draft (proposed) | Owner | - |
+| UC023 (Decompose into subtasks) | P1 | [Architect decomposes a task into subtasks with inherited fields](use-cases/UC023-architect-decomposes-a-task-into-subtasks-with-inherited-fields.md) | draft (proposed) | Architect session | - |
+| UC024 (Ship and reopen tasks) | P1 | [Operator ships a completed initiative and reopens a closed leaf](use-cases/UC024-operator-ships-a-completed-initiative-to-done-and-reopens-a-closed-leaf.md) | draft (proposed) | Operator (CLI) | - |
+| UC025 (Inspect timeline graph) | P1 | [Owner inspects the abstract timeline graph and updates dependencies](use-cases/UC025-owner-inspects-the-abstract-timeline-graph-and-updates-dependencies.md) | draft (proposed) | Owner | - |
+| UC026 (Filter by kind and labels) | P2 | [Owner classifies and filters tasks by kind and labels across views](use-cases/UC026-owner-classifies-and-filters-tasks-by-kind-and-labels-across-views.md) | draft (proposed) | Owner | - |
+| UC027 (Apply answered question) | P1 | [Architect records an answered question as applied in the event ledger](use-cases/UC027-architect-records-an-answered-question-as-applied-in-the-event-ledger.md) | draft (proposed) | Architect session | - |
+| UC028 (Manage headless orchestrator) | P2 | [Owner manages the headless orchestrator queue and succession handoff](use-cases/UC028-owner-manages-the-headless-orchestrator-queue-and-succession-handoff.md) | draft (proposed) | Owner | - |
+| UC029 (Evaluate event triggers) | P2 | [Operator evaluates event triggers and confirms proposed actions](use-cases/UC029-operator-evaluates-event-triggers-and-confirms-proposed-actions.md) | draft (proposed) | Operator (CLI) | - |
+| UC030 (Register workspace projects) | P1 | [Operator registers a workspace and discovers nested project task trees](use-cases/UC030-operator-registers-a-workspace-and-discovers-nested-project-task-trees.md) | draft (proposed) | Operator (CLI) | - |
+| UC031 (Move task to project) | P2 | [Architect relocates a single-project task from workspace to project](use-cases/UC031-architect-relocates-a-single-project-task-from-workspace-to-its-project.md) | draft (proposed) | Architect session | - |
+| UC032 (Use broker MCP tools) | P1 | [Agent session queries and mutates tasks through the broker MCP server](use-cases/UC032-agent-session-queries-and-mutates-tasks-through-the-broker-mcp-server.md) | draft (proposed) | Architect session | - |
+| UC033 (Workspace-wide ready queue) | P1 | [Owner views unified ready queue across all projects in a workspace](use-cases/UC033-owner-views-unified-ready-queue-across-all-projects-in-a-workspace.md) | draft (proposed) | Owner | - |
+| UC034 (Track coordination tasks) | P2 | [Owner tracks cross-project coordination tasks with live child states](use-cases/UC034-owner-tracks-cross-project-coordination-tasks-with-live-child-states.md) | draft (proposed) | Owner | - |
+| UC035 (Clean up executor debris) | P2 | [Architect cleans up merged worktrees and stale sessions safely](use-cases/UC035-architect-cleans-up-merged-worktrees-and-stale-sessions-safely.md) | draft (proposed) | Architect session | - |
+| UC036 (Sync Redmine tracker links) | P2 | [Architect links tasks to Redmine issues and synchronizes progress](use-cases/UC036-architect-links-tasks-to-redmine-issues-and-synchronizes-progress.md) | draft (proposed) | Architect session | - |
+| UC037 (Requester verifies task) | P1 | [Requester session validates a delivered task addressed to it](use-cases/UC037-requester-session-validates-a-delivered-task-addressed-to-its-workspace.md) | draft (proposed) | Requester session | - |
+<!-- /ai-orch:generated use-cases -->
 
 ## Next up
 
