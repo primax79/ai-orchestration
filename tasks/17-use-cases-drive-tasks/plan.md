@@ -10,12 +10,6 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ## Tasks
 
-### 17.4 - Task che nascono dagli use case; kind facoltativo; migrazione dei chiamanti
-
-- **Status:** `delivered` (2026-10-28, kilo: implementati `--use-case` e `--from-use-case [--steps]` per `tasks new` e `tasks child add`, `--kind` facoltativo con predefinito `feature` o avviso su stderr, avvisi di `validate` e aggiornamento dei chiamanti interni e di `CLI_DESCRIPTION`) · **Short:** Task da use case · **Size:** M · **Depends on:** 17.2
-- **Goal:** spec §2: `tasks new --use-case` / `--from-use-case` (precompilazione), anche per i task di iniziativa; `--kind` facoltativo con avviso; avvisi di validate; aggiornati i chiamanti (backend UI, broker `tasks.new`, `orchestration_runs.py`, follow-up interni) senza rompere chi non passa i nuovi campi.
-- **Verification:** `tasks new --use-case UC001,UC004` e `--from-use-case UC001 [--steps 2-3]` (anche per blocchi di iniziativa tramite `tasks child add` e `tasks new --parent`) collegano gli use case alla creazione nell'ordine canonico dei campi/segmenti, precompilano titolo, Goal e Verification, rifiutano use case sconosciuti o `deprecated`, impostano `kind: feature` come predefinito con `--use-case`/`--from-use-case` ed emettono avviso su stderr senza errore quando `kind` è omesso; `validate` emette avvisi (mai errori) per task `feature`/`fix` senza use case, use case `approved` senza task collegati e riferimenti a use case sconosciuti o `deprecated`; i chiamanti interni (`answer_question` follow-up, `orchestration_runs.py` triage) passano `kind` mantenendo la retrocompatibilità per chiamate senza `kind`.
-
 ### 17.8 - Flusso use-case-first nelle skill e ricerca
 
 - **Status:** `open` · **Short:** Skill use-case-first · **Size:** M · **Depends on:** 17.4
@@ -85,3 +79,9 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 - **Status:** `done` (2026-10-28; guardia di validate verificata su UC031; done 2026-10-28, verifier ai-coding-tools-58) · **Short:** Migrazione git-code-rag · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
 - **Goal:** la sessione di git-code-rag applica la migrazione ai suoi 41 use case e la valida; spec §7 punto 7.
+
+### 17.4 - Task che nascono dagli use case; kind facoltativo; migrazione dei chiamanti
+
+- **Status:** `done` (2026-10-28, kilo: implementati `--use-case` e `--from-use-case [--steps]` per `tasks new` e `tasks child add`, `--kind` facoltativo con predefinito `feature` o avviso su stderr, avvisi di `validate` e aggiornamento dei chiamanti interni e di `CLI_DESCRIPTION`; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Task da use case · **Size:** M · **Depends on:** 17.2
+- **Goal:** spec §2: `tasks new --use-case` / `--from-use-case` (precompilazione), anche per i task di iniziativa; `--kind` facoltativo con avviso; avvisi di validate; aggiornati i chiamanti (backend UI, broker `tasks.new`, `orchestration_runs.py`, follow-up interni) senza rompere chi non passa i nuovi campi.
+- **Verification:** `tasks new --use-case UC001,UC004` e `--from-use-case UC001 [--steps 2-3]` (anche per blocchi di iniziativa tramite `tasks child add` e `tasks new --parent`) collegano gli use case alla creazione nell'ordine canonico dei campi/segmenti, precompilano titolo, Goal e Verification, rifiutano use case sconosciuti o `deprecated`, impostano `kind: feature` come predefinito con `--use-case`/`--from-use-case` ed emettono avviso su stderr senza errore quando `kind` è omesso; `validate` emette avvisi (mai errori) per task `feature`/`fix` senza use case, use case `approved` senza task collegati e riferimenti a use case sconosciuti o `deprecated`; i chiamanti interni (`answer_question` follow-up, `orchestration_runs.py` triage) passano `kind` mantenendo la retrocompatibilità per chiamate senza `kind`.
