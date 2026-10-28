@@ -6,16 +6,15 @@
 - priority: P1
 - priority-reason: Blocca 17.13: i 34 use case di ai-swissknife puntano a iniziative intere (62 collegamenti rifiutati)
 - next-up: no
-- state: delivered
+- state: done
 - executor: kilo
 - depends-on: 17.4
 - decider: -
 - sources: 17.13 (prova su ai-swissknife 2026-10-28)
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py
 - handoff: Read tasks/engine/T085-adopt-links-espande-i-collegamenti-a-iniziative-ne.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: ai-coding-tools-87
 - short: Espansione iniziative
-
-verification pending: run Verification checks (independent verifier)
 
 ## Goal
 
@@ -34,5 +33,7 @@ use-cases adopt-links --expand-initiatives: un id di iniziativa nel linked-tasks
 
 ## Log (newest first)
 
+- 2026-10-28, ai-coding-tools-87: state `verified` -> `done`
+- 2026-10-28, ai-coding-tools-87: state `delivered` -> `verified` — Usato dal vivo per 17.13 su ai-swissknife: 62 iniziative espanse in 226 collegamenti, zero rifiuti; suite 630 verdi
 - 2026-10-28, orchestrator: state `in progress` -> `delivered` — Implemented --expand-initiatives in use-cases adopt-links, clearer draft/planned refusal hints in use-cases validate, CLI description update, and unit tests (630 passed)
 - 2026-10-28, orchestrator: state `open` -> `in progress` — kilo 7e7002a32e79

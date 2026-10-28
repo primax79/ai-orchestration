@@ -37,7 +37,7 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.13 - Migrazione ai-swissknife
 
-- **Status:** `waiting` (2026-10-28; operator; 2026-10-28; Gli use case di ai-swissknife puntano a iniziative intere: serve T085 (Espansione iniziative)) · **Short:** Migrazione ai-swissknife · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
+- **Status:** `delivered` (2026-10-28; validate pulito. Al proprietario: approvare gli use case) · **Verify-by:** owner · **Short:** Migrazione ai-swissknife · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
 - **Goal:** come 17.12 per UC001-UC034 di ai-swissknife.
 
 ## Closed
