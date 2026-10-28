@@ -139,7 +139,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T079 (Workspace da sottocartella) | P2 | [I comandi lanciati da una sottocartella risolvono il workspace che la contiene](engine/T079-i-comandi-lanciati-da-una-sottocartella-risolvono.md) | open | kilo | - |
 | T081 (Branch e sblocco dipendenti) | P2 | [tasks_engine: list --branches, sblocco dei dipendenti e validate --branch](engine/T081-tasks-engine-list-branches-sblocco-dei-dipendenti.md) | open | kilo | - |
 | T083 (Rinomina sessione per provider) | P3 | [L'id del provider identifica la sessione: un nome nuovo rinomina il record invece di crearne un altro](engine/T083-l-id-del-provider-identifica-la-sessione-un-nome-n.md) | open | kilo | - |
-| T086 (Approvare use case) | P1 | [Approvazione degli use case da CLI e UI](engine/T086-approvazione-degli-use-case-da-cli-e-ui.md) | in progress | kilo | 17.11 |
+| T086 (Approvare use case) | P1 | [Approvazione degli use case da CLI e UI](engine/T086-approvazione-degli-use-case-da-cli-e-ui.md) | delivered (verify-by: owner) | kilo | 17.11 |
 
 ### methodology
 
