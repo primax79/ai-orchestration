@@ -181,10 +181,17 @@ something over. If that work lives only in the conversation, it is lost when
 the session ends or is compacted, nobody else can pick it up, and it keeps
 occupying the session's context while it waits.
 
-**Rule: capture first, then continue.** As soon as new work appears and will
-not be finished and verified in the current turn, write it down as a task,
-then go back to what you were doing. In the reply, cite the task by id and
-path. A "next steps" paragraph in the chat is not a substitute.
+**Rule: capture first, then continue — following the use-case-first workflow.**
+As soon as new work appears and will not be finished and verified in the current
+turn, write it down, then go back to what you were doing. In the reply, cite the
+task by id and path. A "next steps" paragraph in the chat is not a substitute.
+
+For any new `feature` or `fix` request, capture follows the **use-case-first** steps
+(skipping directly to tasks is allowed for `chore`, `docs`, and `investigation`):
+1. **Find related use cases:** Run `ai-orch tasks use-cases search <text> [--actor A] [--json]` (matches text in title/description/scenario/criteria, actor, cited specs `Source: tasks/specs/...`, and use cases linked to tasks touching the same `paths` or `sources`).
+2. **Reconcile or draft:** Propose updates to matching use cases, or point out contradictions between the request and existing use cases (scenario, acceptance criteria, scope), and/or draft missing use cases (`ai-orch tasks use-cases create ...`, written with `approval: proposed`).
+3. **Get approval:** Get the new or updated use cases approved by the user/decider (`approval: approved`) — file a blocking question (`Q###` via `questions.ask` / `ai-orch questions ask`) when the user is not in the conversation.
+4. **Write specs and create linked tasks:** Only after use-case alignment, write or update `specs/<slug>.md` and create the tasks linked to their use cases (`--use-case UC###[,UC###]` or `--from-use-case UC### [--steps M-N]` to pre-fill title, `## Goal`, and `## Verification`).
 
 ### Where and how
 
@@ -669,17 +676,38 @@ of individual tasks and calibrating verification depth.
 
 ## Use Cases (`tasks/use-cases/UC###-<slug>.md`)
 
-Use Cases represent end-to-end capabilities from the user/actor perspective. They connect requirements to autonomous validation:
-1. **Top-Down:** Use Cases drive task `## Goal` and `## Verification` criteria. Each task specifies `- use-cases: UC001`.
-2. **Bottom-Up:** Implemented tasks link back to Use Cases (`- linked-tasks: 08.T1, 08.T3`).
-3. **Autonomous AI Validation:** Once linked tasks are delivered, the operator can trigger AI testing of the scenario (`ai-orch use-cases validate UC001` or UI "Validate with AI"), which records evidence into `## AI Validation Log`.
-4. **Product Validation Campaigns:** Running `ai-orch use-cases campaign` validates all active Use Cases across the assembled product and detects regressions.
+Use Cases represent end-to-end capabilities from the user/actor perspective. They drive tasks (`many-to-many`, with the task header `- use-cases:` or initiative block `**Use cases:**` as the single source of truth and `- linked-tasks:` on the use case derived automatically by `sync-index`):
+
+### Use-case-first workflow (when a user asks for a new feature or task)
+
+1. **Find related use cases:** Run `ai-orch tasks use-cases search <text> [--actor A] [--json]`, which ranks use cases by text match in title/description/scenario/criteria (case-insensitive, all words), actor match, cited specs (`Source: tasks/specs/...`), and use cases linked to tasks whose `paths` or `sources` overlap the query terms.
+2. **Propose updates or draft missing use cases:** Propose updates to matching use cases, or point out contradictions between the request and existing use cases (scenario, acceptance criteria, scope), and/or draft missing use cases with `approval: proposed` (`ai-orch tasks use-cases create --title ...`).
+3. **Get approval:** Get the new or updated use cases approved by the user/decider (`approval: approved`) — file a blocking question (`Q###` via `questions.ask` / `ai-orch questions ask`) when the user is not in the conversation.
+4. **Write specs and create linked tasks:** Only after use-case approval, write or update `specs/<slug>.md` and create the tasks (`ai-orch tasks new` or `ai-orch tasks child add`), linking each with `--use-case UC###[,UC###]` or `--from-use-case UC### [--steps M-N]` (which pre-fills title, `## Goal`, and `## Verification` from the use case).
+- **Skipping allowed for non-feature/fix work:** Skipping directly to tasks without a use case is allowed for `chore`, `docs`, and `investigation` (`--kind chore|docs|investigation`).
+
+### Lifecycle, Readiness Gating, and Campaigns
+
+1. **Two independent fields (`approval` and `stage`):**
+   - `approval`: `proposed` | `approved` | `deprecated` (author/owner intent).
+   - `stage`: derived by the engine from linked tasks (`draft` → `planned` → `in development` → `ready` → `verified` / `failing` / `partial` / `untested`, or `ready (revalidation pending)`).
+2. **Readiness-Gated AI Validation:** Once all non-dropped linked tasks are delivered/verified/done (`ready`), run `ai-orch tasks use-cases validate UC001` (refuses with exit 2 if not ready unless `--force` is given), recording evidence in `## AI Validation Log`.
+3. **Product Validation Campaigns & Regression Queue:** `ai-orch tasks use-cases campaign` runs probes only on in-scope ready use cases (listing others under `Not ready (N/M)`). Reopening, bouncing, or re-delivering a task linked to a verified use case marks `revalidation: pending` (listed by `ai-orch tasks use-cases queue`), and a task cannot reach `verified`/`done` while a linked approved use case is `failing` unless the use case passed after the task's delivery (or `--owner-approved`).
 
 ## CLI fallback (`ai-orch tasks …`)
 
 When a session has no broker MCP tools, use the version-free launcher (`~/.local/bin/ai-orch`, or `ai-orch` on `PATH`; see "Reaching the task engine" above):
 
 ```bash
+# Search, create, link, or validate use cases
+ai-orch tasks use-cases search <text> [--actor A] [--tasks-dir tasks] [--json]
+ai-orch tasks use-cases create --title T [--actor A] [--approval proposed|approved|deprecated] [--json]
+ai-orch tasks use-cases validate <UC###> [--force] [--timeout 60] [--json]
+ai-orch tasks use-cases campaign [--filter-actor A] [--timeout 60] [--json]
+ai-orch tasks use-cases queue [--tasks-dir tasks] [--json]
+ai-orch tasks link <task_id> <UC###[,UC###]> [--apply --expect-plan-hash <hash>] [--json]
+ai-orch tasks unlink <task_id> <UC###[,UC###]> [--apply --expect-plan-hash <hash>] [--json]
+
 # List, show, or validate tasks
 ai-orch tasks list [--tasks-dir tasks] [--json]
 ai-orch tasks config [--tasks-dir tasks] [--json]
@@ -688,7 +716,7 @@ ai-orch tasks sync-index [--tasks-dir tasks] [--apply | --check] [--json]
 ai-orch tasks merge-index [<base> <ours> <theirs>] [--tasks-dir tasks] [--json]
 
 # Create, transition, or update tasks
-ai-orch tasks new --category C --title T --short S --priority P --priority-reason R --goal G [--json]
+ai-orch tasks new --category C --title T --short S --priority P --priority-reason R --goal G [--use-case UC001] [--from-use-case UC001 [--steps 1-3]] [--kind feature|fix|chore|docs|investigation] [--json]
 ai-orch tasks transition <task_id> <new_state> [--actor <actor>] [--verifier <verifier>] [--verify-by <target>] [--verify-check <check>] [--reason "<text>"] [--json]
 ai-orch tasks set-verify-by <id> <target> [--check <what-to-check>] [--json]
 ai-orch tasks request-verification <id> --by <target> [--check <what-to-check>] [--json]

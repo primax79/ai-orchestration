@@ -353,9 +353,13 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "List all labels currently in use with their occurrence counts.",
                 },
                 "use-cases": {
-                    "usage": "ai-orch tasks use-cases <list|show|create|record-validation|validate|campaign|queue|adopt-links|migrate-lifecycle> [options] [--json]",
-                    "description": "Manage use cases, readiness-gated AI validations (--force override), campaigns, revalidation queue, and lifecycle/link migrations.",
+                    "usage": "ai-orch tasks use-cases <list|show|search|create|record-validation|validate|campaign|queue|adopt-links|migrate-lifecycle> [options] [--json]",
+                    "description": "Manage use cases, search, readiness-gated AI validations (--force override), campaigns, revalidation queue, and lifecycle/link migrations.",
                     "subcommands": {
+                        "search": {
+                            "usage": "ai-orch tasks use-cases search <text> [--actor <actor>] [--tasks-dir <dir>] [--json]",
+                            "description": "Search and rank use cases by text (title/description/scenario/criteria), actor, cited specs (Source: tasks/specs/...), and linked tasks' paths/sources (read-only).",
+                        },
                         "validate": {
                             "usage": "ai-orch tasks use-cases validate <UC###> [--force] [--timeout <sec>] [--actor <name>] [--tasks-dir <dir>] [--json]",
                             "description": "Run automated probe on a ready use case (refuses with exit 2 if not ready unless --force is passed).",

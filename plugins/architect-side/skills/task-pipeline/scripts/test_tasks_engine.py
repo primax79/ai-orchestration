@@ -17217,6 +17217,274 @@ def test_t085_validate_not_ready_messages_for_draft_and_planned(tmp_path: pathli
     assert res_planned_json["error"].index(planned_hint) < res_planned_json["error"].index("--force")
 
 
+def test_17_8_use_cases_search_ranking_and_read_only(tmp_path: pathlib.Path) -> None:
+    """Task 17.8:
+    - `ai-orch tasks use-cases search <text> [--actor A] [--json]` ranks use cases by:
+      1) text match in title/description/scenario/criteria (case-insensitive, all words),
+      2) actor match (`--actor` or query term),
+      3) specs the use case cites (`Source: tasks/specs/...` lines) matching the query,
+      4) use cases linked to tasks whose `paths` or `sources` overlap the query terms.
+    - Output includes `id`, `title`, `stage`, `approval`, `score`, and `reasons`.
+    - Read-only: all files under `tasks/` remain byte-for-byte unchanged.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "specs").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # UC001: matches text in title + description + scenario + criteria, approved, linked to delivered T001
+    (tasks_dir / "use-cases" / "UC001-token-rotation.md").write_text(
+        "# UC001 - Automatic OAuth token rotation on expiry\n\n"
+        "- id: UC001\n"
+        "- title: Automatic OAuth token rotation on expiry\n"
+        "- actor: Security Operator\n"
+        "- approval: approved\n"
+        "- priority: P1\n"
+        "- linked-tasks: T001\n"
+        "- verification-type: automated-probe\n"
+        "- last-tested: 2026-10-28\n"
+        "- last-verdict: pass\n"
+        "- short: Token rotation\n\n"
+        "## Description & Business Value\n"
+        "Rotates expired OAuth token credentials through automatic rotation. Source: tasks/specs/oauth-lifecycle.md §2\n\n"
+        "## Preconditions\n"
+        "- Active session exists.\n\n"
+        "## Scenario / Interaction Steps\n"
+        "1. Client detects OAuth token expiry and requests rotation.\n\n"
+        "## Automated Verification Command\n"
+        "```bash\n"
+        "pytest tests/test_oauth.py\n"
+        "```\n\n"
+        "## Acceptance Criteria\n"
+        "- [ ] Token rotation succeeds without dropping requests.\n\n"
+        "## AI Validation Log\n",
+        encoding="utf-8",
+    )
+
+    # UC002: matches all words across description + criteria only (not title), proposed
+    (tasks_dir / "use-cases" / "UC002-audit-logging.md").write_text(
+        "# UC002 - Security audit trail for credential events\n\n"
+        "- id: UC002\n"
+        "- title: Security audit trail for credential events\n"
+        "- actor: Auditor\n"
+        "- approval: proposed\n"
+        "- priority: P2\n"
+        "- linked-tasks: -\n"
+        "- verification-type: automated-probe\n"
+        "- last-tested: -\n"
+        "- last-verdict: -\n"
+        "- short: Credential audit trail\n\n"
+        "## Description & Business Value\n"
+        "Records every token event in the immutable ledger. Source: tasks/specs/audit-trail.md §1\n\n"
+        "## Preconditions\n"
+        "- Ledger enabled.\n\n"
+        "## Scenario / Interaction Steps\n"
+        "1. System emits event during rotation.\n\n"
+        "## Automated Verification Command\n"
+        "```bash\n"
+        "pytest tests/test_audit.py\n"
+        "```\n\n"
+        "## Acceptance Criteria\n"
+        "- [ ] Rotation entry contains actor and timestamp.\n\n"
+        "## AI Validation Log\n",
+        encoding="utf-8",
+    )
+
+    # UC003: only matches one word ("token"), NOT "rotation" -> must NOT match all-words text search for "token rotation"
+    # Cites Source: tasks/specs/webhook-dispatch.md and linked to T002 (which touches src/webhooks/dispatcher.py)
+    (tasks_dir / "use-cases" / "UC003-webhook-delivery.md").write_text(
+        "# UC003 - Outbound webhook retry policy\n\n"
+        "- id: UC003\n"
+        "- title: Outbound webhook retry policy\n"
+        "- actor: Integration Developer\n"
+        "- approval: approved\n"
+        "- priority: P1\n"
+        "- linked-tasks: T002\n"
+        "- verification-type: automated-probe\n"
+        "- last-tested: -\n"
+        "- last-verdict: -\n"
+        "- short: Webhook retry\n\n"
+        "## Description & Business Value\n"
+        "Retries failed webhook calls using a bearer token. Source: tasks/specs/webhook-dispatch.md §4\n\n"
+        "## Preconditions\n"
+        "- Webhook endpoint configured.\n\n"
+        "## Scenario / Interaction Steps\n"
+        "1. Endpoint returns 503; worker schedules backoff.\n\n"
+        "## Automated Verification Command\n"
+        "```bash\n"
+        "pytest tests/test_webhooks.py\n"
+        "```\n\n"
+        "## Acceptance Criteria\n"
+        "- [ ] Backoff retries up to 5 times.\n\n"
+        "## AI Validation Log\n",
+        encoding="utf-8",
+    )
+
+    # Tasks T001 (delivered, linked to UC001) and T002 (in progress, linked to UC003)
+    (tasks_dir / "features" / "T001-oauth-rotator.md").write_text(
+        "# T001 Implement OAuth token rotator\n\n"
+        "- id: T001\n"
+        "- title: Implement OAuth token rotator\n"
+        "- category: features\n"
+        "- priority: P1\n"
+        "- priority-reason: Core auth\n"
+        "- next-up: no\n"
+        "- state: delivered\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: tasks/specs/oauth-lifecycle.md\n"
+        "- paths: src/auth/rotator.py, tests/test_oauth.py\n"
+        "- handoff: Implement rotator\n"
+        "- kind: feature\n"
+        "- use-cases: UC001\n"
+        "- short: OAuth rotator\n\n"
+        "verification pending: pytest\n\n"
+        "## Goal\nRotate tokens.\n\n## Steps\n- [x] Rotate.\n\n## Verification\npytest\n",
+        encoding="utf-8",
+    )
+
+    (tasks_dir / "features" / "T002-webhook-worker.md").write_text(
+        "# T002 Implement webhook worker\n\n"
+        "- id: T002\n"
+        "- title: Implement webhook worker\n"
+        "- category: features\n"
+        "- priority: P1\n"
+        "- priority-reason: Webhooks\n"
+        "- next-up: no\n"
+        "- state: in progress\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: tasks/specs/webhook-dispatch.md, N088\n"
+        "- paths: src/webhooks/dispatcher.py\n"
+        "- handoff: Implement webhook worker\n"
+        "- kind: feature\n"
+        "- use-cases: UC003\n"
+        "- short: Webhook worker\n\n"
+        "## Goal\nRetry webhooks.\n\n## Steps\n- [ ] Backoff.\n\n## Verification\npytest\n",
+        encoding="utf-8",
+    )
+
+    # Snapshot all files before running searches to verify read-only guarantee
+    before_snapshot = {
+        p.relative_to(tasks_dir).as_posix(): p.read_bytes()
+        for p in sorted(tasks_dir.rglob("*"))
+        if p.is_file()
+    }
+
+    # 1. Text search (case-insensitive, all words): "TOKEN rotation"
+    # UC001 (title + description + scenario + criteria) ranks above UC002 (description + scenario + criteria);
+    # UC003 only has "token" (missing "rotation") so it is excluded.
+    res_text = run_cli("use-cases", "search", "TOKEN rotation", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_text.returncode == 0, res_text.stdout + res_text.stderr
+    text_data = json.loads(res_text.stdout)
+    assert text_data["ok"] is True
+    assert [r["id"] for r in text_data["results"]] == ["UC001", "UC002"]
+    uc1_res, uc2_res = text_data["results"][0], text_data["results"][1]
+    assert uc1_res["score"] > uc2_res["score"]
+    assert uc1_res["stage"] == "verified"
+    assert uc1_res["approval"] == "approved"
+    assert "text:title" in uc1_res["reasons"]
+    assert "text:description" in uc1_res["reasons"]
+    assert "text:scenario" in uc1_res["reasons"]
+    assert "text:criteria" in uc1_res["reasons"]
+    assert uc2_res["stage"] == "draft"
+    assert uc2_res["approval"] == "proposed"
+    assert "text:title" not in uc2_res["reasons"]
+    assert "text:description" in uc2_res["reasons"]
+    assert "text:criteria" in uc2_res["reasons"]
+
+    # 2. Actor ranking: passing `--actor Auditor` boosts UC002 above UC001
+    res_actor = run_cli(
+        "use-cases", "search", "token rotation", "--actor", "auditor", "--tasks-dir", str(tasks_dir), "--json"
+    )
+    assert res_actor.returncode == 0
+    actor_data = json.loads(res_actor.stdout)
+    assert [r["id"] for r in actor_data["results"]] == ["UC002", "UC001"]
+    assert any(reason.startswith("actor:") and "Auditor" in reason for reason in actor_data["results"][0]["reasons"])
+
+    # 3. Cited spec search (`Source: tasks/specs/...`)
+    res_spec = run_cli("use-cases", "search", "tasks/specs/webhook-dispatch.md", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_spec.returncode == 0
+    spec_data = json.loads(res_spec.stdout)
+    assert [r["id"] for r in spec_data["results"]] == ["UC003"]
+    assert spec_data["results"][0]["stage"] == "in development"
+    assert any("spec:tasks/specs/webhook-dispatch.md" in r for r in spec_data["results"][0]["reasons"])
+
+    # 4. Linked task paths and sources overlap
+    res_path = run_cli("use-cases", "search", "src/webhooks/dispatcher.py", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_path.returncode == 0
+    path_data = json.loads(res_path.stdout)
+    assert [r["id"] for r in path_data["results"]] == ["UC003"]
+    assert any("task-paths:T002" in r and "src/webhooks/dispatcher.py" in r for r in path_data["results"][0]["reasons"])
+
+    res_source = run_cli("use-cases", "search", "N088", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_source.returncode == 0
+    source_data = json.loads(res_source.stdout)
+    assert [r["id"] for r in source_data["results"]] == ["UC003"]
+    assert any("task-sources:T002" in r and "N088" in r for r in source_data["results"][0]["reasons"])
+
+    # 5. Human-readable CLI output via bin/ai-orch
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    res_human = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "use-cases", "search", "token rotation", "--tasks-dir", str(tasks_dir)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_human.returncode == 0
+    assert "UC001" in res_human.stdout
+    assert "stage: verified" in res_human.stdout
+    assert "approval: approved" in res_human.stdout
+    assert "score:" in res_human.stdout
+    assert "reasons:" in res_human.stdout
+
+    # 6. Verify read-only guarantee: files unchanged
+    after_snapshot = {
+        p.relative_to(tasks_dir).as_posix(): p.read_bytes()
+        for p in sorted(tasks_dir.rglob("*"))
+        if p.is_file()
+    }
+    assert after_snapshot == before_snapshot
+
+
+def test_17_8_skills_use_case_first_and_regenerate_check() -> None:
+    """Task 17.8:
+    - `task-pipeline/SKILL.md` and `orchestration-workflow/SKILL.template.md` (and generated `SKILL.md`)
+      document the use-case-first workflow (`use-cases search`, contradictions/updates, `approval: proposed`,
+      Q### approval when user is not in conversation, `--use-case`/`--from-use-case`, skipping for
+      `chore`, `docs`, `investigation`).
+    - `python3 scripts/regenerate_generic_skills.py --check` exits 0.
+    """
+    tp_skill = (REPO_ROOT / "plugins" / "architect-side" / "skills" / "task-pipeline" / "SKILL.md").read_text(encoding="utf-8")
+    ow_template = (REPO_ROOT / "plugins" / "architect-side" / "skills" / "orchestration-workflow" / "SKILL.template.md").read_text(encoding="utf-8")
+    ow_skill = (REPO_ROOT / "plugins" / "architect-side" / "skills" / "orchestration-workflow" / "SKILL.md").read_text(encoding="utf-8")
+
+    for doc_name, content in (
+        ("task-pipeline/SKILL.md", tp_skill),
+        ("orchestration-workflow/SKILL.template.md", ow_template),
+        ("orchestration-workflow/SKILL.md", ow_skill),
+    ):
+        assert "use-cases search" in content, f"Missing 'use-cases search' in {doc_name}"
+        assert "proposed" in content, f"Missing 'proposed' approval in {doc_name}"
+        assert "--use-case" in content, f"Missing '--use-case' in {doc_name}"
+        assert "--from-use-case" in content, f"Missing '--from-use-case' in {doc_name}"
+        for skip_kind in ("chore", "docs", "investigation"):
+            assert skip_kind in content, f"Missing skip kind {skip_kind!r} in {doc_name}"
+
+    regen_script = REPO_ROOT / "scripts" / "regenerate_generic_skills.py"
+    proc = subprocess.run(
+        [sys.executable, str(regen_script), "--check"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+
 
 
 

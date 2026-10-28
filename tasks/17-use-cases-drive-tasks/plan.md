@@ -12,8 +12,9 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.8 - Flusso use-case-first nelle skill e ricerca
 
-- **Status:** `open` · **Short:** Skill use-case-first · **Size:** M · **Depends on:** 17.4
+- **Status:** `delivered` (2026-10-28, kilo: implementato `ai-orch tasks use-cases search <text> [--actor A] [--json]` in sola lettura con ranking per testo, attore, spec citate e percorsi/sorgenti dei task collegati, aggiornato `CLI_DESCRIPTION` in `bin/ai-orch` e documentato il flusso use-case-first in `task-pipeline/SKILL.md` e `orchestration-workflow/SKILL.template.md` con rigenerazione verificata tramite `--check`) · **Short:** Skill use-case-first · **Size:** M · **Depends on:** 17.4
 - **Goal:** spec §4: `use-cases search` (testo, attore, spec citate, task sugli stessi percorsi); task-pipeline e orchestration-workflow dai template, rigenerati con `--check`, rigenerata la skill legata di kilo-mcp.
+- **Verification:** `ai-orch tasks use-cases search <text> [--actor A] [--json]` ordina gli use case in sola lettura per corrispondenza testuale (tutte le parole, case-insensitive, in titolo/descrizione/scenario/criteri), attore, spec citate (`Source: tasks/specs/...`) e sovrapposizione con `paths`/`sources` dei task collegati restituendo `id`, `title`, `stage`, `approval`, `score` e `reasons`; `task-pipeline/SKILL.md` e `orchestration-workflow/SKILL.template.md` (con `SKILL.md` rigenerato e verificato con `regenerate_generic_skills.py --check`) includono i passi use-case-first di §4 con esenzione per `chore`, `docs` e `investigation`.
 
 ### 17.9 - API del backend UI per collegamenti e stadi
 
