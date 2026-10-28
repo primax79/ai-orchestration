@@ -37,7 +37,7 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.12 - Migrazione ai-orchestration
 
-- **Status:** `in progress` (2026-10-28; operator) · **Short:** Migrazione ai-orchestration · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
+- **Status:** `delivered` (2026-10-28; operator; 2026-10-28; Applicata (76506eb): 109 collegamenti su 91 task, 37 use case con approval proposed; validate ok. Al proprietario: approvare gli use case) · **Verify-by:** owner · **Short:** Migrazione ai-orchestration · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
 - **Goal:** adopt-links e collegamenti mancanti per UC001-UC037; anteprima, report, validate pulito.
 
 ### 17.13 - Migrazione ai-swissknife
