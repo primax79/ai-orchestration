@@ -12,7 +12,7 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.8 - Flusso use-case-first nelle skill e ricerca
 
-- **Status:** `open` · **Short:** Skill use-case-first · **Size:** M · **Depends on:** 17.4
+- **Status:** `in progress` (2026-10-28; kilo) · **Short:** Skill use-case-first · **Size:** M · **Depends on:** 17.4
 - **Goal:** spec §4: `use-cases search` (testo, attore, spec citate, task sugli stessi percorsi); task-pipeline e orchestration-workflow dai template, rigenerati con `--check`, rigenerata la skill legata di kilo-mcp.
 
 ### 17.9 - API del backend UI per collegamenti e stadi
