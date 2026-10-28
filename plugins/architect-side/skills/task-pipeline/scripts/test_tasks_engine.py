@@ -4326,7 +4326,7 @@ def test_use_cases_crud_and_validation(tmp_path: pathlib.Path) -> None:
 
     # 1. Create a task that references UC001 (placed after handoff per header grammar)
     task_file = tasks_dir / "features" / "T001-car-search.md"
-    _write_sample_task(task_file, task_id="T001")
+    _write_sample_task(task_file, task_id="T001", state="delivered")
     task_text = task_file.read_text(encoding="utf-8")
     task_file.write_text(task_text.replace("- verifier: -", "- verifier: -\n- use-cases: UC001"), encoding="utf-8")
 
@@ -4363,6 +4363,9 @@ def test_use_cases_crud_and_validation(tmp_path: pathlib.Path) -> None:
     assert payload_list["use_cases"][0]["id"] == "UC001"
     assert payload_list["use_cases"][0]["actor"] == "Buyer"
     assert payload_list["use_cases"][0]["linked_tasks"] == ["T001"]
+    assert payload_list["use_cases"][0]["approval"] == "approved"
+    assert payload_list["use_cases"][0]["stage"] == "untested"
+    assert payload_list["use_cases"][0]["status"] == "untested"
 
     # 4. Show use case
     res_show = run_cli("use-cases", "show", "UC001", "--tasks-dir", str(tasks_dir), "--json")
@@ -4388,7 +4391,7 @@ def test_use_cases_crud_and_validation(tmp_path: pathlib.Path) -> None:
     # Verify updated content has AI Validation Log
     uc_file = tasks_dir / "use-cases" / "UC001-search-by-budget-and-fuel.md"
     uc_text = uc_file.read_text(encoding="utf-8")
-    assert "- status: verified" in uc_text
+    assert "- approval: approved" in uc_text
     assert "- last-verdict: pass" in uc_text
     assert "### [" in uc_text
     assert "AI Validation by kilo:gemini-4-argon" in uc_text
@@ -4409,6 +4412,7 @@ def test_use_cases_validate_probe_and_campaign(tmp_path: pathlib.Path) -> None:
         "--id", "UC001",
         "--title", "Passing Scenario",
         "--actor", "Buyer",
+        "--approval", "approved",
         "--verification-command", "echo 'PASS_DATA'",
         "--tasks-dir", str(tasks_dir),
         "--json",
@@ -4420,6 +4424,7 @@ def test_use_cases_validate_probe_and_campaign(tmp_path: pathlib.Path) -> None:
         "--id", "UC002",
         "--title", "Failing Scenario",
         "--actor", "Buyer",
+        "--approval", "approved",
         "--verification-command", "exit 1",
         "--tasks-dir", str(tasks_dir),
         "--json",
@@ -13584,7 +13589,10 @@ def test_t066_project_languages_and_english_headings_keywords(tmp_path: pathlib.
     )
     assert res_rec.returncode == 0, res_rec.stdout + res_rec.stderr
     uc2_after = json.loads(run_cli("use-cases", "show", "UC002", "--tasks-dir", str(tasks_it), "--json").stdout)["use_case"]
-    assert uc2_after["status"] == "verified"
+    assert uc2_after["last_verdict"] == "pass"
+    assert uc2_after["written_status"] == "verified"
+    assert uc2_after["stage"] == "draft"
+    assert uc2_after["status"] == "draft"
     assert "Verificato con successo" in uc2_after["validation_log"]
 
     val_uc_warn = json.loads(run_cli("validate", "--tasks-dir", str(tasks_it), "--json").stdout)
@@ -14286,16 +14294,20 @@ def test_17_1_use_case_link_projection_validate_and_show(tmp_path: pathlib.Path)
     tshow_data = json.loads(res_tshow_json.stdout)["task"]
     assert tshow_data["use_cases"] == ["UC001", "UC004", "workspace:sibling-ws/UC010"]
     uc_det_by_id = {u["id"]: u for u in tshow_data["use_cases_details"]}
-    assert uc_det_by_id["UC001"]["status"] == "active"
-    assert uc_det_by_id["UC004"]["status"] == "verified"
+    assert uc_det_by_id["UC001"]["stage"] == "in development"
+    assert uc_det_by_id["UC001"]["status"] == "in development"
+    assert uc_det_by_id["UC001"]["approval"] == "approved"
+    assert uc_det_by_id["UC004"]["stage"] == "in development"
+    assert uc_det_by_id["UC004"]["status"] == "in development"
+    assert uc_det_by_id["UC004"]["approval"] == "approved"
     assert uc_det_by_id["workspace:sibling-ws/UC010"]["status"] == "external"
     assert uc_det_by_id["workspace:sibling-ws/UC010"]["external"] is True
 
     res_tshow_txt = run_cli("show", "T001", "--tasks-dir", str(tasks_dir))
     assert res_tshow_txt.returncode == 0
     assert "Use cases:" in res_tshow_txt.stdout
-    assert "UC001 - Search by budget (status: active)" in res_tshow_txt.stdout
-    assert "UC004 - Export search results (status: verified)" in res_tshow_txt.stdout
+    assert "UC001 - Search by budget (stage: in development, status: in development, approval: approved)" in res_tshow_txt.stdout
+    assert "UC004 - Export search results (stage: in development, status: in development, approval: approved)" in res_tshow_txt.stdout
 
     # 4. Verify `use-cases show <UC>` (text and --json)
     res_ucshow_json = run_cli("use-cases", "show", "UC001", "--tasks-dir", str(tasks_dir), "--json")
@@ -14409,25 +14421,35 @@ def test_t069_campaign_skips_drafts_and_untested_is_not_failing(tmp_path: pathli
     assert camp["out_of_scope"] == 2  # UC003, UC004
     assert camp["readiness_score"] == 33.3  # 1/3
 
-    # Inspect statuses and last-verdict of each use case
+    # Inspect statuses and last-verdict of each use case (no linked tasks -> derived stage is 'draft', never raw 'failing')
     uc1 = json.loads(run_cli("use-cases", "show", "UC001", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
-    assert uc1["status"] == "verified"
+    assert uc1["stage"] == "draft"
+    assert uc1["status"] == "draft"
+    assert uc1["approval"] == "approved"
     assert uc1["last_verdict"] == "pass"
 
     uc2 = json.loads(run_cli("use-cases", "show", "UC002", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
-    assert uc2["status"] == "failing"
+    assert uc2["stage"] == "draft"
+    assert uc2["status"] == "draft"
+    assert uc2["approval"] == "approved"
     assert uc2["last_verdict"] == "fail"
 
     uc5 = json.loads(run_cli("use-cases", "show", "UC005", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
-    assert uc5["status"] == "active"  # NOT failing!
+    assert uc5["stage"] == "draft"
+    assert uc5["status"] == "draft"  # NOT failing!
+    assert uc5["approval"] == "approved"
     assert uc5["last_verdict"] == "untested"
 
     uc3 = json.loads(run_cli("use-cases", "show", "UC003", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc3["stage"] == "draft"
     assert uc3["status"] == "draft"  # untouched
+    assert uc3["approval"] == "proposed"
     assert uc3["last_verdict"] in (None, "-")  # untouched
 
     uc4 = json.loads(run_cli("use-cases", "show", "UC004", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc4["stage"] == "draft"
     assert uc4["status"] == "draft"  # untouched
+    assert uc4["approval"] == "proposed"
     assert uc4["last_verdict"] in (None, "-")  # untouched
 
     # Check report content
@@ -14474,7 +14496,9 @@ def test_t069_probe_missing_test_file_and_timeout_recorded_as_untested(tmp_path:
     assert val_data["status"] == "active"
 
     uc10 = json.loads(run_cli("use-cases", "show", "UC010", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
-    assert uc10["status"] == "active"
+    assert uc10["stage"] == "draft"
+    assert uc10["status"] == "draft"
+    assert uc10["approval"] == "approved"
     assert uc10["last_verdict"] == "untested"
 
     # 2. Timeout probe
@@ -14495,7 +14519,9 @@ def test_t069_probe_missing_test_file_and_timeout_recorded_as_untested(tmp_path:
     assert res_to["status"] == "active"
 
     uc11 = json.loads(run_cli("use-cases", "show", "UC011", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
-    assert uc11["status"] == "active"
+    assert uc11["stage"] == "draft"
+    assert uc11["status"] == "draft"
+    assert uc11["approval"] == "approved"
     assert uc11["last_verdict"] == "untested"
 
 
@@ -15278,6 +15304,405 @@ def test_orchestrator_missing_hint_uses_enclosing_workspace(tmp_path: pathlib.Pa
     res = run_cli("transition", "T001", "in progress", "--tasks-dir", str(tasks_dir), "--json")
     assert res.returncode == 0, res.stdout + res.stderr
     assert "[hint]" not in res.stderr
+
+
+# ===========================================================================
+# Task 17.5: Use case lifecycle — approval field, migrate-lifecycle, derived stage
+# ===========================================================================
+
+def test_17_5_use_case_stage_derivation_all_stages_dropped_and_revalidation(tmp_path: pathlib.Path) -> None:
+    """Task 17.5 (deliverables 1, 3, 4, 6):
+    - `use-cases create` writes `approval: proposed` right where `status` was.
+    - Pure derived `stage` for every stage:
+      * `draft`: no linked tasks, OR all linked tasks dropped (links kept and shown as dropped);
+      * `planned`: linked tasks exist, none started (open, waiting, blocked, paused);
+      * `in development`: at least one linked task in progress, bounced, delivered, verified, or done,
+        but not all non-dropped tasks delivered/verified/done;
+      * `ready` -> mapped from `last-verdict` when all non-dropped tasks are delivered/verified/done
+        (dropped tasks ignored):
+        - `verified` (last-verdict: pass)
+        - `failing` (last-verdict: fail)
+        - `partial` (last-verdict: partial)
+        - `untested` (last-verdict: untested or `-`/missing)
+        - `ready (revalidation pending)` when `revalidation: pending`.
+    - Shown everywhere (`use-cases list`, `use-cases show`, `00-INDEX.md` use-case rows):
+      a use case that is not ready is never shown as raw `failing`; JSON keeps `status` = `stage`.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "done" / "features").mkdir(parents=True)
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "01-core").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # 1. Verify `use-cases create` writes `- approval: proposed` right after `- actor:` (no `- status:`)
+    res_c1 = run_cli(
+        "use-cases", "create",
+        "--id", "UC001",
+        "--title", "No Linked Tasks Draft",
+        "--actor", "End-User",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_c1.returncode == 0
+    uc1_path = next((tasks_dir / "use-cases").glob("UC001-*.md"))
+    uc1_text = uc1_path.read_text(encoding="utf-8")
+    assert "- actor: End-User\n- approval: proposed\n- priority: P1\n" in uc1_text
+    assert "- status:" not in uc1_text
+
+    def _write_uc(
+        uc_id: str,
+        title: str,
+        approval: str = "approved",
+        last_verdict: str = "-",
+        revalidation: str | None = None,
+    ) -> pathlib.Path:
+        reval_line = f"- revalidation: {revalidation}\n" if revalidation else ""
+        p = tasks_dir / "use-cases" / f"{uc_id}-{title.lower().replace(' ', '-')}.md"
+        p.write_text(
+            f"# {uc_id} - {title}\n\n"
+            f"- id: {uc_id}\n"
+            f"- title: {title}\n"
+            f"- actor: Operator\n"
+            f"- approval: {approval}\n"
+            f"- priority: P1\n"
+            f"- linked-tasks: -\n"
+            f"- verification-type: automated-probe\n"
+            f"- last-tested: 2026-10-28\n"
+            f"- last-verdict: {last_verdict}\n"
+            f"{reval_line}"
+            f"- short: {title}\n\n"
+            "## Description & Business Value\nDesc.\n\n"
+            "## Preconditions\n- None.\n\n"
+            "## Scenario / Interaction Steps\n1. Step.\n\n"
+            "## Automated Verification Command\n```bash\necho ok\n```\n\n"
+            "## Acceptance Criteria\n- [ ] Criterion.\n\n"
+            "## AI Validation Log\n",
+            encoding="utf-8",
+        )
+        return p
+
+    # UC002: all linked tasks dropped -> stage = draft (links kept, shown as dropped)
+    _write_uc("UC002", "All Dropped Draft", approval="approved", last_verdict="fail")
+    # UC003: linked tasks in open, waiting, blocked, paused (+ 1 dropped) -> stage = planned (even with last-verdict: fail!)
+    _write_uc("UC003", "Planned Tasks Not Started", approval="proposed", last_verdict="fail")
+    # UC004: one open + one in progress -> stage = in development (even with last-verdict: fail!)
+    _write_uc("UC004", "In Development In Progress", approval="approved", last_verdict="fail")
+    # UC005: one waiting + one bounced -> stage = in development
+    _write_uc("UC005", "In Development Bounced", approval="approved", last_verdict="pass")
+    # UC006: one open + one delivered -> stage = in development
+    _write_uc("UC006", "In Development Partial Delivered", approval="approved", last_verdict="pass")
+    # UC007: all non-dropped tasks delivered/verified/done (+ 1 dropped) + last-verdict: pass -> stage = verified
+    _write_uc("UC007", "Ready Verified Flow", approval="approved", last_verdict="pass")
+    # UC008: all non-dropped tasks delivered/verified/done + last-verdict: fail -> stage = failing
+    _write_uc("UC008", "Ready Failing Flow", approval="approved", last_verdict="fail")
+    # UC009: all non-dropped tasks delivered + last-verdict: partial -> stage = partial
+    _write_uc("UC009", "Ready Partial Flow", approval="approved", last_verdict="partial")
+    # UC010: all non-dropped tasks done + last-verdict: untested -> stage = untested
+    _write_uc("UC010", "Ready Untested Explicit", approval="approved", last_verdict="untested")
+    # UC011: all non-dropped tasks verified + last-verdict: - -> stage = untested
+    _write_uc("UC011", "Ready Untested Missing Verdict", approval="deprecated", last_verdict="-")
+    # UC012: all non-dropped tasks done + last-verdict: pass + revalidation: pending -> stage = ready (revalidation pending)
+    _write_uc("UC012", "Ready Revalidation Pending", approval="approved", last_verdict="pass", revalidation="pending")
+
+    # Create initiative 01 with tasks in every state linked to UC002..UC012
+    (tasks_dir / "01-core" / "plan.md").write_text(
+        "# 01 — Core Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Dropped task A\n\n"
+        "- **Status:** `dropped` · **Short:** Dropped A · **Size:** S · **Depends on:** - · **Use cases:** UC002, UC003, UC007\n"
+        "- **Goal:** Dropped A.\n\n"
+        "### 01.2 - Dropped task B\n\n"
+        "- **Status:** `dropped` · **Short:** Dropped B · **Size:** S · **Depends on:** - · **Use cases:** UC002\n"
+        "- **Goal:** Dropped B.\n\n"
+        "### 01.3 - Open task\n\n"
+        "- **Status:** `open` · **Short:** Open task · **Size:** S · **Depends on:** - · **Use cases:** UC003, UC004, UC006\n"
+        "- **Goal:** Open.\n\n"
+        "### 01.4 - Waiting task\n\n"
+        "- **Status:** `waiting` · **Short:** Waiting task · **Size:** S · **Depends on:** - · **Use cases:** UC003, UC005\n"
+        "- **Goal:** Waiting.\n\n"
+        "### 01.5 - Blocked task\n\n"
+        "- **Status:** `blocked` · **Short:** Blocked task · **Size:** S · **Depends on:** - · **Use cases:** UC003\n"
+        "- **Goal:** Blocked.\n\n"
+        "### 01.6 - Paused task\n\n"
+        "- **Status:** `paused` · **Short:** Paused task · **Size:** S · **Depends on:** - · **Use cases:** UC003\n"
+        "- **Goal:** Paused.\n\n"
+        "### 01.7 - In progress task\n\n"
+        "- **Status:** `in progress` · **Short:** In progress · **Size:** S · **Depends on:** - · **Use cases:** UC004\n"
+        "- **Goal:** In progress.\n\n"
+        "### 01.8 - Bounced task\n\n"
+        "- **Status:** `bounced` · **Short:** Bounced · **Size:** S · **Depends on:** - · **Use cases:** UC005\n"
+        "- **Goal:** Bounced.\n\n"
+        "### 01.9 - Delivered task\n\n"
+        "- **Status:** `delivered` · **Short:** Delivered · **Size:** S · **Depends on:** - · **Use cases:** UC006, UC007, UC008, UC009\n"
+        "- **Goal:** Delivered.\n\n"
+        "### 01.10 - Verified task\n\n"
+        "- **Status:** `verified` · **Short:** Verified · **Size:** S · **Depends on:** - · **Use cases:** UC007, UC008, UC011\n"
+        "- **Goal:** Verified.\n\n"
+        "### 01.11 - Done task\n\n"
+        "- **Status:** `done` · **Short:** Done · **Size:** S · **Depends on:** - · **Use cases:** UC007, UC008, UC010, UC012\n"
+        "- **Goal:** Done.\n\n"
+        "### 01.12 - Done with caveat task\n\n"
+        "- **Status:** `done with a caveat: minor note` · **Short:** Done caveat · **Size:** S · **Depends on:** - · **Use cases:** UC007\n"
+        "- **Goal:** Done with caveat.\n",
+        encoding="utf-8",
+    )
+
+    expected_stages = {
+        "UC001": ("draft", "proposed"),
+        "UC002": ("draft", "approved"),
+        "UC003": ("planned", "proposed"),
+        "UC004": ("in development", "approved"),
+        "UC005": ("in development", "approved"),
+        "UC006": ("in development", "approved"),
+        "UC007": ("verified", "approved"),
+        "UC008": ("failing", "approved"),
+        "UC009": ("partial", "approved"),
+        "UC010": ("untested", "approved"),
+        "UC011": ("untested", "deprecated"),
+        "UC012": ("ready (revalidation pending)", "approved"),
+    }
+
+    # Check `use-cases list` JSON and text
+    res_list_json = run_cli("use-cases", "list", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_list_json.returncode == 0
+    list_payload = json.loads(res_list_json.stdout)
+    by_id = {u["id"]: u for u in list_payload["use_cases"]}
+    for ucid, (exp_stage, exp_app) in expected_stages.items():
+        assert by_id[ucid]["stage"] == exp_stage, f"{ucid}: expected stage {exp_stage}, got {by_id[ucid]['stage']}"
+        assert by_id[ucid]["status"] == exp_stage, f"{ucid}: JSON status must equal stage {exp_stage}"
+        assert by_id[ucid]["approval"] == exp_app
+
+    res_list_txt = run_cli("use-cases", "list", "--tasks-dir", str(tasks_dir)).stdout
+    for ucid, (exp_stage, exp_app) in expected_stages.items():
+        assert f"[{ucid}] (stage: {exp_stage}, approval: {exp_app})" in res_list_txt
+    # UC002, UC003, UC004 have last-verdict=fail but are not ready -> never shown as stage: failing
+    for not_ready_id in ("UC002", "UC003", "UC004"):
+        line_for_uc = next(ln for ln in res_list_txt.splitlines() if f"[{not_ready_id}]" in ln)
+        assert "stage: failing" not in line_for_uc
+
+    # Check `use-cases show` on UC002 (all dropped -> draft, links kept and shown as dropped)
+    res_show_uc2_json = json.loads(run_cli("use-cases", "show", "UC002", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert res_show_uc2_json["stage"] == "draft"
+    assert res_show_uc2_json["status"] == "draft"
+    assert res_show_uc2_json["approval"] == "approved"
+    assert res_show_uc2_json["linked_tasks"] == ["01.1", "01.2"]
+    assert all(d["dropped"] is True for d in res_show_uc2_json["linked_tasks_details"])
+
+    res_show_uc2_txt = run_cli("use-cases", "show", "UC002", "--tasks-dir", str(tasks_dir)).stdout
+    assert "Approval : approved" in res_show_uc2_txt
+    assert "Stage    : draft" in res_show_uc2_txt
+    assert "Linked   : 01.1 (dropped), 01.2 (dropped)" in res_show_uc2_txt
+
+    # Check `use-cases show` on UC012 (revalidation pending)
+    res_show_uc12_json = json.loads(run_cli("use-cases", "show", "UC012", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert res_show_uc12_json["stage"] == "ready (revalidation pending)"
+    assert res_show_uc12_json["status"] == "ready (revalidation pending)"
+
+    # Check 00-INDEX.md use-case rows via render_synced_index
+    rendered_idx = te.render_synced_index(tasks_dir, "# Task Index\n", adopt=True)
+    assert "<!-- ai-orch:generated use-cases -->" in rendered_idx
+    # Approved use cases show stage only; non-approved (proposed/deprecated) show `stage (approval)`
+    assert "| UC001 (No Linked Tasks Draft) | P1 | [No Linked Tasks Draft](use-cases/UC001-no-linked-tasks-draft.md) | draft (proposed) |" in rendered_idx
+    assert "| UC002 (All Dropped Draft) | P1 | [All Dropped Draft](use-cases/UC002-all-dropped-draft.md) | draft |" in rendered_idx
+    assert "| UC003 (Planned Tasks Not Started) | P1 | [Planned Tasks Not Started](use-cases/UC003-planned-tasks-not-started.md) | planned (proposed) |" in rendered_idx
+    assert "| UC004 (In Development In Progress) | P1 | [In Development In Progress](use-cases/UC004-in-development-in-progress.md) | in development |" in rendered_idx
+    assert "| UC007 (Ready Verified Flow) | P1 | [Ready Verified Flow](use-cases/UC007-ready-verified-flow.md) | verified |" in rendered_idx
+    assert "| UC008 (Ready Failing Flow) | P1 | [Ready Failing Flow](use-cases/UC008-ready-failing-flow.md) | failing |" in rendered_idx
+    assert "| UC009 (Ready Partial Flow) | P1 | [Ready Partial Flow](use-cases/UC009-ready-partial-flow.md) | partial |" in rendered_idx
+    assert "| UC010 (Ready Untested Explicit) | P1 | [Ready Untested Explicit](use-cases/UC010-ready-untested-explicit.md) | untested |" in rendered_idx
+    assert "| UC011 (Ready Untested Missing Verdict) | P1 | [Ready Untested Missing Verdict](use-cases/UC011-ready-untested-missing-verdict.md) | untested (deprecated) |" in rendered_idx
+    assert "| UC012 (Ready Revalidation Pending) | P1 | [Ready Revalidation Pending](use-cases/UC012-ready-revalidation-pending.md) | ready (revalidation pending) |" in rendered_idx
+
+
+def test_17_5_migrate_lifecycle_mapping_verdict_fill_log_preserved_idempotent_rollback_and_validate(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 17.5 (deliverables 2, 5, 6):
+    - `use-cases migrate-lifecycle`: preview by default, `--apply --expect-plan-hash <h>`.
+    - Mapping: `draft -> proposed`; `active`, `verified`, `failing`, `partial -> approved`; `deprecated -> deprecated`.
+    - Verdict backfill/fix: `verified -> pass`, `failing -> fail`, `partial -> partial` when `last-verdict` is missing
+      or disagrees, and reported in preview/apply output.
+    - `## AI Validation Log` and every other body line are kept byte-for-byte.
+    - Snapshot written under `tasks/_reviews/migrate-lifecycle-<timestamp>/` before applying.
+    - Unknown `status` values stop the apply (fail-closed) and are listed.
+    - Atomic apply with rollback on injected write failure.
+    - Idempotent second run.
+    - `validate`: unmigrated use case (without `approval`) is a warning, not an error.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    log_payload = (
+        "\n### [2026-10-25 17:00 UTC] AI Validation by campaign-runner\n"
+        "- **Verdict:** `FAIL`\n"
+        "- **Summary:** Probe failed with exit code 1\n"
+        "- **Evidence:**\n"
+        "```\n$ pytest -q\n1 failed\n```\n"
+        "- **Gaps Found:**\n"
+        "  - Assertion mismatch in line 42\n"
+    )
+
+    def _write_legacy_uc(uc_id: str, status_val: str, last_verdict_val: str = "-", extra_log: str = "") -> pathlib.Path:
+        p = tasks_dir / "use-cases" / f"{uc_id}-legacy.md"
+        p.write_text(
+            f"# {uc_id} - Legacy {status_val}\n\n"
+            f"- id: {uc_id}\n"
+            f"- title: Legacy {status_val}\n"
+            f"- actor: User\n"
+            f"- status: {status_val}\n"
+            f"- priority: P1\n"
+            f"- linked-tasks: -\n"
+            f"- verification-type: automated-probe\n"
+            f"- last-tested: 2026-10-25\n"
+            f"- last-verdict: {last_verdict_val}\n"
+            f"- short: Legacy {uc_id}\n\n"
+            "## Description & Business Value\nExact body text line 1.\nExact body text line 2.\n\n"
+            "## Preconditions\n- Precondition A.\n\n"
+            "## Scenario / Interaction Steps\n1. Step one.\n2. Step two.\n\n"
+            "## Automated Verification Command\n```bash\npytest -q\n```\n\n"
+            "## Acceptance Criteria\n- [x] Criterion 1.\n- [ ] Criterion 2.\n\n"
+            f"## AI Validation Log{extra_log}",
+            encoding="utf-8",
+        )
+        return p
+
+    p_uc1 = _write_legacy_uc("UC001", "draft", "-")
+    p_uc2 = _write_legacy_uc("UC002", "active", "-")
+    p_uc3 = _write_legacy_uc("UC003", "verified", "-", extra_log=log_payload)  # missing last-verdict -> fill pass
+    p_uc4 = _write_legacy_uc("UC004", "failing", "pass", extra_log=log_payload)  # disagreeing last-verdict -> fix fail
+    p_uc5 = _write_legacy_uc("UC005", "partial", "-")  # missing last-verdict -> fill partial
+    p_uc6 = _write_legacy_uc("UC006", "deprecated", "-")
+
+    # 1. Validate on unmigrated tree: missing `approval` is a warning, NOT an error (exit 0)
+    res_val_before = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_val_before.returncode == 0
+    val_before = json.loads(res_val_before.stdout)
+    assert val_before["ok"] is True
+    assert val_before["errors"] == []
+    assert sum(1 for w in val_before["warnings"] if "missing 'approval' header field" in w) == 6
+
+    # 2. Inject an unknown status UC007 -> migrate-lifecycle refuses (fail-closed) and lists UC007
+    p_uc7 = _write_legacy_uc("UC007", "bogus-status", "-")
+    res_bad = run_cli("use-cases", "migrate-lifecycle", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_bad.returncode == 1
+    bad_data = json.loads(res_bad.stdout)
+    assert bad_data["ok"] is False
+    assert bad_data["applied"] is False
+    assert [u["use_case_id"] for u in bad_data["unknown_statuses"]] == ["UC007"]
+    assert bad_data["unknown_statuses"][0]["status"] == "bogus-status"
+    p_uc7.unlink()
+
+    # 3. Preview by default writes nothing and reports mappings + verdict backfills
+    orig_bytes = {p.name: p.read_bytes() for p in (p_uc1, p_uc2, p_uc3, p_uc4, p_uc5, p_uc6)}
+    res_prev = run_cli("use-cases", "migrate-lifecycle", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_prev.returncode == 0
+    prev_data = json.loads(res_prev.stdout)
+    assert prev_data["ok"] is True
+    assert prev_data["applied"] is False
+    assert prev_data["dry_run"] is True
+    assert prev_data["files_changed_count"] == 6
+    assert prev_data["counts_by_old_status"] == {
+        "draft": 1,
+        "active": 1,
+        "verified": 1,
+        "failing": 1,
+        "partial": 1,
+        "deprecated": 1,
+    }
+    assert prev_data["counts_by_new_approval"] == {
+        "proposed": 1,
+        "approved": 4,
+        "deprecated": 1,
+    }
+    assert [v["use_case_id"] for v in prev_data["verdict_updates"]] == ["UC003", "UC004", "UC005"]
+    for p in (p_uc1, p_uc2, p_uc3, p_uc4, p_uc5, p_uc6):
+        assert p.read_bytes() == orig_bytes[p.name]
+
+    # 4. Inject failure midway through atomic write -> verify rollback restores all files and removes no data
+    real_atomic_write = te._atomic_write_text
+    write_calls: list[pathlib.Path] = []
+
+    def _failing_write(path: pathlib.Path, content: str, encoding: str = "utf-8") -> None:
+        # Allow snapshot/manifest writes under _reviews, fail on the 3rd use-case file write
+        if "use-cases" in path.parts:
+            write_calls.append(path)
+            if len(write_calls) == 3:
+                raise OSError("Simulated disk failure during migrate-lifecycle")
+        real_atomic_write(path, content, encoding=encoding)
+
+    monkeypatch.setattr(te, "_atomic_write_text", _failing_write)
+    with pytest.raises(OSError, match="Simulated disk failure"):
+        te.migrate_use_case_lifecycle(tasks_dir, dry_run=False, expect_plan_hash=prev_data["plan_hash"])
+    monkeypatch.setattr(te, "_atomic_write_text", real_atomic_write)
+
+    for p in (p_uc1, p_uc2, p_uc3, p_uc4, p_uc5, p_uc6):
+        assert p.read_bytes() == orig_bytes[p.name]
+
+    # 5. Apply migration with --apply --expect-plan-hash
+    res_app = run_cli(
+        "use-cases", "migrate-lifecycle", "--tasks-dir", str(tasks_dir),
+        "--apply", "--expect-plan-hash", prev_data["plan_hash"], "--json",
+    )
+    assert res_app.returncode == 0, res_app.stdout + res_app.stderr
+    app_data = json.loads(res_app.stdout)
+    assert app_data["ok"] is True
+    assert app_data["applied"] is True
+    assert app_data["changed"] is True
+
+    # Verify snapshot under tasks/_reviews/migrate-lifecycle-<ts>/
+    snap_dir = pathlib.Path(app_data["snapshot_dir"])
+    assert snap_dir.is_dir()
+    assert snap_dir.parent == tasks_dir / "_reviews"
+    assert snap_dir.name.startswith("migrate-lifecycle-")
+    manifest = json.loads(pathlib.Path(app_data["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["files_count"] == 6
+    for p in (p_uc1, p_uc2, p_uc3, p_uc4, p_uc5, p_uc6):
+        assert (snap_dir / "use-cases" / p.name).read_bytes() == orig_bytes[p.name]
+
+    # Verify header positions, approval values, last-verdict backfills, and byte-for-byte body/log preservation
+    expected_after = {
+        p_uc1: ("proposed", "-"),
+        p_uc2: ("approved", "-"),
+        p_uc3: ("approved", "pass"),
+        p_uc4: ("approved", "fail"),
+        p_uc5: ("approved", "partial"),
+        p_uc6: ("deprecated", "-"),
+    }
+    for p, (exp_app, exp_verdict) in expected_after.items():
+        after_text = p.read_text(encoding="utf-8")
+        orig_text = orig_bytes[p.name].decode("utf-8")
+        assert f"- actor: User\n- approval: {exp_app}\n- priority: P1\n" in after_text
+        assert "- status:" not in after_text
+        assert f"- last-verdict: {exp_verdict}\n" in after_text
+        # Everything from `## Description & Business Value` onwards (including `## AI Validation Log`) is identical byte-for-byte
+        orig_body = orig_text.split("## Description & Business Value", 1)[1]
+        after_body = after_text.split("## Description & Business Value", 1)[1]
+        assert after_body == orig_body
+
+    # 6. Validate after migration: 0 errors, 0 missing-approval warnings
+    res_val_after = json.loads(run_cli("validate", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    assert res_val_after["ok"] is True
+    assert res_val_after["errors"] == []
+    assert not any("missing 'approval' header field" in w for w in res_val_after["warnings"])
+
+    # 7. Idempotent second run
+    res_prev2 = json.loads(run_cli("use-cases", "migrate-lifecycle", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    assert res_prev2["ok"] is True
+    assert res_prev2["files_changed_count"] == 0
+    assert res_prev2["plan"] == []
+
+    res_app2 = json.loads(
+        run_cli(
+            "use-cases", "migrate-lifecycle", "--tasks-dir", str(tasks_dir),
+            "--apply", "--expect-plan-hash", res_prev2["plan_hash"], "--json",
+        ).stdout
+    )
+    assert res_app2["ok"] is True
+    assert res_app2["applied"] is True
+    assert res_app2["changed"] is False
+
 
 
 

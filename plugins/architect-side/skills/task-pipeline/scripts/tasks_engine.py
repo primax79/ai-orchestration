@@ -145,12 +145,38 @@ VERIFICATION_MODES: set[str] = {"self", "independent-session", "cross-agent", "p
 
 USE_CASE_ID_RE: re.Pattern = re.compile(r"^UC\d{3,}$")
 USE_CASE_STATUSES: set[str] = {"draft", "active", "verified", "failing", "partial", "deprecated"}
+USE_CASE_APPROVAL_VALUES: set[str] = {"proposed", "approved", "deprecated"}
+USE_CASE_STAGES: set[str] = {
+    "draft",
+    "planned",
+    "in development",
+    "ready",
+    "verified",
+    "failing",
+    "partial",
+    "untested",
+    "ready (revalidation pending)",
+}
+USE_CASE_STATUS_TO_APPROVAL: dict[str, str] = {
+    "draft": "proposed",
+    "active": "approved",
+    "verified": "approved",
+    "failing": "approved",
+    "partial": "approved",
+    "deprecated": "deprecated",
+}
+USE_CASE_VERDICT_STATUS_MAP: dict[str, str] = {
+    "verified": "pass",
+    "failing": "fail",
+    "partial": "partial",
+}
+USE_CASE_VERDICTS: set[str] = {"pass", "fail", "partial", "untested"}
 USE_CASE_VERIFICATION_TYPES: set[str] = {"automated-probe", "e2e", "code-audit", "api-probe"}
 USE_CASE_MANDATORY_HEADER_FIELDS: tuple[str, ...] = (
     "id",
     "title",
     "actor",
-    "status",
+    "approval",
     "priority",
     "linked-tasks",
     "verification-type",
@@ -158,6 +184,8 @@ USE_CASE_MANDATORY_HEADER_FIELDS: tuple[str, ...] = (
     "last-verdict",
 )
 USE_CASE_OPTIONAL_HEADER_FIELDS: tuple[str, ...] = (
+    "status",
+    "revalidation",
     "short",
 )
 USE_CASE_HEADER_FIELDS: tuple[str, ...] = USE_CASE_MANDATORY_HEADER_FIELDS + USE_CASE_OPTIONAL_HEADER_FIELDS
@@ -7334,6 +7362,484 @@ def adopt_use_case_links(
         return base_result
 
 
+def _rewrite_use_case_lifecycle_in_text(
+    text: str,
+) -> tuple[str, dict[str, Any]]:
+    """Targeted header edit migrating hand-written `status` to `approval` (and filling/updating `last-verdict`).
+
+    Never touches the body or the `## AI Validation Log` section (kept byte-for-byte).
+    Returns `(new_text, info)`.
+    """
+    lines = text.splitlines(keepends=True)
+    h1_seen = False
+    in_header = False
+
+    status_indices: list[int] = []
+    approval_indices: list[int] = []
+    last_verdict_indices: list[int] = []
+    actor_idx = -1
+    last_tested_idx = -1
+    last_header_idx = -1
+
+    raw_status: str | None = None
+    raw_approval: str | None = None
+    raw_last_verdict: str | None = None
+    default_prefix = "- "
+    default_ending = "\n"
+
+    for idx, line in enumerate(lines):
+        clean = line.rstrip("\r\n")
+        ending = line[len(clean):] or "\n"
+        if not h1_seen:
+            if clean.startswith("# "):
+                h1_seen = True
+            continue
+        if clean.startswith("## "):
+            break
+        m = re.match(r"^(\s*-\s+)([a-zA-Z0-9_-]+)(:\s*)(.*)$", clean)
+        if m:
+            if not in_header:
+                default_prefix = m.group(1)
+                default_ending = ending
+            in_header = True
+            last_header_idx = idx
+            k_low = m.group(2).strip().lower()
+            v_str = m.group(4).strip()
+            if k_low == "actor":
+                actor_idx = idx
+            elif k_low == "last-tested" or k_low == "last_tested":
+                last_tested_idx = idx
+            elif k_low == "status":
+                status_indices.append(idx)
+                if raw_status is None:
+                    raw_status = v_str
+            elif k_low == "approval":
+                approval_indices.append(idx)
+                if raw_approval is None:
+                    raw_approval = v_str
+            elif k_low in ("last-verdict", "last_verdict"):
+                last_verdict_indices.append(idx)
+                if raw_last_verdict is None:
+                    raw_last_verdict = v_str
+        elif in_header and not clean.strip():
+            break
+
+    clean_status = raw_status if (raw_status and raw_status != "-") else None
+    clean_approval = raw_approval if (raw_approval and raw_approval != "-") else None
+    clean_verdict = raw_last_verdict if (raw_last_verdict and raw_last_verdict != "-") else None
+
+    if clean_status is not None and clean_status not in USE_CASE_STATUS_TO_APPROVAL:
+        return text, {
+            "ok": False,
+            "unknown_status": clean_status,
+            "old_status": clean_status,
+            "old_approval": clean_approval,
+            "new_approval": clean_approval,
+            "old_last_verdict": clean_verdict,
+            "new_last_verdict": clean_verdict,
+            "verdict_updated": False,
+            "verdict_update_reason": None,
+            "changed": False,
+        }
+
+    if clean_approval is not None and clean_approval not in USE_CASE_APPROVAL_VALUES:
+        return text, {
+            "ok": False,
+            "unknown_status": f"approval:{clean_approval}",
+            "old_status": clean_status,
+            "old_approval": clean_approval,
+            "new_approval": clean_approval,
+            "old_last_verdict": clean_verdict,
+            "new_last_verdict": clean_verdict,
+            "verdict_updated": False,
+            "verdict_update_reason": None,
+            "changed": False,
+        }
+
+    if clean_approval is not None:
+        new_approval = clean_approval
+    elif clean_status is not None:
+        new_approval = USE_CASE_STATUS_TO_APPROVAL[clean_status]
+    else:
+        new_approval = "proposed"
+
+    expected_verdict_from_status = USE_CASE_VERDICT_STATUS_MAP.get(clean_status or "")
+    new_verdict = clean_verdict
+    verdict_updated = False
+    verdict_update_reason: str | None = None
+    if expected_verdict_from_status is not None:
+        if clean_verdict is None:
+            new_verdict = expected_verdict_from_status
+            verdict_updated = True
+            verdict_update_reason = f"missing last-verdict filled from status '{clean_status}' -> '{expected_verdict_from_status}'"
+        elif clean_verdict.lower() != expected_verdict_from_status:
+            new_verdict = expected_verdict_from_status
+            verdict_updated = True
+            verdict_update_reason = (
+                f"last-verdict '{clean_verdict}' disagreed with status '{clean_status}'; "
+                f"set to '{expected_verdict_from_status}'"
+            )
+
+    new_lines = list(lines)
+
+    # 1. Update or insert `last-verdict` if needed before index shifts
+    if verdict_updated and new_verdict is not None:
+        if last_verdict_indices:
+            lv_idx = last_verdict_indices[0]
+            lv_clean = new_lines[lv_idx].rstrip("\r\n")
+            lv_end = new_lines[lv_idx][len(lv_clean):] or default_ending
+            m_lv = re.match(r"^(\s*-\s+)(?:last-verdict|last_verdict)(:\s*).*$", lv_clean, flags=re.IGNORECASE)
+            lv_pref = m_lv.group(1) if m_lv else default_prefix
+            new_lines[lv_idx] = f"{lv_pref}last-verdict: {new_verdict}{lv_end}"
+        else:
+            ins_lv_idx = (last_tested_idx + 1) if last_tested_idx >= 0 else (last_header_idx + 1 if last_header_idx >= 0 else len(new_lines))
+            new_lines.insert(ins_lv_idx, f"{default_prefix}last-verdict: {new_verdict}{default_ending}")
+            # Adjust indices >= ins_lv_idx
+            status_indices = [i + 1 if i >= ins_lv_idx else i for i in status_indices]
+            approval_indices = [i + 1 if i >= ins_lv_idx else i for i in approval_indices]
+            if actor_idx >= ins_lv_idx:
+                actor_idx += 1
+            if last_header_idx >= ins_lv_idx:
+                last_header_idx += 1
+
+    # 2. Replace `status:` in place with `approval:` (or remove duplicate `status:` if `approval:` already exists)
+    if approval_indices:
+        ap_idx = approval_indices[0]
+        ap_clean = new_lines[ap_idx].rstrip("\r\n")
+        ap_end = new_lines[ap_idx][len(ap_clean):] or default_ending
+        m_ap = re.match(r"^(\s*-\s+)approval(:\s*).*$", ap_clean, flags=re.IGNORECASE)
+        ap_pref = m_ap.group(1) if m_ap else default_prefix
+        new_lines[ap_idx] = f"{ap_pref}approval: {new_approval}{ap_end}"
+        for rm_idx in sorted(status_indices + approval_indices[1:], reverse=True):
+            del new_lines[rm_idx]
+    elif status_indices:
+        st_idx = status_indices[0]
+        st_clean = new_lines[st_idx].rstrip("\r\n")
+        st_end = new_lines[st_idx][len(st_clean):] or default_ending
+        m_st = re.match(r"^(\s*-\s+)status(:\s*).*$", st_clean, flags=re.IGNORECASE)
+        st_pref = m_st.group(1) if m_st else default_prefix
+        new_lines[st_idx] = f"{st_pref}approval: {new_approval}{st_end}"
+        for rm_idx in sorted(status_indices[1:], reverse=True):
+            del new_lines[rm_idx]
+    else:
+        ins_ap_idx = (actor_idx + 1) if actor_idx >= 0 else (last_header_idx + 1 if last_header_idx >= 0 else len(new_lines))
+        new_lines.insert(ins_ap_idx, f"{default_prefix}approval: {new_approval}{default_ending}")
+
+    new_text = "".join(new_lines)
+    return new_text, {
+        "ok": True,
+        "unknown_status": None,
+        "old_status": clean_status,
+        "old_approval": clean_approval,
+        "new_approval": new_approval,
+        "old_last_verdict": clean_verdict,
+        "new_last_verdict": new_verdict,
+        "verdict_updated": verdict_updated,
+        "verdict_update_reason": verdict_update_reason,
+        "changed": new_text != text,
+    }
+
+
+def _write_migrate_lifecycle_snapshot(
+    tasks_dir: pathlib.Path,
+    file_records: list[dict[str, Any]],
+    plan_hash: str,
+    verdict_updates: list[dict[str, Any]],
+) -> tuple[pathlib.Path, dict[str, Any]]:
+    """Snapshot every use-case file that will change under `tasks/_reviews/migrate-lifecycle-<timestamp>/`
+    (copies + `manifest.json` with sha256 + `report.md`).
+    """
+    reviews_dir = tasks_dir / "_reviews"
+    reviews_dir.mkdir(parents=True, exist_ok=True)
+    ts_base = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    snap_dir = reviews_dir / f"migrate-lifecycle-{ts_base}"
+    suffix = 1
+    while snap_dir.exists():
+        snap_dir = reviews_dir / f"migrate-lifecycle-{ts_base}-{suffix}"
+        suffix += 1
+    snap_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_files: list[dict[str, Any]] = []
+    for rec in file_records:
+        src_path = pathlib.Path(rec["file_path"])
+        rel_path = rec["path"]
+        dst_path = snap_dir / rel_path
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_bytes = src_path.read_bytes()
+        sha = hashlib.sha256(raw_bytes).hexdigest()
+        dst_path.write_bytes(raw_bytes)
+        manifest_files.append({
+            "use_case_id": rec["use_case_id"],
+            "path": rel_path,
+            "file_path": str(src_path),
+            "snapshot_path": str(dst_path),
+            "sha256": sha,
+            "size_bytes": len(raw_bytes),
+            "old_status": rec.get("old_status"),
+            "new_approval": rec.get("new_approval"),
+            "old_last_verdict": rec.get("old_last_verdict"),
+            "new_last_verdict": rec.get("new_last_verdict"),
+            "verdict_updated": rec.get("verdict_updated", False),
+        })
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    manifest = {
+        "timestamp": now_iso,
+        "tasks_dir": str(tasks_dir),
+        "snapshot_dir": str(snap_dir),
+        "plan_hash": plan_hash,
+        "files_count": len(manifest_files),
+        "files": manifest_files,
+        "verdict_updates": verdict_updates,
+    }
+    manifest_path = snap_dir / "manifest.json"
+    _atomic_write_text(manifest_path, json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    report_lines = [
+        f"# Migrate-Lifecycle Report — {now_iso}",
+        "",
+        f"- **Plan Hash:** `{plan_hash}`",
+        f"- **Files Snapshotted:** {len(manifest_files)}",
+        f"- **Verdict Backfills / Fixes:** {len(verdict_updates)}",
+        "",
+        "## Snapshotted Files (Before Apply)",
+        "",
+    ]
+    if manifest_files:
+        for mf in manifest_files:
+            report_lines.append(
+                f"- **{mf['use_case_id']}** (`{mf['path']}`, `sha256:{mf['sha256']}`): "
+                f"status `{mf.get('old_status') or '-'}` -> approval `{mf.get('new_approval')}`"
+            )
+    else:
+        report_lines.append("- None")
+
+    if verdict_updates:
+        report_lines.extend([
+            "",
+            "## Last-Verdict Backfills & Adjustments",
+            "",
+        ])
+        for vu in verdict_updates:
+            report_lines.append(
+                f"- **{vu['use_case_id']}** (`{vu['path']}`): `{vu.get('old_last_verdict') or '-'}` -> "
+                f"`{vu['new_last_verdict']}` ({vu['reason']})"
+            )
+
+    _atomic_write_text(snap_dir / "report.md", "\n".join(report_lines) + "\n", encoding="utf-8")
+    return snap_dir, manifest
+
+
+def migrate_use_case_lifecycle(
+    tasks_dir: pathlib.Path,
+    *,
+    dry_run: bool = True,
+    expect_plan_hash: str | None = None,
+) -> dict[str, Any]:
+    """Migrate hand-written `status` on use cases to `approval` (Spec 17.5 / §3):
+
+    - `draft -> proposed`
+    - `active`, `verified`, `failing`, `partial -> approved`
+    - `deprecated -> deprecated`
+    - Ensures verdict part (`verified->pass`, `failing->fail`, `partial->partial`) is in `last-verdict`,
+      backfilling or fixing when missing/disagreeing and reporting it.
+    - Targeted header edit only: `## AI Validation Log` and every body line are kept byte-for-byte.
+    - Fail-closed on unknown `status` values (stops apply and lists them).
+    - Snapshots touched files under `tasks/_reviews/migrate-lifecycle-<timestamp>/` before applying,
+      writes atomically with rollback on failure, and is idempotent on second run.
+    """
+    if not is_platform_supported() and not dry_run:
+        return {
+            "ok": False,
+            "applied": False,
+            "error": "unsupported-platform",
+            "message": "Mutating commands are unsupported on Windows (requires fcntl for flock).",
+        }
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    lock_ctx = contextlib.nullcontext() if dry_run else task_write_lock(tasks_dir)
+    with lock_ctx:
+        all_ucs = sorted(discover_use_cases(tasks_dir), key=lambda u: _natural_sort_key(u.get("id", "")))
+        projection = compute_use_case_links(tasks_dir, use_cases=all_ucs)
+
+        file_records: list[dict[str, Any]] = []
+        use_case_changes: list[dict[str, Any]] = []
+        verdict_updates: list[dict[str, Any]] = []
+        unknown_statuses: list[dict[str, Any]] = []
+
+        counts_by_old_status: dict[str, int] = {}
+        counts_by_new_approval: dict[str, int] = {}
+        counts_by_stage: dict[str, int] = {}
+
+        for uc in all_ucs:
+            uc_id = uc.get("id", "")
+            if not uc_id:
+                continue
+            uc_path = pathlib.Path(uc["file_path"]).resolve()
+            rel_path = uc.get("rel_path") or (
+                uc_path.relative_to(tasks_dir).as_posix() if uc_path.is_relative_to(tasks_dir) else str(uc_path)
+            )
+            old_text = uc_path.read_text(encoding="utf-8")
+            new_text, info = _rewrite_use_case_lifecycle_in_text(old_text)
+
+            old_st_key = info.get("old_status") or (f"(migrated:{info.get('old_approval')})" if info.get("old_approval") else "(none)")
+            counts_by_old_status[old_st_key] = counts_by_old_status.get(old_st_key, 0) + 1
+
+            if not info.get("ok"):
+                unknown_statuses.append({
+                    "use_case_id": uc_id,
+                    "path": rel_path,
+                    "file_path": str(uc_path),
+                    "status": info.get("unknown_status"),
+                })
+                continue
+
+            new_app = info["new_approval"]
+            counts_by_new_approval[new_app] = counts_by_new_approval.get(new_app, 0) + 1
+
+            derived_details = list(projection.details.get(uc_id, []))
+            stage = compute_use_case_stage(
+                derived_details,
+                last_verdict=info.get("new_last_verdict"),
+                revalidation=uc.get("revalidation"),
+            )
+            counts_by_stage[stage] = counts_by_stage.get(stage, 0) + 1
+
+            if info.get("verdict_updated"):
+                verdict_updates.append({
+                    "use_case_id": uc_id,
+                    "path": rel_path,
+                    "old_status": info.get("old_status"),
+                    "old_last_verdict": info.get("old_last_verdict"),
+                    "new_last_verdict": info.get("new_last_verdict"),
+                    "reason": info.get("verdict_update_reason"),
+                })
+
+            if not info.get("changed"):
+                continue
+
+            diff_lines = list(
+                difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    new_text.splitlines(keepends=True),
+                    fromfile=str(uc_path),
+                    tofile=f"{uc_path} (dry-run)" if dry_run else str(uc_path),
+                )
+            )
+            summary_parts = [f"{uc_id} status '{info.get('old_status') or '-'}' -> approval '{new_app}'"]
+            if info.get("verdict_updated"):
+                summary_parts.append(
+                    f"last-verdict '{info.get('old_last_verdict') or '-'}' -> '{info.get('new_last_verdict')}'"
+                )
+            summary = "; ".join(summary_parts)
+
+            change_rec = {
+                "use_case_id": uc_id,
+                "path": rel_path,
+                "file_path": str(uc_path),
+                "old_status": info.get("old_status"),
+                "old_approval": info.get("old_approval"),
+                "new_approval": new_app,
+                "old_last_verdict": info.get("old_last_verdict"),
+                "new_last_verdict": info.get("new_last_verdict"),
+                "verdict_updated": info.get("verdict_updated", False),
+                "verdict_update_reason": info.get("verdict_update_reason"),
+                "stage": stage,
+                "summary": summary,
+            }
+            use_case_changes.append(change_rec)
+            file_records.append({
+                **change_rec,
+                "before_hash": _file_sha256(uc_path),
+                "old_text": old_text,
+                "new_text": new_text,
+                "diff": "".join(diff_lines),
+            })
+
+        operations: list[dict[str, Any]] = [
+            {
+                "action": "modify",
+                "path": rec["path"],
+                "before_hash": rec["before_hash"],
+                "summary": rec["summary"],
+            }
+            for rec in file_records
+        ]
+        plan, plan_hash = compute_operation_plan(operations)
+        combined_diff = "\n".join(rec["diff"] for rec in file_records if rec.get("diff"))
+
+        has_unknown = len(unknown_statuses) > 0
+        base_result: dict[str, Any] = {
+            "ok": not has_unknown,
+            "applied": False,
+            "dry_run": dry_run,
+            "use_cases_total": len(all_ucs),
+            "files_changed_count": len(file_records),
+            "use_case_changes": use_case_changes,
+            "verdict_updates": verdict_updates,
+            "unknown_statuses": unknown_statuses,
+            "counts_by_old_status": counts_by_old_status,
+            "counts_by_new_approval": counts_by_new_approval,
+            "counts_by_stage": counts_by_stage,
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "diff": combined_diff,
+            "snapshot_dir": None,
+            "manifest_path": None,
+        }
+
+        if has_unknown:
+            unk_summary = ", ".join(f"{u['use_case_id']} ({u['path']}): {u['status']!r}" for u in unknown_statuses)
+            base_result["error"] = (
+                f"Refusing to migrate lifecycle: {len(unknown_statuses)} use case(s) have unknown status value(s): {unk_summary}."
+            )
+            return base_result
+
+        if dry_run:
+            return base_result
+
+        if not expect_plan_hash:
+            base_result["ok"] = False
+            base_result["error"] = (
+                "Applying migrate-lifecycle requires --expect-plan-hash <hash>. "
+                "Run without --apply to preview and obtain the plan hash."
+            )
+            return base_result
+
+        if expect_plan_hash.strip().lower() != plan_hash.lower():
+            base_result["ok"] = False
+            base_result["error"] = f"Plan hash mismatch: expected {expect_plan_hash}, but recomputed {plan_hash}"
+            return base_result
+
+        if not file_records:
+            base_result["ok"] = True
+            base_result["applied"] = True
+            base_result["changed"] = False
+            return base_result
+
+        snap_dir, manifest = _write_migrate_lifecycle_snapshot(
+            tasks_dir,
+            file_records,
+            plan_hash=plan_hash,
+            verdict_updates=verdict_updates,
+        )
+        base_result["snapshot_dir"] = str(snap_dir)
+        base_result["manifest_path"] = str(snap_dir / "manifest.json")
+        base_result["manifest"] = manifest
+
+        writes: list[tuple[pathlib.Path, str]] = [
+            (pathlib.Path(rec["file_path"]), rec["new_text"])
+            for rec in file_records
+        ]
+        if writes:
+            _apply_file_writes_atomically(writes)
+
+        base_result["ok"] = True
+        base_result["applied"] = True
+        base_result["changed"] = len(writes) > 0
+        return base_result
+
+
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
@@ -7890,13 +8396,41 @@ def parse_use_case_file(file_path: pathlib.Path, tasks_dir: pathlib.Path) -> dic
     uc_id = headers.get("id") or file_path.stem.split("-")[0]
     title = headers.get("title") or (h1_title.split("-", 1)[-1].strip() if "-" in h1_title else h1_title)
     actor = headers.get("actor", "End-User")
-    status = headers.get("status", "draft")
+    raw_status = headers.get("status")
+    has_written_status = raw_status is not None and raw_status.strip() != "" and raw_status.strip() != "-"
+    written_status = raw_status.strip() if has_written_status else None
+    raw_approval = headers.get("approval")
+    has_written_approval = raw_approval is not None and raw_approval.strip() != "" and raw_approval.strip() != "-"
+    written_approval = raw_approval.strip() if has_written_approval else None
+    if written_approval:
+        approval = written_approval
+        approval_source = "field"
+    elif written_status in USE_CASE_STATUS_TO_APPROVAL:
+        approval = USE_CASE_STATUS_TO_APPROVAL[written_status]
+        approval_source = "legacy_status"
+    else:
+        approval = "proposed"
+        approval_source = "default"
+
+    if written_status is not None:
+        status = written_status
+    elif approval == "deprecated":
+        status = "deprecated"
+    elif approval == "approved":
+        status = "active"
+    else:
+        status = "draft"
+
     priority = headers.get("priority", "P1")
     linked_raw = headers.get("linked-tasks") or headers.get("linked_tasks") or ""
     linked_tasks = [t.strip() for t in linked_raw.split(",") if t.strip() and t.strip() != "-"]
     vtype = headers.get("verification-type") or headers.get("verification_type") or "automated-probe"
-    last_tested = headers.get("last-tested") or headers.get("last_tested")
-    last_verdict = headers.get("last-verdict") or headers.get("last_verdict")
+    raw_last_tested = headers.get("last-tested") or headers.get("last_tested")
+    last_tested = raw_last_tested if (raw_last_tested and raw_last_tested.strip() != "-") else None
+    raw_last_verdict = headers.get("last-verdict") or headers.get("last_verdict")
+    last_verdict = raw_last_verdict.strip() if (raw_last_verdict and raw_last_verdict.strip() and raw_last_verdict.strip() != "-") else None
+    raw_reval = headers.get("revalidation")
+    revalidation = raw_reval.strip().lower() if (raw_reval and raw_reval.strip() and raw_reval.strip() != "-") else None
 
     def _extract_section(*headings: str) -> str:
         for heading in headings:
@@ -7984,7 +8518,15 @@ def parse_use_case_file(file_path: pathlib.Path, tasks_dir: pathlib.Path) -> dic
         "short_title": uc_st_val,
         "short_title_source": uc_st_src,
         "actor": actor,
+        "approval": approval,
+        "approval_source": approval_source,
+        "written_approval": written_approval,
+        "has_written_approval": has_written_approval,
         "status": status,
+        "written_status": written_status,
+        "has_written_status": has_written_status,
+        "stage": "draft",
+        "revalidation": revalidation,
         "priority": priority,
         "linked_tasks": linked_tasks,
         "written_linked_tasks": list(linked_tasks),
@@ -8083,6 +8625,94 @@ class UseCaseLinkProjection(dict):
         return default
 
 
+UC_STAGE_NOT_STARTED_STATES: set[str] = {"open", "waiting", "blocked", "paused"}
+UC_STAGE_DELIVERED_OR_LATER_STATES: set[str] = {"delivered", "verified", "done", "done with a caveat"}
+UC_STAGE_STARTED_STATES: set[str] = {"in progress", "bounced"} | UC_STAGE_DELIVERED_OR_LATER_STATES
+
+
+def compute_use_case_stage(
+    linked_task_details: list[dict[str, Any]],
+    last_verdict: str | None = None,
+    revalidation: str | None = None,
+) -> str:
+    """Compute the derived lifecycle stage of a use case as a pure function (Spec 17 §3):
+
+    - `draft`: no linked task, or all linked tasks dropped (links kept, shown as dropped);
+    - `planned`: linked tasks exist, none started (all open/waiting/blocked/paused);
+    - `in development`: at least one linked task in progress, bounced, delivered or later,
+      but not all non-dropped linked tasks delivered/verified/done;
+    - `ready`: all non-dropped linked tasks delivered/verified/done (at least one non-dropped):
+      - with `revalidation: pending`: `ready (revalidation pending)`;
+      - otherwise mapped from `last_verdict`:
+        `pass` -> `verified`, `fail` -> `failing`, `partial` -> `partial`,
+        `untested` or missing -> `untested`.
+    """
+    active_tasks = [
+        t for t in (linked_task_details or [])
+        if not t.get("dropped") and str(t.get("canonical_state") or t.get("state") or "").strip().lower() != "dropped"
+    ]
+    if not active_tasks:
+        return "draft"
+
+    states = [
+        normalize_state(str(t.get("canonical_state") or t.get("state") or "open"))
+        for t in active_tasks
+    ]
+    if all(st in UC_STAGE_DELIVERED_OR_LATER_STATES for st in states):
+        reval_norm = str(revalidation or "").strip().lower()
+        if reval_norm == "pending":
+            return "ready (revalidation pending)"
+        verdict_norm = str(last_verdict or "").strip().lower()
+        if verdict_norm == "pass":
+            return "verified"
+        if verdict_norm == "fail":
+            return "failing"
+        if verdict_norm == "partial":
+            return "partial"
+        return "untested"
+
+    if any(st in UC_STAGE_STARTED_STATES for st in states):
+        return "in development"
+
+    return "planned"
+
+
+def enrich_use_case_with_stage_and_links(
+    uc: dict[str, Any],
+    projection: UseCaseLinkProjection,
+) -> dict[str, Any]:
+    """Return a copy of `uc` enriched with derived links, derived `stage`, `approval`,
+    and JSON-compatible `status` (equal to `stage`).
+    """
+    uc_copy = dict(uc)
+    uc_id = uc_copy.get("id", "")
+    written_lt = list(uc_copy.get("written_linked_tasks", uc_copy.get("linked_tasks", [])))
+    derived_lt = list(projection.get(uc_id, []))
+    derived_details = list(projection.details.get(uc_id, []))
+    links_differ = written_lt != derived_lt
+
+    stage = compute_use_case_stage(
+        derived_details,
+        last_verdict=uc_copy.get("last_verdict"),
+        revalidation=uc_copy.get("revalidation"),
+    )
+    approval = uc_copy.get("approval") or "proposed"
+
+    uc_copy["approval"] = approval
+    uc_copy["stage"] = stage
+    uc_copy["status"] = stage
+    uc_copy["linked_tasks"] = derived_lt
+    uc_copy["derived_linked_tasks"] = derived_lt
+    uc_copy["linked_tasks_details"] = derived_details
+    uc_copy["derived_linked_tasks_details"] = derived_details
+    uc_copy["written_linked_tasks"] = written_lt
+    uc_copy["linked_tasks_differ"] = links_differ
+    uc_copy["written_linked_tasks_note"] = (
+        "written, will be replaced by derived in 17.2" if links_differ else None
+    )
+    return uc_copy
+
+
 def resolve_task_use_cases(
     uc_refs: list[str],
     use_cases_by_id: dict[str, dict[str, Any]],
@@ -8092,14 +8722,20 @@ def resolve_task_use_cases(
     for ref in uc_refs:
         if ref in use_cases_by_id:
             uc_obj = use_cases_by_id[ref]
-            st = uc_obj.get("status", "draft")
+            stage = uc_obj.get("stage") or uc_obj.get("status", "draft")
+            approval = uc_obj.get("approval") or "proposed"
+            written_st = uc_obj.get("written_status") or uc_obj.get("status", "draft")
             entries.append({
                 "id": ref,
                 "title": uc_obj.get("title", ""),
                 "short_title": uc_obj.get("short_title", ref),
-                "status": st,
+                "stage": stage,
+                "approval": approval,
+                "status": stage,
+                "written_status": written_st,
                 "last_verdict": uc_obj.get("last_verdict"),
-                "deprecated": st == "deprecated" or uc_obj.get("approval") == "deprecated",
+                "revalidation": uc_obj.get("revalidation"),
+                "deprecated": written_st == "deprecated" or approval == "deprecated",
                 "known": True,
                 "external": False,
             })
@@ -8108,8 +8744,12 @@ def resolve_task_use_cases(
                 "id": ref,
                 "title": ref,
                 "short_title": ref,
+                "stage": "external",
+                "approval": None,
                 "status": "external",
+                "written_status": None,
                 "last_verdict": None,
+                "revalidation": None,
                 "deprecated": False,
                 "known": False,
                 "external": True,
@@ -8119,8 +8759,12 @@ def resolve_task_use_cases(
                 "id": ref,
                 "title": "",
                 "short_title": ref,
+                "stage": "unknown",
+                "approval": None,
                 "status": "unknown",
+                "written_status": None,
                 "last_verdict": None,
+                "revalidation": None,
                 "deprecated": False,
                 "known": False,
                 "external": False,
@@ -8143,7 +8787,7 @@ def compute_use_case_links(
     if use_cases is None:
         use_cases = discover_use_cases(tasks_path)
 
-    use_cases_by_id: dict[str, dict[str, Any]] = {uc["id"]: uc for uc in use_cases if uc.get("id")}
+    use_cases_by_id: dict[str, dict[str, Any]] = {uc["id"]: dict(uc) for uc in use_cases if uc.get("id")}
     raw_by_uc: dict[str, list[str]] = {uc_id: [] for uc_id in use_cases_by_id}
     by_task: dict[str, list[str]] = {}
     by_task_details: dict[str, list[dict[str, Any]]] = {}
@@ -8159,7 +8803,6 @@ def compute_use_case_links(
         if not uc_refs:
             continue
         by_task[tid] = list(uc_refs)
-        by_task_details[tid] = resolve_task_use_cases(uc_refs, use_cases_by_id)
         if node.canonical_state == "dropped":
             dropped_tasks.add(tid)
         for uc_ref in uc_refs:
@@ -8185,6 +8828,24 @@ def compute_use_case_links(
                 "dropped": is_dropped,
             })
         details[uc_id] = uc_task_entries
+        if uc_id in use_cases_by_id:
+            uc_entry = use_cases_by_id[uc_id]
+            uc_entry["stage"] = compute_use_case_stage(
+                uc_task_entries,
+                last_verdict=uc_entry.get("last_verdict"),
+                revalidation=uc_entry.get("revalidation"),
+            )
+
+    for uc_id, uc_entry in use_cases_by_id.items():
+        if uc_id not in details:
+            uc_entry["stage"] = compute_use_case_stage(
+                [],
+                last_verdict=uc_entry.get("last_verdict"),
+                revalidation=uc_entry.get("revalidation"),
+            )
+
+    for tid, uc_refs in by_task.items():
+        by_task_details[tid] = resolve_task_use_cases(uc_refs, use_cases_by_id)
 
     return UseCaseLinkProjection(
         by_use_case=by_use_case,
@@ -8314,18 +8975,31 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
             desc_text = data.get("description") or "Describe user value and business context."
             pre_text = data.get("preconditions") or "- System running and initialized."
 
+        raw_approval = data.get("approval")
+        raw_status = data.get("status")
+        if raw_approval and str(raw_approval).strip() and str(raw_approval).strip() != "-":
+            approval_val = str(raw_approval).strip()
+        elif raw_status and str(raw_status).strip() in USE_CASE_STATUS_TO_APPROVAL:
+            approval_val = USE_CASE_STATUS_TO_APPROVAL[str(raw_status).strip()]
+        else:
+            approval_val = "proposed"
+
+        last_verdict_val = data.get("last_verdict")
+        if (not last_verdict_val or str(last_verdict_val).strip() == "-") and raw_status and str(raw_status).strip() in USE_CASE_VERDICT_STATUS_MAP:
+            last_verdict_val = USE_CASE_VERDICT_STATUS_MAP[str(raw_status).strip()]
+
         cmd_text = data.get("verification_command") or "echo 'No verification command specified'"
         content = f"""# {uc_id} - {title}
 
 - id: {uc_id}
 - title: {title}
 - actor: {data.get("actor", "End-User")}
-- status: {data.get("status", "draft")}
+- approval: {approval_val}
 - priority: {data.get("priority", "P1")}
 - linked-tasks: {linked_tasks_str}
 - verification-type: {data.get("verification_type", "automated-probe")}
 - last-tested: {data.get("last_tested") or "-"}
-- last-verdict: {data.get("last_verdict") or "-"}
+- last-verdict: {last_verdict_val or "-"}
 - short: {short_val}
 
 ## Description & Business Value
@@ -8349,7 +9023,7 @@ def create_or_update_use_case(tasks_dir: pathlib.Path, data: dict[str, Any]) -> 
 {data.get("validation_log", "")}
 """
         _atomic_write_text(fpath, content)
-        return True, {"ok": True, "id": uc_id, "file_path": str(fpath), "rel_path": str(fpath.relative_to(tasks_dir))}
+        return True, {"ok": True, "id": uc_id, "approval": approval_val, "file_path": str(fpath), "rel_path": str(fpath.relative_to(tasks_dir))}
 
 
 def record_use_case_validation(
@@ -9858,9 +10532,24 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                     seen_uc_ids[ucid] = uc_rel
                     parsed_ucs_by_id[ucid] = (uc_rel, uc)
 
-            st = uc.get("status", "draft")
-            if st not in USE_CASE_STATUSES:
-                errors.append(f"{uc_rel}: invalid use case status {st!r} (allowed: {sorted(USE_CASE_STATUSES)}).")
+            has_app = bool(uc.get("has_written_approval"))
+            written_app = uc.get("written_approval")
+            has_st = bool(uc.get("has_written_status"))
+            written_st = uc.get("written_status")
+
+            if has_app:
+                if written_app not in USE_CASE_APPROVAL_VALUES:
+                    errors.append(
+                        f"{uc_rel}: invalid use case approval {written_app!r} (allowed: {sorted(USE_CASE_APPROVAL_VALUES)})."
+                    )
+            else:
+                warnings.append(
+                    f"{uc_rel}: use case {ucid} is missing 'approval' header field (run 'ai-orch tasks use-cases migrate-lifecycle')."
+                )
+                if has_st and written_st not in USE_CASE_STATUSES:
+                    errors.append(
+                        f"{uc_rel}: invalid use case status {written_st!r} (allowed: {sorted(USE_CASE_STATUSES)})."
+                    )
 
             prio = uc.get("priority", "P1")
             if prio not in PRIORITIES:
@@ -11971,6 +12660,22 @@ def adopt_markers(existing_index: str) -> str:
                 new_sec = sec.rstrip() + "\n\n<!-- ai-orch:generated specs -->\n<!-- /ai-orch:generated specs -->\n\n"
             updated = updated[:m_specs.start()] + new_sec + updated[m_specs.end():]
 
+    # 0.6. Use cases
+    pat_ucs = re.compile(r"^##\s+Use\s+[Cc]ases\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+    m_ucs = pat_ucs.search(updated)
+    if m_ucs:
+        sec = m_ucs.group(0)
+        if not _marker_pattern("use-cases").search(sec):
+            lines = sec.splitlines(keepends=True)
+            start_idx, end_idx = _find_table_range(lines)
+            if start_idx is not None and end_idx is not None:
+                tbl = "".join(lines[start_idx:end_idx + 1]).strip()
+                replacement = f"<!-- ai-orch:generated use-cases -->\n{tbl}\n<!-- /ai-orch:generated use-cases -->\n"
+                new_sec = "".join(lines[:start_idx]) + replacement + "".join(lines[end_idx + 1:])
+            else:
+                new_sec = sec.rstrip() + "\n\n<!-- ai-orch:generated use-cases -->\n<!-- /ai-orch:generated use-cases -->\n\n"
+            updated = updated[:m_ucs.start()] + new_sec + updated[m_ucs.end():]
+
     # 1. Next up
     pat_next = re.compile(r"^##\s+Next up\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
     m = pat_next.search(updated)
@@ -12507,6 +13212,137 @@ def render_synced_index(
                 sep_after_specs = "\n\n" if (after_table or m_specs.end() < len(existing_index)) else "\n"
                 new_sec = "".join(lines[:start_idx]) + "\n".join(specs_table_lines) + sep_after_specs + after_table
                 existing_index = existing_index[:m_specs.start()] + new_sec + existing_index[m_specs.end():]
+
+    # 0.6. Use cases section
+    all_use_cases = discover_use_cases(tasks_dir)
+    pat_ucs_sec = re.compile(r"^##\s+Use\s+[Cc]ases\b.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+    m_ucs_sec = pat_ucs_sec.search(existing_index)
+    m_ucs_direct_marker = _marker_pattern("use-cases").search(existing_index) if not m_ucs_sec else None
+    uc_table_rendered_content = ""
+    if m_ucs_sec or m_ucs_direct_marker or all_use_cases:
+        if m_ucs_sec:
+            ucs_sec_text = m_ucs_sec.group(0)
+            m_ucs_marker = _marker_pattern("use-cases").search(ucs_sec_text)
+            has_ucs_marker = m_ucs_marker is not None
+            uc_region_to_search = m_ucs_marker.group(1) if has_ucs_marker else ucs_sec_text
+        elif m_ucs_direct_marker:
+            ucs_sec_text = ""
+            has_ucs_marker = True
+            uc_region_to_search = m_ucs_direct_marker.group(1)
+        else:
+            ucs_sec_text = ""
+            has_ucs_marker = False
+            uc_region_to_search = ""
+
+        hdr_ucs, sep_ucs = (
+            _extract_existing_table_header(uc_region_to_search, 6, allow_extra=True)
+            or _extract_existing_table_header(uc_region_to_search, 5, allow_extra=True)
+            or _extract_existing_table_header(uc_region_to_search, 4, allow_extra=True)
+            or _extract_existing_table_header(uc_region_to_search, 3, allow_extra=True)
+            or (
+                "| Id | Priority | Use Case | Stage | Actor | Linked tasks |",
+                "| --- | --- | --- | --- | --- | --- |",
+            )
+        )
+        uc_hdr_cells = [c.strip() for c in hdr_ucs.strip("|").split("|")]
+        uc_preamble_lines: list[str] = []
+        existing_uc_rows: dict[str, list[str]] = {}
+        existing_uc_order: list[str] = []
+        for line in uc_region_to_search.splitlines():
+            line_s = line.strip()
+            if line_s.startswith(("<", "=", ">")):
+                continue
+            if not line_s.startswith("|"):
+                if not existing_uc_order and line_s and not line_s.startswith("## "):
+                    uc_preamble_lines.append(line)
+                continue
+            cells = [c.strip() for c in line_s.strip("|").split("|")]
+            if not cells or cells[0].lower() in ("id", "use case", "---", "-") or cells[0].startswith("---"):
+                continue
+            m_ucid = re.search(r"\b(UC\d{3,})\b", cells[0])
+            row_ucid = m_ucid.group(1) if m_ucid else re.sub(r"\s*\(.*?\)", "", cells[0]).strip()
+            if row_ucid and row_ucid not in existing_uc_rows:
+                existing_uc_order.append(row_ucid)
+                existing_uc_rows[row_ucid] = cells
+
+        uc_prefer_bare = _table_uses_bare_id_format(
+            [c[0] for c in existing_uc_rows.values() if c], prefer_bare_id, has_conflict_markers
+        )
+        uc_proj = compute_use_case_links(tasks_dir, tree=tree, use_cases=all_use_cases)
+        enriched_ucs_map = {
+            u["id"]: enrich_use_case_with_stage_and_links(u, uc_proj)
+            for u in sorted(all_use_cases, key=lambda u: _natural_sort_key(u.get("id", "")))
+            if u.get("id")
+        }
+        has_separate_approval_col = any(c.strip().lower() == "approval" for c in uc_hdr_cells)
+
+        ordered_uc_ids = [uid for uid in existing_uc_order if uid in enriched_ucs_map] + [
+            uid for uid in sorted(enriched_ucs_map.keys(), key=_natural_sort_key) if uid not in existing_uc_order
+        ]
+        if reorder or has_conflict_markers:
+            ordered_uc_ids.sort(key=_natural_sort_key)
+
+        rendered_uc_rows: list[str] = []
+        for uid in ordered_uc_ids:
+            u = enriched_ucs_map[uid]
+            ex_cells = existing_uc_rows.get(uid)
+            st_title = u.get("short_title") or derive_short_title(u["title"])
+            if uc_prefer_bare:
+                id_cell = uid
+            elif ex_cells and re.match(rf"^{re.escape(uid)}\s*\(.+\)$", ex_cells[0]):
+                id_cell = ex_cells[0]
+            else:
+                id_cell = f"{uid} ({st_title})" if st_title and st_title.lower() != uid.lower() else uid
+
+            rel_p = u.get("rel_path") or f"use-cases/{pathlib.Path(u['file_path']).name}"
+            title_cell = f"[{u['title']}]({rel_p})"
+            stage_val = u.get("stage", "draft")
+            app_val = u.get("approval", "proposed")
+            if has_separate_approval_col or app_val == "approved":
+                stage_cell = stage_val
+            else:
+                stage_cell = f"{stage_val} ({app_val})"
+            linked_cell = ", ".join(u.get("linked_tasks", [])) or "-"
+
+            row_cells: list[str] = []
+            for col_idx, col_hdr in enumerate(uc_hdr_cells):
+                cname = col_hdr.strip().lower()
+                if cname in ("id", "#", "uc"):
+                    row_cells.append(id_cell)
+                elif cname == "priority":
+                    row_cells.append(u.get("priority", "P1"))
+                elif cname in ("use case", "use-case", "title", "scenario"):
+                    row_cells.append(title_cell)
+                elif cname in ("stage", "status", "state"):
+                    row_cells.append(stage_cell)
+                elif cname == "approval":
+                    row_cells.append(app_val)
+                elif cname == "actor":
+                    row_cells.append(u.get("actor", "End-User"))
+                elif cname in ("linked tasks", "linked-tasks", "linked_tasks", "tasks"):
+                    row_cells.append(linked_cell)
+                elif cname in ("verdict", "last verdict", "last-verdict"):
+                    row_cells.append(u.get("last_verdict") or "-")
+                else:
+                    row_cells.append(ex_cells[col_idx] if (ex_cells and col_idx < len(ex_cells)) else "-")
+            rendered_uc_rows.append("| " + " | ".join(row_cells) + " |")
+
+        uc_table_lines = [hdr_ucs, sep_ucs] + rendered_uc_rows
+        uc_lines = uc_preamble_lines + ([""] if uc_preamble_lines else []) + uc_table_lines
+        new_uc_content = "\n".join(uc_lines)
+        uc_table_rendered_content = new_uc_content.strip()
+        if uc_region_to_search.endswith("\n"):
+            new_uc_content += "\n"
+        if has_ucs_marker:
+            existing_index = _replace_generated_region(existing_index, "use-cases", new_uc_content)
+        elif m_ucs_sec:
+            lines = ucs_sec_text.splitlines(keepends=True)
+            start_idx, end_idx = _find_table_range(lines)
+            if start_idx is not None and end_idx is not None:
+                after_table = "".join(lines[end_idx + 1:]).lstrip("\n")
+                sep_after_ucs = "\n\n" if (after_table or m_ucs_sec.end() < len(existing_index)) else "\n"
+                new_sec = "".join(lines[:start_idx]) + "\n".join(uc_table_lines) + sep_after_ucs + after_table
+                existing_index = existing_index[:m_ucs_sec.start()] + new_sec + existing_index[m_ucs_sec.end():]
 
     # 1. Next up section
     m_next = _marker_pattern("next-up").search(existing_index) if existing_index.strip() else None
@@ -13076,6 +13912,12 @@ def render_synced_index(
                 "## Initiatives\n\n"
                 f"<!-- ai-orch:generated initiatives -->\n{init_table_rendered_content}\n<!-- /ai-orch:generated initiatives -->\n\n"
             )
+        uc_block = ""
+        if all_use_cases and uc_table_rendered_content:
+            uc_block = (
+                "## Use cases\n\n"
+                f"<!-- ai-orch:generated use-cases -->\n{uc_table_rendered_content}\n<!-- /ai-orch:generated use-cases -->\n\n"
+            )
         cond_block = ""
         if conditional_tasks:
             cond_block = (
@@ -13085,6 +13927,7 @@ def render_synced_index(
         return (
             f"{title_header}\n\n"
             f"{init_block}"
+            f"{uc_block}"
             "## Next up\n\n"
             f"<!-- ai-orch:generated next-up -->\n{next_up_content}\n<!-- /ai-orch:generated next-up -->\n\n"
             "## Tasks by category\n\n"
@@ -13107,6 +13950,16 @@ def render_synced_index(
             updated = updated[:m_first_h2.start()] + init_block + updated[m_first_h2.start():]
         else:
             updated = updated.rstrip() + "\n\n" + init_block
+    if all_use_cases and uc_table_rendered_content and not m_ucs_sec and not m_ucs_direct_marker:
+        uc_block = (
+            "## Use cases\n\n"
+            f"<!-- ai-orch:generated use-cases -->\n{uc_table_rendered_content}\n<!-- /ai-orch:generated use-cases -->\n\n"
+        )
+        m_nu_h2 = re.search(r"^##\s+Next up\b", updated, re.MULTILINE)
+        if m_nu_h2:
+            updated = updated[:m_nu_h2.start()] + uc_block + updated[m_nu_h2.start():]
+        else:
+            updated = updated.rstrip() + "\n\n" + uc_block
     updated = _replace_generated_region(updated, "next-up", next_up_content)
     updated = _replace_generated_region(updated, "tasks-by-category", cat_content)
     updated = _replace_generated_region(updated, "decisions", dec_content)
@@ -13183,8 +14036,11 @@ def _parse_index_table_rows(block_text: str, section_kind: str = "task") -> tupl
         elif section_kind == "specs":
             m_slug = re.search(r"\[([^\]]+)\]", c0)
             row_key = m_slug.group(1) if m_slug else c0
+        elif section_kind == "use-cases":
+            m_uc = re.search(r"\b(UC\d{3,})\b", c0)
+            row_key = m_uc.group(1) if m_uc else re.sub(r"\s*\(.*?\)", "", c0).strip()
         else:
-            m_id = re.search(r"\b(T\d{3,}(?:\.\d+)*|Q\d{3,}|INIT-\d+|\d{2,}(?:\.\d+[a-z]?)*)\b", c0)
+            m_id = re.search(r"\b(T\d{3,}(?:\.\d+)*|Q\d{3,}|UC\d{3,}|INIT-\d+|\d{2,}(?:\.\d+[a-z]?)*)\b", c0)
             row_key = m_id.group(1) if m_id else re.sub(r"\s*\(.*?\)", "", c0).strip()
         if row_key not in rows_map:
             order.append(row_key)
@@ -13252,6 +14108,17 @@ def summarize_index_changes(existing_index: str, rendered_index: str) -> dict[st
         sections["specs"] = sp_diff
         if sp_diff["added"] or sp_diff["removed"] or sp_diff["changed"]:
             lines.append(f"Specs: +{sp_diff['added']} -{sp_diff['removed']} ~{sp_diff['changed']} row(s)")
+
+    # 3.5. Use cases (if present in either)
+    old_uc_txt = _extract_index_section_text(existing_index, "Use cases", "use-cases") or _extract_index_section_text(existing_index, "Use Cases", "use-cases")
+    new_uc_txt = _extract_index_section_text(rendered_index, "Use cases", "use-cases") or _extract_index_section_text(rendered_index, "Use Cases", "use-cases")
+    if old_uc_txt or new_uc_txt:
+        old_uco, old_ucm = _parse_index_table_rows(old_uc_txt, "use-cases")
+        new_uco, new_ucm = _parse_index_table_rows(new_uc_txt, "use-cases")
+        uc_diff = _diff_index_table(old_uco, old_ucm, new_uco, new_ucm)
+        sections["use-cases"] = uc_diff
+        if uc_diff["added"] or uc_diff["removed"] or uc_diff["changed"] or old_uco or new_uco:
+            lines.append(f"Use cases: +{uc_diff['added']} -{uc_diff['removed']} ~{uc_diff['changed']} row(s)")
 
     # 4. Tasks by category (overall + per-category tables)
     def _extract_cat_blocks(txt: str) -> dict[str, str]:
@@ -15363,7 +16230,9 @@ def cmd_show(args: argparse.Namespace) -> int:
         }
 
     all_ucs = discover_use_cases(tasks_dir)
-    ucs_by_id = {u["id"]: u for u in all_ucs if u.get("id")}
+    uc_proj = compute_use_case_links(tasks_dir, tree=tree, use_cases=all_ucs)
+    enriched_ucs = [enrich_use_case_with_stage_and_links(u, uc_proj) for u in all_ucs]
+    ucs_by_id = {u["id"]: u for u in enriched_ucs if u.get("id")}
     raw_task_ucs = task_data.get("use_cases")
     if raw_task_ucs is None:
         hdrs = task_data.get("headers") or task_data.get("own_fields") or {}
@@ -15385,7 +16254,10 @@ def cmd_show(args: argparse.Namespace) -> int:
             print("Use cases:")
             for uc_info in uc_details:
                 t_part = f" - {uc_info['title']}" if uc_info.get("title") and uc_info["title"] != uc_info["id"] else ""
-                print(f"  - {uc_info['id']}{t_part} (status: {uc_info['status']})")
+                stage_val = uc_info.get("stage") or uc_info.get("status")
+                app_val = uc_info.get("approval")
+                app_part = f", approval: {app_val}" if app_val else ""
+                print(f"  - {uc_info['id']}{t_part} (stage: {stage_val}, status: {uc_info['status']}{app_part})")
         else:
             print("Use cases: -")
         if task_data.get("waiting_on"):
@@ -18748,10 +19620,26 @@ def cmd_questions_apply(args: argparse.Namespace) -> int:
 
 def cmd_use_cases_list(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
-    ucs = discover_use_cases(tasks_dir)
+    raw_ucs = discover_use_cases(tasks_dir)
+    uc_links = compute_use_case_links(tasks_dir, use_cases=raw_ucs)
+    ucs = [enrich_use_case_with_stage_and_links(u, uc_links) for u in raw_ucs]
+
     status_filter = getattr(args, "status", None)
     if status_filter and status_filter != "all":
-        ucs = [u for u in ucs if u.get("status") == status_filter]
+        ucs = [
+            u for u in ucs
+            if u.get("stage") == status_filter
+            or u.get("status") == status_filter
+            or u.get("written_status") == status_filter
+        ]
+
+    stage_filter = getattr(args, "stage", None)
+    if stage_filter and stage_filter != "all":
+        ucs = [u for u in ucs if u.get("stage") == stage_filter]
+
+    approval_filter = getattr(args, "approval", None)
+    if approval_filter and approval_filter != "all":
+        ucs = [u for u in ucs if u.get("approval") == approval_filter]
 
     payload = {
         "ok": True,
@@ -18759,6 +19647,7 @@ def cmd_use_cases_list(args: argparse.Namespace) -> int:
         "total": len(ucs),
         "use_cases": ucs,
     }
+    args._last_result = payload
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
     else:
@@ -18767,8 +19656,12 @@ def cmd_use_cases_list(args: argparse.Namespace) -> int:
         else:
             print(f"Use Cases ({len(ucs)}):")
             for u in ucs:
+                stage_val = u.get("stage") or "draft"
+                app_val = u.get("approval") or "proposed"
                 v = f"[{u.get('last_verdict') or 'untested'}]"
-                print(f"  [{u['id']}] ({u.get('status')}) {u['title']} — Actor: {u.get('actor')} {v}")
+                print(
+                    f"  [{u['id']}] (stage: {stage_val}, approval: {app_val}) {u['title']} — Actor: {u.get('actor')} {v}"
+                )
     return 0
 
 
@@ -18784,21 +19677,10 @@ def cmd_use_cases_show(args: argparse.Namespace) -> int:
         return 1
 
     uc_links = compute_use_case_links(tasks_dir, use_cases=ucs)
-    written_lt = list(target.get("written_linked_tasks", target.get("linked_tasks", [])))
-    derived_lt = list(uc_links.get(target["id"], []))
-    derived_details = list(uc_links.details.get(target["id"], []))
-    links_differ = written_lt != derived_lt
-
-    target = dict(target)
-    target["linked_tasks"] = derived_lt
-    target["derived_linked_tasks"] = derived_lt
-    target["linked_tasks_details"] = derived_details
-    target["derived_linked_tasks_details"] = derived_details
-    target["written_linked_tasks"] = written_lt
-    target["linked_tasks_differ"] = links_differ
-    target["written_linked_tasks_note"] = (
-        "written, will be replaced by derived in 17.2" if links_differ else None
-    )
+    target = enrich_use_case_with_stage_and_links(target, uc_links)
+    written_lt = list(target.get("written_linked_tasks", []))
+    derived_details = list(target.get("linked_tasks_details", []))
+    links_differ = bool(target.get("linked_tasks_differ"))
 
     payload = {"ok": True, "use_case": target}
     args._last_result = payload
@@ -18807,7 +19689,11 @@ def cmd_use_cases_show(args: argparse.Namespace) -> int:
     else:
         print(f"Use Case : {target['id']} — {target['title']}")
         print(f"Actor    : {target['actor']}")
-        print(f"Status   : {target['status']} (Last tested: {target.get('last_tested') or '-'}, Verdict: {target.get('last_verdict') or '-'})")
+        print(f"Approval : {target.get('approval', 'proposed')}")
+        print(f"Stage    : {target.get('stage', 'draft')}")
+        print(
+            f"Status   : {target['status']} (Last tested: {target.get('last_tested') or '-'}, Verdict: {target.get('last_verdict') or '-'})"
+        )
         print(f"Priority : {target['priority']}")
         if derived_details:
             linked_str = ", ".join(
@@ -18828,11 +19714,14 @@ def cmd_use_cases_show(args: argparse.Namespace) -> int:
 def cmd_use_cases_create(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     linked_raw = getattr(args, "linked_tasks", "") or ""
+    raw_approval = getattr(args, "approval", None)
+    raw_status = getattr(args, "status", None)
     data = {
         "id": args.id,
         "title": args.title,
         "actor": getattr(args, "actor", "End-User"),
-        "status": getattr(args, "status", "draft"),
+        "approval": raw_approval,
+        "status": raw_status,
         "priority": getattr(args, "priority", "P1"),
         "linked_tasks": [t.strip() for t in linked_raw.split(",") if t.strip() and t.strip() != "-"],
         "verification_type": getattr(args, "verification_type", "automated-probe"),
@@ -19001,6 +19890,105 @@ def cmd_use_cases_adopt_links(args: argparse.Namespace) -> int:
         print(f"  - unresolved ({len(unknown_list)} skipped via --skip-unknown):")
         for u in unknown_list:
             print(f"      * {u['use_case_id']} ({u['use_case_path']}): {u['task_id']} — {u['reason']}")
+    return 0
+
+
+def cmd_use_cases_migrate_lifecycle(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    apply_flag = bool(getattr(args, "apply", False))
+    preview_flag = bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
+    effective_dry_run = not (apply_flag and not preview_flag)
+    expect_plan_hash = getattr(args, "expect_plan_hash", None)
+    is_json = bool(getattr(args, "json", False))
+
+    res = migrate_use_case_lifecycle(
+        tasks_dir=tasks_dir,
+        dry_run=effective_dry_run,
+        expect_plan_hash=expect_plan_hash,
+    )
+    args._last_result = res
+    if is_json:
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
+    unknown_list = res.get("unknown_statuses", [])
+    if not res.get("ok"):
+        print(f"[FAIL] {res.get('error', 'migrate-lifecycle failed')}", file=sys.stderr)
+        if unknown_list:
+            for u in unknown_list:
+                print(f"  - {u['use_case_id']} ({u['path']}): status={u['status']!r}", file=sys.stderr)
+        if res.get("plan_hash"):
+            print(f"Plan hash: {res['plan_hash']}", file=sys.stderr)
+        return 1
+
+    verdict_updates = res.get("verdict_updates", [])
+    if effective_dry_run:
+        print(
+            f"[preview] migrate-lifecycle: {res.get('files_changed_count', 0)}/{res.get('use_cases_total', 0)} use case(s) to migrate "
+            f"(plan hash: {res.get('plan_hash', '')})"
+        )
+        print(f"  - by old status: {res.get('counts_by_old_status', {})}")
+        print(f"  - by new approval: {res.get('counts_by_new_approval', {})}")
+        print(f"  - by derived stage: {res.get('counts_by_stage', {})}")
+        for uc_c in res.get("use_case_changes", []):
+            v_str = (
+                f", last-verdict: {uc_c.get('old_last_verdict') or '-'} -> {uc_c.get('new_last_verdict')}"
+                if uc_c.get("verdict_updated")
+                else ""
+            )
+            print(
+                f"  - [use-case] {uc_c['use_case_id']} ({uc_c['path']}): "
+                f"status {uc_c.get('old_status') or '-'} -> approval {uc_c['new_approval']} "
+                f"(stage: {uc_c['stage']}{v_str})"
+            )
+        if verdict_updates:
+            print(f"  - [last-verdict updates] {len(verdict_updates)} use case(s):")
+            for vu in verdict_updates:
+                print(
+                    f"      * {vu['use_case_id']} ({vu['path']}): {vu.get('old_last_verdict') or '-'} -> "
+                    f"{vu['new_last_verdict']} ({vu['reason']})"
+                )
+        if res.get("diff"):
+            sys.stdout.write(res["diff"])
+            if not res["diff"].endswith("\n"):
+                print()
+        if not res.get("plan"):
+            print("[ok] all use cases already migrated to approval; nothing to change")
+        print(f"Plan hash: {res.get('plan_hash', '')}")
+        print(
+            f"[preview] apply with: --apply --expect-plan-hash {res.get('plan_hash', '')}",
+            file=sys.stderr,
+        )
+        print("[preview] nothing written; re-run with --apply to write these changes")
+        return 0
+
+    if not res.get("changed"):
+        print("[ok] all use cases already migrated to approval; nothing written")
+        return 0
+
+    print(
+        f"[ok] migrated {res.get('files_changed_count', 0)}/{res.get('use_cases_total', 0)} use case(s) to approval"
+    )
+    if res.get("snapshot_dir"):
+        print(f"  - snapshot: {res['snapshot_dir']} (manifest: {res.get('manifest_path')})")
+    for uc_c in res.get("use_case_changes", []):
+        v_str = (
+            f", last-verdict: {uc_c.get('old_last_verdict') or '-'} -> {uc_c.get('new_last_verdict')}"
+            if uc_c.get("verdict_updated")
+            else ""
+        )
+        print(
+            f"  - updated {uc_c['use_case_id']} ({uc_c['path']}): "
+            f"status {uc_c.get('old_status') or '-'} -> approval {uc_c['new_approval']} "
+            f"(stage: {uc_c['stage']}{v_str})"
+        )
+    if verdict_updates:
+        print(f"  - last-verdict backfilled/adjusted on {len(verdict_updates)} use case(s):")
+        for vu in verdict_updates:
+            print(
+                f"      * {vu['use_case_id']} ({vu['path']}): {vu.get('old_last_verdict') or '-'} -> "
+                f"{vu['new_last_verdict']} ({vu['reason']})"
+            )
     return 0
 
 
@@ -23630,7 +24618,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     uc_list = uc_sub.add_parser("list", help="List use cases")
     uc_list.add_argument("--tasks-dir", default="tasks")
-    uc_list.add_argument("--status", choices=["all", "draft", "active", "verified", "failing", "partial"], default="all")
+    uc_list.add_argument(
+        "--status",
+        choices=["all", "draft", "active", "verified", "failing", "partial", "deprecated", "planned", "in development", "ready", "untested", "ready (revalidation pending)"],
+        default="all",
+    )
+    uc_list.add_argument(
+        "--stage",
+        choices=["all", "draft", "planned", "in development", "ready", "verified", "failing", "partial", "untested", "ready (revalidation pending)"],
+        default="all",
+    )
+    uc_list.add_argument(
+        "--approval",
+        choices=["all", "proposed", "approved", "deprecated"],
+        default="all",
+    )
     uc_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     uc_list.set_defaults(func=cmd_use_cases_list)
 
@@ -23644,7 +24646,8 @@ def build_parser() -> argparse.ArgumentParser:
     uc_create.add_argument("--id", default="", help="Use case ID (e.g. UC001); omit to get the next free UC###")
     uc_create.add_argument("--title", required=True, help="Use case title")
     uc_create.add_argument("--actor", default="End-User", help="Primary actor / persona")
-    uc_create.add_argument("--status", choices=list(USE_CASE_STATUSES), default="draft")
+    uc_create.add_argument("--approval", choices=list(USE_CASE_APPROVAL_VALUES), default=None, help="Use case approval (default: proposed)")
+    uc_create.add_argument("--status", choices=list(USE_CASE_STATUSES), default=None, help="Legacy status (mapped to approval)")
     uc_create.add_argument("--priority", choices=list(PRIORITIES), default="P1")
     uc_create.add_argument("--linked-tasks", default="", help="Comma-separated task IDs")
     uc_create.add_argument("--verification-type", choices=list(USE_CASE_VERIFICATION_TYPES), default="automated-probe")
@@ -23697,6 +24700,17 @@ def build_parser() -> argparse.ArgumentParser:
     uc_adopt.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     uc_adopt.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     uc_adopt.set_defaults(func=cmd_use_cases_adopt_links)
+
+    uc_mig = uc_sub.add_parser(
+        "migrate-lifecycle",
+        help="Migrate hand-written use-case status to approval and backfill last-verdict (preview by default; writes with --apply --expect-plan-hash)",
+    )
+    uc_mig.add_argument("--apply", action="store_true", default=False, help="Apply migration after snapshotting touched files")
+    uc_mig.add_argument("--preview", "--dry-run", dest="preview", action="store_true", default=False, help="Preview changes without writing (default)")
+    uc_mig.add_argument("--expect-plan-hash", "--expect-hash", dest="expect_plan_hash", default=None, help="Expected plan hash from preview")
+    uc_mig.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    uc_mig.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    uc_mig.set_defaults(func=cmd_use_cases_migrate_lifecycle)
 
     # tasks step
     p_step = sub.add_parser("step", help="Checklist commands for ## Steps of an emergent task")
@@ -23788,6 +24802,8 @@ def is_mutating_command(args: argparse.Namespace) -> bool:
         return inbox_cmd in ("add", "edit", "attach", "detach", "resolve", "discard", "reopen")
     if cmd == "use-cases":
         uc_cmd = getattr(args, "uc_cmd", None)
+        if uc_cmd in ("adopt-links", "migrate-lifecycle"):
+            return bool(getattr(args, "apply", False)) and not bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
         return uc_cmd in ("create", "record-validation")
     if cmd == "child":
         child_cmd = getattr(args, "child_cmd", None)

@@ -17,7 +17,7 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.5 - Ciclo di vita: approvazione e stadio derivato
 
-- **Status:** `in progress` (2026-10-28; kilo 468e53e1c4ea) · **Short:** Stadio degli use case · **Size:** M · **Depends on:** 17.1
+- **Status:** `delivered` (2026-10-28, kilo, commit `2b07859`: campo `approval`, migrazione atomica `use-cases migrate-lifecycle` con backfill di `last-verdict` e snapshot in `_reviews/`, calcolo puro di `stage` e visualizzazione in `list`/`show`/`00-INDEX.md`) · **Short:** Stadio degli use case · **Size:** M · **Depends on:** 17.1
 - **Goal:** spec §3 secondo la risposta a Q011: campo `approval` con migrazione da `status` (verdetto in `last-verdict`, nessun log perso), `stage` come funzione pura; mostrato da show/list/indice.
 
 ### 17.6 - Validazione solo sugli use case pronti
