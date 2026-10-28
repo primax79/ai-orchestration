@@ -4403,8 +4403,17 @@ def test_use_cases_crud_and_validation(tmp_path: pathlib.Path) -> None:
 
 def test_use_cases_validate_probe_and_campaign(tmp_path: pathlib.Path) -> None:
     tasks_dir = tmp_path / "tasks"
-    tasks_dir.mkdir()
+    (tasks_dir / "01-core").mkdir(parents=True)
     (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    (tasks_dir / "01-core" / "plan.md").write_text(
+        "# 01 — Core Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Core task\n\n"
+        "- **Status:** `done` · **Short:** Core task · **Size:** S · **Depends on:** - · **Use cases:** UC001, UC002\n"
+        "- **Goal:** Core task.\n",
+        encoding="utf-8",
+    )
 
     # 1. Create passing UC001
     run_cli(
@@ -14338,12 +14347,21 @@ def test_17_1_use_case_link_projection_validate_and_show(tmp_path: pathlib.Path)
 # ===========================================================================
 
 def test_t069_campaign_skips_drafts_and_untested_is_not_failing(tmp_path: pathlib.Path) -> None:
-    """T069: Campaign runs only active (and verified/failing) use cases; drafts are listed in Out of scope (draft) without changing status; exit 127 / missing test file / timeout recorded as untested without setting status failing."""
+    """T069 + 17.6: Campaign runs only ready use cases; non-ready/draft use cases are listed under Not ready without changing status or last-verdict; exit 127 / missing test file / timeout recorded as untested without setting status failing, and untested is excluded from the readiness denominator."""
     tasks_dir = tmp_path / "tasks"
-    tasks_dir.mkdir()
+    (tasks_dir / "01-core").mkdir(parents=True)
     (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
 
-    # 1. Active use case: passing
+    (tasks_dir / "01-core" / "plan.md").write_text(
+        "# 01 — Core Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Delivered task for ready use cases\n\n"
+        "- **Status:** `done` · **Short:** Delivered task · **Size:** S · **Depends on:** - · **Use cases:** UC001, UC002, UC005\n"
+        "- **Goal:** Delivered task.\n",
+        encoding="utf-8",
+    )
+
+    # 1. Ready use case: passing
     res1 = run_cli(
         "use-cases", "create",
         "--id", "UC001",
@@ -14356,7 +14374,7 @@ def test_t069_campaign_skips_drafts_and_untested_is_not_failing(tmp_path: pathli
     )
     assert res1.returncode == 0
 
-    # 2. Active use case: failing probe
+    # 2. Ready use case: failing probe
     res2 = run_cli(
         "use-cases", "create",
         "--id", "UC002",
@@ -14369,7 +14387,7 @@ def test_t069_campaign_skips_drafts_and_untested_is_not_failing(tmp_path: pathli
     )
     assert res2.returncode == 0
 
-    # 3. Draft use case 1: probe exits 1 (deliberately unimplemented), should NOT run
+    # 3. Draft use case 1 (no linked tasks): probe exits 1 (deliberately unimplemented), should NOT run
     res3 = run_cli(
         "use-cases", "create",
         "--id", "UC003",
@@ -14382,7 +14400,7 @@ def test_t069_campaign_skips_drafts_and_untested_is_not_failing(tmp_path: pathli
     )
     assert res3.returncode == 0
 
-    # 4. Draft use case 2: probe echo, should NOT run
+    # 4. Draft use case 2 (no linked tasks): probe echo, should NOT run
     res4 = run_cli(
         "use-cases", "create",
         "--id", "UC004",
@@ -14395,7 +14413,7 @@ def test_t069_campaign_skips_drafts_and_untested_is_not_failing(tmp_path: pathli
     )
     assert res4.returncode == 0
 
-    # 5. Active use case: probe command does not exist (exit 127)
+    # 5. Ready use case: probe command does not exist (exit 127)
     res5 = run_cli(
         "use-cases", "create",
         "--id", "UC005",
@@ -14414,29 +14432,32 @@ def test_t069_campaign_skips_drafts_and_untested_is_not_failing(tmp_path: pathli
     assert res_camp.returncode == 1
     camp = json.loads(res_camp.stdout)
     assert camp["ok"] is True
-    assert camp["total"] == 3  # 3 active tested
+    assert camp["total"] == 3  # 3 ready tested
+    assert camp["evaluated"] == 2  # 3 - 1 untested
     assert camp["passed"] == 1  # UC001
     assert camp["failed"] == 1  # UC002
     assert camp["untested"] == 1  # UC005
+    assert camp["not_ready_count"] == 2  # UC003, UC004
     assert camp["out_of_scope"] == 2  # UC003, UC004
-    assert camp["readiness_score"] == 33.3  # 1/3
+    assert camp["readiness_score"] == 50.0  # 1/2 evaluated (untested excluded from denominator)
+    assert camp["readiness_score_in_scope"] == 33.3  # 1/3 in-scope
 
-    # Inspect statuses and last-verdict of each use case (no linked tasks -> derived stage is 'draft', never raw 'failing')
+    # Inspect statuses and last-verdict of each use case
     uc1 = json.loads(run_cli("use-cases", "show", "UC001", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
-    assert uc1["stage"] == "draft"
-    assert uc1["status"] == "draft"
+    assert uc1["stage"] == "verified"
+    assert uc1["status"] == "verified"
     assert uc1["approval"] == "approved"
     assert uc1["last_verdict"] == "pass"
 
     uc2 = json.loads(run_cli("use-cases", "show", "UC002", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
-    assert uc2["stage"] == "draft"
-    assert uc2["status"] == "draft"
+    assert uc2["stage"] == "failing"
+    assert uc2["status"] == "failing"
     assert uc2["approval"] == "approved"
     assert uc2["last_verdict"] == "fail"
 
     uc5 = json.loads(run_cli("use-cases", "show", "UC005", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
-    assert uc5["stage"] == "draft"
-    assert uc5["status"] == "draft"  # NOT failing!
+    assert uc5["stage"] == "untested"
+    assert uc5["status"] == "untested"  # NOT failing!
     assert uc5["approval"] == "approved"
     assert uc5["last_verdict"] == "untested"
 
@@ -14461,8 +14482,8 @@ def test_t069_campaign_skips_drafts_and_untested_is_not_failing(tmp_path: pathli
     assert "- **Passed:** 1" in report_text
     assert "- **Failed:** 1" in report_text
     assert "- **Untested:** 1" in report_text
-    assert "- **Out of scope:** 2" in report_text
-    assert "## Out of scope (draft)" in report_text
+    assert "- **Not ready:** 2" in report_text
+    assert "## Not ready" in report_text
     assert "UC003" in report_text
     assert "UC004" in report_text
     assert "| **UC001** |" in report_text
@@ -14476,8 +14497,17 @@ def test_t069_campaign_skips_drafts_and_untested_is_not_failing(tmp_path: pathli
 def test_t069_probe_missing_test_file_and_timeout_recorded_as_untested(tmp_path: pathlib.Path) -> None:
     """T069: Missing test file and timeout probes are recorded as untested and do not mark use cases as failing."""
     tasks_dir = tmp_path / "tasks"
-    tasks_dir.mkdir()
+    (tasks_dir / "01-core").mkdir(parents=True)
     (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    (tasks_dir / "01-core" / "plan.md").write_text(
+        "# 01 — Core Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Delivered task\n\n"
+        "- **Status:** `done` · **Short:** Delivered task · **Size:** S · **Depends on:** - · **Use cases:** UC010, UC011\n"
+        "- **Goal:** Delivered task.\n",
+        encoding="utf-8",
+    )
 
     # 1. Missing test file probe
     run_cli(
@@ -14493,11 +14523,11 @@ def test_t069_probe_missing_test_file_and_timeout_recorded_as_untested(tmp_path:
     res_val = run_cli("use-cases", "validate", "UC010", "--tasks-dir", str(tasks_dir), "--json")
     val_data = json.loads(res_val.stdout)
     assert val_data["verdict"] == "untested"
-    assert val_data["status"] == "active"
+    assert val_data["stage"] == "untested"
 
     uc10 = json.loads(run_cli("use-cases", "show", "UC010", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
-    assert uc10["stage"] == "draft"
-    assert uc10["status"] == "draft"
+    assert uc10["stage"] == "untested"
+    assert uc10["status"] == "untested"
     assert uc10["approval"] == "approved"
     assert uc10["last_verdict"] == "untested"
 
@@ -14516,11 +14546,11 @@ def test_t069_probe_missing_test_file_and_timeout_recorded_as_untested(tmp_path:
     ok, res_to = te.validate_use_case_probe(tasks_dir, "UC011", timeout_seconds=1)
     assert ok is True
     assert res_to["verdict"] == "untested"
-    assert res_to["status"] == "active"
+    assert res_to["stage"] == "untested"
 
     uc11 = json.loads(run_cli("use-cases", "show", "UC011", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
-    assert uc11["stage"] == "draft"
-    assert uc11["status"] == "draft"
+    assert uc11["stage"] == "untested"
+    assert uc11["status"] == "untested"
     assert uc11["approval"] == "approved"
     assert uc11["last_verdict"] == "untested"
 
@@ -15702,6 +15732,368 @@ def test_17_5_migrate_lifecycle_mapping_verdict_fill_log_preserved_idempotent_ro
     assert res_app2["ok"] is True
     assert res_app2["applied"] is True
     assert res_app2["changed"] is False
+
+
+# ===========================================================================
+# Task 17.6: Validation Only on Ready Use Cases, Campaign Readiness & git-code-rag Shape
+# ===========================================================================
+
+def test_17_6_validate_refusal_exit_2_force_override_and_event(tmp_path: pathlib.Path) -> None:
+    """Task 17.6 (deliverable 1):
+    - `use-cases validate <UC>` refuses with exit code 2 and message 'not ready (N/M tasks done)'
+      when stage is `draft`, `planned`, or `in development` (and when all linked tasks are dropped -> `draft` `0/0`).
+    - `--force` overrides the refusal, executes the probe, records the validation as forced in `## AI Validation Log`,
+      and emits a `use_case.validated` event with `forced: true`.
+    - When all non-dropped linked tasks are delivered/verified/done, `use-cases validate` runs without `--force`
+      and emits `use_case.validated` with `forced: false`.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "01-core").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # UC001: draft (no linked tasks -> 0/0)
+    # UC002: planned (0/2 tasks done)
+    # UC003: in development (1/2 tasks done, 1 dropped ignored)
+    # UC004: ready (2/2 tasks done, 1 dropped ignored)
+    for ucid, title in (
+        ("UC001", "Draft No Tasks"),
+        ("UC002", "Planned Zero Done"),
+        ("UC003", "In Dev One Of Two Done"),
+        ("UC004", "Ready Two Of Two Done"),
+    ):
+        run_cli(
+            "use-cases", "create",
+            "--id", ucid,
+            "--title", title,
+            "--actor", "Operator",
+            "--approval", "approved",
+            "--verification-command", f"echo 'PROBE_{ucid}'",
+            "--tasks-dir", str(tasks_dir),
+            "--json",
+        )
+
+    (tasks_dir / "01-core" / "plan.md").write_text(
+        "# 01 — Core Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Open task A\n\n"
+        "- **Status:** `open` · **Short:** Open A · **Size:** S · **Depends on:** - · **Use cases:** UC002\n"
+        "- **Goal:** Open A.\n\n"
+        "### 01.2 - Waiting task B\n\n"
+        "- **Status:** `waiting` · **Short:** Waiting B · **Size:** S · **Depends on:** - · **Use cases:** UC002\n"
+        "- **Goal:** Waiting B.\n\n"
+        "### 01.3 - In progress task C\n\n"
+        "- **Status:** `in progress` · **Short:** In progress C · **Size:** S · **Depends on:** - · **Use cases:** UC003\n"
+        "- **Goal:** In progress C.\n\n"
+        "### 01.4 - Delivered task D\n\n"
+        "- **Status:** `delivered` · **Short:** Delivered D · **Size:** S · **Depends on:** - · **Use cases:** UC003, UC004\n"
+        "- **Goal:** Delivered D.\n\n"
+        "### 01.5 - Done task E\n\n"
+        "- **Status:** `done` · **Short:** Done E · **Size:** S · **Depends on:** - · **Use cases:** UC004\n"
+        "- **Goal:** Done E.\n\n"
+        "### 01.6 - Dropped task F\n\n"
+        "- **Status:** `dropped` · **Short:** Dropped F · **Size:** S · **Depends on:** - · **Use cases:** UC003, UC004\n"
+        "- **Goal:** Dropped F.\n",
+        encoding="utf-8",
+    )
+
+    # 1. Refusal on UC001 (draft, 0/0 tasks done) -> exit 2, both JSON and text
+    res_uc1_json = run_cli("use-cases", "validate", "UC001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_uc1_json.returncode == 2
+    d_uc1 = json.loads(res_uc1_json.stdout)
+    assert d_uc1["ok"] is False
+    assert d_uc1["reason"] == "not_ready"
+    assert d_uc1["stage"] == "draft"
+    assert d_uc1["tasks_done"] == 0
+    assert d_uc1["tasks_total"] == 0
+    assert "not ready (0/0 tasks done" in d_uc1["error"]
+
+    res_uc1_txt = run_cli("use-cases", "validate", "UC001", "--tasks-dir", str(tasks_dir))
+    assert res_uc1_txt.returncode == 2
+    assert "not ready (0/0 tasks done" in res_uc1_txt.stderr
+
+    # 2. Refusal on UC002 (planned, 0/2 tasks done) -> exit 2
+    res_uc2_json = run_cli("use-cases", "validate", "UC002", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_uc2_json.returncode == 2
+    d_uc2 = json.loads(res_uc2_json.stdout)
+    assert d_uc2["ok"] is False
+    assert d_uc2["stage"] == "planned"
+    assert d_uc2["tasks_done"] == 0
+    assert d_uc2["tasks_total"] == 2
+    assert "not ready (0/2 tasks done" in d_uc2["error"]
+
+    # 3. Refusal on UC003 (in development, 1/2 tasks done; dropped task 01.6 ignored) -> exit 2
+    res_uc3_json = run_cli("use-cases", "validate", "UC003", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_uc3_json.returncode == 2
+    d_uc3 = json.loads(res_uc3_json.stdout)
+    assert d_uc3["ok"] is False
+    assert d_uc3["stage"] == "in development"
+    assert d_uc3["tasks_done"] == 1
+    assert d_uc3["tasks_total"] == 2
+    assert "not ready (1/2 tasks done" in d_uc3["error"]
+
+    # Verify UC003 file was NOT touched by refused validation
+    uc3_path = next((tasks_dir / "use-cases").glob("UC003-*.md"))
+    assert "AI Validation by" not in uc3_path.read_text(encoding="utf-8")
+
+    # 4. Force override on UC003 (--force) -> exit 0, recorded as forced in log and event
+    res_uc3_force = run_cli("use-cases", "validate", "UC003", "--force", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_uc3_force.returncode == 0
+    d_uc3_force = json.loads(res_uc3_force.stdout)
+    assert d_uc3_force["ok"] is True
+    assert d_uc3_force["forced"] is True
+    assert d_uc3_force["verdict"] == "pass"
+    assert "(forced)" in d_uc3_force["summary"]
+
+    uc3_text_after = uc3_path.read_text(encoding="utf-8")
+    assert "(forced)" in uc3_text_after
+    assert "- **Forced:** `true`" in uc3_text_after
+
+    # 5. Ready UC004 (2/2 non-dropped tasks done) -> runs without --force, exit 0, forced=False
+    res_uc4 = run_cli("use-cases", "validate", "UC004", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_uc4.returncode == 0
+    d_uc4 = json.loads(res_uc4.stdout)
+    assert d_uc4["ok"] is True
+    assert d_uc4["forced"] is False
+    assert d_uc4["verdict"] == "pass"
+    assert d_uc4["stage"] == "verified"
+    assert d_uc4["tasks_done"] == 2
+    assert d_uc4["tasks_total"] == 2
+
+    # Check emitted `use_case.validated` events
+    import orchestration_events
+    evs = orchestration_events.read_events(tmp_path, types=["use_case.validated"])
+    assert len(evs) >= 2
+    ev_uc3 = next(e for e in evs if e["subject"] == "UC003")
+    assert ev_uc3["payload"]["forced"] is True
+    assert ev_uc3["payload"]["verdict"] == "pass"
+    ev_uc4 = next(e for e in evs if e["subject"] == "UC004")
+    assert ev_uc4["payload"]["forced"] is False
+    assert ev_uc4["payload"]["verdict"] == "pass"
+
+
+def test_17_6_campaign_2_ready_2_draft_1_in_dev_and_readiness_denominator(tmp_path: pathlib.Path) -> None:
+    """Task 17.6 (Spec §7 item 4 + readiness denominator):
+    - Campaign on 2 ready + 2 draft + 1 in-development use cases: only the 2 ready are probed;
+      others listed under 'Not ready' with N/M and stage, untouched on disk.
+    - Readiness score excludes `untested` from the denominator (and reports both evaluated and in-scope).
+       specifically tests the 24 passed, 1 failed, 7 untested shape -> 24/25 = 96.0% evaluated (and 24/32 = 75.0% in-scope).
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "01-core").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    marker_draft = tmp_path / "draft_ran.marker"
+    marker_indev = tmp_path / "indev_ran.marker"
+
+    # 2 ready (UC001 pass, UC002 fail)
+    run_cli(
+        "use-cases", "create", "--id", "UC001", "--title", "Ready Passing",
+        "--approval", "approved", "--verification-command", "echo 'READY_1'",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    run_cli(
+        "use-cases", "create", "--id", "UC002", "--title", "Ready Failing",
+        "--approval", "approved", "--verification-command", "exit 1",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    # 2 draft (no linked tasks) — commands touch marker files if ever executed
+    run_cli(
+        "use-cases", "create", "--id", "UC003", "--title", "Draft One",
+        "--approval", "proposed", "--verification-command", f"touch {marker_draft} && exit 1",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    run_cli(
+        "use-cases", "create", "--id", "UC004", "--title", "Draft Two",
+        "--approval", "approved", "--verification-command", f"touch {marker_draft} && exit 1",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+    # 1 in-development (1 of 2 linked tasks delivered)
+    run_cli(
+        "use-cases", "create", "--id", "UC005", "--title", "In Dev Flow",
+        "--approval", "approved", "--verification-command", f"touch {marker_indev} && exit 1",
+        "--tasks-dir", str(tasks_dir), "--json",
+    )
+
+    (tasks_dir / "01-core" / "plan.md").write_text(
+        "# 01 — Core Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Delivered task\n\n"
+        "- **Status:** `delivered` · **Short:** Delivered · **Size:** S · **Depends on:** - · **Use cases:** UC001, UC002, UC005\n"
+        "- **Goal:** Delivered.\n\n"
+        "### 01.2 - Open task\n\n"
+        "- **Status:** `open` · **Short:** Open · **Size:** S · **Depends on:** - · **Use cases:** UC005\n"
+        "- **Goal:** Open.\n",
+        encoding="utf-8",
+    )
+
+    uc3_before = next((tasks_dir / "use-cases").glob("UC003-*.md")).read_bytes()
+    uc4_before = next((tasks_dir / "use-cases").glob("UC004-*.md")).read_bytes()
+    uc5_before = next((tasks_dir / "use-cases").glob("UC005-*.md")).read_bytes()
+
+    res_camp = run_cli("use-cases", "campaign", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_camp.returncode == 1  # UC002 failed
+    camp = json.loads(res_camp.stdout)
+    assert camp["ok"] is True
+    assert camp["total"] == 2
+    assert [r["id"] for r in camp["results"]] == ["UC001", "UC002"]
+    assert camp["passed"] == 1
+    assert camp["failed"] == 1
+    assert camp["untested"] == 0
+    assert camp["not_ready_count"] == 3
+    assert [u["id"] for u in camp["not_ready"]] == ["UC003", "UC004", "UC005"]
+    assert camp["not_ready"][0]["progress"] == "0/0"
+    assert camp["not_ready"][0]["stage"] == "draft"
+    assert camp["not_ready"][1]["progress"] == "0/0"
+    assert camp["not_ready"][1]["stage"] == "draft"
+    assert camp["not_ready"][2]["progress"] == "1/2"
+    assert camp["not_ready"][2]["stage"] == "in development"
+
+    # Non-ready probes never executed and their files are byte-for-byte untouched
+    assert not marker_draft.exists()
+    assert not marker_indev.exists()
+    assert next((tasks_dir / "use-cases").glob("UC003-*.md")).read_bytes() == uc3_before
+    assert next((tasks_dir / "use-cases").glob("UC004-*.md")).read_bytes() == uc4_before
+    assert next((tasks_dir / "use-cases").glob("UC005-*.md")).read_bytes() == uc5_before
+
+    report_text = pathlib.Path(camp["report_file"]).read_text(encoding="utf-8")
+    assert "## Not ready" in report_text
+    assert "- **UC003**: Draft One (Not ready (0/0), stage: `draft`)" in report_text
+    assert "- **UC004**: Draft Two (Not ready (0/0), stage: `draft`)" in report_text
+    assert "- **UC005**: In Dev Flow (Not ready (1/2), stage: `in development`)" in report_text
+
+
+def test_17_6_git_code_rag_shape_fixture(tmp_path: pathlib.Path) -> None:
+    """Task 17.6 (corrected deliverable 6):
+    Reproduces the git-code-rag shape in a self-contained fixture:
+    - 4 use cases (UC001..UC004) with all linked tasks done and verdict pass;
+    - 1 use case (UC005) with `last-verdict: fail` (or legacy `status: failing`) and NO linked tasks:
+      must have derived stage `draft`, must NOT be probed, and must be listed under `Not ready (0/0)`;
+    - 3 use cases (UC006..UC008) with linked tasks open (`0/1`, `0/2`, `0/3` tasks done):
+      must be listed under `Not ready (0/N)` and must NOT be probed;
+    - Assert the campaign probes ONLY the 4 ready use cases.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "use-cases").mkdir(parents=True)
+    (tasks_dir / "01-rag").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    forbidden_marker = tmp_path / "forbidden_probe_ran.marker"
+
+    def _write_uc(uc_id: str, title: str, approval: str, last_verdict: str, cmd: str) -> pathlib.Path:
+        p = tasks_dir / "use-cases" / f"{uc_id}-{title.lower().replace(' ', '-')}.md"
+        p.write_text(
+            f"# {uc_id} - {title}\n\n"
+            f"- id: {uc_id}\n"
+            f"- title: {title}\n"
+            f"- actor: Developer\n"
+            f"- approval: {approval}\n"
+            f"- priority: P1\n"
+            f"- linked-tasks: -\n"
+            f"- verification-type: automated-probe\n"
+            f"- last-tested: 2026-10-27\n"
+            f"- last-verdict: {last_verdict}\n"
+            f"- short: {title}\n\n"
+            "## Description & Business Value\nDesc.\n\n"
+            "## Preconditions\n- None.\n\n"
+            "## Scenario / Interaction Steps\n1. Step.\n\n"
+            f"## Automated Verification Command\n```bash\n{cmd}\n```\n\n"
+            "## Acceptance Criteria\n- [x] Criterion.\n\n"
+            "## AI Validation Log\n",
+            encoding="utf-8",
+        )
+        return p
+
+    # 4 use cases with all linked tasks done and verdict pass
+    for i in range(1, 5):
+        _write_uc(f"UC00{i}", f"Ready Passing Flow {i}", "approved", "pass", f"echo 'PASS_UC00{i}'")
+
+    # 1 failing with no linked tasks (reproducing git-code-rag UC031 which was marked failing with no tasks)
+    p_uc5 = _write_uc(
+        "UC005",
+        "Unimplemented Post V0 Failing",
+        "approved",
+        "fail",
+        f"touch {forbidden_marker} && exit 1",
+    )
+
+    # 3 use cases with linked tasks open (Not ready, 0/N)
+    p_uc6 = _write_uc("UC006", "Planned One Open Task", "approved", "-", f"touch {forbidden_marker} && exit 1")
+    p_uc7 = _write_uc("UC007", "Planned Two Open Tasks", "proposed", "-", f"touch {forbidden_marker} && exit 1")
+    p_uc8 = _write_uc("UC008", "Planned Three Open Tasks", "approved", "-", f"touch {forbidden_marker} && exit 1")
+
+    (tasks_dir / "01-rag" / "plan.md").write_text(
+        "# 01 — RAG Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Done task 1\n\n"
+        "- **Status:** `done` · **Short:** Done 1 · **Size:** S · **Depends on:** - · **Use cases:** UC001, UC002\n"
+        "- **Goal:** Done 1.\n\n"
+        "### 01.2 - Done task 2\n\n"
+        "- **Status:** `done` · **Short:** Done 2 · **Size:** S · **Depends on:** - · **Use cases:** UC002, UC003, UC004\n"
+        "- **Goal:** Done 2.\n\n"
+        "### 01.3 - Open task A\n\n"
+        "- **Status:** `open` · **Short:** Open A · **Size:** S · **Depends on:** - · **Use cases:** UC006, UC007, UC008\n"
+        "- **Goal:** Open A.\n\n"
+        "### 01.4 - Open task B\n\n"
+        "- **Status:** `open` · **Short:** Open B · **Size:** S · **Depends on:** - · **Use cases:** UC007, UC008\n"
+        "- **Goal:** Open B.\n\n"
+        "### 01.5 - Open task C\n\n"
+        "- **Status:** `open` · **Short:** Open C · **Size:** S · **Depends on:** - · **Use cases:** UC008\n"
+        "- **Goal:** Open C.\n",
+        encoding="utf-8",
+    )
+
+    # Verify UC005 stage is `draft` (never shown as `failing`)
+    uc5_show = json.loads(run_cli("use-cases", "show", "UC005", "--tasks-dir", str(tasks_dir), "--json").stdout)["use_case"]
+    assert uc5_show["stage"] == "draft"
+    assert uc5_show["status"] == "draft"
+    assert uc5_show["last_verdict"] == "fail"
+
+    not_ready_bytes_before = {p.name: p.read_bytes() for p in (p_uc5, p_uc6, p_uc7, p_uc8)}
+
+    # Run campaign
+    res_camp = run_cli("use-cases", "campaign", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_camp.returncode == 0, res_camp.stdout + res_camp.stderr
+    camp = json.loads(res_camp.stdout)
+    assert camp["ok"] is True
+
+    # Only the 4 ready use cases are probed
+    assert camp["total"] == 4
+    assert camp["evaluated"] == 4
+    assert camp["passed"] == 4
+    assert camp["failed"] == 0
+    assert camp["untested"] == 0
+    assert camp["readiness_score"] == 100.0
+    assert [r["id"] for r in camp["results"]] == ["UC001", "UC002", "UC003", "UC004"]
+
+    # The 1 draft-with-fail-verdict + 3 open-task use cases are under Not ready
+    assert camp["not_ready_count"] == 4
+    not_ready_by_id = {u["id"]: u for u in camp["not_ready"]}
+    assert set(not_ready_by_id.keys()) == {"UC005", "UC006", "UC007", "UC008"}
+    assert not_ready_by_id["UC005"]["stage"] == "draft"
+    assert not_ready_by_id["UC005"]["progress"] == "0/0"
+    assert not_ready_by_id["UC006"]["stage"] == "planned"
+    assert not_ready_by_id["UC006"]["progress"] == "0/1"
+    assert not_ready_by_id["UC007"]["stage"] == "planned"
+    assert not_ready_by_id["UC007"]["progress"] == "0/2"
+    assert not_ready_by_id["UC008"]["stage"] == "planned"
+    assert not_ready_by_id["UC008"]["progress"] == "0/3"
+
+    # None of UC005..UC008 were probed or modified on disk
+    assert not forbidden_marker.exists()
+    for p in (p_uc5, p_uc6, p_uc7, p_uc8):
+        assert p.read_bytes() == not_ready_bytes_before[p.name]
+
+    # Verify markdown report lists them under ## Not ready with 0/N and stage
+    report_text = pathlib.Path(camp["report_file"]).read_text(encoding="utf-8")
+    assert "- **Readiness Score:** `100.0%` (4/4 evaluated, 4/4 in-scope Use Cases Verified)" in report_text
+    assert "## Not ready" in report_text
+    assert "- **UC005**: Unimplemented Post V0 Failing (Not ready (0/0), stage: `draft`)" in report_text
+    assert "- **UC006**: Planned One Open Task (Not ready (0/1), stage: `planned`)" in report_text
+    assert "- **UC007**: Planned Two Open Tasks (Not ready (0/2), stage: `planned`)" in report_text
+    assert "- **UC008**: Planned Three Open Tasks (Not ready (0/3), stage: `planned`)" in report_text
+
 
 
 
