@@ -9,11 +9,11 @@
 - state: waiting
 - executor: kilo
 - depends-on: -
-- decider: Q018, Q019, Q020, Q021, Q022, Q023, Q024
+- decider: Q020
 - sources: owner 2026-10-27: 'mi servirebbe uno studio su questo tipo di interazioni' (dopo la richiesta di Valida e chiudi, T075, e della chat contestuale, T074)
 - paths: tasks/specs/owner-interactions-study.md
 - handoff: Read tasks/methodology/T076-studio-delle-interazioni-del-proprietario-con-task.md, do the open steps, run the Verification, update the task and the registry.
-- waiting-on: question:Q024
+- waiting-on: question:Q020
 - short: Studio interazioni UI
 
 ## Goal
