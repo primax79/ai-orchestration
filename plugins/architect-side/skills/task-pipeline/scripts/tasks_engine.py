@@ -9463,6 +9463,356 @@ def compute_task_use_case_links(
     return compute_use_case_links(tasks_dir, tree=tree, use_cases=use_cases).by_task
 
 
+_UC_SEARCH_STOPWORDS: set[str] = {"the", "and", "for", "with", "from", "into", "that", "this"}
+_UC_SPEC_GENERIC_WORDS: set[str] = _UC_SEARCH_STOPWORDS | {"tasks", "task", "specs", "spec", "md", "source", "sources"}
+
+
+def _extract_use_case_cited_specs(uc: dict[str, Any]) -> list[str]:
+    """Extract spec paths cited by a use case (e.g. `Source: tasks/specs/...` lines)."""
+    cited: list[str] = []
+    content = str(uc.get("content") or "")
+    headers = uc.get("headers") or {}
+
+    def _add(ref: str) -> None:
+        cleaned = ref.strip().strip(".,;()[]\"'<>`")
+        if cleaned and cleaned != "-" and cleaned not in cited:
+            cited.append(cleaned)
+
+    for m in re.finditer(r"\bSource:\s*([^\n]+)", content, flags=re.IGNORECASE):
+        line_rest = m.group(1).strip()
+        spec_matches = re.findall(r"(?:tasks/)?specs/[A-Za-z0-9_./-]+(?:\.md)?|[A-Za-z0-9_./-]+\.md", line_rest)
+        for sm in spec_matches:
+            _add(sm)
+
+    for hdr_key in ("source", "sources", "spec", "specs"):
+        raw_hdr = str(headers.get(hdr_key) or "").strip()
+        if raw_hdr and raw_hdr != "-":
+            for part in re.split(r"[,;\s]+", raw_hdr):
+                p_clean = part.strip().strip(".,;()[]\"'<>`")
+                if p_clean and ("/" in p_clean or p_clean.endswith(".md")):
+                    _add(p_clean)
+
+    for m_any in re.finditer(r"(?:tasks/)?specs/[A-Za-z0-9_.-]+\.md", content):
+        _add(m_any.group(0))
+
+    return cited
+
+
+def _tokenize_task_field_items(raw_val: Any, *, is_sources: bool = False) -> list[str]:
+    """Extract path or source items from a task field value (ignoring `-`)."""
+    if not raw_val:
+        return []
+    text = str(raw_val).strip()
+    if not text or text == "-":
+        return []
+    items: list[str] = []
+    for m_link in re.finditer(r"\[([^\]]*)\]\(([^)]+)\)", text):
+        for candidate in (m_link.group(2), m_link.group(1)):
+            c = candidate.strip().strip(".,;()[]\"'<>`")
+            if c.startswith("../"):
+                c = "tasks/" + c[3:]
+            if c and c != "-" and c not in items:
+                items.append(c)
+    stripped = re.sub(r"\[([^\]]*)\]\(([^)]+)\)", " ", text)
+    for chunk in re.split(r"[,;]+", stripped):
+        chunk_clean = chunk.strip()
+        if not chunk_clean or chunk_clean == "-":
+            continue
+        for tok in chunk_clean.split():
+            c = tok.strip().strip(".,;()[]\"'<>`")
+            if not c or c == "-" or c.startswith("(") or c.lower() in ("and", "or", "v1", "v2", "note", "from", "task", "spec"):
+                continue
+            if c.startswith("../"):
+                c = "tasks/" + c[3:]
+            if is_sources:
+                # Keep paths, spec filenames, or canonical IDs (N###, T###, Q###, UC###) or explicit tokens
+                if "/" in c or c.endswith(".md") or re.match(r"^(?:N|T|Q|UC)\d{2,}\b", c, re.IGNORECASE) or len(chunk_clean.split()) == 1:
+                    if c not in items:
+                        items.append(c)
+            else:
+                if c not in items:
+                    items.append(c)
+    return items
+
+
+def _collect_task_paths_and_sources(
+    node: TaskNode,
+    tree: dict[str, TaskNode],
+    init_header_specs_cache: dict[str, list[str]],
+) -> tuple[list[str], list[str]]:
+    """Collect normalized `paths` and `sources` lists for a TaskNode (and its parent initiative)."""
+    paths_list: list[str] = []
+    sources_list: list[str] = []
+
+    def _extend_unique(target: list[str], values: list[str]) -> None:
+        for v in values:
+            if v not in target:
+                target.append(v)
+
+    own = node.own_fields or {}
+    for pk in ("paths", "path", "focus_files", "focus_file", "repo"):
+        _extend_unique(paths_list, _tokenize_task_field_items(own.get(pk), is_sources=False))
+    inh_paths = (node.fields or {}).get("paths", {}).get("value")
+    _extend_unique(paths_list, _tokenize_task_field_items(inh_paths, is_sources=False))
+
+    if not paths_list and node.block_text:
+        for m_p in re.finditer(
+            r"`([A-Za-z0-9_./-]+(?:/[A-Za-z0-9_./-]+|\.(?:py|md|ts|tsx|js|jsx|json|toml|sh|html|css|yml|yaml)))`",
+            node.block_text,
+        ):
+            cand = (m_p.group(1) or "").strip(".,;()[]\"'<>`")
+            if cand and "/" in cand and not cand.startswith(("http:", "https:", "tasks/specs/", "specs/")):
+                _extend_unique(paths_list, [cand])
+
+    for sk in ("sources", "source", "spec", "specs", "derived_from", "derived-from"):
+        _extend_unique(sources_list, _tokenize_task_field_items(own.get(sk), is_sources=True))
+
+    curr_parent_id = node.parent
+    visited: set[str] = set()
+    while curr_parent_id and curr_parent_id in tree and curr_parent_id not in visited:
+        visited.add(curr_parent_id)
+        pnode = tree[curr_parent_id]
+        p_own = pnode.own_fields or {}
+        for pk in ("paths", "path", "focus_files", "focus_file", "repo"):
+            _extend_unique(paths_list, _tokenize_task_field_items(p_own.get(pk), is_sources=False))
+        for sk in ("sources", "source", "spec", "specs", "derived_from", "derived-from"):
+            _extend_unique(sources_list, _tokenize_task_field_items(p_own.get(sk), is_sources=True))
+        if pnode.node_type == "initiative" and pnode.file_path:
+            if pnode.file_path not in init_header_specs_cache:
+                found_specs: list[str] = []
+                try:
+                    ptext = pathlib.Path(pnode.file_path).read_text(encoding="utf-8")
+                    for line in ptext.splitlines():
+                        if line.startswith("## ") or line.startswith("### "):
+                            break
+                        for sm in re.findall(r"(?:tasks/)?specs/[A-Za-z0-9_.-]+(?:\.md)?", line):
+                            if sm not in found_specs:
+                                found_specs.append(sm)
+                        if re.search(r"\*\*(?:Spec|Sources?|Derived from):\*\*", line, flags=re.IGNORECASE):
+                            _extend_unique(found_specs, _tokenize_task_field_items(line.split(":**", 1)[-1], is_sources=True))
+                except OSError:
+                    pass
+                init_header_specs_cache[pnode.file_path] = found_specs
+            _extend_unique(sources_list, init_header_specs_cache[pnode.file_path])
+        curr_parent_id = pnode.parent
+
+    return paths_list, sources_list
+
+
+def _item_overlaps_query_terms(item: str, query_terms: list[str], *, is_spec: bool = False) -> bool:
+    """Return True if a path/source/spec string overlaps any query term."""
+    item_low = item.lower().strip().strip("/")
+    if not item_low or item_low == "-":
+        return False
+    item_parts = [seg for seg in re.split(r"[/\s]+", item_low) if seg]
+    item_base = pathlib.PurePosixPath(item_low).name
+    item_stem = pathlib.PurePosixPath(item_base).stem
+    item_words = [w for w in re.split(r"[-_./\s]+", item_stem) if w]
+
+    stopwords = _UC_SPEC_GENERIC_WORDS if is_spec else _UC_SEARCH_STOPWORDS
+    for qt in query_terms:
+        q = qt.lower().strip().strip("/")
+        if not q:
+            continue
+        if q in (item_low, item_base, item_stem):
+            return True
+        if "/" in q and (
+            item_low.endswith("/" + q)
+            or q.endswith("/" + item_low)
+            or item_low.startswith(q + "/")
+            or q.startswith(item_low + "/")
+            or q in item_low
+        ):
+            return True
+        if q in stopwords:
+            continue
+        if q in item_parts or q in item_words:
+            return True
+        if len(q) >= 3 and (q in item_base or q in item_stem or q in item_low):
+            return True
+    return False
+
+
+def search_use_cases(
+    tasks_dir: pathlib.Path | str,
+    query: str = "",
+    *,
+    actor: str | None = None,
+) -> dict[str, Any]:
+    """Search and rank use cases by (Spec 17 §4 / 17.8):
+    1. Text match in title/description/scenario/criteria (case-insensitive, all words),
+    2. Actor match (`--actor` or query matching actor),
+    3. Specs the use case cites (`Source: tasks/specs/...` lines) matching the query,
+    4. Use cases linked to tasks whose `paths` or `sources` overlap the query terms.
+
+    Read-only: never modifies any file on disk.
+    """
+    tasks_path = pathlib.Path(tasks_dir).resolve()
+    ucs = discover_use_cases(tasks_path)
+    tree = discover_task_tree(tasks_path)
+    uc_links = compute_use_case_links(tasks_path, tree=tree, use_cases=ucs)
+
+    query_str = (query or "").strip()
+    actor_str = (actor or "").strip() if actor else None
+
+    raw_tokens = [
+        tok.strip(".,;()[]\"'<>`")
+        for tok in re.split(r"[\s,;]+", query_str.lower())
+        if tok.strip(".,;()[]\"'<>`")
+    ]
+    # Words for text matching (ignoring path-only tokens if mixed with text, or all tokens when pure text)
+    text_words = list(raw_tokens)
+
+    init_header_specs_cache: dict[str, list[str]] = {}
+    task_paths_sources_cache: dict[str, tuple[list[str], list[str]]] = {}
+
+    results: list[dict[str, Any]] = []
+
+    for raw_uc in ucs:
+        uc = enrich_use_case_with_stage_and_links(raw_uc, uc_links)
+        score = 0
+        reasons: list[str] = []
+
+        # 1. Text match in title/description/scenario/criteria (case-insensitive, all words)
+        title_text = str(uc.get("title") or "")
+        raw_desc_text = str(uc.get("description") or "")
+        desc_without_source = re.sub(r"\bSource:\s*[^\n]+", "", raw_desc_text, flags=re.IGNORECASE).strip()
+        scen_text = str(uc.get("scenario") or "")
+        crit_text = str(uc.get("acceptance_criteria") or "")
+
+        title_low = title_text.lower()
+        desc_low = desc_without_source.lower()
+        scen_low = scen_text.lower()
+        crit_low = crit_text.lower()
+        combined_low = "\n".join([title_low, desc_low, scen_low, crit_low])
+
+        if text_words and all(w in combined_low for w in text_words):
+            score += 4
+            sections = (
+                ("title", title_low, 10, 4),
+                ("description", desc_low, 6, 3),
+                ("scenario", scen_low, 5, 2),
+                ("criteria", crit_low, 5, 2),
+            )
+            for sec_name, sec_val, full_pts, part_pts in sections:
+                if not sec_val:
+                    continue
+                if all(w in sec_val for w in text_words):
+                    score += full_pts
+                    reasons.append(f"text:{sec_name}")
+                elif any(w in sec_val for w in text_words):
+                    score += part_pts
+                    reasons.append(f"text:{sec_name}")
+            if len(text_words) > 1 and query_str.lower() in title_low:
+                score += 3
+
+        # 2. Actor match
+        uc_actor = str(uc.get("actor") or "").strip()
+        uc_actor_low = uc_actor.lower()
+        actor_matched = False
+        if actor_str:
+            af_low = actor_str.lower()
+            af_words = [
+                w.strip(".,;()[]\"'<>`")
+                for w in re.split(r"[\s,;/]+", af_low)
+                if w.strip(".,;()[]\"'<>`")
+            ]
+            if af_low in uc_actor_low or (af_words and all(w in uc_actor_low for w in af_words)):
+                score += 25
+                reasons.append(f"actor:{uc_actor}")
+                actor_matched = True
+        if not actor_matched and raw_tokens and uc_actor_low:
+            non_stop_actor_tokens = [w for w in raw_tokens if w not in _UC_SEARCH_STOPWORDS and len(w) >= 3]
+            if non_stop_actor_tokens and all(w in uc_actor_low for w in non_stop_actor_tokens):
+                score += 8
+                reasons.append(f"actor:{uc_actor}")
+            elif any(w in re.split(r"[\s,;/()-]+", uc_actor_low) for w in non_stop_actor_tokens):
+                score += 5
+                reasons.append(f"actor:{uc_actor}")
+
+        # 3. Cited specs (`Source: tasks/specs/...`)
+        cited_specs = _extract_use_case_cited_specs(uc)
+        if raw_tokens and cited_specs:
+            matched_specs: list[str] = []
+            for sp in cited_specs:
+                if _item_overlaps_query_terms(sp, raw_tokens, is_spec=True):
+                    matched_specs.append(sp)
+            if matched_specs:
+                for idx, sp in enumerate(matched_specs):
+                    sp_low = sp.lower()
+                    sp_base = pathlib.PurePosixPath(sp_low).name
+                    sp_stem = pathlib.PurePosixPath(sp_base).stem
+                    is_exact = any(
+                        qt in (sp_low, sp_base, sp_stem) or sp_low.endswith(qt)
+                        for qt in raw_tokens
+                    )
+                    pts = (9 if is_exact else 6) if idx == 0 else 2
+                    score += pts
+                    reasons.append(f"spec:{sp}")
+
+        # 4. Linked tasks whose `paths` or `sources` overlap query terms
+        derived_tids = list(uc.get("linked_tasks") or [])
+        written_tids = list(uc.get("written_linked_tasks") or [])
+        all_tids = list(dict.fromkeys(derived_tids + written_tids))
+        if raw_tokens and all_tids:
+            path_matches: list[tuple[str, str]] = []
+            source_matches: list[tuple[str, str]] = []
+            for tid in all_tids:
+                node = tree.get(tid)
+                if node is None or node.canonical_state == "dropped":
+                    continue
+                if tid not in task_paths_sources_cache:
+                    task_paths_sources_cache[tid] = _collect_task_paths_and_sources(
+                        node, tree, init_header_specs_cache
+                    )
+                t_paths, t_sources = task_paths_sources_cache[tid]
+                for p in t_paths:
+                    if _item_overlaps_query_terms(p, raw_tokens, is_spec=False):
+                        path_matches.append((tid, p))
+                        break
+                for s in t_sources:
+                    if _item_overlaps_query_terms(s, raw_tokens, is_spec=True):
+                        source_matches.append((tid, s))
+                        break
+
+            if path_matches:
+                score += 7 + min(4, 2 * (len(path_matches) - 1))
+                for tid, p in path_matches:
+                    reasons.append(f"task-paths:{tid} ({p})")
+            if source_matches:
+                score += 6 + min(4, 2 * (len(source_matches) - 1))
+                for tid, s in source_matches:
+                    reasons.append(f"task-sources:{tid} ({s})")
+
+        if score > 0:
+            results.append({
+                "id": uc["id"],
+                "title": uc["title"],
+                "short_title": uc.get("short_title", uc["id"]),
+                "actor": uc.get("actor", ""),
+                "stage": uc.get("stage", "draft"),
+                "approval": uc.get("approval", "proposed"),
+                "status": uc.get("status", uc.get("stage", "draft")),
+                "score": score,
+                "reasons": reasons,
+                "cited_specs": cited_specs,
+                "linked_tasks": list(uc.get("linked_tasks") or []),
+            })
+
+    results.sort(key=lambda item: (-int(item["score"]), _natural_sort_key(item["id"])))
+
+    return {
+        "ok": True,
+        "tasks_dir": str(tasks_path),
+        "query": query_str,
+        "actor": actor_str,
+        "total": len(results),
+        "count": len(results),
+        "results": results,
+        "use_cases": results,
+    }
+
+
 def _next_use_case_id(tasks_dir: pathlib.Path) -> str:
     """Next free UC### id: one above the highest id found anywhere under tasks/ (use-cases/, done/, and git branches/worktrees)."""
     highest = 0
@@ -21335,6 +21685,42 @@ def cmd_use_cases_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_use_cases_search(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    raw_query = getattr(args, "query", None) or []
+    if isinstance(raw_query, str):
+        query_text = raw_query.strip()
+    else:
+        query_text = " ".join(str(part) for part in raw_query).strip()
+    actor = getattr(args, "actor", None)
+
+    res = search_use_cases(tasks_dir, query_text, actor=actor)
+    args._last_result = res
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+        return 0
+
+    items = res.get("results", [])
+    if not items:
+        print("No matching use cases found.")
+        return 0
+
+    label_parts = []
+    if query_text:
+        label_parts.append(repr(query_text))
+    if actor:
+        label_parts.append(f"actor={actor!r}")
+    label_str = f" matching {', '.join(label_parts)}" if label_parts else ""
+    print(f"Use Cases{label_str} ({len(items)}):")
+    for item in items:
+        reasons_str = ", ".join(item.get("reasons") or [])
+        print(
+            f"  [{item['id']}] (stage: {item['stage']}, approval: {item['approval']}, score: {item['score']}) "
+            f"{item['title']} — reasons: {reasons_str}"
+        )
+    return 0
+
+
 def cmd_use_cases_create(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(args.tasks_dir).resolve()
     linked_raw = getattr(args, "linked_tasks", "") or ""
@@ -26523,6 +26909,16 @@ def build_parser() -> argparse.ArgumentParser:
     uc_queue.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     uc_queue.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     uc_queue.set_defaults(func=cmd_use_cases_queue)
+
+    uc_search = uc_sub.add_parser(
+        "search",
+        help="Search and rank use cases by text, actor, cited specs, and linked task paths/sources (read-only)",
+    )
+    uc_search.add_argument("query", nargs="*", default=[], help="Search query text")
+    uc_search.add_argument("--actor", default=None, help="Match or boost by actor (case-insensitive)")
+    uc_search.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    uc_search.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    uc_search.set_defaults(func=cmd_use_cases_search)
 
     # tasks step
     p_step = sub.add_parser("step", help="Checklist commands for ## Steps of an emergent task")
