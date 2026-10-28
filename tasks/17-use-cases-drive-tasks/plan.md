@@ -10,12 +10,6 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ## Tasks
 
-### 17.8 - Flusso use-case-first nelle skill e ricerca
-
-- **Status:** `delivered` (2026-10-28, kilo: implementato `ai-orch tasks use-cases search <text> [--actor A] [--json]` in sola lettura con ranking per testo, attore, spec citate e percorsi/sorgenti dei task collegati, aggiornato `CLI_DESCRIPTION` in `bin/ai-orch` e documentato il flusso use-case-first in `task-pipeline/SKILL.md` e `orchestration-workflow/SKILL.template.md` con rigenerazione verificata tramite `--check`) · **Short:** Skill use-case-first · **Size:** M · **Depends on:** 17.4
-- **Goal:** spec §4: `use-cases search` (testo, attore, spec citate, task sugli stessi percorsi); task-pipeline e orchestration-workflow dai template, rigenerati con `--check`, rigenerata la skill legata di kilo-mcp.
-- **Verification:** `ai-orch tasks use-cases search <text> [--actor A] [--json]` ordina gli use case in sola lettura per corrispondenza testuale (tutte le parole, case-insensitive, in titolo/descrizione/scenario/criteri), attore, spec citate (`Source: tasks/specs/...`) e sovrapposizione con `paths`/`sources` dei task collegati restituendo `id`, `title`, `stage`, `approval`, `score` e `reasons`; `task-pipeline/SKILL.md` e `orchestration-workflow/SKILL.template.md` (con `SKILL.md` rigenerato e verificato con `regenerate_generic_skills.py --check`) includono i passi use-case-first di §4 con esenzione per `chore`, `docs` e `investigation`.
-
 ### 17.10 - UI web ed estensione VS Code
 
 - **Status:** `in progress` (2026-10-28; kilo (UI web); estensione dopo) · **Short:** UI use case e task · **Size:** M · **Depends on:** 17.9
@@ -86,3 +80,9 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 - **Status:** `done` (2026-10-28; 104 test backend verdi, build ok; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** API use case-task · **Size:** S · **Depends on:** 17.5, 17.7
 - **Goal:** backend di ai-orchestration-ui: campi stage/approval/collegamenti/coda in JSON, test di compatibilità del JSON.
+
+### 17.8 - Flusso use-case-first nelle skill e ricerca
+
+- **Status:** `done` (2026-10-28, kilo: implementato `ai-orch tasks use-cases search <text> [--actor A] [--json]` in sola lettura con ranking per testo, attore, spec citate e percorsi/sorgenti dei task collegati, aggiornato `CLI_DESCRIPTION` in `bin/ai-orch` e documentato il flusso use-case-first in `task-pipeline/SKILL.md` e `orchestration-workflow/SKILL.template.md` con rigenerazione verificata tramite `--check`; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Skill use-case-first · **Size:** M · **Depends on:** 17.4
+- **Goal:** spec §4: `use-cases search` (testo, attore, spec citate, task sugli stessi percorsi); task-pipeline e orchestration-workflow dai template, rigenerati con `--check`, rigenerata la skill legata di kilo-mcp.
+- **Verification:** `ai-orch tasks use-cases search <text> [--actor A] [--json]` ordina gli use case in sola lettura per corrispondenza testuale (tutte le parole, case-insensitive, in titolo/descrizione/scenario/criteri), attore, spec citate (`Source: tasks/specs/...`) e sovrapposizione con `paths`/`sources` dei task collegati restituendo `id`, `title`, `stage`, `approval`, `score` e `reasons`; `task-pipeline/SKILL.md` e `orchestration-workflow/SKILL.template.md` (con `SKILL.md` rigenerato e verificato con `regenerate_generic_skills.py --check`) includono i passi use-case-first di §4 con esenzione per `chore`, `docs` e `investigation`.
