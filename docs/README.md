@@ -18,10 +18,11 @@ flowchart TB
     D02["docs/02-gap-analysis-and-evolution-roadmap.md<br/>Consolidated Review Audit & Evolution Roadmap"]
     D06["docs/06-naming-taxonomy-and-coherence.md<br/>Naming Taxonomy (ai-orchestration, kilo-mcp, claude-mcp)"]
     D07["docs/07-gemini-pricing-and-role-cost-analysis.md<br/>Gemini Pricing Analysis & Cognitive Role Cost Optimization"]
+    D_MIG["docs/use-case-migration.md<br/>Use Case Lifecycle & Links Migration Guide"]
 
     ROOT --> D00
     D00 --> D05 & D04 & S_TASK & S_EXT
-    D00 --> D01 & D02 & D06 & D07
+    D00 --> D01 & D02 & D06 & D07 & D_MIG
 ```
 
 ---
@@ -32,6 +33,7 @@ flowchart TB
 | :--- | :--- |
 | **Install skills & MCP servers from scratch or across Kilo, Claude & Codex** | **[`INSTALLATION.md`](INSTALLATION.md)** |
 | **Understand the workflows, visual diagrams & run commands step-by-step** | **[`00-QUICKSTART-AND-PLAYBOOK.md`](00-QUICKSTART-AND-PLAYBOOK.md)** |
+| **Migrate use cases & links to the two-way lifecycle model (Initiative 17)** | **[`use-case-migration.md`](use-case-migration.md)** |
 | **Configure tools (`kilo`, `claude`, `codex`), models & verification modes** | **[`05-orchestration-config-schema.md`](05-orchestration-config-schema.md)** |
 | **Analyze model costs, Gemini 4 Argon vs 3.8 Flash, and Kilo model assignment** | **[`07-gemini-pricing-and-role-cost-analysis.md`](07-gemini-pricing-and-role-cost-analysis.md)** |
 | **Understand how project `AGENTS.md` is generated and kept in sync** | **[`04-project-bootstrap-and-agents-md-pattern.md`](04-project-bootstrap-and-agents-md-pattern.md)** |

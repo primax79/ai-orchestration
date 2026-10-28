@@ -686,13 +686,41 @@ Use Cases represent end-to-end capabilities from the user/actor perspective. The
 4. **Write specs and create linked tasks:** Only after use-case approval, write or update `specs/<slug>.md` and create the tasks (`ai-orch tasks new` or `ai-orch tasks child add`), linking each with `--use-case UC###[,UC###]` or `--from-use-case UC### [--steps M-N]` (which pre-fills title, `## Goal`, and `## Verification` from the use case).
 - **Skipping allowed for non-feature/fix work:** Skipping directly to tasks without a use case is allowed for `chore`, `docs`, and `investigation` (`--kind chore|docs|investigation`).
 
-### Lifecycle, Readiness Gating, and Campaigns
+### Lifecycle: Approval vs Derived Stage
 
-1. **Two independent fields (`approval` and `stage`):**
-   - `approval`: `proposed` | `approved` | `deprecated` (author/owner intent).
-   - `stage`: derived by the engine from linked tasks (`draft` → `planned` → `in development` → `ready` → `verified` / `failing` / `partial` / `untested`, or `ready (revalidation pending)`).
-2. **Readiness-Gated AI Validation:** Once all non-dropped linked tasks are delivered/verified/done (`ready`), run `ai-orch tasks use-cases validate UC001` (refuses with exit 2 if not ready unless `--force` is given), recording evidence in `## AI Validation Log`.
-3. **Product Validation Campaigns & Regression Queue:** `ai-orch tasks use-cases campaign` runs probes only on in-scope ready use cases (listing others under `Not ready (N/M)`). Reopening, bouncing, or re-delivering a task linked to a verified use case marks `revalidation: pending` (listed by `ai-orch tasks use-cases queue`), and a task cannot reach `verified`/`done` while a linked approved use case is `failing` unless the use case passed after the task's delivery (or `--owner-approved`).
+A use case separates persisted author/owner intent (`approval`) from live execution progress (`stage`):
+
+| Field | Nature | Values | Rule / Derivation |
+| :--- | :--- | :--- | :--- |
+| `approval` | Persisted header | `proposed` \| `approved` \| `deprecated` | Author/owner intent. Set to `proposed` on creation; owner/decider approves (`approved`) or retires (`deprecated`). Replaces legacy `status`. |
+| `stage` | Engine-derived | `draft` | No linked tasks (or all linked tasks are `dropped`). |
+| | (never hand-set) | `planned` | Linked tasks exist, but none started (all `open`, `waiting`, `blocked`, `paused`). |
+| | | `in development` | Work started: at least one linked task in progress, delivered, or later, but not all delivered. |
+| | | `ready` | All linked non-dropped tasks delivered, verified, or done (at least one non-dropped task). |
+| | | `verified` | Stage is `ready` + `last-verdict: pass` + no pending revalidation. |
+| | | `failing` | Stage is `ready` + `last-verdict: fail` + no pending revalidation. |
+| | | `partial` | Stage is `ready` + `last-verdict: partial` + no pending revalidation. |
+| | | `untested` | Stage is `ready` + `last-verdict: untested` (or unprobed) + no pending revalidation. |
+| | | `ready (revalidation pending)` | Stage is `ready` + `revalidation: pending` (a task was redelivered, bounced, or reopened). |
+
+### Link Rules (Many-to-Many, Task as Source of Truth)
+
+1. **Source of Truth:** The task owns the link relation:
+   - Emergent tasks: `- use-cases: UC001, UC004` (canonical header order: after `run-id`, before `short`).
+   - Initiative blocks: `**Use cases:** UC001, UC004` (canonical status-line order: immediately after `**Depends on:**`).
+2. **Derived on Use Case:** `- linked-tasks:` in `tasks/use-cases/UC###.md` is derived and synchronized automatically by `sync-index` and link commands. Manual edits are overwritten on sync (and flagged as warnings by `tasks validate`).
+3. **Creation & Linking:**
+   - Create with links: `ai-orch tasks new --use-case UC001,UC004 ...` or `tasks child add <parent> --use-case ...`.
+   - Pre-fill from use case: `ai-orch tasks new --from-use-case UC001 [--steps 1-3]` pre-fills title, `## Goal`, and `## Verification` from the use case.
+   - Mutate links: `ai-orch tasks link <task_id> <UC###>` and `ai-orch tasks unlink <task_id> <UC###>` (preview by default; write with `--apply --expect-plan-hash`).
+4. **Migration:** `ai-orch tasks use-cases adopt-links [--expand-initiatives]` copies legacy written `linked-tasks` onto tasks before flipping the direction.
+
+### Regression & Guard Rules
+
+1. **Validation Readiness Gating:** `ai-orch tasks use-cases validate <UC###>` refuses execution (exit 2) unless the use case is `ready`, `verified`, or `failing`. Use `--force` to bypass for exploratory probing (recorded as forced in the validation log).
+2. **Campaign Scope:** `ai-orch tasks use-cases campaign` only executes probes for ready use cases (`ready`, `verified`, `failing`). Non-ready use cases (`draft`, `planned`, `in development`) are listed in the report under "Not ready (N/M)" with their current progress and left untouched. `untested` probes (missing scripts, timeouts) are excluded from the readiness score denominator.
+3. **Regression Queue:** When a task linked to a `verified` use case is redelivered, bounced, or reopened, the engine marks `revalidation: pending` on the use case and enqueues it in `ai-orch tasks use-cases queue`.
+4. **Safe Closing Guard:** A task cannot transition to `verified` or `done` if any linked approved use case is `failing`, unless that use case passed validation *after* the task was last delivered. The `--owner-approved` flag overrides this guard and is recorded in the task history and audit events.
 
 ## CLI fallback (`ai-orch tasks …`)
 
@@ -705,6 +733,8 @@ ai-orch tasks use-cases create --title T [--actor A] [--approval proposed|approv
 ai-orch tasks use-cases validate <UC###> [--force] [--timeout 60] [--json]
 ai-orch tasks use-cases campaign [--filter-actor A] [--timeout 60] [--json]
 ai-orch tasks use-cases queue [--tasks-dir tasks] [--json]
+ai-orch tasks use-cases adopt-links [--expand-initiatives] [--apply --expect-plan-hash <hash>] [--json]
+ai-orch tasks use-cases migrate-lifecycle [--apply --expect-plan-hash <hash>] [--json]
 ai-orch tasks link <task_id> <UC###[,UC###]> [--apply --expect-plan-hash <hash>] [--json]
 ai-orch tasks unlink <task_id> <UC###[,UC###]> [--apply --expect-plan-hash <hash>] [--json]
 

@@ -26237,7 +26237,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("--verify-by", default=None, help="Durable verification request target (e.g. gcube_atlas, workspace:gcube_atlas, session:...)")
     p_tr.add_argument("--verify-check", default=None, help="What to check during verification")
     p_tr.add_argument("--reason", default=None, help="Bounce findings (B1..Bn), caveat reason, or transition note")
-    p_tr.add_argument("--owner-approved", action="store_true", default=False, help="Flag indicating explicit owner approval for verification")
+    p_tr.add_argument("--owner-approved", action="store_true", default=False, help="Explicit owner approval for verification or overriding failing use cases during task closure")
     p_tr.add_argument("--dry-run", action="store_true", default=False, help="Preview transition path without writing to disk")
     p_tr.add_argument("--expect-task-hash", default=None, help="Refuse to transition if task bundle SHA256 does not match this hash")
     p_tr.add_argument("--force-unblock", action="store_true", help="Force move task out of waiting, withdrawing open questions with --reason")
@@ -26253,7 +26253,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_close.add_argument("--verifier", default=None, help="Independent verifier identifier (e.g. reviewer, owner)")
     p_close.add_argument("--reason", default=None, help="Closure reason or caveat reason")
     p_close.add_argument("--actor", default=None, help="Actor performing the close")
-    p_close.add_argument("--owner-approved", action="store_true", default=False, help="Flag indicating explicit owner approval for verification")
+    p_close.add_argument("--owner-approved", action="store_true", default=False, help="Explicit owner approval for verification or overriding failing use cases during task closure")
     p_close.add_argument("--self-verified", action="store_true", default=False, help="Self-close as 'done with a caveat: self-verified only'")
     p_close.add_argument("--caveat", default=None, help="Caveat description for closing to 'done with a caveat'")
     p_close.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
@@ -26803,33 +26803,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_uc.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     uc_sub = _instrument_subparsers(p_uc.add_subparsers(dest="uc_cmd", required=True))
 
-    uc_list = uc_sub.add_parser("list", help="List use cases")
-    uc_list.add_argument("--tasks-dir", default="tasks")
+    uc_list = uc_sub.add_parser("list", help="List use cases with derived stage, approval, and linked task counts")
+    uc_list.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     uc_list.add_argument(
         "--status",
         choices=["all", "draft", "active", "verified", "failing", "partial", "deprecated", "planned", "in development", "ready", "untested", "ready (revalidation pending)"],
         default="all",
+        help="Filter by legacy status or stage",
     )
     uc_list.add_argument(
         "--stage",
         choices=["all", "draft", "planned", "in development", "ready", "verified", "failing", "partial", "untested", "ready (revalidation pending)"],
         default="all",
+        help="Filter by derived stage",
     )
     uc_list.add_argument(
         "--approval",
         choices=["all", "proposed", "approved", "deprecated"],
         default="all",
+        help="Filter by approval (proposed, approved, deprecated)",
     )
-    uc_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     uc_list.set_defaults(func=cmd_use_cases_list)
 
-    uc_show = uc_sub.add_parser("show", help="Show use case detail")
+    uc_show = uc_sub.add_parser("show", help="Show use case detail including stage, approval, linked tasks, and validation log")
     uc_show.add_argument("uc_id", help="Use case ID (e.g. UC001)")
-    uc_show.add_argument("--tasks-dir", default="tasks")
-    uc_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_show.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    uc_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     uc_show.set_defaults(func=cmd_use_cases_show)
 
-    uc_create = uc_sub.add_parser("create", help="Create or update a use case")
+    uc_create = uc_sub.add_parser("create", help="Create or update a use case (approval defaults to proposed)")
     uc_create.add_argument("--id", default="", help="Use case ID (e.g. UC001); omit to get the next free UC###")
     uc_create.add_argument("--title", required=True, help="Use case title")
     uc_create.add_argument("--actor", default="End-User", help="Primary actor / persona")
@@ -26838,15 +26841,15 @@ def build_parser() -> argparse.ArgumentParser:
     uc_create.add_argument("--priority", choices=list(PRIORITIES), default="P1")
     uc_create.add_argument("--linked-tasks", default="", help="Comma-separated task IDs")
     uc_create.add_argument("--verification-type", choices=list(USE_CASE_VERIFICATION_TYPES), default="automated-probe")
-    uc_create.add_argument("--verification-command", default="")
-    uc_create.add_argument("--description", default="")
-    uc_create.add_argument("--preconditions", default="")
-    uc_create.add_argument("--scenario", default="")
+    uc_create.add_argument("--verification-command", default="", help="Automated probe command to execute")
+    uc_create.add_argument("--description", default="", help="Description & business value")
+    uc_create.add_argument("--preconditions", default="", help="Preconditions text")
+    uc_create.add_argument("--scenario", default="", help="Scenario / interaction steps")
     uc_create.add_argument("--criteria", "--acceptance-criteria", dest="criteria", action="append", default=None, help="Acceptance criteria item(s) (repeatable or semicolon/newline separated)")
     uc_create.add_argument("--lang", choices=["en", "it"], default=None, help="Template language (default: from orchestration.toml or en)")
     uc_create.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
-    uc_create.add_argument("--tasks-dir", default="tasks")
-    uc_create.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_create.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    uc_create.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     uc_create.set_defaults(func=cmd_use_cases_create)
 
     uc_rec = uc_sub.add_parser("record-validation", help="Record an AI validation result on a use case")
@@ -26857,25 +26860,25 @@ def build_parser() -> argparse.ArgumentParser:
     uc_rec.add_argument("--gaps", default="", help="Semicolon-separated list of gaps found")
     uc_rec.add_argument("--actor", default="ai-validator", help="Validating agent name / model")
     uc_rec.add_argument("--force", action="store_true", default=False, help="Record validation as forced")
-    uc_rec.add_argument("--tasks-dir", default="tasks")
-    uc_rec.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_rec.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    uc_rec.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     uc_rec.set_defaults(func=cmd_use_cases_record_validation)
 
     uc_val = uc_sub.add_parser("validate", help="Run automated probe/validation on a ready use case (or pass --force)")
     uc_val.add_argument("uc_id", help="Use case ID (e.g. UC001)")
     uc_val.add_argument("--timeout", type=int, default=60, help="Timeout in seconds")
-    uc_val.add_argument("--actor", default="automated-probe")
+    uc_val.add_argument("--actor", default="automated-probe", help="Validating agent name / model (default: automated-probe)")
     uc_val.add_argument("--force", action="store_true", default=False, help="Force validation even when linked tasks are not all delivered/done (recorded as forced)")
-    uc_val.add_argument("--tasks-dir", default="tasks")
-    uc_val.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_val.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    uc_val.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     uc_val.set_defaults(func=cmd_use_cases_validate)
 
-    uc_camp = uc_sub.add_parser("campaign", help="Run full product validation campaign across all use cases")
+    uc_camp = uc_sub.add_parser("campaign", help="Run validation campaign across ready use cases (skips non-ready; reports them under 'Not ready')")
     uc_camp.add_argument("--filter-actor", default=None, help="Filter by actor")
     uc_camp.add_argument("--timeout", type=int, default=60, help="Timeout in seconds per probe")
-    uc_camp.add_argument("--actor", default="campaign-runner")
-    uc_camp.add_argument("--tasks-dir", default="tasks")
-    uc_camp.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    uc_camp.add_argument("--actor", default="campaign-runner", help="Actor running the campaign (default: campaign-runner)")
+    uc_camp.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    uc_camp.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     uc_camp.set_defaults(func=cmd_use_cases_campaign)
 
     uc_adopt = uc_sub.add_parser(
