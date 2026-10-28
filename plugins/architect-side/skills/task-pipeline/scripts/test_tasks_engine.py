@@ -16556,6 +16556,410 @@ def test_17_7_revalidation_pending_atomicity_rollback_on_failure(
     assert p_uc2.read_bytes() == uc2_bytes_before
 
 
+# ===========================================================================
+# Task 17.4: Tasks born from use cases; optional kind; validate warnings; callers
+# ===========================================================================
+
+
+def _write_17_4_use_case(
+    tasks_dir: pathlib.Path,
+    uc_id: str,
+    *,
+    title: str = "Sample Use Case",
+    approval: str = "approved",
+    scenario: str = "1. Actor opens form.\n2. Actor fills fields.\n3. System saves record.\n4. System shows confirmation.",
+    verification_command: str = "pytest -q tests/test_uc.py",
+    acceptance_criteria: str = "- [ ] Form validates inputs.\n- [ ] Record is persisted.",
+    linked_tasks: str = "-",
+) -> pathlib.Path:
+    uc_dir = tasks_dir / "use-cases"
+    uc_dir.mkdir(parents=True, exist_ok=True)
+    slug = te.slugify(title)
+    p = uc_dir / f"{uc_id}-{slug}.md"
+    p.write_text(
+        f"# {uc_id} - {title}\n\n"
+        f"- id: {uc_id}\n"
+        f"- title: {title}\n"
+        f"- actor: Operator\n"
+        f"- approval: {approval}\n"
+        f"- priority: P1\n"
+        f"- linked-tasks: {linked_tasks}\n"
+        f"- verification-type: automated-probe\n"
+        f"- last-tested: -\n"
+        f"- last-verdict: -\n"
+        f"- short: {te.derive_short_title(title)}\n\n"
+        f"## Description & Business Value\n{title} description.\n\n"
+        f"## Preconditions\n- System is running.\n\n"
+        f"## Scenario / Interaction Steps\n{scenario}\n\n"
+        f"## Automated Verification Command\n```bash\n{verification_command}\n```\n\n"
+        f"## Acceptance Criteria\n{acceptance_criteria}\n\n"
+        f"## AI Validation Log\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_17_4_tasks_new_use_case_link_at_creation_and_sync_index(tmp_path: pathlib.Path) -> None:
+    """Task 17.4 Deliverable 1 & 3:
+    - `tasks new --use-case UC001,UC004` links at creation in canonical header order (`kind` before `use-cases` before `short`).
+    - Defaults `kind` to `feature` when `--use-case` is given and `--kind` is omitted.
+    - Derived `linked-tasks` on the use cases updates on `sync-index`.
+    - Refuses unknown or `deprecated` use cases with a clear error message.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n"
+        "## Next up\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+    uc1_path = _write_17_4_use_case(tasks_dir, "UC001", title="First flow", approval="approved")
+    uc4_path = _write_17_4_use_case(tasks_dir, "UC004", title="Fourth flow", approval="approved")
+    _write_17_4_use_case(tasks_dir, "UC009", title="Deprecated flow", approval="deprecated")
+
+    # 1. Create emergent task with --use-case UC001,UC004 (no --kind -> defaults to feature)
+    res_new = run_cli(
+        "new",
+        "--category", "features",
+        "--title", "Implement flows 1 and 4",
+        "--priority", "P1",
+        "--priority-reason", "Required by UC001 and UC004",
+        "--goal", "Implement both flows.",
+        "--step", "Code flow 1",
+        "--verification", "pytest",
+        "--use-case", "UC001,UC004",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_new.returncode == 0, res_new.stdout + res_new.stderr
+    assert "Warning:" not in res_new.stderr
+    data = json.loads(res_new.stdout)
+    assert data["ok"] is True
+    assert data["id"] == "T001"
+    assert data["kind"] == "feature"
+    assert data["use_cases"] == ["UC001", "UC004"]
+
+    t1_text = (tasks_dir / data["rel_path"]).read_text(encoding="utf-8")
+    assert "- kind: feature\n" in t1_text
+    assert "- use-cases: UC001, UC004\n" in t1_text
+    assert t1_text.index("- handoff:") < t1_text.index("- kind: feature") < t1_text.index("- use-cases: UC001, UC004") < t1_text.index("- short:")
+
+    # Sync index updates derived linked-tasks on UC001 and UC004
+    sync_prev = json.loads(run_cli("sync-index", "--tasks-dir", str(tasks_dir), "--preview", "--json").stdout)
+    res_sync = run_cli(
+        "sync-index", "--tasks-dir", str(tasks_dir),
+        "--apply", "--expect-plan-hash", sync_prev["plan_hash"], "--json",
+    )
+    assert res_sync.returncode == 0, res_sync.stdout + res_sync.stderr
+    assert "- linked-tasks: T001\n" in uc1_path.read_text(encoding="utf-8")
+    assert "- linked-tasks: T001\n" in uc4_path.read_text(encoding="utf-8")
+
+    # Tree validates with 0 errors and 0 warnings
+    val_res = json.loads(run_cli("validate", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    assert val_res["ok"] is True
+    assert val_res["errors"] == []
+    assert val_res["warnings"] == []
+
+    # 2. Refusal for unknown use case
+    res_unk = run_cli(
+        "new",
+        "--category", "features",
+        "--title", "Bad UC task",
+        "--priority-reason", "test",
+        "--goal", "goal",
+        "--use-case", "UC999",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_unk.returncode != 0
+    assert "Unknown use case 'UC999'" in json.loads(res_unk.stdout)["error"]
+
+    # 3. Refusal for deprecated use case
+    res_dep = run_cli(
+        "new",
+        "--category", "features",
+        "--title", "Deprecated UC task",
+        "--priority-reason", "test",
+        "--goal", "goal",
+        "--use-case", "UC009",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_dep.returncode != 0
+    assert "deprecated" in json.loads(res_dep.stdout)["error"].lower()
+
+
+def test_17_4_from_use_case_prefill_and_steps_range_and_initiative_variants(tmp_path: pathlib.Path) -> None:
+    """Task 17.4 Deliverable 2:
+    - `tasks new --from-use-case UC001` pre-fills title (overridable by `--title`), Goal (all scenario steps by default,
+      or `--steps 2-3`), Verification (acceptance criteria + automated verification command), and links UC001.
+    - Initiative task block creation (`tasks child add` and `tasks new --parent`) supports `--use-case` and
+      `--from-use-case [--steps 2-3]`, placing `**Use cases:**` right after `**Depends on:**`.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    init_dir = tasks_dir / "01-core"
+    init_dir.mkdir(parents=True)
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        "# 01 — Core Initiative\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - Base setup\n\n"
+        "- **Status:** `open` · **Short:** Base setup · **Kind:** chore · **Size:** S\n"
+        "- **Goal:** Setup base.\n",
+        encoding="utf-8",
+    )
+    _write_17_4_use_case(
+        tasks_dir,
+        "UC001",
+        title="Operator exports audit bundle",
+        approval="approved",
+        scenario=(
+            "1. Operator selects audit date range.\n"
+            "2. Operator clicks export bundle.\n"
+            "3. System signs bundle with SHA256 manifest.\n"
+            "4. Operator downloads the archive."
+        ),
+        verification_command="pytest -q tests/test_export.py",
+        acceptance_criteria="- [ ] Archive contains manifest.json.\n- [ ] Signature verifies cleanly.",
+    )
+    _write_17_4_use_case(
+        tasks_dir,
+        "UC002",
+        title="Operator verifies signature",
+        approval="approved",
+    )
+
+    # 1. `tasks new --from-use-case UC001` (all steps, default title from UC001)
+    res_full = run_cli(
+        "new",
+        "--category", "features",
+        "--from-use-case", "UC001",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_full.returncode == 0, res_full.stdout + res_full.stderr
+    d_full = json.loads(res_full.stdout)
+    assert d_full["id"] == "T001"
+    assert d_full["kind"] == "feature"
+    assert d_full["use_cases"] == ["UC001"]
+    t1_text = (tasks_dir / d_full["rel_path"]).read_text(encoding="utf-8")
+    assert "# T001 Operator exports audit bundle\n" in t1_text
+    assert "- title: Operator exports audit bundle\n" in t1_text
+    assert "- kind: feature\n" in t1_text
+    assert "- use-cases: UC001\n" in t1_text
+    assert "1. Operator selects audit date range." in t1_text
+    assert "4. Operator downloads the archive." in t1_text
+    assert "- Archive contains manifest.json." in t1_text
+    assert "- Signature verifies cleanly." in t1_text
+    assert "pytest -q tests/test_export.py" in t1_text
+
+    # 2. `tasks new --from-use-case UC001 --steps 2-3 --title "Custom export step"`
+    res_steps = run_cli(
+        "new",
+        "--category", "features",
+        "--from-use-case", "UC001",
+        "--steps", "2-3",
+        "--title", "Custom export step",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_steps.returncode == 0, res_steps.stdout + res_steps.stderr
+    d_steps = json.loads(res_steps.stdout)
+    t2_text = (tasks_dir / d_steps["rel_path"]).read_text(encoding="utf-8")
+    assert "# T002 Custom export step\n" in t2_text
+    goal_section = t2_text.split("## Goal")[1].split("## Steps")[0]
+    assert "2. Operator clicks export bundle." in goal_section
+    assert "3. System signs bundle with SHA256 manifest." in goal_section
+    assert "1. Operator selects audit date range." not in goal_section
+    assert "4. Operator downloads the archive." not in goal_section
+
+    # 3. Initiative block variant via `tasks child add 01 --from-use-case UC001 --steps 2-3 --use-case UC002`
+    res_cadd_dry = run_cli(
+        "child", "add", "01",
+        "--from-use-case", "UC001",
+        "--steps", "2-3",
+        "--use-case", "UC002",
+        "--dry-run",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_cadd_dry.returncode == 0, res_cadd_dry.stdout + res_cadd_dry.stderr
+    cadd_plan_hash = json.loads(res_cadd_dry.stdout)["plan_hash"]
+
+    res_cadd_app = run_cli(
+        "child", "add", "01",
+        "--from-use-case", "UC001",
+        "--steps", "2-3",
+        "--use-case", "UC002",
+        "--expect-plan-hash", cadd_plan_hash,
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_cadd_app.returncode == 0, res_cadd_app.stdout + res_cadd_app.stderr
+    cadd_data = json.loads(res_cadd_app.stdout)
+    assert cadd_data["allocated_id"] == "01.2"
+    assert cadd_data["use_cases"] == ["UC001", "UC002"]
+    assert cadd_data["kind"] == "feature"
+
+    plan_text = plan_file.read_text(encoding="utf-8")
+    assert "### 01.2 - Operator exports audit bundle" in plan_text
+    assert "**Depends on:** - · **Use cases:** UC001, UC002" in plan_text
+    assert "**Kind:** feature" in plan_text
+    assert "2. Operator clicks export bundle.; 3. System signs bundle with SHA256 manifest." in plan_text
+    assert "- **Verification:** Archive contains manifest.json.; Signature verifies cleanly.; Automated verification command: `pytest -q tests/test_export.py`" in plan_text
+
+    # 4. Initiative block variant via `tasks new --parent 01 --from-use-case UC002`
+    res_pnew = run_cli(
+        "new",
+        "--parent", "01",
+        "--from-use-case", "UC002",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_pnew.returncode == 0, res_pnew.stdout + res_pnew.stderr
+    pnew_data = json.loads(res_pnew.stdout)
+    assert pnew_data["id"] == "01.3"
+    assert pnew_data["use_cases"] == ["UC002"]
+    assert "### 01.3 - Operator verifies signature" in plan_file.read_text(encoding="utf-8")
+
+    # Tree validates with zero errors
+    val_res = json.loads(run_cli("validate", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    assert val_res["ok"] is True
+    assert val_res["errors"] == []
+
+
+def test_17_4_optional_kind_warning_and_validate_warnings_and_callers(tmp_path: pathlib.Path) -> None:
+    """Task 17.4 Deliverables 3, 4, 5:
+    - Without use case and without `--kind`: creates task with no error and prints warning on stderr.
+    - `validate` warnings (never errors):
+      * `feature`/`fix` task without use cases;
+      * `approved` use case with no linked task;
+      * task linked to unknown or `deprecated` use case.
+    - Callers without `kind` (e.g. `tasks_new_from_note` programmatic call as used by broker `tasks.new`,
+      `answer_question` follow-up creation, and `orchestration_runs.py` triage acceptance) keep working.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "features").mkdir(parents=True)
+    (tasks_dir / "server-and-bindings").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # 1. CLI `tasks new` without --use-case and without --kind succeeds and warns on stderr
+    res_no_kind = run_cli(
+        "new",
+        "--category", "features",
+        "--title", "Task without kind",
+        "--priority-reason", "Testing optional kind",
+        "--goal", "Verify warning on stderr.",
+        "--step", "Do step",
+        "--verification", "pytest",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_no_kind.returncode == 0
+    assert "Warning: --kind not specified" in res_no_kind.stderr
+    t1_data = json.loads(res_no_kind.stdout)
+    assert t1_data["ok"] is True
+    t1_text = (tasks_dir / t1_data["rel_path"]).read_text(encoding="utf-8")
+    assert "\n- kind:" not in t1_text
+
+    # 2. Programmatic caller (`tasks_new_from_note` without `kind`, as called by broker `tasks.new`) works cleanly
+    ok_b, res_b = te.tasks_new_from_note(
+        tasks_dir=tasks_dir,
+        from_note=None,
+        category="features",
+        title="Broker created task without kind",
+        priority="P2",
+        priority_reason="Broker call",
+        goal="Broker goal.",
+        steps=["Step A"],
+        verifications=["pytest"],
+    )
+    assert ok_b is True
+    assert res_b["id"] == "T002"
+
+    # 3. `tasks new --kind feature` without use cases -> validate warns (never errors) about feature task without use cases
+    res_feat_no_uc = run_cli(
+        "new",
+        "--category", "features",
+        "--title", "Feature without UC",
+        "--kind", "feature",
+        "--priority-reason", "Testing validate warning",
+        "--goal", "Feature goal.",
+        "--step", "Step A",
+        "--verification", "pytest",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_feat_no_uc.returncode == 0
+    assert "Warning:" not in res_feat_no_uc.stderr
+
+    res_fix_no_uc = run_cli(
+        "new",
+        "--category", "features",
+        "--title", "Fix without UC",
+        "--kind", "fix",
+        "--priority-reason", "Testing fix warning",
+        "--goal", "Fix goal.",
+        "--step", "Step B",
+        "--verification", "pytest",
+        "--tasks-dir", str(tasks_dir),
+        "--json",
+    )
+    assert res_fix_no_uc.returncode == 0
+
+    # Approved use case with no linked task + deprecated use case linked manually
+    _write_17_4_use_case(tasks_dir, "UC010", title="Approved unlinked UC", approval="approved")
+    _write_17_4_use_case(tasks_dir, "UC011", title="Deprecated UC", approval="deprecated")
+
+    # Manually link T002 to unknown UC999 and deprecated UC011
+    t2_path = tasks_dir / res_b["rel_path"]
+    t2_path.write_text(
+        te._rewrite_emergent_use_cases_in_text(t2_path.read_text(encoding="utf-8"), ["UC011", "UC999"]),
+        encoding="utf-8",
+    )
+
+    val_res = json.loads(run_cli("validate", "--tasks-dir", str(tasks_dir), "--json").stdout)
+    assert val_res["ok"] is True
+    assert val_res["errors"] == []
+    warnings = val_res["warnings"]
+    assert any("feature task T003 has no linked use cases" in w for w in warnings)
+    assert any("fix task T004 has no linked use cases" in w for w in warnings)
+    assert any("approved use case UC010 has no linked task" in w for w in warnings)
+    assert any("task T002 references unknown use case 'UC999'" in w for w in warnings)
+    assert any("task T002 references deprecated use case 'UC011'" in w for w in warnings)
+
+    # 4. Internal follow-up creation in `answer_question` passes `kind`
+    ok_q, q_res = te.ask_question(
+        tasks_dir=tasks_dir,
+        question="Which option?",
+        context="Context.",
+        options=[("A", "Opt A", "Conseq A"), ("B", "Opt B", "Conseq B")],
+    )
+    assert ok_q is True
+    t3_path = tasks_dir / json.loads(res_feat_no_uc.stdout)["rel_path"]
+    t3_path.write_text(
+        t3_path.read_text(encoding="utf-8").replace("- short:", f"- conditions: {q_res['id']}\n- short:"),
+        encoding="utf-8",
+    )
+    ok_ans, ans_res = te.answer_question(
+        tasks_dir=tasks_dir,
+        question_id=q_res["id"],
+        choice="A",
+        changes_result=True,
+    )
+    assert ok_ans is True
+    assert len(ans_res["follow_up_tasks"]) == 1
+    fu_id = ans_res["follow_up_tasks"][0]
+    fu_files = list(tasks_dir.rglob(f"{fu_id}-*.md"))
+    assert len(fu_files) == 1
+    assert "- kind: feature\n" in fu_files[0].read_text(encoding="utf-8")
+
+
+
 
 
 
