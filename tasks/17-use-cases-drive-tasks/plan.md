@@ -15,11 +15,6 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 - **Status:** `in progress` (2026-10-28; operator) · **Short:** Task da use case · **Size:** M · **Depends on:** 17.2
 - **Goal:** spec §2: `tasks new --use-case` / `--from-use-case` (precompilazione), anche per i task di iniziativa; `--kind` facoltativo con avviso; avvisi di validate; aggiornati i chiamanti (backend UI, broker `tasks.new`, `orchestration_runs.py`, follow-up interni) senza rompere chi non passa i nuovi campi.
 
-### 17.6 - Validazione solo sugli use case pronti
-
-- **Status:** `delivered` (2026-10-28, kilo, commit `e538a28`: rifiuto exit 2 in `use-cases validate` se non pronto salvo `--force` registrato e con evento `use_case.validated`, campagne limitate agli use case pronti con sezione "Not ready (N/M)" ed esclusione di `untested` dal denominatore di prontezza) · **Short:** Validazione solo se pronti · **Size:** M · **Depends on:** 17.5, T069
-- **Goal:** spec §5: `use-cases validate` rifiuta se non pronto (salvo `--force` registrato); campagne solo sugli use case in ambito, gli altri "Not ready (N/M)"; sostituisce l'ambito di T069 tenendo la regola `untested`; il punteggio di prontezza esclude gli `untested` dal denominatore o li mostra a parte (osservazione di ai-coding-tools-ea nella validazione di T069: 75% = 24/32 con 7 untested).
-
 ### 17.7 - Regressione: rivalidazione e chiusura sicura dei task
 
 - **Status:** `open` · **Short:** Regressione use case · **Size:** M · **Depends on:** 17.5
@@ -84,3 +79,8 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 - **Status:** `done` (2026-10-28, kilo, commit `2b07859`: campo `approval`, migrazione atomica `use-cases migrate-lifecycle` con backfill di `last-verdict` e snapshot in `_reviews/`, calcolo puro di `stage` e visualizzazione in `list`/`show`/`00-INDEX.md`; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Stadio degli use case · **Size:** M · **Depends on:** 17.1
 - **Goal:** spec §3 secondo la risposta a Q011: campo `approval` con migrazione da `status` (verdetto in `last-verdict`, nessun log perso), `stage` come funzione pura; mostrato da show/list/indice.
+
+### 17.6 - Validazione solo sugli use case pronti
+
+- **Status:** `done` (2026-10-28, kilo, commit `e538a28`: rifiuto exit 2 in `use-cases validate` se non pronto salvo `--force` registrato e con evento `use_case.validated`, campagne limitate agli use case pronti con sezione "Not ready (N/M)" ed esclusione di `untested` dal denominatore di prontezza; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Validazione solo se pronti · **Size:** M · **Depends on:** 17.5, T069
+- **Goal:** spec §5: `use-cases validate` rifiuta se non pronto (salvo `--force` registrato); campagne solo sugli use case in ambito, gli altri "Not ready (N/M)"; sostituisce l'ambito di T069 tenendo la regola `untested`; il punteggio di prontezza esclude gli `untested` dal denominatore o li mostra a parte (osservazione di ai-coding-tools-ea nella validazione di T069: 75% = 24/32 con 7 untested).
