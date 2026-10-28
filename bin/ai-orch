@@ -353,8 +353,8 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "description": "List all labels currently in use with their occurrence counts.",
                 },
                 "use-cases": {
-                    "usage": "ai-orch tasks use-cases <list|show|search|create|record-validation|validate|campaign|queue|adopt-links|migrate-lifecycle> [options] [--json]",
-                    "description": "Manage use cases, search, readiness-gated AI validations (--force override), campaigns, revalidation queue, and lifecycle/link migrations.",
+                    "usage": "ai-orch tasks use-cases <list|show|search|create|approve|deprecate|propose|record-validation|validate|campaign|queue|adopt-links|migrate-lifecycle> [options] [--json]",
+                    "description": "Manage use cases, search, approval transitions (approve/deprecate/propose), readiness-gated AI validations (--force override), campaigns, revalidation queue, and lifecycle/link migrations.",
                     "subcommands": {
                         "list": {
                             "usage": "ai-orch tasks use-cases list [--stage <stage>] [--approval <approval>] [--status <status>] [--tasks-dir <dir>] [--json]",
@@ -367,6 +367,18 @@ CLI_DESCRIPTION: dict[str, Any] = {
                         "create": {
                             "usage": "ai-orch tasks use-cases create --title <title> [--actor <actor>] [--approval <proposed|approved|deprecated>] [--priority <P0-P3>] [--criteria <item>...] [--tasks-dir <dir>] [--json]",
                             "description": "Create or update a use case (approval defaults to proposed).",
+                        },
+                        "approve": {
+                            "usage": "ai-orch tasks use-cases approve [UC###[,UC###...]] [--stage <stage>] [--approval <current>] [--all] [--reason <text>] [--by <name>] [--apply --expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
+                            "description": "Approve selected use cases (sets approval: approved, approved-by, approved date; preview by default, snapshot under tasks/_reviews/approval-<timestamp>/).",
+                        },
+                        "deprecate": {
+                            "usage": "ai-orch tasks use-cases deprecate [UC###[,UC###...]] [--stage <stage>] [--approval <current>] [--all] [--reason <text>] [--by <name>] [--apply --expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
+                            "description": "Deprecate selected use cases (sets approval: deprecated and removes approved-by/approved; preview by default, snapshot under tasks/_reviews/approval-<timestamp>/).",
+                        },
+                        "propose": {
+                            "usage": "ai-orch tasks use-cases propose [UC###[,UC###...]] [--stage <stage>] [--approval <current>] [--all] [--reason <text>] [--by <name>] [--apply --expect-plan-hash <hash>] [--tasks-dir <dir>] [--json]",
+                            "description": "Re-propose selected use cases (sets approval: proposed and removes approved-by/approved; preview by default, snapshot under tasks/_reviews/approval-<timestamp>/).",
                         },
                         "record-validation": {
                             "usage": "ai-orch tasks use-cases record-validation <UC###> --verdict <pass|fail|partial|untested> --summary <text> [--evidence <snippet>] [--gaps <gaps>] [--actor <name>] [--force] [--tasks-dir <dir>] [--json]",

@@ -131,13 +131,17 @@ Ensure the command exits `0` with no errors. Common warnings to check:
 Inspect the migrated use cases:
 
 ```bash
-ai-orch tasks use-cases list
+ai-orch tasks use-cases list --approval proposed
 ```
 
-Use cases that were previously in `draft` will now have `approval: proposed`. The project owner or designated decider reviews these and approves them:
+Use cases that were previously in `draft` will now have `approval: proposed`. The project owner or designated decider can preview and approve (or deprecate / re-propose) them individually or in bulk by stage/approval filter with `ai-orch tasks use-cases approve|deprecate|propose`, which performs a targeted header edit (`approval`, `approved-by`, `approved`), saves a rollback snapshot under `tasks/_reviews/approval-<timestamp>/`, and emits `use_case.approval_changed` while leaving `stage` and the validation log untouched:
 
 ```bash
-# Edit approval: proposed -> approved directly or via tooling
+# Preview approving all untested proposed use cases
+ai-orch tasks use-cases approve --stage untested --approval proposed --by owner
+
+# Apply with the previewed plan hash (or pass explicit IDs: UC001,UC002)
+ai-orch tasks use-cases approve --stage untested --approval proposed --by owner --apply --expect-plan-hash <hash>
 ```
 
 Once approved, a use case whose linked tasks are complete enters `stage: ready` and is eligible for automated AI validation and campaigns.

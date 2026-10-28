@@ -703,6 +703,8 @@ A use case separates persisted author/owner intent (`approval`) from live execut
 | | | `untested` | Stage is `ready` + `last-verdict: untested` (or unprobed) + no pending revalidation. |
 | | | `ready (revalidation pending)` | Stage is `ready` + `revalidation: pending` (a task was redelivered, bounced, or reopened). |
 
+Use `ai-orch tasks use-cases approve|deprecate|propose [UC###[,UC###...]] [--stage <stage>] [--approval <current>] [--all] [--reason TEXT] [--by NAME]` (preview by default; `--apply --expect-plan-hash <hash>` writes) to transition `approval` individually or in bulk. Approving performs a targeted header edit setting `approval: approved`, `approved-by: <by>`, and `approved: <YYYY-MM-DD>` right after `approval` (removed on `deprecate`/`propose`), snapshots touched files under `tasks/_reviews/approval-<timestamp>/`, and emits `use_case.approval_changed` without modifying `stage` or the validation log.
+
 ### Link Rules (Many-to-Many, Task as Source of Truth)
 
 1. **Source of Truth:** The task owns the link relation:
@@ -727,9 +729,11 @@ A use case separates persisted author/owner intent (`approval`) from live execut
 When a session has no broker MCP tools, use the version-free launcher (`~/.local/bin/ai-orch`, or `ai-orch` on `PATH`; see "Reaching the task engine" above):
 
 ```bash
-# Search, create, link, or validate use cases
+# Search, create, approve, link, or validate use cases
+ai-orch tasks use-cases list [--stage <stage>] [--approval proposed|approved|deprecated] [--tasks-dir tasks] [--json]
 ai-orch tasks use-cases search <text> [--actor A] [--tasks-dir tasks] [--json]
 ai-orch tasks use-cases create --title T [--actor A] [--approval proposed|approved|deprecated] [--json]
+ai-orch tasks use-cases approve|deprecate|propose [UC###[,UC###...]] [--stage <stage>] [--approval <current>] [--all] [--reason TEXT] [--by NAME] [--apply --expect-plan-hash <hash>] [--json]
 ai-orch tasks use-cases validate <UC###> [--force] [--timeout 60] [--json]
 ai-orch tasks use-cases campaign [--filter-actor A] [--timeout 60] [--json]
 ai-orch tasks use-cases queue [--tasks-dir tasks] [--json]

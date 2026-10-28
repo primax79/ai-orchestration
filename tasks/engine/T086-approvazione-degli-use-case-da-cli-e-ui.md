@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: 71 use case (ai-orchestration, ai-swissknife) sono proposed dopo la migrazione e oggi si approvano solo editando i file
 - next-up: no
-- state: open
+- state: in progress
 - executor: kilo
 - depends-on: 17.11
 - decider: -
@@ -22,11 +22,11 @@ ai-orch tasks use-cases approve|deprecate|propose UC###[,UC###...] (anteprima, -
 
 ## Steps
 
-- [ ] Motore: comandi approve/deprecate/propose con anteprima e applicazione, filtri, evento, test
+- [x] Motore: comandi approve/deprecate/propose con anteprima e applicazione, filtri, evento, test
 - [ ] Backend UI: endpoint preview/apply
 - [ ] UI: pulsanti singoli e in blocco con conferma
 - [ ] Estensione: handler del bridge
-- [ ] docs/use-case-migration.md passo 5 e SKILL.md: citare il nuovo comando di approvazione
+- [x] docs/use-case-migration.md passo 5 e SKILL.md: citare il nuovo comando di approvazione
 
 ## Verification
 
