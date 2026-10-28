@@ -356,6 +356,22 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch tasks use-cases <list|show|search|create|record-validation|validate|campaign|queue|adopt-links|migrate-lifecycle> [options] [--json]",
                     "description": "Manage use cases, search, readiness-gated AI validations (--force override), campaigns, revalidation queue, and lifecycle/link migrations.",
                     "subcommands": {
+                        "list": {
+                            "usage": "ai-orch tasks use-cases list [--stage <stage>] [--approval <approval>] [--status <status>] [--tasks-dir <dir>] [--json]",
+                            "description": "List use cases with derived stage, approval, and linked task counts.",
+                        },
+                        "show": {
+                            "usage": "ai-orch tasks use-cases show <UC###> [--tasks-dir <dir>] [--json]",
+                            "description": "Show use case detail including stage, approval, linked tasks, and validation log.",
+                        },
+                        "create": {
+                            "usage": "ai-orch tasks use-cases create --title <title> [--actor <actor>] [--approval <proposed|approved|deprecated>] [--priority <P0-P3>] [--criteria <item>...] [--tasks-dir <dir>] [--json]",
+                            "description": "Create or update a use case (approval defaults to proposed).",
+                        },
+                        "record-validation": {
+                            "usage": "ai-orch tasks use-cases record-validation <UC###> --verdict <pass|fail|partial|untested> --summary <text> [--evidence <snippet>] [--gaps <gaps>] [--actor <name>] [--force] [--tasks-dir <dir>] [--json]",
+                            "description": "Record an AI validation result on a use case, updating last-tested, last-verdict, and validation log.",
+                        },
                         "search": {
                             "usage": "ai-orch tasks use-cases search <text> [--actor <actor>] [--tasks-dir <dir>] [--json]",
                             "description": "Search and rank use cases by text (title/description/scenario/criteria), actor, cited specs (Source: tasks/specs/...), and linked tasks' paths/sources (read-only).",

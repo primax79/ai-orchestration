@@ -17,7 +17,7 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 ### 17.11 - Documentazione e spec superata
 
-- **Status:** `open` · **Short:** Documentazione use case · **Size:** S · **Depends on:** 17.5, 17.7
+- **Status:** `delivered` (2026-10-28, kilo: aggiunta sezione "Superseded fields" nella spec, help allineato in tasks_engine e bin/ai-orch, documentate regole use case in task-pipeline e redatta guida di migrazione in docs/use-case-migration.md) · **Short:** Documentazione use case · **Size:** S · **Depends on:** 17.5, 17.7
 - **Goal:** nota "Superseded fields" in `use-case-management-and-ai-validation.md`, help dei comandi, regole di task-pipeline, guida di migrazione.
 
 ### 17.12 - Migrazione ai-orchestration
