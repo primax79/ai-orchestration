@@ -210,13 +210,13 @@ TERMINAL_STATES: set[str] = {"done", "done with a caveat", "dropped", "moved"}
 # Legal state transitions (canonical base state -> allowed target canonical base states)
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "open": {"in progress", "waiting", "blocked", "paused", "dropped"},
-    "in progress": {"waiting", "blocked", "paused", "delivered", "dropped"},
+    "in progress": {"waiting", "blocked", "paused", "delivered", "open", "dropped"},
     "paused": {"in progress", "open", "waiting", "blocked", "dropped"},
     "waiting": {"in progress", "blocked", "paused", "open", "dropped"},
     "blocked": {"in progress", "waiting", "paused", "open", "dropped"},
-    "delivered": {"verified", "bounced", "paused", "done with a caveat", "dropped"},
-    "bounced": {"in progress", "waiting", "blocked", "paused", "dropped"},
-    "verified": {"done", "done with a caveat", "bounced", "dropped"},
+    "delivered": {"verified", "bounced", "paused", "in progress", "delivered", "open", "done with a caveat", "dropped"},
+    "bounced": {"in progress", "waiting", "blocked", "paused", "open", "delivered", "dropped"},
+    "verified": {"done", "done with a caveat", "bounced", "delivered", "in progress", "open", "dropped"},
     "done": set(),
     "done with a caveat": set(),
     "dropped": set(),
@@ -2903,8 +2903,9 @@ def move_block_to_closed(
     If new_status is given, the status line is updated first.
     Appends the block to ## Closed (creating ## Closed at end of file if not present).
     """
+    rewritten_block: str | None = None
     if new_status is not None:
-        rewrite_block_in_file(
+        rewritten_block, _ = rewrite_block_in_file(
             file_path,
             task_id,
             new_status=new_status,
@@ -2914,6 +2915,7 @@ def move_block_to_closed(
             clear_waiting_on=clear_waiting_on,
             new_verify_by=new_verify_by,
             clear_verify_by=clear_verify_by,
+            dry_run=True,
         )
 
     text = file_path.read_text(encoding="utf-8")
@@ -2941,6 +2943,10 @@ def move_block_to_closed(
                 end_pos = sum(len(sl2.text) + 1 for sl2 in scanned_lines[:idx])
                 break
 
+    if rewritten_block is not None:
+        text = text[:start_pos] + rewritten_block + text[end_pos:]
+        end_pos = start_pos + len(rewritten_block)
+
     block_text = text[start_pos:end_pos]
     if expect_task_hash and new_status is None:
         curr_h = hashlib.sha256(block_text.encode("utf-8")).hexdigest()
@@ -2949,6 +2955,8 @@ def move_block_to_closed(
     m_closed = re.search(r"^##\s+Closed\b.*$", text, re.MULTILINE)
     if m_closed and start_pos > m_closed.start():
         # Already under ## Closed
+        if rewritten_block is not None:
+            _atomic_write_text(file_path, text, encoding="utf-8")
         return block_text, hashlib.sha256(block_text.encode("utf-8")).hexdigest()
 
     before = text[:start_pos].rstrip("\n")
@@ -2985,13 +2993,20 @@ def move_block_to_open(
     new_status: str = "open",
     status_note: str | None = None,
     expect_task_hash: str | None = None,
+    new_verify_by: str | None = None,
 ) -> tuple[str, str]:
     """Move a block ### task_id out of ## Closed back into the open section of file_path.
     Inserts in sorted ID order among open sibling blocks.
     Removes ## Closed if no blocks remain in it.
     """
     new_block_text, new_h = rewrite_block_in_file(
-        file_path, task_id, new_status=new_status, status_note=status_note, expect_task_hash=expect_task_hash
+        file_path,
+        task_id,
+        new_status=new_status,
+        status_note=status_note,
+        expect_task_hash=expect_task_hash,
+        new_verify_by=new_verify_by,
+        dry_run=True,
     )
     text = file_path.read_text(encoding="utf-8")
     heading_re = re.compile(
@@ -3018,8 +3033,12 @@ def move_block_to_open(
                 end_pos = sum(len(sl2.text) + 1 for sl2 in scanned_lines[:idx])
                 break
 
+    text = text[:start_pos] + new_block_text + text[end_pos:]
+    end_pos = start_pos + len(new_block_text)
+
     m_closed = re.search(r"^##\s+Closed\b.*$", text, re.MULTILINE)
     if not m_closed or start_pos < m_closed.start():
+        _atomic_write_text(file_path, text, encoding="utf-8")
         return new_block_text, new_h
 
     before = text[:start_pos].rstrip("\n")
@@ -4877,10 +4896,36 @@ def reopen_node(
         node.state = old_st
         node.canonical_state = old_cst
 
+        reval_items = _plan_revalidation_for_task_transition(
+            tasks_dir,
+            node_id,
+            old_st,
+            target_state,
+            tree=tree,
+            is_reopen=True,
+            internal_walk=False,
+        )
+        for ritem in reval_items:
+            if ritem["changed"]:
+                r_rel = ritem["rel_path"]
+                if not any(op["path"] == r_rel for op in operations):
+                    operations.append({
+                        "action": "modify",
+                        "path": r_rel,
+                        "before_hash": ritem["before_hash"],
+                    })
+
         plan, plan_hash = compute_operation_plan(operations)
         if dry_run:
-            return {"ok": True, "dry_run": True, "plan": plan, "plan_hash": plan_hash, "new_state": target_state}
-        if not expect_plan_hash and not auto_apply:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "plan": plan,
+                "plan_hash": plan_hash,
+                "new_state": target_state,
+                "revalidation_requested": [item["id"] for item in reval_items],
+            }
+        if not expect_plan_hash and not auto_apply and not reval_items:
             return {
                 "ok": False,
                 "error": "Applying reopen requires --expect-plan-hash <hash>. Run with --dry-run to obtain the plan hash.",
@@ -4901,153 +4946,218 @@ def reopen_node(
             reason_clean = "reopened"
             status_note = f"reopened {today}"
 
-        # 1. Restore shipped initiative if applicable
-        if shipped_init:
-            init_dir = pathlib.Path(shipped_init.file_path).parent
-            init_name = init_dir.name
-            restored_dir = tasks_dir / init_name
-            res = subprocess.run(
-                ["git", "mv", str(init_dir), str(restored_dir)],
-                cwd=str(tasks_dir),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if res.returncode != 0:
-                shutil.move(str(init_dir), str(restored_dir))
+        orig_file_path = file_path
+        orig_progress_path = file_path.parent / "PROGRESS.md"
+        index_p = tasks_dir / "00-INDEX.md"
+        tx_backups: list[tuple[pathlib.Path, bytes | None]] = [
+            (orig_file_path, orig_file_path.read_bytes() if orig_file_path.exists() else None),
+        ]
+        if orig_progress_path.exists():
+            tx_backups.append((orig_progress_path, orig_progress_path.read_bytes()))
+        if index_p.exists():
+            tx_backups.append((index_p, index_p.read_bytes()))
+        for ritem in reval_items:
+            tx_backups.append((ritem["file_path"], ritem["old_bytes"]))
 
-            summary_f = restored_dir / "summary.md"
-            if summary_f.is_file():
-                s_text = summary_f.read_text(encoding="utf-8")
-                s_text = s_text.rstrip() + f"\n- **Reopened:** {today} ({reason_clean})\n"
-                _atomic_write_text(summary_f, s_text, encoding="utf-8")
-
-            for md in restored_dir.rglob("*.md"):
-                if md == summary_f:
-                    continue
-                old_t = md.read_text(encoding="utf-8")
-                new_t = adjust_markdown_link_depth(old_t, depth_delta=-1)
-                if new_t != old_t:
-                    _atomic_write_text(md, new_t, encoding="utf-8")
-
-            index_p = tasks_dir / "00-INDEX.md"
-            if index_p.is_file():
-                idx_t = index_p.read_text(encoding="utf-8")
-                new_idx_t = rewrite_links_in_text(idx_t, f"done/{init_name}", init_name)
-                if new_idx_t != idx_t:
-                    _atomic_write_text(index_p, new_idx_t, encoding="utf-8")
-
-            for md in tasks_dir.rglob("*.md"):
-                if md.is_relative_to(restored_dir) or md == index_p:
-                    continue
-                m_t = md.read_text(encoding="utf-8")
-                new_m_t = rewrite_links_in_text(m_t, f"done/{init_name}", init_name)
-                if new_m_t != m_t:
-                    _atomic_write_text(md, new_m_t, encoding="utf-8")
-
-            rel_in_init = file_path.relative_to(init_dir)
-            file_path = restored_dir / rel_in_init
-
-        # 2. Restore closed folder child if applicable
-        if closed_folder:
-            parent_node = tree[closed_folder.parent]
-            p_dir = pathlib.Path(parent_node.file_path).parent
+        moved_pairs: list[tuple[pathlib.Path, pathlib.Path]] = []
+        try:
+            # 1. Restore shipped initiative if applicable
             if shipped_init:
-                p_dir = tasks_dir / init_name
-            new_readme = move_folder_child_to_open(p_dir, closed_folder.id, tasks_dir)
-            fld_orig_parent = pathlib.Path(closed_folder.file_path).parent
-            if str(file_path).startswith(str(fld_orig_parent)):
-                file_path = new_readme.parent / file_path.name
-
-        # 3. Reopen the leaf block or task
-        if node.block_text is not None:
-            if node.in_closed_section:
-                move_block_to_open(file_path, node_id, new_status=target_state, status_note=status_note)
-            else:
-                rewrite_block_in_file(file_path, node_id, new_status=target_state, status_note=status_note)
-            if verify_by:
-                rewrite_block_in_file(file_path, node_id, new_verify_by=verify_by)
-        else:
-            if node.in_done:
-                emergent = discover_emergent_tasks(tasks_dir)
-                target = next((t for t in emergent if t["id"] == node_id), None)
-                cat = (target.get("category") or "features") if target else "features"
-                target_dir = tasks_dir / cat
-                target_dir.mkdir(parents=True, exist_ok=True)
-                is_folder = (
-                    node.is_folder
-                    or (target.get("is_folder") if target else False)
-                    or file_path.name == "README.md"
+                init_dir = pathlib.Path(shipped_init.file_path).parent
+                init_name = init_dir.name
+                restored_dir = tasks_dir / init_name
+                res = subprocess.run(
+                    ["git", "mv", str(init_dir), str(restored_dir)],
+                    cwd=str(tasks_dir),
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
-                if is_folder:
-                    src_folder = file_path.parent
-                    dest_folder = target_dir / src_folder.name
-                    res = subprocess.run(
-                        ["git", "mv", str(src_folder), str(dest_folder)],
-                        cwd=str(tasks_dir),
-                        capture_output=True,
-                        text=True,
-                        check=False,
+                if res.returncode != 0:
+                    shutil.move(str(init_dir), str(restored_dir))
+                moved_pairs.append((init_dir, restored_dir))
+
+                summary_f = restored_dir / "summary.md"
+                if summary_f.is_file():
+                    s_text = summary_f.read_text(encoding="utf-8")
+                    s_text = s_text.rstrip() + f"\n- **Reopened:** {today} ({reason_clean})\n"
+                    _atomic_write_text(summary_f, s_text, encoding="utf-8")
+
+                for md in restored_dir.rglob("*.md"):
+                    if md == summary_f:
+                        continue
+                    old_t = md.read_text(encoding="utf-8")
+                    new_t = adjust_markdown_link_depth(old_t, depth_delta=-1)
+                    if new_t != old_t:
+                        _atomic_write_text(md, new_t, encoding="utf-8")
+
+                if index_p.is_file():
+                    idx_t = index_p.read_text(encoding="utf-8")
+                    new_idx_t = rewrite_links_in_text(idx_t, f"done/{init_name}", init_name)
+                    if new_idx_t != idx_t:
+                        _atomic_write_text(index_p, new_idx_t, encoding="utf-8")
+
+                for md in tasks_dir.rglob("*.md"):
+                    if md.is_relative_to(restored_dir) or md == index_p:
+                        continue
+                    m_t = md.read_text(encoding="utf-8")
+                    new_m_t = rewrite_links_in_text(m_t, f"done/{init_name}", init_name)
+                    if new_m_t != m_t:
+                        _atomic_write_text(md, new_m_t, encoding="utf-8")
+
+                rel_in_init = file_path.relative_to(init_dir)
+                file_path = restored_dir / rel_in_init
+
+            # 2. Restore closed folder child if applicable
+            if closed_folder:
+                parent_node = tree[closed_folder.parent]
+                p_dir = pathlib.Path(parent_node.file_path).parent
+                if shipped_init:
+                    p_dir = tasks_dir / init_name
+                new_readme = move_folder_child_to_open(p_dir, closed_folder.id, tasks_dir)
+                fld_orig_parent = pathlib.Path(closed_folder.file_path).parent
+                if str(file_path).startswith(str(fld_orig_parent)):
+                    file_path = new_readme.parent / file_path.name
+
+            # 3. Reopen the leaf block or task
+            pending_index_rename: tuple[str, str] | None = None
+            if node.block_text is not None:
+                if node.in_closed_section:
+                    move_block_to_open(
+                        file_path,
+                        node_id,
+                        new_status=target_state,
+                        status_note=status_note,
+                        new_verify_by=verify_by,
                     )
-                    if res.returncode != 0:
-                        shutil.move(str(src_folder), str(dest_folder))
-                    dest_file = dest_folder / "README.md"
                 else:
-                    dest_file = target_dir / file_path.name
-                    res = subprocess.run(
-                        ["git", "mv", str(file_path), str(dest_file)],
-                        cwd=str(tasks_dir),
-                        capture_output=True,
-                        text=True,
-                        check=False,
+                    rewrite_block_in_file(
+                        file_path,
+                        node_id,
+                        new_status=target_state,
+                        status_note=status_note,
+                        new_verify_by=verify_by,
                     )
-                    if res.returncode != 0:
-                        shutil.move(str(file_path), str(dest_file))
-
-                old_rel = node.rel_path
-                file_path = dest_file
-                _update_task_file_headers_and_state(
-                    file_path,
-                    target_state,
-                    verify_by=verify_by,
-                    verify_check=verify_check,
-                    clear_verifier=True,
-                )
-                dest_rel = dest_file.relative_to(tasks_dir).as_posix()
-                node.file_path = str(file_path)
-                node.rel_path = dest_rel
-                node.in_done = False
-                if target:
-                    target["in_done"] = False
-                    target["rel_path"] = dest_rel
-                _update_index_task_path(tasks_dir, old_rel=old_rel, new_rel=dest_rel)
             else:
-                _update_task_file_headers_and_state(
-                    file_path,
-                    target_state,
-                    verify_by=verify_by,
-                    verify_check=verify_check,
-                    clear_verifier=True,
-                )
-            t_dict = node.to_dict() if hasattr(node, "to_dict") else vars(node)
-            _append_progress_log(t_dict, old_st, target_state, actor="owner", verifier=None, reason=reason_clean)
+                if node.in_done:
+                    emergent = discover_emergent_tasks(tasks_dir)
+                    target = next((t for t in emergent if t["id"] == node_id), None)
+                    cat = (target.get("category") or "features") if target else "features"
+                    target_dir = tasks_dir / cat
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    is_folder = (
+                        node.is_folder
+                        or (target.get("is_folder") if target else False)
+                        or file_path.name == "README.md"
+                    )
+                    if is_folder:
+                        src_folder = file_path.parent
+                        dest_folder = target_dir / src_folder.name
+                        res = subprocess.run(
+                            ["git", "mv", str(src_folder), str(dest_folder)],
+                            cwd=str(tasks_dir),
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        if res.returncode != 0:
+                            shutil.move(str(src_folder), str(dest_folder))
+                        moved_pairs.append((src_folder, dest_folder))
+                        dest_file = dest_folder / "README.md"
+                    else:
+                        dest_file = target_dir / file_path.name
+                        res = subprocess.run(
+                            ["git", "mv", str(file_path), str(dest_file)],
+                            cwd=str(tasks_dir),
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        if res.returncode != 0:
+                            shutil.move(str(file_path), str(dest_file))
+                        moved_pairs.append((file_path, dest_file))
 
-        for anc, new_anc_state in ancestors_to_restore:
-            anc_file = pathlib.Path(anc.file_path)
-            if shipped_init:
-                if anc_file.is_relative_to(tasks_dir / "done"):
-                    rel_done = anc_file.relative_to(tasks_dir / "done")
-                    anc_file = tasks_dir / rel_done
-            _update_task_file_headers_and_state(anc_file, new_anc_state)
-            anc_dict = anc.to_dict() if hasattr(anc, "to_dict") else vars(anc)
-            _append_progress_log(
-                anc_dict,
-                anc.state,
-                new_anc_state,
-                actor="owner",
-                verifier=None,
-                reason=f"Restored ancestor because child {node_id} reopened: {reason_clean}",
-            )
+                    old_rel = node.rel_path
+                    file_path = dest_file
+                    updated_task_text = _update_task_file_headers_and_state(
+                        file_path,
+                        target_state,
+                        verify_by=verify_by,
+                        verify_check=verify_check,
+                        clear_verifier=True,
+                        write_file=False,
+                    )
+                    dest_rel = dest_file.relative_to(tasks_dir).as_posix()
+                    node.file_path = str(file_path)
+                    node.rel_path = dest_rel
+                    node.in_done = False
+                    if target:
+                        target["in_done"] = False
+                        target["rel_path"] = dest_rel
+                    pending_index_rename = (old_rel, dest_rel)
+                else:
+                    updated_task_text = _update_task_file_headers_and_state(
+                        file_path,
+                        target_state,
+                        verify_by=verify_by,
+                        verify_check=verify_check,
+                        clear_verifier=True,
+                        write_file=False,
+                    )
+                t_dict = node.to_dict() if hasattr(node, "to_dict") else vars(node)
+                _append_progress_log(
+                    t_dict,
+                    old_st,
+                    target_state,
+                    actor="owner",
+                    verifier=None,
+                    reason=reason_clean,
+                    in_memory_file_content=updated_task_text,
+                )
+
+            # 4. Write linked verified use cases `revalidation: pending` in the same transaction
+            for ritem in reval_items:
+                if ritem["changed"]:
+                    _atomic_write_text(ritem["file_path"], ritem["new_text"], encoding="utf-8")
+
+            if pending_index_rename is not None:
+                _update_index_task_path(tasks_dir, old_rel=pending_index_rename[0], new_rel=pending_index_rename[1])
+
+            for anc, new_anc_state in ancestors_to_restore:
+                anc_file = pathlib.Path(anc.file_path)
+                if shipped_init:
+                    if anc_file.is_relative_to(tasks_dir / "done"):
+                        rel_done = anc_file.relative_to(tasks_dir / "done")
+                        anc_file = tasks_dir / rel_done
+                updated_anc_text = _update_task_file_headers_and_state(anc_file, new_anc_state, write_file=False)
+                anc_dict = anc.to_dict() if hasattr(anc, "to_dict") else vars(anc)
+                _append_progress_log(
+                    anc_dict,
+                    anc.state,
+                    new_anc_state,
+                    actor="owner",
+                    verifier=None,
+                    reason=f"Restored ancestor because child {node_id} reopened: {reason_clean}",
+                    in_memory_file_content=updated_anc_text,
+                )
+        except Exception:
+            for src_p, dst_p in reversed(moved_pairs):
+                try:
+                    if dst_p.exists() and not src_p.exists():
+                        src_p.parent.mkdir(parents=True, exist_ok=True)
+                        res_mv = subprocess.run(
+                            ["git", "mv", str(dst_p), str(src_p)],
+                            cwd=str(tasks_dir),
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        if res_mv.returncode != 0:
+                            shutil.move(str(dst_p), str(src_p))
+                except Exception:
+                    pass
+            _restore_file_backups(tx_backups)
+            raise
 
         _emit_event(
             tasks_dir,
@@ -5075,8 +5185,16 @@ def reopen_node(
                 subject=anc.id,
                 actor="owner",
             )
+        if reval_items:
+            _emit_revalidation_events(tasks_dir, reval_items, actor="owner")
 
-        res_out: dict[str, Any] = {"ok": True, "task_id": node_id, "new_state": target_state, "plan_hash": plan_hash}
+        res_out: dict[str, Any] = {
+            "ok": True,
+            "task_id": node_id,
+            "new_state": target_state,
+            "plan_hash": plan_hash,
+            "revalidation_requested": [item["id"] for item in reval_items],
+        }
         if verify_by:
             res_out["verify_by"] = verify_by
         return res_out
@@ -6473,6 +6591,98 @@ def _rewrite_use_case_linked_tasks_in_text(text: str, linked_tasks: list[str]) -
     return new_text, old_linked_tasks, (new_text != text)
 
 
+def _rewrite_use_case_revalidation_in_text(
+    text: str,
+    revalidation: str | None,
+) -> tuple[str, str | None, bool]:
+    """Targeted header edit of `revalidation:` on a use case markdown text.
+
+    Never touches the body or the `## AI Validation Log` section (every byte outside
+    the `revalidation:` header line is preserved byte-for-byte).
+    When `revalidation` is None/empty/`-`, removes any `- revalidation:` header line.
+    When `revalidation` is `'pending'`, updates `- revalidation: pending` in place or inserts
+    it right after `last-verdict` (or before `short` / at the end of the header block).
+    Returns `(new_text, old_revalidation, changed)`.
+    """
+    clean_target = (
+        str(revalidation).strip().lower()
+        if (revalidation and str(revalidation).strip() and str(revalidation).strip() != "-")
+        else None
+    )
+    lines = text.splitlines(keepends=True)
+    h1_seen = False
+    in_header = False
+    reval_indices: list[int] = []
+    old_reval: str | None = None
+    last_verdict_idx = -1
+    last_tested_idx = -1
+    short_idx = -1
+    last_header_idx = -1
+    default_prefix = "- "
+    default_ending = "\n"
+
+    for idx, line in enumerate(lines):
+        clean = line.rstrip("\r\n")
+        ending = line[len(clean):] or "\n"
+        if not h1_seen:
+            if clean.startswith("# "):
+                h1_seen = True
+            continue
+        if clean.startswith("## "):
+            break
+        m = re.match(r"^(\s*-\s+)([a-zA-Z0-9_-]+)(:\s*)(.*)$", clean)
+        if m:
+            if not in_header:
+                default_prefix = m.group(1)
+                default_ending = ending
+            in_header = True
+            last_header_idx = idx
+            k_low = m.group(2).strip().lower()
+            v_str = m.group(4).strip()
+            if k_low in ("last-verdict", "last_verdict"):
+                last_verdict_idx = idx
+            elif k_low in ("last-tested", "last_tested"):
+                last_tested_idx = idx
+            elif k_low == "short":
+                short_idx = idx
+            elif k_low == "revalidation":
+                reval_indices.append(idx)
+                if old_reval is None and v_str and v_str != "-":
+                    old_reval = v_str.lower()
+        elif in_header and not clean.strip():
+            break
+
+    new_lines = list(lines)
+    if clean_target is None:
+        for rm_idx in reversed(reval_indices):
+            del new_lines[rm_idx]
+    else:
+        if reval_indices:
+            first_i = reval_indices[0]
+            clean_ln = new_lines[first_i].rstrip("\r\n")
+            end_ln = new_lines[first_i][len(clean_ln):] or default_ending
+            m_rv = re.match(r"^(\s*-\s+)revalidation(:\s*).*$", clean_ln, flags=re.IGNORECASE)
+            pref = m_rv.group(1) if m_rv else default_prefix
+            new_lines[first_i] = f"{pref}revalidation: {clean_target}{end_ln}"
+            for rm_idx in reversed(reval_indices[1:]):
+                del new_lines[rm_idx]
+        else:
+            if last_verdict_idx >= 0:
+                ins_idx = last_verdict_idx + 1
+            elif short_idx >= 0:
+                ins_idx = short_idx
+            elif last_tested_idx >= 0:
+                ins_idx = last_tested_idx + 1
+            elif last_header_idx >= 0:
+                ins_idx = last_header_idx + 1
+            else:
+                ins_idx = len(new_lines)
+            new_lines.insert(ins_idx, f"{default_prefix}revalidation: {clean_target}{default_ending}")
+
+    new_text = "".join(new_lines)
+    return new_text, old_reval, (new_text != text)
+
+
 def _rewrite_emergent_use_cases_in_text(
     text: str,
     use_cases: list[str],
@@ -6555,6 +6765,23 @@ def _rewrite_emergent_use_cases_in_text(
     return "".join(lines)
 
 
+def _restore_file_backups(backups: list[tuple[pathlib.Path, bytes | None]]) -> None:
+    """Restore `(path, old_bytes)` backups in reverse order, resilient to monkeypatched writers."""
+    for target_path, old_bytes in reversed(backups):
+        try:
+            if old_bytes is None:
+                if target_path.exists():
+                    target_path.unlink()
+            else:
+                try:
+                    _atomic_write_text(target_path, old_bytes.decode("utf-8"), encoding="utf-8")
+                except Exception:
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.write_bytes(old_bytes)
+        except Exception:
+            pass
+
+
 def _apply_file_writes_atomically(writes: list[tuple[pathlib.Path, str]]) -> None:
     """Write multiple `(path, new_content)` pairs atomically with rollback on any failure."""
     backups: list[tuple[pathlib.Path, bytes | None]] = []
@@ -6564,15 +6791,7 @@ def _apply_file_writes_atomically(writes: list[tuple[pathlib.Path, str]]) -> Non
             backups.append((target_path, old_bytes))
             _atomic_write_text(target_path, new_content, encoding="utf-8")
     except Exception:
-        for target_path, old_bytes in reversed(backups):
-            try:
-                if old_bytes is None:
-                    if target_path.exists():
-                        target_path.unlink()
-                else:
-                    _atomic_write_text(target_path, old_bytes.decode("utf-8"), encoding="utf-8")
-            except Exception:
-                pass
+        _restore_file_backups(backups)
         raise
 
 
@@ -8475,6 +8694,8 @@ def parse_use_case_file(file_path: pathlib.Path, tasks_dir: pathlib.Path) -> dic
     command = _extract_section(
         "## Automated Verification Command",
         "## Verification Command",
+        "## Verification Probe / Test",
+        "## Verification Probe",
         "## Comando di verifica automatico",
         "## Comando di verifica",
     )
@@ -9066,9 +9287,11 @@ def record_use_case_validation(
             log_entry += "- **Gaps Found:**\n" + "\n".join(f"  - {g}" for g in gaps) + "\n"
 
         existing_content = target["content"]
-        updated_content = re.sub(r"-\s+last-tested:\s*.*$", f"- last-tested: {now_date}", existing_content, flags=re.MULTILINE)
-        updated_content = re.sub(r"-\s+last-verdict:\s*.*$", f"- last-verdict: {verdict_clean}", updated_content, flags=re.MULTILINE)
-        updated_content = re.sub(r"-\s+status:\s*.*$", f"- status: {new_status}", updated_content, flags=re.MULTILINE)
+        updated_content = re.sub(r"^-\s+last-tested:\s*.*$", f"- last-tested: {now_date}", existing_content, count=1, flags=re.MULTILINE)
+        updated_content = re.sub(r"^-\s+last-verdict:\s*.*$", f"- last-verdict: {verdict_clean}", updated_content, count=1, flags=re.MULTILINE)
+        updated_content = re.sub(r"^-\s+status:\s*.*$", f"- status: {new_status}", updated_content, count=1, flags=re.MULTILINE)
+        if verdict_clean in ("pass", "fail", "partial"):
+            updated_content, _, _ = _rewrite_use_case_revalidation_in_text(updated_content, None)
 
         if any(
             h in updated_content
@@ -9096,6 +9319,7 @@ def record_use_case_validation(
                 "verdict": verdict_clean,
                 "stage": derived_stage,
                 "status": new_status,
+                "revalidation": enriched.get("revalidation"),
                 "forced": bool(forced),
                 "summary": summary,
             },
@@ -9109,11 +9333,618 @@ def record_use_case_validation(
             "verdict": verdict_clean,
             "stage": derived_stage,
             "status": new_status,
+            "revalidation": enriched.get("revalidation"),
             "forced": bool(forced),
             "summary": summary,
             "file_path": str(fpath),
             "rel_path": str(fpath.relative_to(tasks_dir)),
         }
+
+
+def _plan_revalidation_for_task_transition(
+    tasks_dir: pathlib.Path,
+    task_id: str,
+    old_state: str,
+    new_state: str,
+    *,
+    tree: dict[str, "TaskNode"] | None = None,
+    is_reopen: bool = False,
+    internal_walk: bool = False,
+) -> list[dict[str, Any]]:
+    """Plan `revalidation: pending` header edits on linked `verified` use cases when `task_id`
+    is delivered again, reopened, or bounced (Spec 17 §5 / Task 17.7 Deliverable 1).
+    """
+    if internal_walk:
+        return []
+    old_canon = normalize_state(old_state)
+    new_canon = normalize_state(new_state)
+    if not is_reopen and new_canon not in ("bounced", "open", "delivered"):
+        return []
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if tree is None:
+        tree = discover_task_tree(tasks_dir)
+    use_cases = discover_use_cases(tasks_dir)
+    if not use_cases:
+        return []
+
+    ucs_by_id = {u["id"]: u for u in use_cases if u.get("id")}
+    projection = compute_use_case_links(tasks_dir, tree=tree, use_cases=use_cases)
+    linked_uc_ids = projection.by_task.get(task_id, [])
+    if not linked_uc_ids:
+        return []
+
+    if is_reopen or new_canon == "open":
+        action = "reopen"
+    elif new_canon == "bounced":
+        action = "bounce"
+    else:
+        action = "redeliver"
+
+    plan_items: list[dict[str, Any]] = []
+    for uc_id in linked_uc_ids:
+        uc = ucs_by_id.get(uc_id)
+        if not uc:
+            continue
+        details_before = list(projection.details.get(uc_id, []))
+        stage_before = compute_use_case_stage(
+            details_before,
+            last_verdict=uc.get("last_verdict"),
+            revalidation=uc.get("revalidation"),
+        )
+        stage_after = stage_before
+        if new_canon == "delivered" and stage_before != "verified":
+            details_after = [
+                {**d, "state": new_state, "canonical_state": "delivered", "dropped": False}
+                if d.get("id") == task_id
+                else dict(d)
+                for d in details_before
+            ]
+            stage_after = compute_use_case_stage(
+                details_after,
+                last_verdict=uc.get("last_verdict"),
+                revalidation=uc.get("revalidation"),
+            )
+
+        if stage_before != "verified" and not (new_canon == "delivered" and stage_after == "verified"):
+            continue
+
+        uc_path = pathlib.Path(uc["file_path"])
+        old_bytes = uc_path.read_bytes()
+        old_text = old_bytes.decode("utf-8")
+        new_text, old_reval, changed = _rewrite_use_case_revalidation_in_text(old_text, "pending")
+        plan_items.append({
+            "id": uc_id,
+            "use_case_id": uc_id,
+            "file_path": uc_path,
+            "rel_path": uc.get("rel_path") or uc_path.relative_to(tasks_dir).as_posix(),
+            "before_hash": hashlib.sha256(old_bytes).hexdigest(),
+            "old_bytes": old_bytes,
+            "old_text": old_text,
+            "new_text": new_text,
+            "old_revalidation": old_reval,
+            "changed": changed,
+            "task_id": task_id,
+            "old_state": old_state,
+            "new_state": new_state,
+            "transition": f"{old_state} -> {new_state}",
+            "action": action,
+        })
+    return plan_items
+
+
+def _emit_revalidation_events(
+    tasks_dir: pathlib.Path,
+    reval_items: list[dict[str, Any]],
+    *,
+    actor: str | None = None,
+) -> None:
+    """Emit one `use_case.revalidation_requested` event per affected use case."""
+    today_iso = datetime.date.today().isoformat()
+    for item in reval_items:
+        uc_id = item["id"]
+        _emit_event(
+            tasks_dir,
+            "use_case.revalidation_requested",
+            {
+                "use_case_id": uc_id,
+                "id": uc_id,
+                "task_id": item["task_id"],
+                "transition": item["transition"],
+                "action": item["action"],
+                "from": item["old_state"],
+                "to": item["new_state"],
+                "from_state": item["old_state"],
+                "to_state": item["new_state"],
+                "date": today_iso,
+            },
+            subject=uc_id,
+            actor=actor or "owner",
+        )
+
+
+def _parse_iso_or_log_timestamp(raw: str | None) -> tuple[datetime.datetime | None, str | None, str]:
+    """Parse an ISO/log/date timestamp into `(utc_datetime_or_none, yyyy_mm_dd_or_none, precision)`.
+    `precision` is `'second'`, `'minute'`, `'date'`, or `'none'`.
+    """
+    if not raw or not str(raw).strip() or str(raw).strip() == "-":
+        return None, None, "none"
+    s = str(raw).strip()
+    m_date = re.match(r"^(\d{4}-\d{2}-\d{2})$", s)
+    if m_date:
+        d_str = m_date.group(1)
+        try:
+            dt = datetime.datetime.strptime(d_str, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+            return dt, d_str, "date"
+        except ValueError:
+            return None, d_str, "date"
+
+    m_min_utc = re.match(r"^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})(?:\s*UTC)?$", s, flags=re.IGNORECASE)
+    if m_min_utc:
+        d_str = m_min_utc.group(1)
+        try:
+            dt = datetime.datetime.strptime(f"{d_str} {m_min_utc.group(2)}", "%Y-%m-%d %H:%M").replace(
+                tzinfo=datetime.timezone.utc
+            )
+            return dt, d_str, "minute"
+        except ValueError:
+            return None, d_str, "date"
+
+    m_sec_utc = re.match(r"^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC)?$", s, flags=re.IGNORECASE)
+    if m_sec_utc:
+        d_str = m_sec_utc.group(1)
+        try:
+            dt = datetime.datetime.strptime(f"{d_str} {m_sec_utc.group(2)}", "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc
+            )
+            return dt, d_str, "second"
+        except ValueError:
+            return None, d_str, "date"
+
+    iso_clean = s.replace("Z", "+00:00")
+    try:
+        dt = datetime.datetime.fromisoformat(iso_clean)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        else:
+            dt = dt.astimezone(datetime.timezone.utc)
+        return dt, dt.date().isoformat(), "second"
+    except ValueError:
+        pass
+
+    m_any_date = re.search(r"(\d{4}-\d{2}-\d{2})", s)
+    if m_any_date:
+        d_str = m_any_date.group(1)
+        try:
+            dt = datetime.datetime.strptime(d_str, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+            return dt, d_str, "date"
+        except ValueError:
+            return None, d_str, "date"
+    return None, None, "none"
+
+
+def _parse_validation_log_entries(validation_log: str) -> list[dict[str, Any]]:
+    """Extract structured entries from `## AI Validation Log`."""
+    if not validation_log or not validation_log.strip():
+        return []
+    entries: list[dict[str, Any]] = []
+    blocks = re.split(r"(?=^###\s+\[)", validation_log.strip(), flags=re.MULTILINE)
+    for blk in blocks:
+        blk_s = blk.strip()
+        if not blk_s:
+            continue
+        m_hdr = re.match(r"^###\s+\[([^\]]+)\](.*)$", blk_s, flags=re.MULTILINE)
+        if not m_hdr:
+            continue
+        raw_ts = m_hdr.group(1).strip()
+        dt, d_str, prec = _parse_iso_or_log_timestamp(raw_ts)
+        m_v = re.search(r"-\s+\*\*Verdict:\*\*\s*`?([A-Za-z]+)`?", blk_s, flags=re.IGNORECASE)
+        verdict = m_v.group(1).strip().lower() if m_v else None
+        entries.append({
+            "raw_ts": raw_ts,
+            "dt": dt,
+            "date": d_str,
+            "precision": prec,
+            "verdict": verdict,
+        })
+    return entries
+
+
+def _get_task_last_delivered_info(
+    tasks_dir: pathlib.Path,
+    task_id: str,
+    node: "TaskNode | None" = None,
+) -> dict[str, Any]:
+    """Find the timestamp/date/sequence of `task_id`'s last transition to `delivered`."""
+    delivered_dt: datetime.datetime | None = None
+    delivered_date: str | None = None
+    delivered_seq: int = 0
+
+    orch_events = _get_orchestration_events()
+    if orch_events is not None:
+        workspace = _resolve_workspace_from_tasks_dir(tasks_dir)
+        try:
+            evs = orch_events.read_events(workspace, types=["task.transitioned"])
+            for ev in evs:
+                subj = ev.get("subject") or (ev.get("payload") or {}).get("task_id")
+                if subj != task_id:
+                    continue
+                payload = ev.get("payload") or {}
+                to_st = normalize_state(str(payload.get("to") or ""))
+                if to_st == "delivered":
+                    dt, d_str, _ = _parse_iso_or_log_timestamp(ev.get("ts"))
+                    delivered_dt = dt
+                    delivered_date = d_str
+                    delivered_seq = int(ev.get("seq") or 0)
+        except Exception:
+            pass
+
+    if delivered_date is None and node is not None:
+        # Check block text or task file log for delivered date
+        if node.block_text:
+            m_d = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", node.block_text)
+            if m_d:
+                delivered_date = m_d.group(1)
+        elif node.file_path:
+            fp = pathlib.Path(node.file_path)
+            for candidate in (fp.parent / "PROGRESS.md", fp):
+                if candidate.is_file():
+                    try:
+                        txt = candidate.read_text(encoding="utf-8")
+                        for m_log in re.finditer(r"^-\s+(\d{4}-\d{2}-\d{2})\b.*->\s*`?delivered`?", txt, flags=re.MULTILINE | re.IGNORECASE):
+                            delivered_date = m_log.group(1)
+                            break
+                    except Exception:
+                        pass
+                if delivered_date:
+                    break
+
+    if delivered_date is None:
+        delivered_date = datetime.date.today().isoformat()
+
+    return {
+        "dt": delivered_dt,
+        "date": delivered_date,
+        "seq": delivered_seq,
+    }
+
+
+def _has_probe_run_strictly_after_delivery(
+    tasks_dir: pathlib.Path,
+    uc: dict[str, Any],
+    delivered_info: dict[str, Any],
+) -> bool:
+    """Return True if `uc` has a probe run (validation log entry or `last-tested`)
+    strictly AFTER the task's last `delivered` transition that did not fail via `use_case.validated`.
+    """
+    uc_id = uc.get("id", "")
+    deliv_dt: datetime.datetime | None = delivered_info.get("dt")
+    deliv_date: str = delivered_info.get("date") or datetime.date.today().isoformat()
+    deliv_seq: int = int(delivered_info.get("seq") or 0)
+
+    # 1. Check `use_case.validated` events if available
+    latest_val_event_after: dict[str, Any] | None = None
+    orch_events = _get_orchestration_events()
+    if orch_events is not None:
+        workspace = _resolve_workspace_from_tasks_dir(tasks_dir)
+        try:
+            evs = orch_events.read_events(workspace, types=["use_case.validated"])
+            for ev in evs:
+                subj = ev.get("subject") or (ev.get("payload") or {}).get("use_case_id")
+                if subj != uc_id:
+                    continue
+                ev_seq = int(ev.get("seq") or 0)
+                ev_dt, _, _ = _parse_iso_or_log_timestamp(ev.get("ts"))
+                is_after = False
+                if deliv_seq > 0 and ev_seq > 0:
+                    is_after = ev_seq > deliv_seq
+                elif deliv_dt is not None and ev_dt is not None:
+                    is_after = ev_dt > deliv_dt
+                if is_after:
+                    latest_val_event_after = ev
+        except Exception:
+            pass
+
+    if latest_val_event_after is not None:
+        ev_verdict = str((latest_val_event_after.get("payload") or {}).get("verdict") or "").strip().lower()
+        if ev_verdict == "pass":
+            return True
+
+    # 2. Check `## AI Validation Log` entries strictly after delivery
+    log_entries = _parse_validation_log_entries(uc.get("validation_log") or "")
+    for entry in reversed(log_entries):
+        e_dt: datetime.datetime | None = entry.get("dt")
+        e_date: str | None = entry.get("date")
+        e_prec: str = entry.get("precision", "none")
+        e_verdict: str | None = entry.get("verdict")
+
+        strictly_after = False
+        if e_prec in ("second", "minute") and e_dt is not None:
+            if deliv_dt is not None:
+                if e_prec == "minute":
+                    strictly_after = e_dt > deliv_dt.replace(second=0, microsecond=0)
+                else:
+                    strictly_after = e_dt > deliv_dt
+            else:
+                strictly_after = bool(e_date and e_date >= deliv_date)
+        elif e_date:
+            strictly_after = e_date > deliv_date
+
+        if strictly_after:
+            if e_verdict == "fail" and latest_val_event_after is not None:
+                # Real probe run executed via validate/record-validation after delivery and failed
+                continue
+            return True
+
+    # 3. Check `last-tested` header strictly after delivery
+    raw_lt = uc.get("last_tested")
+    lt_dt, lt_date, lt_prec = _parse_iso_or_log_timestamp(raw_lt)
+    if lt_prec in ("second", "minute") and lt_dt is not None:
+        if deliv_dt is not None:
+            if lt_prec == "minute":
+                if lt_dt > deliv_dt.replace(second=0, microsecond=0):
+                    return True
+            elif lt_dt > deliv_dt:
+                return True
+        elif lt_date and lt_date > deliv_date:
+            return True
+    elif lt_date and lt_date > deliv_date:
+        # Ensure this isn't simply a failing log entry on that same date
+        has_fail_on_lt_date = any(
+            e.get("date") == lt_date and e.get("verdict") == "fail" and latest_val_event_after is not None
+            for e in log_entries
+        )
+        if not has_fail_on_lt_date:
+            return True
+
+    return False
+
+
+def _check_safe_closing_guard(
+    tasks_dir: pathlib.Path,
+    task_id: str,
+    old_state: str,
+    new_state: str,
+    *,
+    tree: dict[str, "TaskNode"] | None = None,
+    actor: str | None = None,
+    verifier: str | None = None,
+    owner_approved: bool = False,
+    dry_run: bool = False,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Enforce Spec 17 §5 / Task 17.7 Deliverable 3 safe closing guard on transitions to `verified` or `done`.
+
+    Refuses with exit_code=2 and emits `task.transition_refused` (reason `use_case_failing`)
+    when any linked use case with `approval == 'approved'` has `last-verdict: fail`,
+    unless that use case has a probe run strictly after `task_id`'s last `delivered` transition,
+    or `owner_approved=True` is passed. Use cases with `proposed`/`deprecated` never block.
+    """
+    if owner_approved:
+        return True, None
+    new_canon = normalize_state(new_state)
+    if new_canon not in ("verified", "done"):
+        return True, None
+
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if tree is None:
+        tree = discover_task_tree(tasks_dir)
+    use_cases = discover_use_cases(tasks_dir)
+    if not use_cases:
+        return True, None
+
+    ucs_by_id = {u["id"]: u for u in use_cases if u.get("id")}
+    projection = compute_use_case_links(tasks_dir, tree=tree, use_cases=use_cases)
+    linked_uc_ids = projection.by_task.get(task_id, [])
+    if not linked_uc_ids:
+        return True, None
+
+    node = tree.get(task_id)
+    delivered_info = _get_task_last_delivered_info(tasks_dir, task_id, node=node)
+
+    failing_uc_ids: list[str] = []
+    for uc_id in linked_uc_ids:
+        uc = ucs_by_id.get(uc_id)
+        if not uc:
+            continue
+        approval = (uc.get("approval") or "proposed").strip().lower()
+        written_status = (uc.get("written_status") or uc.get("status") or "draft").strip().lower()
+        if approval != "approved" or written_status == "deprecated":
+            continue
+        last_verdict = (uc.get("last_verdict") or "").strip().lower()
+        if last_verdict != "fail":
+            continue
+        if _has_probe_run_strictly_after_delivery(tasks_dir, uc, delivered_info):
+            continue
+        failing_uc_ids.append(uc_id)
+
+    if not failing_uc_ids:
+        return True, None
+
+    eff_actor = actor or verifier or "owner"
+    if not dry_run:
+        _emit_event(
+            tasks_dir,
+            "task.transition_refused",
+            {
+                "task_id": task_id,
+                "from": old_state,
+                "to": new_state,
+                "old_state": old_state,
+                "new_state": new_state,
+                "reason": "use_case_failing",
+                "use_case_ids": failing_uc_ids,
+                "use_cases": failing_uc_ids,
+                "actor": eff_actor,
+            },
+            subject=task_id,
+            actor=eff_actor,
+        )
+
+    uc_str = ", ".join(failing_uc_ids)
+    err_msg = (
+        f"Cannot transition task {task_id!r} to '{new_state}': linked approved use case(s) failing ({uc_str}). "
+        f"Re-validate with 'ai-orch tasks use-cases validate <UC>' after delivery so the probe passes, "
+        f"or pass --owner-approved to override."
+    )
+    return False, {
+        "ok": False,
+        "task_id": task_id,
+        "old_state": old_state,
+        "new_state": new_state,
+        "reason": "use_case_failing",
+        "use_case_ids": failing_uc_ids,
+        "use_cases": failing_uc_ids,
+        "error": err_msg,
+        "message": err_msg,
+        "exit_code": 2,
+    }
+
+
+def get_use_case_revalidation_queue(tasks_dir: pathlib.Path) -> dict[str, Any]:
+    """Return use cases with `revalidation: pending`, with triggering task and date, oldest first (Task 17.7 Deliverable 2)."""
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    use_cases = discover_use_cases(tasks_dir)
+    tree = discover_task_tree(tasks_dir)
+    projection = compute_use_case_links(tasks_dir, tree=tree, use_cases=use_cases)
+
+    # Map uc_id -> latest active revalidation trigger from events
+    last_val_seq_by_uc: dict[str, int] = {}
+    reval_events_by_uc: dict[str, list[dict[str, Any]]] = {}
+    task_trans_events_by_task: dict[str, list[dict[str, Any]]] = {}
+
+    orch_events = _get_orchestration_events()
+    if orch_events is not None:
+        workspace = _resolve_workspace_from_tasks_dir(tasks_dir)
+        try:
+            evs = orch_events.read_events(
+                workspace,
+                types=["use_case.validated", "use_case.revalidation_requested", "task.transitioned"],
+            )
+            for ev in evs:
+                ev_type = ev.get("type")
+                seq = int(ev.get("seq") or 0)
+                payload = ev.get("payload") or {}
+                if ev_type == "use_case.validated":
+                    uc_id = ev.get("subject") or payload.get("use_case_id")
+                    verdict = str(payload.get("verdict") or "").strip().lower()
+                    if uc_id and verdict in ("pass", "fail", "partial"):
+                        last_val_seq_by_uc[uc_id] = max(last_val_seq_by_uc.get(uc_id, 0), seq)
+                elif ev_type == "use_case.revalidation_requested":
+                    uc_id = ev.get("subject") or payload.get("use_case_id")
+                    if uc_id:
+                        reval_events_by_uc.setdefault(uc_id, []).append(ev)
+                elif ev_type == "task.transitioned":
+                    tid = ev.get("subject") or payload.get("task_id")
+                    if tid:
+                        task_trans_events_by_task.setdefault(tid, []).append(ev)
+        except Exception:
+            pass
+
+    raw_items: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    for uc in use_cases:
+        if str(uc.get("revalidation") or "").strip().lower() != "pending":
+            continue
+        enriched = enrich_use_case_with_stage_and_links(uc, projection)
+        uc_id = enriched["id"]
+        last_val_seq = last_val_seq_by_uc.get(uc_id, 0)
+        cand_evs = [
+            e for e in reval_events_by_uc.get(uc_id, [])
+            if int(e.get("seq") or 0) > last_val_seq
+        ]
+        if not cand_evs:
+            cand_evs = reval_events_by_uc.get(uc_id, [])
+
+        triggering_task: str | None = None
+        triggering_date: str | None = None
+        triggering_ts: str = ""
+        triggering_seq: int = 999_999_999
+        transition_str: str = ""
+
+        if cand_evs:
+            # Oldest trigger in the current pending cycle
+            chosen_ev = cand_evs[0]
+            p = chosen_ev.get("payload") or {}
+            triggering_task = p.get("task_id")
+            triggering_ts = str(chosen_ev.get("ts") or "")
+            triggering_date = p.get("date") or (triggering_ts[:10] if len(triggering_ts) >= 10 else None)
+            triggering_seq = int(chosen_ev.get("seq") or 0)
+            transition_str = str(p.get("transition") or "")
+        else:
+            # Fallback to latest task.transitioned event or linked task metadata
+            linked_tids = list(enriched.get("linked_tasks") or [])
+            best_ev: dict[str, Any] | None = None
+            for tid in linked_tids:
+                for tev in task_trans_events_by_task.get(tid, []):
+                    if best_ev is None or int(tev.get("seq") or 0) > int(best_ev.get("seq") or 0):
+                        best_ev = tev
+            if best_ev is not None:
+                p = best_ev.get("payload") or {}
+                triggering_task = best_ev.get("subject") or p.get("task_id")
+                triggering_ts = str(best_ev.get("ts") or "")
+                triggering_date = triggering_ts[:10] if len(triggering_ts) >= 10 else None
+                triggering_seq = int(best_ev.get("seq") or 0)
+                transition_str = f"{p.get('from', '')} -> {p.get('to', '')}".strip(" ->")
+            elif linked_tids:
+                triggering_task = linked_tids[0]
+                node = tree.get(triggering_task)
+                if node and node.block_text:
+                    m_d = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", node.block_text)
+                    if m_d:
+                        triggering_date = m_d.group(1)
+
+        if not triggering_date:
+            triggering_date = enriched.get("last_tested") or datetime.date.today().isoformat()
+        if not triggering_task:
+            linked_tids = list(enriched.get("linked_tasks") or [])
+            triggering_task = linked_tids[0] if linked_tids else "-"
+
+        try:
+            mtime = pathlib.Path(enriched["file_path"]).stat().st_mtime
+        except OSError:
+            mtime = 0.0
+
+        sort_key = (
+            triggering_date,
+            triggering_ts or f"{mtime:020.6f}",
+            triggering_seq,
+            _natural_sort_key(uc_id),
+        )
+        item = {
+            "id": uc_id,
+            "use_case_id": uc_id,
+            "title": enriched["title"],
+            "short_title": enriched["short_title"],
+            "actor": enriched["actor"],
+            "approval": enriched["approval"],
+            "stage": enriched["stage"],
+            "status": enriched["status"],
+            "priority": enriched["priority"],
+            "revalidation": "pending",
+            "last_verdict": enriched.get("last_verdict"),
+            "last_tested": enriched.get("last_tested"),
+            "linked_tasks": enriched["linked_tasks"],
+            "triggering_task": triggering_task,
+            "task_id": triggering_task,
+            "trigger_task": triggering_task,
+            "date": triggering_date,
+            "triggering_date": triggering_date,
+            "trigger_date": triggering_date,
+            "requested_at": triggering_ts or triggering_date,
+            "transition": transition_str,
+            "file_path": enriched["file_path"],
+            "rel_path": enriched["rel_path"],
+        }
+        raw_items.append((sort_key, item))
+
+    raw_items.sort(key=lambda pair: pair[0])
+    queue_items = [pair[1] for pair in raw_items]
+    return {
+        "ok": True,
+        "count": len(queue_items),
+        "queue": queue_items,
+        "use_cases": queue_items,
+        "items": queue_items,
+    }
 
 
 UC_READY_VALIDATION_STAGES: set[str] = {
@@ -11103,7 +11934,8 @@ def _update_task_file_headers_and_state(
     conditions: str | None = None,
     waiting_on: str | None = None,
     clear_waiting_on: bool = False,
-) -> None:
+    write_file: bool = True,
+) -> str:
     if waiting_on is not None:
         waiting_on = normalize_waiting_on(waiting_on)
     if new_state is not None:
@@ -11261,7 +12093,10 @@ def _update_task_file_headers_and_state(
         if scan_idx < len(lines) and not lines[scan_idx].strip() and scan_idx > 0 and not lines[scan_idx - 1].strip():
             del lines[scan_idx]
 
-    _atomic_write_text(file_path, "\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    updated_text = "\n".join(lines).rstrip() + "\n"
+    if write_file:
+        _atomic_write_text(file_path, updated_text, encoding="utf-8")
+    return updated_text
 
 
 def _append_progress_log(
@@ -11272,27 +12107,43 @@ def _append_progress_log(
     verifier: str | None,
     reason: str | None,
     force_log: bool = False,
+    owner_approved: bool = False,
+    in_memory_file_content: str | None = None,
 ) -> pathlib.Path | None:
     file_path = pathlib.Path(task_info["file_path"])
+    if owner_approved:
+        force_log = True
     progress_path = file_path.parent / "PROGRESS.md" if task_info["is_folder"] else None
     if progress_path is None:
         if (file_path.parent / "PROGRESS.md").exists():
             progress_path = file_path.parent / "PROGRESS.md"
-        elif file_path.is_file():
-            content = file_path.read_text(encoding="utf-8")
-            if "## Log" in content or verifier or reason or force_log:
+        elif file_path.is_file() or in_memory_file_content is not None:
+            content_check = in_memory_file_content if in_memory_file_content is not None else file_path.read_text(encoding="utf-8")
+            if "## Log" in content_check or verifier or reason or force_log:
                 progress_path = file_path
     if progress_path is None and not (file_path.parent / "PROGRESS.md").exists():
+        if in_memory_file_content is not None:
+            _atomic_write_text(file_path, in_memory_file_content, encoding="utf-8")
         # For single-file tasks that bounce or get owner-verified, only write PROGRESS.md if it's a folder task
         return None
 
     today = datetime.date.today().isoformat()
-    who = verifier or actor or "orchestrator"
-    detail = f" — {reason}" if reason else ""
+    who = verifier or actor or ("owner" if owner_approved else "orchestrator")
+    eff_reason = reason or ""
+    if owner_approved and "owner-approved" not in eff_reason and "owner_approved" not in eff_reason:
+        eff_reason = f"{eff_reason} (owner-approved)".strip() if eff_reason else "owner-approved"
+    detail = f" — {eff_reason}" if eff_reason else ""
     entry_line = f"- {today}, {who}: state `{old_state}` -> `{new_state}`{detail}"
 
-    if progress_path and progress_path.exists():
-        content = progress_path.read_text(encoding="utf-8")
+    if in_memory_file_content is not None and progress_path != file_path:
+        _atomic_write_text(file_path, in_memory_file_content, encoding="utf-8")
+
+    if progress_path and (progress_path.exists() or (progress_path == file_path and in_memory_file_content is not None)):
+        content = (
+            in_memory_file_content
+            if (progress_path == file_path and in_memory_file_content is not None)
+            else progress_path.read_text(encoding="utf-8")
+        )
         scanned_lines, _ = scan_markdown_blocks(content)
         log_line_idx: int | None = None
         for idx, sline in enumerate(scanned_lines):
@@ -11460,6 +12311,23 @@ def transition_task(
 
             old_canon_check = node.canonical_state
             new_canon_check = normalize_state(new_state)
+
+            # Safe closing guard (Spec 17 §5 / Task 17.7 Deliverable 3): check before delegating to close_task or mutating
+            if not _internal_walk_step and new_canon_check in ("verified", "done") and old_canon_check not in TERMINAL_STATES:
+                guard_ok, guard_err = _check_safe_closing_guard(
+                    tasks_dir=tasks_dir,
+                    task_id=task_id,
+                    old_state=node.state,
+                    new_state=new_state,
+                    tree=tree,
+                    actor=actor,
+                    verifier=verifier,
+                    owner_approved=owner_approved,
+                    dry_run=dry_run,
+                )
+                if not guard_ok and guard_err is not None:
+                    return False, guard_err
+
             if not _internal_walk_step and new_canon_check == "done" and old_canon_check != "verified":
                 if old_canon_check in TERMINAL_STATES or node.in_done or node.in_closed_section:
                     return False, {
@@ -11486,7 +12354,11 @@ def transition_task(
                     vmode_check = "cross-agent"
 
                 eff_actor = "owner" if owner_approved else actor
-                eff_verifier = verifier or ("owner" if owner_approved else None)
+                eff_verifier = verifier or (
+                    "owner"
+                    if owner_approved
+                    else ("use-case-probe" if (actor is None and old_canon_check == "delivered" and bool(node.use_cases)) else None)
+                )
 
                 if vmode_check == "self" and not _is_independent_verifier(executor_check, eff_actor, eff_verifier):
                     return False, {
@@ -11535,7 +12407,7 @@ def transition_task(
                     tasks_dir=tasks_dir,
                     task_id=task_id,
                     actor=actor,
-                    verifier=verifier,
+                    verifier=eff_verifier,
                     reason=reason,
                     owner_approved=owner_approved,
                     dry_run=dry_run,
@@ -11626,8 +12498,14 @@ def transition_task(
 
                 executor = node.executor or "kilo"
                 vmode = node.fields.get("verification_mode", {}).get("value") or node.own_fields.get("verification_mode")
+                eff_actor_init = "owner" if owner_approved else actor
+                eff_verifier_init = verifier or (
+                    "owner"
+                    if owner_approved
+                    else ("use-case-probe" if (actor is None and bool(node.use_cases)) else None)
+                )
                 if new_canon == "verified":
-                    if vmode == "self" and not verifier and (actor or "").lower() != "owner":
+                    if vmode == "self" and not eff_verifier_init and (eff_actor_init or "").lower() != "owner":
                         return False, {
                             "ok": False,
                             "task_id": task_id,
@@ -11638,7 +12516,7 @@ def transition_task(
                                 "transition to 'done with a caveat: self-verified only' instead of 'verified'."
                             ),
                         }
-                    if not _is_independent_verifier(executor, actor, verifier):
+                    if not owner_approved and not _is_independent_verifier(executor, eff_actor_init, eff_verifier_init):
                         return False, {
                             "ok": False,
                             "task_id": task_id,
@@ -11688,57 +12566,88 @@ def transition_task(
 
                         if reason and reason.strip() and reason.strip() not in effective_state:
                             status_note += f", {reason.strip()}"
+                        if owner_approved and "owner-approved" not in status_note and "owner_approved" not in status_note:
+                            status_note += ", owner-approved"
                     else:
                         note_parts = [today]
                         if verifier and verifier.strip():
                             note_parts.append(f"verifier {verifier.strip()}")
                         elif actor and actor.strip():
                             note_parts.append(actor.strip())
+                        elif owner_approved:
+                            note_parts.append("owner-approved")
                         if reason and reason.strip() and reason.strip() not in effective_state:
                             note_parts.append(reason.strip())
+                        if owner_approved and not any("owner-approved" in p or "owner_approved" in p for p in note_parts):
+                            note_parts.append("owner-approved")
                         status_note = "; ".join(note_parts)
+
                 file_path = pathlib.Path(node.file_path)
-                if new_canon in TERMINAL_STATES:
-                    _, new_h = move_block_to_closed(
-                        file_path,
-                        task_id,
-                        new_status=effective_state,
-                        status_note=status_note,
-                        expect_task_hash=expect_task_hash,
-                        new_waiting_on=waiting_on,
-                        clear_waiting_on=clear_wo,
-                    )
-                    if node.parent and node.parent in tree:
-                        parent_node = tree[node.parent]
-                        if parent_node.is_folder and parent_node.parent is not None:
-                            sub_tree = discover_task_tree(tasks_dir)
-                            if node.parent in sub_tree:
-                                p_derived = sub_tree[node.parent].derived_state
-                                if p_derived and normalize_state(p_derived) in TERMINAL_STATES and not sub_tree[node.parent].in_done:
-                                    p_dir = pathlib.Path(sub_tree[parent_node.parent].file_path).parent if parent_node.parent in sub_tree else file_path.parent.parent
-                                    move_folder_child_to_done(p_dir, node.parent, tasks_dir)
-                                    _emit_event(
-                                        tasks_dir,
-                                        "task.transitioned",
-                                        {
-                                             "from": parent_node.state,
-                                             "to": p_derived,
-                                             "actor": actor or "owner",
-                                             "reason": f"All children closed on child {task_id} closing",
-                                        },
-                                        subject=node.parent,
-                                        actor=actor or "owner",
-                                    )
-                else:
-                    _, new_h = rewrite_block_in_file(
-                        file_path,
-                        task_id,
-                        new_status=effective_state,
-                        status_note=status_note,
-                        expect_task_hash=expect_task_hash,
-                        new_waiting_on=waiting_on,
-                        clear_waiting_on=clear_wo,
-                        new_verify_by=verify_by,
+                reval_items = _plan_revalidation_for_task_transition(
+                    tasks_dir,
+                    task_id,
+                    old_state,
+                    effective_state,
+                    tree=tree,
+                    is_reopen=False,
+                    internal_walk=_internal_walk_step,
+                )
+                tx_backups: list[tuple[pathlib.Path, bytes | None]] = [
+                    (file_path, file_path.read_bytes() if file_path.exists() else None),
+                    *((item["file_path"], item["old_bytes"]) for item in reval_items),
+                ]
+                parent_closed_event: tuple[str, str, str] | None = None
+                try:
+                    if new_canon in TERMINAL_STATES:
+                        _, new_h = move_block_to_closed(
+                            file_path,
+                            task_id,
+                            new_status=effective_state,
+                            status_note=status_note,
+                            expect_task_hash=expect_task_hash,
+                            new_waiting_on=waiting_on,
+                            clear_waiting_on=clear_wo,
+                        )
+                        if node.parent and node.parent in tree:
+                            parent_node = tree[node.parent]
+                            if parent_node.is_folder and parent_node.parent is not None:
+                                sub_tree = discover_task_tree(tasks_dir)
+                                if node.parent in sub_tree:
+                                    p_derived = sub_tree[node.parent].derived_state
+                                    if p_derived and normalize_state(p_derived) in TERMINAL_STATES and not sub_tree[node.parent].in_done:
+                                        p_dir = pathlib.Path(sub_tree[parent_node.parent].file_path).parent if parent_node.parent in sub_tree else file_path.parent.parent
+                                        move_folder_child_to_done(p_dir, node.parent, tasks_dir)
+                                        parent_closed_event = (node.parent, parent_node.state, p_derived)
+                    else:
+                        _, new_h = rewrite_block_in_file(
+                            file_path,
+                            task_id,
+                            new_status=effective_state,
+                            status_note=status_note,
+                            expect_task_hash=expect_task_hash,
+                            new_waiting_on=waiting_on,
+                            clear_waiting_on=clear_wo,
+                            new_verify_by=verify_by,
+                        )
+                    for item in reval_items:
+                        if item["changed"]:
+                            _atomic_write_text(item["file_path"], item["new_text"], encoding="utf-8")
+                except Exception:
+                    _restore_file_backups(tx_backups)
+                    raise
+
+                if parent_closed_event is not None:
+                    _emit_event(
+                        tasks_dir,
+                        "task.transitioned",
+                        {
+                            "from": parent_closed_event[1],
+                            "to": parent_closed_event[2],
+                            "actor": actor or "owner",
+                            "reason": f"All children closed on child {task_id} closing",
+                        },
+                        subject=parent_closed_event[0],
+                        actor=actor or "owner",
                     )
                 _emit_event(
                     tasks_dir,
@@ -11748,20 +12657,25 @@ def transition_task(
                         "to": effective_state,
                         "actor": actor or "owner",
                         "reason": reason,
-                        "verifier": verifier,
+                        "verifier": verifier or ("owner" if owner_approved else None),
                         "verify_by": verify_by,
+                        "owner_approved": bool(owner_approved),
                     },
                     subject=task_id,
                     actor=actor or "owner",
                 )
+                if reval_items:
+                    _emit_revalidation_events(tasks_dir, reval_items, actor=actor or "owner")
                 return True, {
                     "ok": True,
                     "task_id": task_id,
                     "kind": "initiative_task" if not task_id.startswith("T") else "emergent_child",
                     "old_state": old_state,
                     "new_state": effective_state,
+                    "owner_approved": bool(owner_approved),
                     "waiting_on": waiting_on if (new_canon == "waiting" and waiting_on) else None,
                     "verify_by": verify_by or (getattr(node, "verify_by", None)),
+                    "revalidation_requested": [item["id"] for item in reval_items],
                     "file_path": str(file_path),
                     "rel_path": node.rel_path,
                     "task_hash": new_h,
@@ -11889,9 +12803,15 @@ def transition_task(
             if vmode == "-":
                 vmode = "cross-agent"
             executor = target.get("executor", "self")
+            eff_actor_em = "owner" if owner_approved else actor
+            eff_verifier_em = verifier or (
+                "owner"
+                if owner_approved
+                else ("use-case-probe" if (actor is None and bool(node.use_cases)) else None)
+            )
 
             if old_canon == "delivered" and new_canon == "verified":
-                if vmode == "self" and not _is_independent_verifier(executor, actor, verifier):
+                if vmode == "self" and not owner_approved and not _is_independent_verifier(executor, eff_actor_em, eff_verifier_em):
                     return False, {
                         "ok": False,
                         "task_id": task_id,
@@ -11902,7 +12822,7 @@ def transition_task(
                             "transition to 'done with a caveat: self-verified only' instead of 'verified'."
                         ),
                     }
-                if vmode == "owner" and (actor or "").lower() != "owner" and (verifier or "").lower() != "owner":
+                if vmode == "owner" and not owner_approved and (eff_actor_em or "").lower() != "owner" and (eff_verifier_em or "").lower() != "owner":
                     return False, {
                         "ok": False,
                         "task_id": task_id,
@@ -11910,7 +12830,7 @@ def transition_task(
                         "new_state": new_state,
                         "error": "Task requires owner verification (--actor owner or --verifier owner).",
                     }
-                if not _is_independent_verifier(executor, actor, verifier):
+                if not owner_approved and not _is_independent_verifier(executor, eff_actor_em, eff_verifier_em):
                     return False, {
                         "ok": False,
                         "task_id": task_id,
@@ -11941,22 +12861,69 @@ def transition_task(
 
             is_terminal = new_canon in TERMINAL_STATES
             file_path = pathlib.Path(target["file_path"])
-            _update_task_file_headers_and_state(
-                file_path,
+            progress_cand = file_path.parent / "PROGRESS.md"
+            reval_items = _plan_revalidation_for_task_transition(
+                tasks_dir,
+                task_id,
+                old_state,
                 effective_state,
-                verifier=verifier,
-                verify_by=verify_by,
-                verify_check=verify_check,
-                decider=decider_to_set,
-                clear_next_up=is_terminal,
-                waiting_on=waiting_on,
-                clear_waiting_on=clear_wo,
+                tree=tree,
+                is_reopen=False,
+                internal_walk=_internal_walk_step,
             )
-            _append_progress_log(target, old_state, effective_state, actor, verifier, reason, force_log=force_log)
+            tx_backups = [
+                (file_path, file_path.read_bytes() if file_path.exists() else None),
+            ]
+            if target["is_folder"] or progress_cand.exists():
+                tx_backups.append((progress_cand, progress_cand.read_bytes() if progress_cand.exists() else None))
+            for item in reval_items:
+                tx_backups.append((item["file_path"], item["old_bytes"]))
 
             final_path = file_path
-            if is_terminal and not target["in_done"]:
-                final_path = _move_task_to_done(target, tasks_dir)
+            moved_src_dest: tuple[pathlib.Path, pathlib.Path] | None = None
+            try:
+                updated_task_text = _update_task_file_headers_and_state(
+                    file_path,
+                    effective_state,
+                    verifier=verifier or ("owner" if owner_approved else None),
+                    verify_by=verify_by,
+                    verify_check=verify_check,
+                    decider=decider_to_set,
+                    clear_next_up=is_terminal,
+                    waiting_on=waiting_on,
+                    clear_waiting_on=clear_wo,
+                    write_file=False,
+                )
+                _append_progress_log(
+                    target,
+                    old_state,
+                    effective_state,
+                    actor,
+                    verifier,
+                    reason,
+                    force_log=force_log,
+                    owner_approved=owner_approved,
+                    in_memory_file_content=updated_task_text,
+                )
+                for item in reval_items:
+                    if item["changed"]:
+                        _atomic_write_text(item["file_path"], item["new_text"], encoding="utf-8")
+
+                if is_terminal and not target["in_done"]:
+                    src_root = pathlib.Path(target["task_root"])
+                    final_path = _move_task_to_done(target, tasks_dir)
+                    dest_root = final_path.parent if target["is_folder"] else final_path
+                    moved_src_dest = (src_root, dest_root)
+            except Exception:
+                if moved_src_dest is not None:
+                    src_r, dst_r = moved_src_dest
+                    if dst_r.exists() and not src_r.exists():
+                        try:
+                            shutil.move(str(dst_r), str(src_r))
+                        except Exception:
+                            pass
+                _restore_file_backups(tx_backups)
+                raise
 
             new_bundle_hash = task_bundle_sha256(final_path)
             eff_verify_by = verify_by or target.get("verify_by") or target.get("verify-by")
@@ -11968,21 +12935,26 @@ def transition_task(
                     "to": effective_state,
                     "actor": actor or "owner",
                     "reason": reason,
-                    "verifier": verifier or target.get("verifier"),
+                    "verifier": verifier or ("owner" if owner_approved else target.get("verifier")),
                     "verify_by": eff_verify_by,
+                    "owner_approved": bool(owner_approved),
                 },
                 subject=task_id,
                 actor=actor or "owner",
             )
+            if reval_items:
+                _emit_revalidation_events(tasks_dir, reval_items, actor=actor or "owner")
             return True, {
                 "ok": True,
                 "task_id": task_id,
                 "old_state": old_state,
                 "new_state": effective_state,
+                "owner_approved": bool(owner_approved),
                 "waiting_on": waiting_on if (new_canon == "waiting" and waiting_on) else None,
-                "verifier": verifier or target.get("verifier"),
+                "verifier": verifier or ("owner" if owner_approved else target.get("verifier")),
                 "verify_by": eff_verify_by,
                 "reason": reason,
+                "revalidation_requested": [item["id"] for item in reval_items],
                 "file_path": str(final_path),
                 "rel_path": final_path.relative_to(tasks_dir).as_posix(),
                 "bundle_sha256": new_bundle_hash,
@@ -12175,6 +13147,21 @@ def close_task(
             else:
                 target_terminal = "done"
 
+            if normalize_state(target_terminal) == "done":
+                guard_ok, guard_err = _check_safe_closing_guard(
+                    tasks_dir=tasks_dir,
+                    task_id=task_id,
+                    old_state=curr_state,
+                    new_state=target_terminal,
+                    tree=tree,
+                    actor=actor,
+                    verifier=verifier,
+                    owner_approved=owner_approved,
+                    dry_run=dry_run,
+                )
+                if not guard_ok and guard_err is not None:
+                    return False, guard_err
+
             steps: list[str] = []
             if curr_canon in ("open", "bounced", "paused", "waiting", "blocked"):
                 steps.extend(["in progress", "delivered"])
@@ -12202,6 +13189,7 @@ def close_task(
                     "task_id": task_id,
                     "old_state": curr_state,
                     "new_state": target_terminal,
+                    "owner_approved": bool(owner_approved),
                     "verifier": verifier or ("owner" if owner_approved else None),
                     "reason": reason,
                     "path": path_states,
@@ -12238,18 +13226,25 @@ def close_task(
                     reason=step_reason,
                     expect_task_hash=expect_task_hash if idx_step == 0 else None,
                     force_unblock=force_unblock if idx_step == 0 else False,
+                    owner_approved=owner_approved if next_canon in ("verified", "done") else False,
                     force_log=True,
                     _internal_walk_step=True,
                     _is_last_walk_step=is_last_step,
                 )
                 if not ok:
-                    return False, {
+                    err_out: dict[str, Any] = {
                         "ok": False,
                         "task_id": task_id,
                         "error": f"Failed during transition to '{next_st}': {res.get('error')}",
                         "details": res,
                         "completed_transitions": transitions_recorded,
                     }
+                    if res.get("exit_code"):
+                        err_out["exit_code"] = res["exit_code"]
+                        err_out["reason"] = res.get("reason")
+                        err_out["use_case_ids"] = res.get("use_case_ids")
+                        err_out["use_cases"] = res.get("use_cases")
+                    return False, err_out
                 last_payload = res
                 transitions_recorded.append({
                     "from": res.get("old_state"),
@@ -12270,6 +13265,7 @@ def close_task(
                 "task_id": task_id,
                 "old_state": curr_state,
                 "new_state": last_payload.get("new_state", target_terminal),
+                "owner_approved": bool(owner_approved),
                 "verifier": verifier or ("owner" if owner_approved else None),
                 "reason": reason,
                 "path": path_states,
@@ -15376,11 +16372,11 @@ def cmd_transition(args: argparse.Namespace) -> int:
             err = payload.get("error", "transition failed")
             if "expected" in payload and "actual" in payload:
                 print(f"[FAIL] {err}: expected {payload['expected']}, got {payload['actual']}", file=sys.stderr)
-            elif "message" in payload:
+            elif "message" in payload and payload["message"] != err:
                 print(f"[FAIL] {err}: {payload['message']}", file=sys.stderr)
             else:
                 print(f"[FAIL] {err}", file=sys.stderr)
-    return 0 if ok else 1
+    return 0 if ok else int(payload.get("exit_code") or 1)
 
 
 def cmd_close(args: argparse.Namespace) -> int:
@@ -15463,11 +16459,11 @@ def cmd_close(args: argparse.Namespace) -> int:
                 print(f"[ok] Closed {task_id}: {payload['old_state']!r} -> {payload['new_state']!r} ({payload.get('rel_path', '')})")
         else:
             err = payload.get("error", "close failed")
-            if "message" in payload:
+            if "message" in payload and payload["message"] != err:
                 print(f"[FAIL] {err}: {payload['message']}", file=sys.stderr)
             else:
                 print(f"[FAIL] {err}", file=sys.stderr)
-    return 0 if ok else 1
+    return 0 if ok else int(payload.get("exit_code") or 1)
 
 
 def cmd_child_add(args: argparse.Namespace) -> int:
@@ -20015,6 +21011,27 @@ def cmd_use_cases_campaign(args: argparse.Namespace) -> int:
             for reg in res["regressions"]:
                 print(f"    - {reg['id']}: {reg['title']}")
     return 0 if res["failed"] == 0 else 1
+
+
+def cmd_use_cases_queue(args: argparse.Namespace) -> int:
+    tasks_dir = pathlib.Path(args.tasks_dir).resolve()
+    res = get_use_case_revalidation_queue(tasks_dir)
+    args._last_result = res
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        items = res.get("queue", [])
+        if not items:
+            print("No use cases pending revalidation.")
+        else:
+            print(f"Use Case Revalidation Queue ({len(items)}):")
+            for item in items:
+                trans_part = f", transition: {item['transition']}" if item.get("transition") else ""
+                print(
+                    f"  [{item['id']}] {item['title']} — triggered by {item['triggering_task']} on {item['date']}"
+                    f" (stage: {item.get('stage')}{trans_part})"
+                )
+    return 0
 
 
 def cmd_use_cases_adopt_links(args: argparse.Namespace) -> int:
@@ -24923,6 +25940,14 @@ def build_parser() -> argparse.ArgumentParser:
     uc_mig.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     uc_mig.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     uc_mig.set_defaults(func=cmd_use_cases_migrate_lifecycle)
+
+    uc_queue = uc_sub.add_parser(
+        "queue",
+        help="List use cases with revalidation: pending, with triggering task and date (oldest first)",
+    )
+    uc_queue.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
+    uc_queue.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
+    uc_queue.set_defaults(func=cmd_use_cases_queue)
 
     # tasks step
     p_step = sub.add_parser("step", help="Checklist commands for ## Steps of an emergent task")
