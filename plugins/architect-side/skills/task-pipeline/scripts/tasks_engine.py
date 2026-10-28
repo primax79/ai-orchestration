@@ -7542,11 +7542,34 @@ def _replace_block_in_text(
     return source_text[:start_pos] + new_block_text + source_text[end_pos:]
 
 
+def _expand_initiative_to_non_dropped_leaves(tree: dict[str, TaskNode], init_id: str) -> list[str]:
+    """Return all leaf, non-dropped task IDs belonging to initiative `init_id` in natural sort order."""
+    if init_id not in tree:
+        return []
+    root = tree[init_id]
+    leaves: list[str] = []
+
+    def _collect(n: TaskNode) -> None:
+        for cid in sorted(n.children, key=_natural_sort_key):
+            if cid not in tree:
+                continue
+            c = tree[cid]
+            if c.is_leaf or not c.children:
+                if c.canonical_state not in ("dropped", "moved"):
+                    leaves.append(c.id)
+            else:
+                _collect(c)
+
+    _collect(root)
+    return sorted(dict.fromkeys(leaves), key=_natural_sort_key)
+
+
 def _write_adopt_links_snapshot(
     tasks_dir: pathlib.Path,
     file_records: list[dict[str, Any]],
     plan_hash: str,
     unresolved: list[dict[str, Any]],
+    expansions: list[dict[str, Any]] | None = None,
 ) -> tuple[pathlib.Path, dict[str, Any]]:
     """Snapshot every file that will change under `tasks/_reviews/adopt-links-<timestamp>/`
     (copies + `manifest.json` with sha256 + `unresolved.md` when unresolved ids exist).
@@ -7579,6 +7602,7 @@ def _write_adopt_links_snapshot(
             "tasks": [t["task_id"] for t in rec.get("tasks", [])],
         })
 
+    expansions_list = list(expansions or [])
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     manifest = {
         "timestamp": now_iso,
@@ -7587,6 +7611,7 @@ def _write_adopt_links_snapshot(
         "plan_hash": plan_hash,
         "files_count": len(manifest_files),
         "files": manifest_files,
+        "expansions": expansions_list,
         "unresolved_ids": unresolved,
     }
     manifest_path = snap_dir / "manifest.json"
@@ -7597,6 +7622,7 @@ def _write_adopt_links_snapshot(
         "",
         f"- **Plan Hash:** `{plan_hash}`",
         f"- **Files Snapshotted:** {len(manifest_files)}",
+        f"- **Initiative Expansions:** {len(expansions_list)}",
         f"- **Unresolved IDs:** {len(unresolved)}",
         "",
         "## Snapshotted Files (Before Apply)",
@@ -7607,6 +7633,18 @@ def _write_adopt_links_snapshot(
             report_lines.append(f"- `{mf['path']}` (`sha256:{mf['sha256']}`)")
     else:
         report_lines.append("- None")
+
+    if expansions_list:
+        report_lines.extend([
+            "",
+            "## Expanded Initiative Links (--expand-initiatives)",
+            "",
+        ])
+        for exp in expansions_list:
+            leaves_str = ", ".join(exp.get("leaf_tasks", []))
+            report_lines.append(
+                f"- **{exp['use_case_id']}** (`{exp['use_case_path']}`): `{exp['initiative_id']}` -> {leaves_str}"
+            )
 
     if unresolved:
         report_lines.extend([
@@ -7628,13 +7666,16 @@ def adopt_use_case_links(
     dry_run: bool = True,
     expect_plan_hash: str | None = None,
     skip_unknown: bool = False,
+    expand_initiatives: bool = False,
 ) -> dict[str, Any]:
-    """Migrate written `linked-tasks` from use cases onto referenced tasks' `use-cases` (Spec 17.3).
+    """Migrate written `linked-tasks` from use cases onto referenced tasks' `use-cases` (Spec 17.3, T085).
 
     - Preview by default (`dry_run=True`); `--apply --expect-plan-hash <hash>` writes changes.
     - Union only, never removes existing task `use-cases`.
     - Uses the 17.2 writer (`_rewrite_emergent_use_cases_in_text` for emergent/micro tasks,
       `rewrite_block_in_file` for initiative blocks).
+    - When `expand_initiatives=True` (`--expand-initiatives`), an initiative ID in `linked-tasks`
+      expands to all leaf, non-dropped tasks of that initiative across active, `done/`, and `merged/`.
     - Fail-closed on unknown, non-canonical, or cross-workspace (`workspace:x/...`) task IDs unless
       `skip_unknown=True` (`--skip-unknown`), which proceeds while recording them as unresolved in the report.
     - Snapshots every file that will change under `tasks/_reviews/adopt-links-<timestamp>/` (copies + manifest with sha256)
@@ -7656,6 +7697,7 @@ def adopt_use_case_links(
 
         additions_by_task: dict[str, list[str]] = {}
         unknown_refs: list[dict[str, Any]] = []
+        expansions: list[dict[str, Any]] = []
         use_cases_with_links_count = 0
         links_total_count = 0
         links_adopted_count = 0
@@ -7687,7 +7729,25 @@ def adopt_use_case_links(
                 else:
                     target_node = tree[tid]
                     if target_node.node_type == "initiative":
-                        reason = "non-canonical task target (initiative container ID, not a task)"
+                        if expand_initiatives:
+                            expanded_leaves = _expand_initiative_to_non_dropped_leaves(tree, tid)
+                            if not expanded_leaves:
+                                reason = "initiative has no non-dropped leaf tasks"
+                            else:
+                                expansions.append({
+                                    "use_case_id": uc_id,
+                                    "use_case_path": uc_rel,
+                                    "initiative_id": tid,
+                                    "leaf_tasks": list(expanded_leaves),
+                                })
+                                for leaf_tid in expanded_leaves:
+                                    links_adopted_count += 1
+                                    bucket = additions_by_task.setdefault(leaf_tid, [])
+                                    if uc_id not in bucket:
+                                        bucket.append(uc_id)
+                                continue
+                        else:
+                            reason = "non-canonical task target (initiative container ID, not a task)"
                     elif target_node.canonical_state == "moved":
                         reason = "task is a moved pointer stub"
 
@@ -7808,10 +7868,13 @@ def adopt_use_case_links(
             "applied": False,
             "dry_run": dry_run,
             "skip_unknown": skip_unknown,
+            "expand_initiatives": expand_initiatives,
             "use_cases_total": len(all_ucs),
             "use_cases_with_links": use_cases_with_links_count,
             "links_total": links_total_count,
             "links_adopted": links_adopted_count,
+            "expansions_count": len(expansions),
+            "expansions": expansions,
             "tasks_changed_count": len(task_changes),
             "files_changed_count": len(file_records),
             "task_changes": task_changes,
@@ -7861,6 +7924,7 @@ def adopt_use_case_links(
             file_records,
             plan_hash=plan_hash,
             unresolved=unknown_refs,
+            expansions=expansions,
         )
         base_result["snapshot_dir"] = str(snap_dir)
         base_result["manifest_path"] = str(snap_dir / "manifest.json")
@@ -10415,7 +10479,19 @@ def validate_use_case_probe(
     m_total = readiness["tasks_total"]
 
     if not readiness["is_ready"] and not force:
-        err_msg = f"Use case {uc_id} is not ready ({n_done}/{m_total} tasks done; stage: {stage}). Pass --force to override."
+        if stage == "draft":
+            err_msg = (
+                f"Use case {uc_id} is not ready ({n_done}/{m_total} tasks done; stage: {stage}): "
+                f"approve the use case and link tasks first (ai-orch tasks link <task> <UC>), "
+                f"or pass --force to override."
+            )
+        elif stage == "planned":
+            err_msg = (
+                f"Use case {uc_id} is not ready ({n_done}/{m_total} tasks done; stage: {stage}): "
+                f"its linked tasks are not delivered yet; pass --force to override."
+            )
+        else:
+            err_msg = f"Use case {uc_id} is not ready ({n_done}/{m_total} tasks done; stage: {stage}). Pass --force to override."
         return False, {
             "ok": False,
             "id": uc_id,
@@ -21398,6 +21474,7 @@ def cmd_use_cases_adopt_links(args: argparse.Namespace) -> int:
     effective_dry_run = not (apply_flag and not preview_flag)
     expect_plan_hash = getattr(args, "expect_plan_hash", None)
     skip_unknown = bool(getattr(args, "skip_unknown", False))
+    expand_initiatives = bool(getattr(args, "expand_initiatives", False))
     is_json = bool(getattr(args, "json", False))
 
     res = adopt_use_case_links(
@@ -21405,6 +21482,7 @@ def cmd_use_cases_adopt_links(args: argparse.Namespace) -> int:
         dry_run=effective_dry_run,
         expect_plan_hash=expect_plan_hash,
         skip_unknown=skip_unknown,
+        expand_initiatives=expand_initiatives,
     )
     args._last_result = res
     if is_json:
@@ -21412,6 +21490,7 @@ def cmd_use_cases_adopt_links(args: argparse.Namespace) -> int:
         return 0 if res.get("ok") else 1
 
     unknown_list = res.get("unknown_ids", [])
+    expansions_list = res.get("expansions", [])
     if not res.get("ok"):
         print(f"[FAIL] {res.get('error', 'adopt-links failed')}", file=sys.stderr)
         if unknown_list:
@@ -21430,6 +21509,9 @@ def cmd_use_cases_adopt_links(args: argparse.Namespace) -> int:
             f"{res.get('links_adopted', 0)} link(s) across {res.get('tasks_changed_count', 0)} task(s) in {res.get('files_changed_count', 0)} file(s) "
             f"(plan hash: {res.get('plan_hash', '')})"
         )
+        for exp in expansions_list:
+            leaves_str = ", ".join(exp.get("leaf_tasks", []))
+            print(f"  - [expand] {exp['use_case_id']}: {exp['initiative_id']} -> {leaves_str}")
         for tc in res.get("task_changes", []):
             old_str = ", ".join(tc.get("old_use_cases", [])) or "-"
             new_str = ", ".join(tc.get("new_use_cases", [])) or "-"
@@ -21448,9 +21530,10 @@ def cmd_use_cases_adopt_links(args: argparse.Namespace) -> int:
         if not res.get("plan"):
             print("[ok] all use-case links already adopted on tasks; nothing to change")
         print(f"Plan hash: {res.get('plan_hash', '')}")
+        exp_hint = "--expand-initiatives " if expand_initiatives else ""
         skip_hint = "--skip-unknown " if skip_unknown else ""
         print(
-            f"[preview] apply with: {skip_hint}--apply --expect-plan-hash {res.get('plan_hash', '')}",
+            f"[preview] apply with: {exp_hint}{skip_hint}--apply --expect-plan-hash {res.get('plan_hash', '')}",
             file=sys.stderr,
         )
         print("[preview] nothing written; re-run with --apply to write these changes")
@@ -21466,6 +21549,9 @@ def cmd_use_cases_adopt_links(args: argparse.Namespace) -> int:
     )
     if res.get("snapshot_dir"):
         print(f"  - snapshot: {res['snapshot_dir']} (manifest: {res.get('manifest_path')})")
+    for exp in expansions_list:
+        leaves_str = ", ".join(exp.get("leaf_tasks", []))
+        print(f"  - expanded {exp['use_case_id']}: {exp['initiative_id']} -> {leaves_str}")
     for tc in res.get("task_changes", []):
         old_str = ", ".join(tc.get("old_use_cases", [])) or "-"
         new_str = ", ".join(tc.get("new_use_cases", [])) or "-"
@@ -26413,6 +26499,7 @@ def build_parser() -> argparse.ArgumentParser:
     uc_adopt.add_argument("--apply", action="store_true", default=False, help="Apply migration after snapshotting touched files")
     uc_adopt.add_argument("--preview", "--dry-run", dest="preview", action="store_true", default=False, help="Preview changes without writing (default)")
     uc_adopt.add_argument("--expect-plan-hash", "--expect-hash", dest="expect_plan_hash", default=None, help="Expected plan hash from preview")
+    uc_adopt.add_argument("--expand-initiatives", action="store_true", default=False, help="Expand initiative IDs in linked-tasks to all leaf, non-dropped tasks of that initiative")
     uc_adopt.add_argument("--skip-unknown", action="store_true", default=False, help="Proceed when unknown/non-canonical/cross-workspace task IDs exist, recording them as unresolved in the report")
     uc_adopt.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     uc_adopt.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
