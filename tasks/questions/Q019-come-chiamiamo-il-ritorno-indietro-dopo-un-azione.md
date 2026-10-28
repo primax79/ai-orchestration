@@ -10,7 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
-- applied: no
+- applied: yes
 - short: Annulla o Riapri
 
 ## Context
