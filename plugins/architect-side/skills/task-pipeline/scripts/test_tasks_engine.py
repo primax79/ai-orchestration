@@ -17884,6 +17884,333 @@ def test_t086_use_cases_approve_deprecate_propose_preview_filters_headers_log_id
     assert all(u["approval"] == "approved" for u in list_after["use_cases"])
 
 
+# ---------------------------------------------------------------------------
+# N075: waiting-on accumulates blocking questions; unblock only when all resolved
+# ---------------------------------------------------------------------------
+
+def test_n075_ask_3_questions_answer_2_then_last_unblocks(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+
+    # Ask 3 questions blocking T001
+    ok1, res1 = te.ask_question(
+        tasks_dir,
+        question="First question?",
+        context="C1",
+        options=[("A", "Opt A", None), ("B", "Opt B", None)],
+        blocks="T001",
+    )
+    assert ok1 is True
+    q1_id = res1["id"]
+
+    t_after_q1 = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_after_q1["state"] == "waiting"
+    assert t_after_q1["decider"] == q1_id
+    assert t_after_q1["waiting_on"] == f"question:{q1_id}"
+
+    ok2, res2 = te.ask_question(
+        tasks_dir,
+        question="Second question?",
+        context="C2",
+        options=[("A", "Opt A", None), ("B", "Opt B", None)],
+        blocks="T001",
+    )
+    assert ok2 is True
+    q2_id = res2["id"]
+
+    t_after_q2 = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_after_q2["state"] == "waiting"
+    assert t_after_q2["decider"] == f"{q1_id}, {q2_id}"
+    assert t_after_q2["waiting_on"] == f"question:{q1_id}, question:{q2_id}"
+
+    ok3, res3 = te.ask_question(
+        tasks_dir,
+        question="Third question?",
+        context="C3",
+        options=[("A", "Opt A", None), ("B", "Opt B", None)],
+        blocks="T001",
+    )
+    assert ok3 is True
+    q3_id = res3["id"]
+
+    t_after_q3 = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_after_q3["state"] == "waiting"
+    assert t_after_q3["decider"] == f"{q1_id}, {q2_id}, {q3_id}"
+    assert t_after_q3["waiting_on"] == f"question:{q1_id}, question:{q2_id}, question:{q3_id}"
+    content3 = (tasks_dir / "features" / "T001-task.md").read_text(encoding="utf-8")
+    assert f"- waiting-on: question:{q1_id}, question:{q2_id}, question:{q3_id}" in content3
+
+    # Answer Q001: still waiting with Q002 and Q003
+    ok_ans1, res_ans1 = te.answer_question(tasks_dir, q1_id, choice="A", text="Chose A")
+    assert ok_ans1 is True
+    assert res_ans1["unblocked_tasks"] == []
+
+    t_after_ans1 = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_after_ans1["state"] == "waiting"
+    assert t_after_ans1["decider"] == f"{q2_id}, {q3_id}"
+    assert t_after_ans1["waiting_on"] == f"question:{q2_id}, question:{q3_id}"
+
+    # Answer Q002: still waiting with Q003
+    ok_ans2, res_ans2 = te.answer_question(tasks_dir, q2_id, choice="B", text="Chose B")
+    assert ok_ans2 is True
+    assert res_ans2["unblocked_tasks"] == []
+
+    t_after_ans2 = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_after_ans2["state"] == "waiting"
+    assert t_after_ans2["decider"] == q3_id
+    assert t_after_ans2["waiting_on"] == f"question:{q3_id}"
+
+    # Answer Q003: all resolved -> unblocked to 'in progress'!
+    ok_ans3, res_ans3 = te.answer_question(tasks_dir, q3_id, choice="A", text="Chose A")
+    assert ok_ans3 is True
+    assert res_ans3["unblocked_tasks"] == ["T001"]
+
+    t_after_ans3 = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_after_ans3["state"] == "in progress"
+    assert t_after_ans3["decider"] == "-"
+    assert t_after_ans3["waiting_on"] is None
+    content_final = (tasks_dir / "features" / "T001-task.md").read_text(encoding="utf-8")
+    assert "waiting-on" not in content_final
+
+
+def test_n075_withdraw_path_with_multiple_questions(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+
+    te.ask_question(tasks_dir, question="Q1?", context="C1", options=[("A", "A", None), ("B", "B", None)], blocks="T001")
+    te.ask_question(tasks_dir, question="Q2?", context="C2", options=[("A", "A", None), ("B", "B", None)], blocks="T001")
+
+    # Withdraw Q001: still waiting on Q002
+    ok_w1, res_w1 = te.withdraw_question(tasks_dir, "Q001", reason="No longer needed")
+    assert ok_w1 is True
+    assert res_w1["unblocked_tasks"] == []
+
+    t_mid = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_mid["state"] == "waiting"
+    assert t_mid["decider"] == "Q002"
+    assert t_mid["waiting_on"] == "question:Q002"
+
+    # Withdraw Q002: now unblocked
+    ok_w2, res_w2 = te.withdraw_question(tasks_dir, "Q002", reason="Also withdrawn")
+    assert ok_w2 is True
+    assert res_w2["unblocked_tasks"] == ["T001"]
+
+    t_final = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_final["state"] == "in progress"
+    assert t_final["decider"] == "-"
+    assert t_final["waiting_on"] is None
+
+
+def test_n075_force_unblock_with_several_questions(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+
+    te.ask_question(tasks_dir, question="Q1?", context="C1", options=[("A", "A", None), ("B", "B", None)], blocks="T001")
+    te.ask_question(tasks_dir, question="Q2?", context="C2", options=[("A", "A", None), ("B", "B", None)], blocks="T001")
+    te.ask_question(tasks_dir, question="Q3?", context="C3", options=[("A", "A", None), ("B", "B", None)], blocks="T001")
+
+    # 1. Normal transition out of waiting is refused with all open questions listed
+    res_tr1 = run_cli("transition", "T001", "in progress", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tr1.returncode == 1
+    p1 = json.loads(res_tr1.stdout)
+    assert "Waiting invariant violated" in p1["error"]
+    assert "Q001, Q002, Q003" in p1["error"]
+
+    # 2. Transition with --force-unblock but no reason is refused
+    res_tr2 = run_cli("transition", "T001", "in progress", "--force-unblock", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_tr2.returncode == 1
+    p2 = json.loads(res_tr2.stdout)
+    assert "--force-unblock requires non-empty --reason" in p2["error"]
+
+    # 3. Transition with --force-unblock and --reason succeeds
+    res_tr3 = run_cli(
+        "transition",
+        "T001",
+        "in progress",
+        "--force-unblock",
+        "--reason",
+        "Owner decided to bypass all 3 questions",
+        "--tasks-dir",
+        str(tasks_dir),
+        "--json",
+    )
+    assert res_tr3.returncode == 0
+    p3 = json.loads(res_tr3.stdout)
+    assert p3["ok"] is True
+
+    t_after = te.parse_emergent_task_file(tasks_dir / "features" / "T001-task.md", tasks_dir)
+    assert t_after["state"] == "in progress"
+    assert t_after["decider"] == "-"
+    assert t_after["waiting_on"] is None
+
+    # All 3 questions are withdrawn with the reason
+    for qid in ("Q001", "Q002", "Q003"):
+        q_data = te.parse_question_file(tasks_dir / "questions" / f"{qid}-q{qid[-1]}.md", tasks_dir)
+        assert q_data["status"] == "withdrawn"
+        assert q_data["answer"]["choice"] == "withdrawn"
+        assert "Owner decided to bypass all 3 questions" in q_data["answer"]["text"]
+
+
+def test_n075_stale_entry_warning(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="in progress",
+    )
+
+    # Ask Q001 and answer it
+    te.ask_question(tasks_dir, question="Q1?", context="C1", options=[("A", "A", None), ("B", "B", None)], blocks="T001")
+    te.answer_question(tasks_dir, "Q001", choice="A", text="Done")
+
+    # Ask Q002 and withdraw it
+    te.ask_question(tasks_dir, question="Q2?", context="C2", options=[("A", "A", None), ("B", "B", None)], blocks="T001")
+    te.withdraw_question(tasks_dir, "Q002", reason="Withdrawn")
+
+    # Now manually put T001 in waiting on answered Q001 and withdrawn Q002
+    t1_path = tasks_dir / "features" / "T001-task.md"
+    te._update_task_file_headers_and_state(
+        t1_path,
+        new_state="waiting",
+        decider="Q001, Q002",
+        waiting_on="question:Q001, question:Q002",
+    )
+
+    errors, warnings, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errors == []
+    q1_warn = [w for w in warnings if "Q001" in w and "stale entry" in w and "already answered" in w]
+    assert len(q1_warn) == 1
+    q2_warn = [w for w in warnings if "Q002" in w and "stale entry" in w and "already withdrawn" in w]
+    assert len(q2_warn) == 1
+
+
+def test_n075_non_question_entries_preserved(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_sample_task(
+        tasks_dir / "features" / "T001-task.md",
+        task_id="T001",
+        category="features",
+        state="waiting",
+    )
+    # Task is waiting on external run
+    t1_path = tasks_dir / "features" / "T001-task.md"
+    te._update_task_file_headers_and_state(
+        t1_path,
+        new_state="waiting",
+        waiting_on="run:run-12345",
+    )
+
+    # Ask question Q001 blocking T001
+    ok, res = te.ask_question(
+        tasks_dir,
+        question="Review this run?",
+        context="Context",
+        options=[("A", "Approve", None), ("B", "Reject", None)],
+        blocks="T001",
+    )
+    assert ok is True
+    qid = res["id"]
+
+    t_mid = te.parse_emergent_task_file(t1_path, tasks_dir)
+    assert t_mid["state"] == "waiting"
+    assert t_mid["waiting_on"] == f"run:run-12345, question:{qid}"
+    assert t_mid["decider"] == qid
+
+    # Answer Q001: question is resolved, but task must STAY in waiting because run:run-12345 remains!
+    ok_ans, res_ans = te.answer_question(tasks_dir, qid, choice="A", text="Approved")
+    assert ok_ans is True
+    assert res_ans["unblocked_tasks"] == []
+
+    t_after = te.parse_emergent_task_file(t1_path, tasks_dir)
+    assert t_after["state"] == "waiting"
+    assert t_after["waiting_on"] == "run:run-12345"
+    assert t_after["decider"] == "-"
+
+
+def test_n075_plan_task_multiple_questions_and_stale_warning(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    init_dir = tasks_dir / "01-sample"
+    init_dir.mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Index\n\n| ID | Title | State |\n|---|---|---|\n| 01 | Sample | open |\n", encoding="utf-8")
+    plan_file = init_dir / "plan.md"
+    plan_file.write_text(
+        "# Initiative 01: Sample\n\n"
+        "- id: 01\n"
+        "- title: Sample\n"
+        "- status: open\n\n"
+        "## Tasks\n\n"
+        "### 01.1 - First Task\n"
+        "- **Status:** `in progress`\n"
+        "- **Priority:** P1\n"
+        "- **Size:** M\n"
+        "- **Handoff:** Do it\n\n"
+        "Goal\n",
+        encoding="utf-8",
+    )
+
+    ok1, res1 = te.ask_question(
+        tasks_dir,
+        question="Plan Q1?",
+        context="C1",
+        options=[("A", "A", None), ("B", "B", None)],
+        blocks="01.1",
+    )
+    assert ok1 is True
+    q1_id = res1["id"]
+
+    tree1 = te.discover_task_tree(tasks_dir)
+    assert tree1["01.1"].state == "waiting"
+    assert tree1["01.1"].waiting_on == f"question:{q1_id}"
+
+    ok2, res2 = te.ask_question(
+        tasks_dir,
+        question="Plan Q2?",
+        context="C2",
+        options=[("A", "A", None), ("B", "B", None)],
+        blocks="01.1",
+    )
+    assert ok2 is True
+    q2_id = res2["id"]
+
+    tree2 = te.discover_task_tree(tasks_dir)
+    assert tree2["01.1"].state == "waiting"
+    assert tree2["01.1"].waiting_on == f"question:{q1_id}, question:{q2_id}"
+
+    # Answer Q1: still waiting
+    ok_ans1, res_ans1 = te.answer_question(tasks_dir, q1_id, choice="A", text="Chose A")
+    assert ok_ans1 is True
+    assert res_ans1["unblocked_tasks"] == []
+
+    tree_mid = te.discover_task_tree(tasks_dir)
+    assert tree_mid["01.1"].state == "waiting"
+    assert tree_mid["01.1"].waiting_on == f"question:{q2_id}"
+
+    # Answer Q2: unblocks to in progress!
+    ok_ans2, res_ans2 = te.answer_question(tasks_dir, q2_id, choice="B", text="Chose B")
+    assert ok_ans2 is True
+    assert res_ans2["unblocked_tasks"] == ["01.1"]
+
+    tree_final = te.discover_task_tree(tasks_dir)
+    assert tree_final["01.1"].state == "in progress"
+    assert tree_final["01.1"].waiting_on is None
+
+
 
 
 
