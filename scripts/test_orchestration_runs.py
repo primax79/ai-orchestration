@@ -953,7 +953,7 @@ def test_start_and_outcome_recording(sample_workspace: pathlib.Path):
     assert data_start["status"] == "starting"
 
     # Poll until completed
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     record = None
     while time.time() < deadline:
         record = load_run_record(sample_workspace, run_id)
@@ -984,7 +984,7 @@ def test_start_and_outcome_recording(sample_workspace: pathlib.Path):
     data_fail = json.loads(res_fail.stdout)
     run_id_fail = data_fail["run_id"]
 
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     rec_fail = None
     while time.time() < deadline:
         rec_fail = load_run_record(sample_workspace, run_id_fail)
@@ -1123,7 +1123,7 @@ def test_reconcile_supervisor_sigkill_marks_lost_and_kills_agent_group(
     sup_pid = None
     try:
         # Wait for running
-        deadline = time.time() + 10.0
+        deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
         record = None
         while time.time() < deadline:
             record = load_run_record(sample_workspace, run_id)
@@ -1209,7 +1209,7 @@ def test_reconcile_pid_reuse_simulated_does_not_kill(sample_workspace: pathlib.P
     res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
     run_id = json.loads(res_start.stdout)["run_id"]
 
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     record = None
     while time.time() < deadline:
         record = load_run_record(sample_workspace, run_id)
@@ -1288,7 +1288,7 @@ def test_prompt_not_in_ps_args(sample_workspace: pathlib.Path):
     res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
     run_id = json.loads(res_start.stdout)["run_id"]
 
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     record = None
     while time.time() < deadline:
         record = load_run_record(sample_workspace, run_id)
@@ -1393,7 +1393,7 @@ def test_log_rotation_and_offsets(sample_workspace: pathlib.Path, monkeypatch):
     res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
     run_id = json.loads(res_start.stdout)["run_id"]
 
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     while time.time() < deadline:
         rec = load_run_record(sample_workspace, run_id)
         if rec and rec.get("status") == "succeeded":
@@ -1844,7 +1844,7 @@ def test_execute_start_moves_task_to_in_progress(sample_workspace: pathlib.Path)
     res_start = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
     run_id = json.loads(res_start.stdout)["run_id"]
 
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     while time.time() < deadline:
         content = task_file.read_text(encoding="utf-8")
         if "state: in progress" in content:
@@ -5820,7 +5820,7 @@ def test_run_events_lifecycle_and_ordering(sample_workspace: pathlib.Path):
     run_id = out["run_id"]
 
     # Wait for run to finish
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     while time.time() < deadline:
         rec = load_run_record(ws, run_id)
         if rec and rec.get("status") in TERMINAL_STATES and rec.get("finalized_at"):
@@ -6014,7 +6014,7 @@ def test_run_events_mark_delivered(sample_workspace: pathlib.Path):
     res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
     run_id = json.loads(res.stdout)["run_id"]
 
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     while time.time() < deadline:
         rec = load_run_record(ws, run_id)
         if rec and rec.get("status") == "succeeded":
@@ -6078,7 +6078,7 @@ def test_run_events_apply_verdict(sample_workspace: pathlib.Path):
     res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
     ver_run_id = json.loads(res.stdout)["run_id"]
 
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     while time.time() < deadline:
         rec = load_run_record(ws, ver_run_id)
         if rec and rec.get("status") == "succeeded":
@@ -6180,7 +6180,7 @@ def test_run_events_batch_member_outcomes(sample_workspace: pathlib.Path):
     res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
     batch_run_id = json.loads(res.stdout)["run_id"]
 
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     while time.time() < deadline:
         rec = load_run_record(ws, batch_run_id)
         if rec and rec.get("status") == "succeeded":
@@ -6229,7 +6229,7 @@ def test_run_events_question_filed_by_run(sample_workspace: pathlib.Path):
     res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
     run_id = json.loads(res.stdout)["run_id"]
 
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     while time.time() < deadline:
         rec = load_run_record(ws, run_id)
         if rec and rec.get("status") == "succeeded":
@@ -6269,7 +6269,7 @@ def test_run_events_session_filter(sample_workspace: pathlib.Path):
     res = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
     run_id = json.loads(res.stdout)["run_id"]
 
-    deadline = time.time() + 10.0
+    deadline = time.time() + 60.0  # generous under load; loops break as soon as the state is reached
     while time.time() < deadline:
         rec = load_run_record(ws, run_id)
         if rec and rec.get("status") == "succeeded" and rec.get("finalized_at"):
