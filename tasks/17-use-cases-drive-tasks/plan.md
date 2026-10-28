@@ -15,11 +15,6 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 - **Status:** `in progress` (2026-10-28; operator) · **Short:** Task da use case · **Size:** M · **Depends on:** 17.2
 - **Goal:** spec §2: `tasks new --use-case` / `--from-use-case` (precompilazione), anche per i task di iniziativa; `--kind` facoltativo con avviso; avvisi di validate; aggiornati i chiamanti (backend UI, broker `tasks.new`, `orchestration_runs.py`, follow-up interni) senza rompere chi non passa i nuovi campi.
 
-### 17.7 - Regressione: rivalidazione e chiusura sicura dei task
-
-- **Status:** `delivered` (2026-10-28, kilo, commit `75c49e4`: scrittura transazionale di `revalidation: pending` con evento `use_case.revalidation_requested`, coda `use-cases queue` ordinata dal più vecchio e guardia di chiusura sicura su `verified`/`done` con rifiuto exit 2, evento `task.transition_refused` e override `--owner-approved`) · **Short:** Regressione use case · **Size:** M · **Depends on:** 17.5
-- **Goal:** spec §5: `revalidation: pending` e coda `use-cases queue`; un task si chiude con uno use case fallito solo se questo è passato dopo la sua consegna (o `--owner-approved`); eventi registrati.
-
 ### 17.8 - Flusso use-case-first nelle skill e ricerca
 
 - **Status:** `open` · **Short:** Skill use-case-first · **Size:** M · **Depends on:** 17.4
@@ -84,3 +79,8 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 - **Status:** `done` (2026-10-28, kilo, commit `e538a28`: rifiuto exit 2 in `use-cases validate` se non pronto salvo `--force` registrato e con evento `use_case.validated`, campagne limitate agli use case pronti con sezione "Not ready (N/M)" ed esclusione di `untested` dal denominatore di prontezza; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Validazione solo se pronti · **Size:** M · **Depends on:** 17.5, T069
 - **Goal:** spec §5: `use-cases validate` rifiuta se non pronto (salvo `--force` registrato); campagne solo sugli use case in ambito, gli altri "Not ready (N/M)"; sostituisce l'ambito di T069 tenendo la regola `untested`; il punteggio di prontezza esclude gli `untested` dal denominatore o li mostra a parte (osservazione di ai-coding-tools-ea nella validazione di T069: 75% = 24/32 con 7 untested).
+
+### 17.7 - Regressione: rivalidazione e chiusura sicura dei task
+
+- **Status:** `done` (2026-10-28, kilo, commit `75c49e4`: scrittura transazionale di `revalidation: pending` con evento `use_case.revalidation_requested`, coda `use-cases queue` ordinata dal più vecchio e guardia di chiusura sicura su `verified`/`done` con rifiuto exit 2, evento `task.transition_refused` e override `--owner-approved`; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Regressione use case · **Size:** M · **Depends on:** 17.5
+- **Goal:** spec §5: `revalidation: pending` e coda `use-cases queue`; un task si chiude con uno use case fallito solo se questo è passato dopo la sua consegna (o `--owner-approved`); eventi registrati.
