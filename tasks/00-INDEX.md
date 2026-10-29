@@ -24,6 +24,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
 | 17 | 17 | [Gli use case guidano i task](done/17-use-cases-drive-tasks/plan.md) | done | - | M |
+| 19 | 19 | [Sviluppo multi-macchina: hub, executor su ogni host, console centrale](19-multi-machine-development/plan.md) | open | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -38,6 +39,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [executor-housekeeping-and-completion](specs/executor-housekeeping-and-completion.md) | - |
 | [inbox-notes](specs/inbox-notes.md) | - |
 | [multi-machine-development-architecture](specs/multi-machine-development-architecture.md) | - |
+| [multi-machine-development-architecture.review-2026-10-29](specs/multi-machine-development-architecture.review-2026-10-29.md) | - |
 | [orchestration-broker-mcp](specs/orchestration-broker-mcp.md) | - |
 | [orchestration-config-and-agents-md](specs/orchestration-config-and-agents-md.md) | - |
 | [orchestration-extension-spec](specs/orchestration-extension-spec.md) | - |
@@ -118,6 +120,9 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | UC035 (Clean up executor debris) | P2 | [Architect cleans up merged worktrees and stale sessions safely](use-cases/UC035-architect-cleans-up-merged-worktrees-and-stale-sessions-safely.md) | untested (proposed) | Architect session | T012 |
 | UC036 (Sync Redmine tracker links) | P2 | [Architect links tasks to Redmine issues and synchronizes progress](use-cases/UC036-architect-links-tasks-to-redmine-issues-and-synchronizes-progress.md) | draft (proposed) | Architect session | - |
 | UC037 (Requester verifies task) | P1 | [Requester session validates a delivered task addressed to it](use-cases/UC037-requester-session-validates-a-delivered-task-addressed-to-its-workspace.md) | untested (proposed) | Requester session | T044, T047 |
+| UC038 (Project drift upgrade) | P1 | [Owner detects and upgrades a project that drifted from the current ai-orchestration conventions](use-cases/UC038-owner-detects-and-upgrades-a-project-that-drifted-from-the-current-ai-orchestration-conventions.md) | planned (proposed) | Owner | 19.1, 19.2, 19.3 |
+| UC039 (Multi-host console attach) | P1 | [Owner sees every run on every machine and attaches to its live terminal from one console](use-cases/UC039-owner-sees-every-run-on-every-machine-and-attaches-to-its-live-terminal-from-one-console.md) | planned (proposed) | Owner | 19.4, 19.5, 19.6, 19.8, 19.9, 19.15, 19.16 |
+| UC040 (Shared queue across hosts) | P1 | [Executors on the Mac and on the hub take tasks from one queue without double claims, and keep working when the hub is down](use-cases/UC040-executors-on-the-mac-and-on-the-hub-take-tasks-from-one-queue-without-double-claims-and-keep-working-when-the-hub-is-down.md) | planned (proposed) | Orchestrator | 19.4, 19.7, 19.10, 19.11, 19.12, 19.13 |
 <!-- /ai-orch:generated use-cases -->
 
 ## Next up
@@ -147,7 +152,7 @@ Tasks in `methodology`. Owner session: unassigned ([README](methodology/README.m
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T073 (Studio pannello orchestratori) | P1 | [Studio: pannello di controllo degli orchestratori di tutti i workspace, handoff e coerenza dei registri](methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md) | waiting (question:Q026, question:Q028) | kilo | - |
+| T073 (Studio pannello orchestratori) | P1 | [Studio: pannello di controllo degli orchestratori di tutti i workspace, handoff e coerenza dei registri](methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md) | in progress | kilo | - |
 | T074 (Chat contestuale per elemento) | P1 | [Chat contestuale con l'IA su un singolo use case, task o domanda](methodology/T074-chat-contestuale-con-l-ia-su-un-singolo-use-case-t.md) | open | kilo | T073 |
 | T076 (Studio interazioni UI) | P1 | [Studio delle interazioni del proprietario con task, use case e domande dalla UI](methodology/T076-studio-delle-interazioni-del-proprietario-con-task.md) | waiting (question:Q020) | kilo | - |
 | T080 (Contratto esecutore robusto) | P1 | [executor-contract: commit a ogni passo verde, nessun segreto nei log, shell portabile su macOS/zsh](methodology/T080-executor-contract-commit-a-ogni-passo-verde-nessun.md) | open | kilo | - |
@@ -160,6 +165,14 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T084 (Test backend UI rossi) | P1 | [Test del backend della UI rossi su main](ui/T084-test-del-backend-della-ui-rossi-su-main.md) | open | kilo | - |
+
+### micro
+
+Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
+
+| Id | Priority | Task | State | Executor | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| T087 (describe run incompleto) | P3 | [ai-orch describe elenca solo una parte dei sottocomandi di run](micro/T087-describe-run-incompleto.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -168,8 +181,7 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 | Key | Question | Blocks | Decider | Recommended |
 | --- | --- | --- | --- | --- |
 | [Q020](questions/Q020-un-azione-di-gruppo-deve-riuscire-tutta-o-niente.md) | Un'azione di gruppo deve riuscire tutta o niente? | T076 | owner | A |
-| [Q026](questions/Q026-come-scopriamo-i-workspace-non-ancora-registrati.md) | Come scopriamo i workspace non ancora registrati? | T073 | owner | A |
-| [Q028](questions/Q028-quello-che-si-scopre-dagli-archivi-e-dai-processi.md) | Quello che si scopre dagli archivi e dai processi può decidere presenza o subentri? | T073 | owner | A |
+| [Q032](questions/Q032-l-interlocutore-di-un-progetto-pu-modificare-il-co.md) | L'interlocutore di un progetto può modificare il codice di prodotto, o solo conversare e smistare il lavoro? | - | owner | B |
 <!-- /ai-orch:generated decisions -->
 
 ## Done
