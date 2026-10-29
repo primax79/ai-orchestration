@@ -4148,6 +4148,62 @@ def test_n063_identical_per_assistant_skill_copies_not_flagged_as_duplicates(tmp
     assert not any(g["group_key"] == f"duplicate-name:{sname}" for g in st["finding_groups"])
 
 
+def test_parse_frontmatter_and_compare_without_pyyaml(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T088: Stdlib fallback parser in parse_frontmatter_and_body normalizes nested metadata and folded block scalars when PyYAML is absent."""
+    import orchestration_env as oe
+
+    monkeypatch.setattr(oe, "yaml", None)
+
+    nested_md = (
+        "---\n"
+        "name: gcube-component-release\n"
+        "description: \"Release gcube components\"\n"
+        "metadata:\n"
+        "  author: Alfredo Oliviero\n"
+        "  version: 1.0.0\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    flat_md = (
+        "---\n"
+        "name: gcube-component-release\n"
+        "description: \"Release gcube components\"\n"
+        "metadata: \"\"\n"
+        "author: Alfredo Oliviero\n"
+        "version: 1.0.0\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    eq1, changed1, body_diff1 = oe.compare_skill_md(nested_md, flat_md)
+    assert eq1 is True
+    assert changed1 == []
+    assert body_diff1 is False
+
+    folded_md = (
+        "---\n"
+        "name: demo-folded-skill\n"
+        "description: >-\n"
+        "  Create distinctive: frontend interfaces\n"
+        "  with high design quality.\n"
+        "license: Apache-2.0\n"
+        "---\n\n"
+        "# Body line\n"
+    )
+    quoted_md = (
+        "---\r\n"
+        "name: demo-folded-skill\r\n"
+        "description: \"Create distinctive: frontend interfaces with high design quality.\"\r\n"
+        "license: Apache-2.0   \r\n"
+        "---\r\n\r\n"
+        "# Body line  \r\n"
+    )
+    eq2, changed2, body_diff2 = oe.compare_skill_md(folded_md, quoted_md)
+    assert eq2 is True
+    assert changed2 == []
+    assert body_diff2 is False
+
+
+
 
 
 
