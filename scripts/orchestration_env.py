@@ -407,6 +407,50 @@ def get_config_dir(home: pathlib.Path | None = None) -> pathlib.Path:
     return h / ".config" / "ai-orchestration"
 
 
+def _get_global_config_path(home: pathlib.Path | None = None) -> pathlib.Path:
+    if home is not None:
+        return home / ".config" / "ai-orchestration" / "orchestration.toml"
+    env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
+    if env_cfg and env_cfg.strip():
+        p = pathlib.Path(env_cfg).expanduser().resolve()
+        if p.is_file() or p.suffix.lower() == ".toml" or p.name.endswith(".toml"):
+            return p
+        return p / "orchestration.toml"
+    env_dir = os.environ.get("AI_ORCH_CONFIG_DIR")
+    if env_dir and env_dir.strip():
+        return pathlib.Path(env_dir).expanduser().resolve() / "orchestration.toml"
+    h = get_home_dir()
+    return h / ".config" / "ai-orchestration" / "orchestration.toml"
+
+
+def _inspect_project_config_env(
+    workspace: pathlib.Path,
+    home: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    gpath = _get_global_config_path(home)
+    try:
+        setup_scripts = REPO_ROOT / "plugins" / "shared" / "skills" / "orchestration-setup" / "scripts"
+        if setup_scripts.is_dir() and str(setup_scripts) not in sys.path:
+            sys.path.insert(0, str(setup_scripts))
+        import orchestration_config  # type: ignore
+        return orchestration_config.inspect_project_config(workspace, gpath)
+    except Exception:
+        ws = pathlib.Path(workspace)
+        ext_path = gpath.parent / "projects" / ws.resolve().name / "orchestration.toml"
+        local_dot = ws / ".ai-orchestration.local.toml"
+        p = local_dot if local_dot.is_file() else ext_path
+        return {
+            "path": p,
+            "write_path": p,
+            "exists": p.is_file(),
+            "is_legacy": False,
+            "label": str(p),
+            "candidates": [{"path": p, "label": str(p), "is_legacy": False}] if p.is_file() else [],
+            "legacy_paths": [],
+            "warnings": [],
+        }
+
+
 def get_doctor_ack_path(home: pathlib.Path | None = None) -> pathlib.Path:
     return get_config_dir(home) / DOCTOR_ACK_FILENAME
 
@@ -976,50 +1020,57 @@ def find_configured_local_checkout(
     h = home or get_home_dir()
     cache_dir = get_repos_cache_dir(h)
 
-    cfg_dirs: list[pathlib.Path] = []
+    tfiles: list[pathlib.Path] = []
     if workspace:
-        cfg_dirs.extend([
-            workspace / ".config" / "ai-orchestration",
-            workspace,
-            workspace / "tasks",
-        ])
-    cfg_dirs.append(h / ".config" / "ai-orchestration")
+        for cand in _inspect_project_config_env(workspace, h).get("candidates", []):
+            cp = cand["path"]
+            if cp.is_file() and cp not in tfiles:
+                tfiles.append(cp)
+        for fname in ("orchestration.toml", ".ai-orchestration.local.toml"):
+            cp = workspace / ".config" / "ai-orchestration" / fname
+            if cp.is_file() and cp not in tfiles:
+                tfiles.append(cp)
+    for fname in ("orchestration.toml", ".ai-orchestration.local.toml"):
+        cp = h / ".config" / "ai-orchestration" / fname
+        if cp.is_file() and cp not in tfiles:
+            tfiles.append(cp)
+    gpath_cand = _get_global_config_path(h)
+    if gpath_cand.is_file() and gpath_cand not in tfiles:
+        tfiles.append(gpath_cand)
 
     cand_keys = [repo_name, repo_name.replace("-", "_")]
     if repo_name == "ai-orchestration":
         cand_keys.extend(["source_checkout", "source_repo", "ai_orchestration_root", "ai_orchestration", "ai-orchestration"])
 
-    for cdir in cfg_dirs:
-        for fname in ("orchestration.toml", ".ai-orchestration.local.toml"):
-            tfile = cdir / fname
-            if not tfile.is_file():
-                continue
-            try:
-                raw = tfile.read_text(encoding="utf-8", errors="replace")
-                data = None
-                if tomllib is not None:
-                    try:
-                        data = tomllib.loads(raw)
-                    except Exception:
-                        data = None
-                if isinstance(data, dict):
-                    for k in cand_keys:
-                        val = data.get(k)
-                        if isinstance(val, str) and val.strip():
-                            cand_p = pathlib.Path(val).expanduser().resolve()
-                            if cand_p.is_dir() and (cand_p / ".git").exists() and cand_p != (cache_dir / repo_name).resolve() and cache_dir not in cand_p.parents:
-                                return cand_p
-                    for sec in ("repos", "paths", "launcher"):
-                        sub = data.get(sec)
-                        if isinstance(sub, dict):
-                            for k in cand_keys:
-                                val = sub.get(k)
-                                if isinstance(val, str) and val.strip():
-                                    cand_p = pathlib.Path(val).expanduser().resolve()
-                                    if cand_p.is_dir() and (cand_p / ".git").exists() and cand_p != (cache_dir / repo_name).resolve() and cache_dir not in cand_p.parents:
-                                        return cand_p
-            except Exception:
-                pass
+    for tfile in tfiles:
+        if not tfile.is_file():
+            continue
+        try:
+            raw = tfile.read_text(encoding="utf-8", errors="replace")
+            data = None
+            if tomllib is not None:
+                try:
+                    data = tomllib.loads(raw)
+                except Exception:
+                    data = None
+            if isinstance(data, dict):
+                for k in cand_keys:
+                    val = data.get(k)
+                    if isinstance(val, str) and val.strip():
+                        cand_p = pathlib.Path(val).expanduser().resolve()
+                        if cand_p.is_dir() and (cand_p / ".git").exists() and cand_p != (cache_dir / repo_name).resolve() and cache_dir not in cand_p.parents:
+                            return cand_p
+                for sec in ("repos", "paths", "launcher"):
+                    sub = data.get(sec)
+                    if isinstance(sub, dict):
+                        for k in cand_keys:
+                            val = sub.get(k)
+                            if isinstance(val, str) and val.strip():
+                                cand_p = pathlib.Path(val).expanduser().resolve()
+                                if cand_p.is_dir() and (cand_p / ".git").exists() and cand_p != (cache_dir / repo_name).resolve() and cache_dir not in cand_p.parents:
+                                    return cand_p
+        except Exception:
+            pass
 
     real_h = get_home_dir()
     if home is None or home == real_h:
@@ -1565,7 +1616,7 @@ def load_conflict_policy(
         "codex": "bound",
     }
     h = home or get_home_dir()
-    gpath = h / ".config" / "ai-orchestration" / "orchestration.toml"
+    gpath = _get_global_config_path(h)
 
     cfg: dict[str, Any] = {}
     try:
@@ -1574,7 +1625,7 @@ def load_conflict_policy(
             sys.path.insert(0, str(setup_scripts))
         import orchestration_config  # type: ignore
         merged, _ = orchestration_config.resolve_config(
-            global_path=gpath if gpath.exists() else None,
+            global_path=gpath,
             workspace=workspace,
         )
         cfg = merged
@@ -5470,6 +5521,11 @@ def inspect_environment(
     if "kilo" in environments:
         environments["kilo"]["kilo_effective"] = kilo_effective
 
+    cfg_ws = ws if ws is not None else pathlib.Path.cwd().resolve()
+    if cfg_ws.name == "tasks" and cfg_ws.parent != cfg_ws:
+        cfg_ws = cfg_ws.parent
+    proj_cfg_info = _inspect_project_config_env(cfg_ws, h)
+
     return {
         "clis": clis,
         "source_repos": repos_status,
@@ -5483,6 +5539,17 @@ def inspect_environment(
         "kilo_effective": kilo_effective,
         "launcher": broker_mcp_report["launcher"],
         "broker_mcp": broker_mcp_report,
+        "project_config_path": str(proj_cfg_info["path"]),
+        "project_config_exists": bool(proj_cfg_info["exists"]),
+        "project_config_write_path": str(proj_cfg_info["write_path"]),
+        "project_config_legacy": bool(proj_cfg_info["is_legacy"]),
+        "project_config": {
+            "path": str(proj_cfg_info["path"]),
+            "exists": bool(proj_cfg_info["exists"]),
+            "write_path": str(proj_cfg_info["write_path"]),
+            "legacy": bool(proj_cfg_info["is_legacy"]),
+            "warnings": list(proj_cfg_info["warnings"]),
+        },
     }
 
 
@@ -6997,6 +7064,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(report, indent=2))
         return 0
+
+    if report.get("project_config_path"):
+        print(f"Project config    : {report['project_config_path']} (exists={report.get('project_config_exists', False)})")
+        for w in report.get("project_config", {}).get("warnings", []):
+            print(f"  [WARN] {w}")
 
     print("=== CLI Binaries ===")
     for tool, info in report["clis"].items():

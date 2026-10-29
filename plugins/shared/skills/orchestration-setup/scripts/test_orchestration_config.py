@@ -2498,3 +2498,189 @@ def test_config_show_defaults_to_cwd(tmp_path: pathlib.Path, monkeypatch: pytest
     data_other = json.loads(res_other.stdout)
     assert "other_project" in data_other["meta"]["project_config_path"]
     assert data_other["meta"]["project_config_exists"] is False
+
+
+def test_19_1_unified_config_lookup_across_all_subsystems_and_legacy_positions(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1: Every canonical and legacy project config location is read identically by
+    orchestration_config, tasks_engine, and orchestration_triggers; legacy locations
+    emit a read-only deprecation warning and are never written to."""
+    tasks_scripts = REPO_ROOT / "plugins" / "architect-side" / "skills" / "task-pipeline" / "scripts"
+    root_scripts = REPO_ROOT / "scripts"
+    for p in (tasks_scripts, root_scripts):
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+
+    import tasks_engine as te  # type: ignore
+    import orchestration_triggers as ot  # type: ignore
+
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    global_cfg_dir = fake_home / ".config" / "ai-orchestration"
+    global_cfg_path = global_cfg_dir / "orchestration.toml"
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(global_cfg_path))
+    monkeypatch.setenv("AI_ORCH_HOME", str(fake_home))
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
+
+    sample_toml = (
+        '[routing]\n'
+        'default_orchestrator = "codex"\n'
+        'default_executor = "kilo"\n\n'
+        '[tasks]\n'
+        'language = "it"\n'
+        'extension_fields = ["area", "subsystem"]\n\n'
+        '[[triggers]]\n'
+        'name = "legacy-pos-rule"\n'
+        'on = "task.transitioned"\n'
+        'when = { to = "delivered" }\n'
+        'action = "notify"\n'
+    )
+
+    positions = [
+        ("local_dot", lambda ws: ws / ".ai-orchestration.local.toml", False),
+        ("external_projects", lambda ws: global_cfg_dir / "projects" / ws.name / "orchestration.toml", False),
+        ("legacy_root", lambda ws: ws / "orchestration.toml", True),
+        ("legacy_dot_dir", lambda ws: ws / ".ai-orchestration" / "orchestration.toml", True),
+        ("legacy_tasks_dir", lambda ws: ws / "tasks" / "orchestration.toml", True),
+        ("legacy_dot_toml", lambda ws: ws / ".ai-orchestration.toml", True),
+    ]
+
+    for pos_name, path_fn, expect_legacy in positions:
+        ws = tmp_path / f"proj_{pos_name}"
+        tasks_dir = ws / "tasks"
+        tasks_dir.mkdir(parents=True)
+
+        cfg_file = path_fn(ws)
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(sample_toml, encoding="utf-8")
+
+        # 1. orchestration_config reads routing, tasks, triggers and reports expected path + legacy status
+        merged, meta = oc.resolve_config(global_cfg_path, ws)
+        assert pathlib.Path(meta["project_config_path"]).resolve() == cfg_file.resolve(), pos_name
+        assert meta["project_config_exists"] is True, pos_name
+        assert meta["project_config_legacy"] is expect_legacy, pos_name
+        assert merged["routing"]["default_orchestrator"] == "codex", pos_name
+        assert merged["tasks"]["extension_fields"] == ["area", "subsystem"], pos_name
+        if expect_legacy:
+            assert any("legacy project config path" in w and "read-only" in w for w in meta["warnings"]), pos_name
+        else:
+            assert meta["warnings"] == [], pos_name
+
+        # 2. tasks_engine reads extension_fields and languages from the exact same location
+        ext_fields = te.get_project_extension_fields(tasks_dir)
+        assert ext_fields == ("area", "subsystem"), pos_name
+        lang_info = te.resolve_project_languages(tasks_dir)
+        assert lang_info["tasks"] == "it", pos_name
+        if expect_legacy:
+            assert any("legacy project config path" in w and "read-only" in w for w in lang_info["warnings"]), pos_name
+
+        # 3. orchestration_triggers reads trigger rule from the exact same location
+        trig_meta, rules, trig_errs = ot.load_triggers_config(ws)
+        assert not trig_errs, f"{pos_name}: {trig_errs}"
+        assert len(rules) == 1 and rules[0]["name"] == "legacy-pos-rule", pos_name
+        assert pathlib.Path(trig_meta["project_config_path"]).resolve() == cfg_file.resolve(), pos_name
+        assert trig_meta["project_config_legacy"] is expect_legacy, pos_name
+        if expect_legacy:
+            assert any("legacy project config path" in w and "read-only" in w for w in trig_meta["warnings"]), pos_name
+
+        # 4. Write target is always canonical (legacy file stays untouched / read-only)
+        write_target = oc.find_project_config_path(ws, global_cfg_path, for_write=True)
+        if expect_legacy:
+            expected_canonical = global_cfg_dir / "projects" / ws.name / "orchestration.toml"
+            assert write_target.resolve() == expected_canonical.resolve(), pos_name
+            before_legacy = cfg_file.read_text(encoding="utf-8")
+            res_set = run_cli(
+                "--global-config",
+                str(global_cfg_path),
+                "set-routing",
+                "--scope",
+                "project",
+                "--workspace",
+                str(ws),
+                "--orchestrator",
+                "claude",
+                "--json",
+            )
+            assert res_set.returncode == 0, res_set.stdout + res_set.stderr
+            assert cfg_file.read_text(encoding="utf-8") == before_legacy, pos_name
+            assert expected_canonical.is_file(), pos_name
+
+
+def test_19_1_precedence_order_and_tasks_config_matches_env_status(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1: Precedence order is enforced, and `ai-orch tasks config` and `ai-orch env status`
+    report the exact same `project_config_path`."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    global_cfg_dir = fake_home / ".config" / "ai-orchestration"
+    global_cfg_path = global_cfg_dir / "orchestration.toml"
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(global_cfg_path))
+    monkeypatch.setenv("AI_ORCH_HOME", str(fake_home))
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
+
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    ws = tmp_path / "sample_repo"
+    (ws / "tasks").mkdir(parents=True)
+
+    def _assert_same_path(expected: pathlib.Path, expect_exists: bool) -> None:
+        res_tasks = subprocess.run(
+            [sys.executable, str(bin_ai_orch), "tasks", "config", "--tasks-dir", str(ws / "tasks"), "--json"],
+            cwd=str(ws),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        res_env = subprocess.run(
+            [sys.executable, str(bin_ai_orch), "env", "status", "--workspace", str(ws), "--json"],
+            cwd=str(ws),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        tasks_data = json.loads(res_tasks.stdout)
+        env_data = json.loads(res_env.stdout)
+        assert tasks_data["project_config_path"] == env_data["project_config_path"]
+        assert pathlib.Path(tasks_data["project_config_path"]).resolve() == expected.resolve()
+        assert tasks_data["project_config_exists"] is expect_exists
+        assert env_data["project_config_exists"] is expect_exists
+
+    # 0. Unconfigured -> both report external canonical path with exists=False
+    ext_cfg = global_cfg_dir / "projects" / ws.name / "orchestration.toml"
+    _assert_same_path(ext_cfg, expect_exists=False)
+
+    # Walk from lowest precedence to highest precedence, verifying each newly added file wins
+    ordered_files = [
+        ws / ".ai-orchestration.toml",
+        ws / "tasks" / "orchestration.toml",
+        ws / ".ai-orchestration" / "orchestration.toml",
+        ws / "orchestration.toml",
+        ext_cfg,
+        ws / ".ai-orchestration.local.toml",
+    ]
+    for fpath in ordered_files:
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        fpath.write_text('[routing]\ndefault_executor = "kilo"\n', encoding="utf-8")
+        _assert_same_path(fpath, expect_exists=True)
+
+
+def test_19_1_no_tasks_orchestration_toml_in_docs_or_skill_templates() -> None:
+    """19.1: `grep -rn "tasks/orchestration.toml" docs plugins/*/skills/*/SKILL.template.md`
+    finds no instructions to write to tasks/orchestration.toml."""
+    search_targets: list[pathlib.Path] = list((REPO_ROOT / "docs").rglob("*.md"))
+    search_targets.extend((REPO_ROOT / "plugins").glob("*/skills/*/SKILL.template.md"))
+    search_targets.append(REPO_ROOT / "plugins" / "shared" / "skills" / "orchestration-setup" / "SKILL.md")
+
+    offending: list[str] = []
+    for path in search_targets:
+        if not path.is_file():
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if "tasks/orchestration.toml" in line:
+                offending.append(f"{path.relative_to(REPO_ROOT)}:{lineno}: {line}")
+
+    assert offending == [], f"Found forbidden tasks/orchestration.toml references:\n" + "\n".join(offending)
+

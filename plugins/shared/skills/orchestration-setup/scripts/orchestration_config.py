@@ -319,43 +319,173 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
 
 def default_global_config_path() -> pathlib.Path:
     env_path = os.environ.get("AI_ORCHESTRATION_CONFIG")
-    if env_path:
+    if env_path and env_path.strip():
         p = pathlib.Path(env_path).expanduser().resolve()
         if p.is_dir():
             return p / "orchestration.toml"
         return p
+    env_dir = os.environ.get("AI_ORCH_CONFIG_DIR")
+    if env_dir and env_dir.strip():
+        return pathlib.Path(env_dir).expanduser().resolve() / "orchestration.toml"
+    env_home = os.environ.get("AI_ORCH_HOME")
+    if env_home and env_home.strip():
+        return pathlib.Path(env_home).expanduser().resolve() / ".config" / "ai-orchestration" / "orchestration.toml"
     return pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml"
 
 
 def global_config_dir() -> pathlib.Path:
     """Return the directory containing global orchestration configuration."""
     env_path = os.environ.get("AI_ORCHESTRATION_CONFIG")
-    if env_path:
+    if env_path and env_path.strip():
         p = pathlib.Path(env_path).expanduser().resolve()
         if p.is_file() or p.suffix == ".toml" or p.name.endswith(".toml"):
             return p.parent
         return p
+    env_dir = os.environ.get("AI_ORCH_CONFIG_DIR")
+    if env_dir and env_dir.strip():
+        return pathlib.Path(env_dir).expanduser().resolve()
+    env_home = os.environ.get("AI_ORCH_HOME")
+    if env_home and env_home.strip():
+        return pathlib.Path(env_home).expanduser().resolve() / ".config" / "ai-orchestration"
     return pathlib.Path.home() / ".config" / "ai-orchestration"
 
 
+def project_config_candidates(
+    workspace: pathlib.Path | str,
+    global_path: pathlib.Path | str | None = None,
+) -> list[tuple[pathlib.Path, str, bool]]:
+    """Return ordered (path, label, is_legacy) candidates for a project's configuration.
+
+    Documented precedence order:
+      1. `<workspace>/.ai-orchestration.local.toml` (canonical, local unversioned, read-write)
+      2. `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` (canonical, external, read-write)
+      3. `<workspace>/orchestration.toml` (legacy, read-only with warning)
+      4. `<workspace>/.ai-orchestration/orchestration.toml` (legacy, read-only with warning)
+      5. `<workspace>/tasks/orchestration.toml` (legacy, read-only with warning)
+      6. `<workspace>/.ai-orchestration.toml` (legacy, read-only with warning)
+    """
+    ws = pathlib.Path(workspace)
+    ws_resolved = ws.resolve()
+    if global_path is not None:
+        gp = pathlib.Path(global_path).expanduser().resolve()
+        gpath = gp / "orchestration.toml" if gp.is_dir() else gp
+    else:
+        gpath = default_global_config_path()
+    projects_root = gpath.parent / "projects"
+    ext_path = projects_root / ws_resolved.name / "orchestration.toml"
+    ext_label = f"~/.config/ai-orchestration/projects/{ws_resolved.name}/orchestration.toml"
+
+    return [
+        (ws / ".ai-orchestration.local.toml", ".ai-orchestration.local.toml", False),
+        (ext_path, ext_label, False),
+        (ws / "orchestration.toml", "orchestration.toml", True),
+        (ws / ".ai-orchestration" / "orchestration.toml", ".ai-orchestration/orchestration.toml", True),
+        (ws / "tasks" / "orchestration.toml", "tasks/orchestration.toml", True),
+        (ws / ".ai-orchestration.toml", ".ai-orchestration.toml", True),
+    ]
+
+
+def inspect_project_config(
+    workspace: pathlib.Path | str,
+    global_path: pathlib.Path | str | None = None,
+) -> dict[str, Any]:
+    """Inspect all canonical and legacy project configuration candidates for `workspace`.
+
+    Returns a dict with:
+      - `path`: pathlib.Path — active config path for reading (first existing candidate, or canonical external default)
+      - `write_path`: pathlib.Path — canonical config path for writing (never a legacy location)
+      - `exists`: bool — whether `path` exists on disk
+      - `is_legacy`: bool — True when `path` is one of the read-only legacy paths
+      - `label`: str — short display label of `path`
+      - `candidates`: list[dict] — all existing candidate files in precedence order
+      - `legacy_paths`: list[pathlib.Path] — all existing legacy config files on disk
+      - `warnings`: list[str] — deprecation warnings for any legacy config files found on disk
+    """
+    cands = project_config_candidates(workspace, global_path)
+    local_dot_path = cands[0][0]
+    default_ext_path, default_ext_label, _ = cands[1]
+
+    write_path = local_dot_path if local_dot_path.is_file() else default_ext_path
+
+    existing: list[dict[str, Any]] = []
+    seen_resolved: set[pathlib.Path] = set()
+    for p, lbl, is_leg in cands:
+        if not p.is_file():
+            continue
+        try:
+            rp = p.resolve()
+        except Exception:
+            rp = p
+        if rp in seen_resolved:
+            continue
+        seen_resolved.add(rp)
+        existing.append({"path": p, "label": lbl, "is_legacy": is_leg})
+
+    if existing:
+        active = existing[0]
+        active_path: pathlib.Path = active["path"]
+        active_label: str = active["label"]
+        active_legacy: bool = bool(active["is_legacy"])
+        active_exists = True
+    else:
+        active_path = default_ext_path
+        active_label = default_ext_label
+        active_legacy = False
+        active_exists = False
+
+    legacy_paths: list[pathlib.Path] = [c["path"] for c in existing if c["is_legacy"]]
+    warnings: list[str] = []
+    for c in existing:
+        if c["is_legacy"]:
+            c_path = c["path"]
+            c_lbl = c["label"]
+            if c_path == active_path:
+                warnings.append(
+                    f"{c_lbl}: legacy project config path '{c_path}' is deprecated and read-only; "
+                    f"move it to '{write_path}' (or '{local_dot_path}')."
+                )
+            else:
+                warnings.append(
+                    f"{c_lbl}: legacy project config path '{c_path}' is deprecated (read-only) and shadowed by '{active_path}'; "
+                    f"move or merge it into '{write_path}'."
+                )
+
+    return {
+        "path": active_path,
+        "write_path": write_path,
+        "exists": active_exists,
+        "is_legacy": active_legacy,
+        "label": active_label,
+        "candidates": existing,
+        "legacy_paths": legacy_paths,
+        "warnings": warnings,
+    }
+
+
 def find_project_config_path(
-    workspace: pathlib.Path,
-    global_path: pathlib.Path | None = None,
+    workspace: pathlib.Path | str,
+    global_path: pathlib.Path | str | None = None,
+    *,
+    for_write: bool = False,
 ) -> pathlib.Path:
-    """Return the UNVERSIONED local project agent configuration path.
+    """Return the project configuration path for `workspace`.
 
     Agent/model/tool choices are local to the developer's machine and must NOT
     be committed to the repository's versioned `tasks/` tree.
-    Precedence:
-      1. `<workspace>/.ai-orchestration.local.toml` (if already present locally, gitignored)
-      2. `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` (outside repo)
+    Precedence when reading (`for_write=False`, default):
+      1. `<workspace>/.ai-orchestration.local.toml` (canonical, local gitignored)
+      2. `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` (canonical, external)
+      3. `<workspace>/orchestration.toml` (legacy, read-only with warning)
+      4. `<workspace>/.ai-orchestration/orchestration.toml` (legacy, read-only with warning)
+      5. `<workspace>/tasks/orchestration.toml` (legacy, read-only with warning)
+      6. `<workspace>/.ai-orchestration.toml` (legacy, read-only with warning)
+    If none exist on disk, returns (2).
+
+    When writing (`for_write=True`), legacy locations (3–6) are ignored so they remain
+    strictly read-only: returns (1) if it already exists, otherwise (2).
     """
-    local_dot = workspace / ".ai-orchestration.local.toml"
-    if local_dot.exists():
-        return local_dot
-    gpath = global_path or default_global_config_path()
-    projects_root = gpath.parent / "projects"
-    return projects_root / workspace.resolve().name / "orchestration.toml"
+    info = inspect_project_config(workspace, global_path)
+    return info["write_path"] if for_write else info["path"]
 
 
 def format_diff_path(
@@ -854,10 +984,15 @@ def resolve_config(
 
     project_cfg: dict[str, Any] = {}
     ppath: pathlib.Path | None = None
+    proj_info: dict[str, Any] | None = None
     if workspace is not None:
-        ppath = find_project_config_path(workspace, gpath)
-        if ppath.exists():
-            project_cfg = load_toml_file(ppath)
+        proj_info = inspect_project_config(workspace, gpath)
+        ppath = proj_info["path"]
+        # Merge existing candidates from lowest precedence to highest precedence
+        for cand in reversed(proj_info["candidates"]):
+            c_path = cand["path"]
+            if c_path.exists():
+                project_cfg = deep_merge(project_cfg, load_toml_file(c_path))
 
     merged = deep_merge(DEFAULT_GLOBAL_CONFIG, global_cfg)
     if project_cfg:
@@ -868,6 +1003,9 @@ def resolve_config(
         "global_config_exists": gpath.exists(),
         "project_config_path": str(ppath) if ppath else None,
         "project_config_exists": bool(ppath and ppath.exists()),
+        "project_config_write_path": str(proj_info["write_path"]) if proj_info else None,
+        "project_config_legacy": bool(proj_info and proj_info["is_legacy"]),
+        "warnings": list(proj_info["warnings"]) if proj_info else [],
     }
     return merged, meta
 
@@ -1169,7 +1307,7 @@ def render_agents_md_block(
     tools = cfg.get("tools", {})
 
     ws = workspace or pathlib.Path(".")
-    proj_cfg_path = find_project_config_path(ws, global_path)
+    proj_cfg_path = find_project_config_path(ws, global_path, for_write=True)
     gpath = global_path or default_global_config_path()
 
     orchestrator_id = proj.get("primary_orchestrator") or routing.get("default_orchestrator", "kilo")
@@ -1494,7 +1632,8 @@ def cmd_show(args: argparse.Namespace) -> int:
     ws_arg = getattr(args, "workspace", None) or "."
     ws = pathlib.Path(ws_arg).resolve()
     cfg, meta = resolve_config(getattr(args, "global_config", None), ws)
-    errors, warnings = validate_config(cfg)
+    errors, val_warnings = validate_config(cfg)
+    warnings = list(meta.get("warnings", [])) + [w for w in val_warnings if w not in meta.get("warnings", [])]
     payload = {
         "meta": meta,
         "valid": len(errors) == 0,
@@ -1507,6 +1646,8 @@ def cmd_show(args: argparse.Namespace) -> int:
     else:
         print(f"Global config : {meta['global_config_path']} (exists={meta['global_config_exists']})")
         print(f"Project config: {meta['project_config_path']} (exists={meta['project_config_exists']})")
+        for w in meta.get("warnings", []):
+            print(f"[WARN] {w}")
         print(f"Orchestrator  : {cfg.get('routing', {}).get('default_orchestrator')}")
         print(f"Executor      : {cfg.get('routing', {}).get('default_executor')}")
         print(f"Verify mode   : {cfg.get('verification', {}).get('default_mode')}")
@@ -1533,7 +1674,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
     cfg, meta = resolve_config(args.global_config, ws)
-    errors, warnings = validate_config(cfg)
+    errors, val_warnings = validate_config(cfg)
+    warnings = list(meta.get("warnings", [])) + [w for w in val_warnings if w not in meta.get("warnings", [])]
     ok = kit_ok and (len(errors) == 0)
 
     if args.json:
@@ -1611,7 +1753,7 @@ def cmd_set_profile(args: argparse.Namespace) -> int:
     gpath = getattr(args, "global_config", None)
     if args.scope == "project":
         ws = pathlib.Path(args.workspace or ".").resolve()
-        target_path = find_project_config_path(ws, gpath)
+        target_path = find_project_config_path(ws, gpath, for_write=True)
     else:
         ws = pathlib.Path(args.workspace).resolve() if getattr(args, "workspace", None) else None
         target_path = gpath or default_global_config_path()
@@ -1805,7 +1947,7 @@ def cmd_set_routing(args: argparse.Namespace) -> int:
 
     if args.scope == "project":
         project_ws = ws or pathlib.Path(".").resolve()
-        target_path = find_project_config_path(project_ws, gpath)
+        target_path = find_project_config_path(project_ws, gpath, for_write=True)
     else:
         target_path = gpath or default_global_config_path()
 
@@ -1950,7 +2092,7 @@ def cmd_set_routing(args: argparse.Namespace) -> int:
 
 def cmd_init_project(args: argparse.Namespace) -> int:
     ws = pathlib.Path(args.workspace or ".").resolve()
-    ppath = find_project_config_path(ws, args.global_config)
+    ppath = find_project_config_path(ws, args.global_config, for_write=True)
     with config_lock(ppath):
         if ppath.exists() and not args.force:
             if args.json:
@@ -2016,7 +2158,7 @@ def cmd_render_agents_md(args: argparse.Namespace) -> int:
     v_mode = ver.get("default_mode", "cross-agent")
     routing_desc = f"orchestrator='{orchestrator_id}', executor='{executor_id}', verification_mode='{v_mode}'"
 
-    warnings: list[str] = []
+    warnings: list[str] = list(meta.get("warnings", []))
     if not has_project_config:
         routing_warning = (
             f"Workspace has no project config; using global routing ({routing_desc}). "
@@ -2345,7 +2487,7 @@ def build_setup_plan(
     if scope == "project-local":
         target_path = ws / ".ai-orchestration.local.toml"
     elif scope == "project":
-        target_path = find_project_config_path(ws, gpath)
+        target_path = find_project_config_path(ws, gpath, for_write=True)
     else:
         target_path = gpath
 
