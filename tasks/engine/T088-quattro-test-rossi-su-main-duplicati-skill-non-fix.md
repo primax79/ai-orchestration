@@ -22,11 +22,15 @@ Riportare verde la suite completa. Baseline 2026-10-29 su alf_ubuntu (uvx pytest
 
 ## Steps
 
-- [ ] Step 1
+- [ ] Riprodurre i quattro fallimenti singolarmente (Mac e Linux).
+- [ ] Per ciascuno trovare il commit che lo ha introdotto (git log/blame) e la causa.
+- [ ] Correggere il codice; correggere il test solo se è il test a essere sbagliato, motivandolo.
 
 ## Verification
 
-- Command or check that proves completion
+- `uvx --quiet pytest -q -p no:cacheprovider ./scripts ./plugins` verde su alf_ubuntu (Linux).
+- I tre test non legati a Linux verdi anche sul Mac.
+- Nessun test saltato o rimosso.
 
 ## Log (newest first)
 
