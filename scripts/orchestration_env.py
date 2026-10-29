@@ -554,6 +554,7 @@ def parse_frontmatter_and_body(content: str) -> tuple[dict[str, Any] | None, str
         pass
     parsed: dict[str, Any] = {}
     current_key: str | None = None
+    current_mode: str = "scalar"
     for line in fm_raw.splitlines():
         line_s = line.strip()
         if not line_s or line_s.startswith("#"):
@@ -561,10 +562,38 @@ def parse_frontmatter_and_body(content: str) -> tuple[dict[str, Any] | None, str
         if ":" in line_s and not line.startswith(" ") and not line.startswith("\t"):
             k, v = line_s.split(":", 1)
             current_key = k.strip()
-            parsed[current_key] = v.strip().strip("\"'")
+            val_raw = v.strip()
+            if val_raw in (">", ">-", ">+", "|", "|-", "|+"):
+                parsed[current_key] = ""
+                current_mode = "block_scalar"
+            elif val_raw == "":
+                parsed[current_key] = ""
+                current_mode = "nested_or_scalar"
+            else:
+                parsed[current_key] = val_raw.strip("\"'")
+                current_mode = "scalar"
         elif current_key and (line.startswith(" ") or line.startswith("\t")):
-            if isinstance(parsed[current_key], str):
-                parsed[current_key] += " " + line_s
+            if current_mode in ("block_scalar", "scalar"):
+                if isinstance(parsed[current_key], str):
+                    parsed[current_key] = (parsed[current_key] + " " + line_s).strip()
+            elif current_mode == "nested_or_scalar":
+                if line_s.startswith("- ") or line_s == "-":
+                    if parsed[current_key] == "":
+                        parsed[current_key] = []
+                    if isinstance(parsed[current_key], list):
+                        parsed[current_key].append(line_s[1:].strip().strip("\"'"))
+                elif ":" in line_s:
+                    if parsed[current_key] == "":
+                        parsed[current_key] = {}
+                    if isinstance(parsed[current_key], dict):
+                        sub_k, sub_v = line_s.split(":", 1)
+                        parsed[current_key][sub_k.strip()] = sub_v.strip().strip("\"'")
+                    elif isinstance(parsed[current_key], str):
+                        parsed[current_key] = (parsed[current_key] + " " + line_s).strip()
+                else:
+                    current_mode = "scalar"
+                    if isinstance(parsed[current_key], str):
+                        parsed[current_key] = (parsed[current_key] + " " + line_s).strip()
     return parsed, body
 
 
