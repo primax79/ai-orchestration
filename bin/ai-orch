@@ -50,6 +50,18 @@ ORCH_ORCHESTRATOR_SCRIPT = REPO_ROOT / "scripts" / "orchestration_orchestrator.p
 ORCH_BROKER_LOCK_SCRIPT = REPO_ROOT / "scripts" / "orchestration_broker_lock.py"
 ORCH_REGISTRY_SCRIPT = REPO_ROOT / "scripts" / "orchestration_registry.py"
 
+
+def _get_run_subcommands() -> dict[str, dict[str, str]]:
+    if str(REPO_ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        import orchestration_runs
+
+        return orchestration_runs.get_subcommands_description(prog_prefix="ai-orch run")
+    except Exception:
+        return {}
+
+
 CLI_DESCRIPTION: dict[str, Any] = {
     "name": "ai-orch",
     "version": "1.1.0",
@@ -520,29 +532,7 @@ CLI_DESCRIPTION: dict[str, Any] = {
         "run": {
             "script": str(ORCH_RUNS_SCRIPT.relative_to(REPO_ROOT)),
             "usage": "ai-orch run <subcommand> [options] [--json]",
-            "subcommands": {
-                "options": {
-                    "usage": "ai-orch run options --task <id> [--workspace <dir>] [--json]",
-                    "description": "Show available tools, resolved defaults, and usable verify targets for a task.",
-                },
-                "preview": {
-                    "usage": (
-                        "ai-orch run preview --task <id> [--mode <orchestrate|execute|verify>] "
-                        "[--tool <tool>] [--profile <profile>] [--model <model>] [--variant <variant>] "
-                        "[--effort <effort>] [--isolation <worktree|none>] [--target-run <id|none>] "
-                        "[--instructions <text>] [--allow-same-tool] [--force] [--workspace <dir>] [--json]"
-                    ),
-                    "description": "Validate launch request and return prompt, redacted argv, cwd, planned worktree/branch, and binding plan_hash.",
-                },
-                "list": {
-                    "usage": "ai-orch run list [--task <id>] [--active] [--workspace <dir>] [--json]",
-                    "description": "List agent runs, newest first, after reconciliation.",
-                },
-                "show": {
-                    "usage": "ai-orch run show <run_id> [--workspace <dir>] [--json]",
-                    "description": "Display a specific run record after reconciliation.",
-                },
-            },
+            "subcommands": _get_run_subcommands(),
         },
         "events": {
             "script": str(ORCH_EVENTS_SCRIPT.relative_to(REPO_ROOT)),
@@ -831,6 +821,8 @@ def main() -> int:
         rest = rest + ["--json"]
 
     if group == "describe":
+        if not CLI_DESCRIPTION["commands"]["run"].get("subcommands"):
+            CLI_DESCRIPTION["commands"]["run"]["subcommands"] = _get_run_subcommands()
         print(json.dumps(CLI_DESCRIPTION, indent=2))
         return 0
 

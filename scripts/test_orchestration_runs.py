@@ -17,6 +17,7 @@ from __future__ import annotations
 import concurrent.futures
 import copy
 import hashlib
+import argparse
 import json
 import os
 import pathlib
@@ -69,6 +70,8 @@ from orchestration_runs import (
     check_kilo_agent,
     DEFAULT_KILO_AGENTS,
     resolve_task_by_id,
+    build_parser,
+    get_subcommands_description,
 )
 
 SCRIPT = pathlib.Path(__file__).resolve().parent / "orchestration_runs.py"
@@ -792,6 +795,54 @@ def test_bin_ai_orch_run_commands(sample_workspace: pathlib.Path):
     assert res_show.returncode != 0
     data_show = json.loads(res_show.stdout)
     assert data_show["ok"] is False and data_show["reason"] == "not-found"
+
+
+def test_describe_run_subcommands_match_parser():
+    """T087: ai-orch describe lists every run subcommand dynamically from argument parser."""
+    # Test both `ai-orch describe` and `ai-orch describe --json`
+    for cmd in ([str(BIN_AI_ORCH), "describe"], [str(BIN_AI_ORCH), "describe", "--json"]):
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        catalog = json.loads(res.stdout)
+        assert "commands" in catalog and "run" in catalog["commands"]
+        run_entry = catalog["commands"]["run"]
+        assert "subcommands" in run_entry
+        describe_subcommands = run_entry["subcommands"]
+
+        parser = build_parser()
+        subparsers_actions = [
+            a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+        ]
+        assert len(subparsers_actions) == 1, "Expected exactly 1 subparsers action on build_parser()"
+        spa = subparsers_actions[0]
+        parser_subcommands = set(spa.choices.keys())
+
+        # Assert every run subcommand of the argument parser appears in describe output
+        for subcmd in parser_subcommands:
+            assert subcmd in describe_subcommands, f"Subcommand {subcmd} from parser missing in describe"
+        assert set(describe_subcommands.keys()) == parser_subcommands
+
+        # Assert specific missing subcommands cited in T087 are present
+        expected_missing = {
+            "start",
+            "cancel",
+            "logs",
+            "mark-delivered",
+            "apply-verdict",
+            "accept-triage",
+            "cleanup",
+            "kilo-agent",
+        }
+        assert expected_missing.issubset(set(describe_subcommands.keys()))
+
+        # Verify usage and description are non-empty and well-formed
+        for name, meta in describe_subcommands.items():
+            assert "usage" in meta, f"Missing usage for {name}"
+            assert meta["usage"].startswith(f"ai-orch run {name}"), f"Usage format invalid for {name}: {meta['usage']}"
+            assert "description" in meta, f"Missing description for {name}"
+            assert meta["description"], f"Description empty for {name}"
+
+        # Verify get_subcommands_description matches describe output
+        assert describe_subcommands == get_subcommands_description(parser=parser)
 
 
 def test_multi_repo_paths_refusal(tmp_path: pathlib.Path):

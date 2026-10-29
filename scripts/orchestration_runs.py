@@ -6969,6 +6969,37 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def get_subcommands_description(
+    parser: argparse.ArgumentParser | None = None,
+    prog_prefix: str = "ai-orch run",
+) -> dict[str, dict[str, str]]:
+    """Introspect argument parser and return dict of subcommand usage and descriptions."""
+    if parser is None:
+        parser = build_parser()
+    subparsers_actions = [
+        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+    ]
+    if not subparsers_actions:
+        return {}
+    spa = subparsers_actions[0]
+    help_map = {ca.dest: ca.help or "" for ca in getattr(spa, "_choices_actions", [])}
+    subcmds: dict[str, dict[str, str]] = {}
+    for name, subp in spa.choices.items():
+        orig_prog = subp.prog
+        subp.prog = f"{prog_prefix} {name}"
+        u = " ".join(subp.format_usage().split())
+        subp.prog = orig_prog
+        if u.startswith("usage: "):
+            u = u[len("usage: ") :]
+        u = u.replace(" [-h]", "")
+        desc = help_map.get(name) or subp.description or ""
+        subcmds[name] = {
+            "usage": u,
+            "description": desc,
+        }
+    return subcmds
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
