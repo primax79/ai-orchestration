@@ -60,6 +60,92 @@ except ImportError:
     except ImportError:
         orchestration_registry = None  # type: ignore
 
+try:
+    import orchestration_config
+except ImportError:
+    _repo_root_cfg = pathlib.Path(__file__).resolve().parents[5]
+    _setup_scripts_dir = _repo_root_cfg / "plugins" / "shared" / "skills" / "orchestration-setup" / "scripts"
+    if _setup_scripts_dir.is_dir() and str(_setup_scripts_dir) not in sys.path:
+        sys.path.insert(0, str(_setup_scripts_dir))
+    try:
+        import orchestration_config
+    except ImportError:
+        orchestration_config = None  # type: ignore
+
+
+def _inspect_project_config(
+    workspace: pathlib.Path | str,
+    global_path: pathlib.Path | str | None = None,
+) -> dict[str, Any]:
+    """Unified project config lookup delegating to orchestration_config.inspect_project_config."""
+    if orchestration_config is not None and hasattr(orchestration_config, "inspect_project_config"):
+        return orchestration_config.inspect_project_config(workspace, global_path)
+    ws = pathlib.Path(workspace)
+    ws_resolved = ws.resolve()
+    env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
+    if global_path is not None:
+        gp = pathlib.Path(global_path).expanduser().resolve()
+        gpath = gp / "orchestration.toml" if gp.is_dir() else gp
+    elif env_cfg and env_cfg.strip():
+        gp = pathlib.Path(env_cfg).expanduser().resolve()
+        gpath = gp / "orchestration.toml" if gp.is_dir() else gp
+    elif os.environ.get("AI_ORCH_CONFIG_DIR", "").strip():
+        gpath = pathlib.Path(os.environ["AI_ORCH_CONFIG_DIR"]).expanduser().resolve() / "orchestration.toml"
+    elif os.environ.get("AI_ORCH_HOME", "").strip():
+        gpath = pathlib.Path(os.environ["AI_ORCH_HOME"]).expanduser().resolve() / ".config" / "ai-orchestration" / "orchestration.toml"
+    else:
+        gpath = pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml"
+    ext_path = gpath.parent / "projects" / ws_resolved.name / "orchestration.toml"
+    ext_label = f"~/.config/ai-orchestration/projects/{ws_resolved.name}/orchestration.toml"
+    local_dot = ws / ".ai-orchestration.local.toml"
+    cands = [
+        (local_dot, ".ai-orchestration.local.toml", False),
+        (ext_path, ext_label, False),
+        (ws / "orchestration.toml", "orchestration.toml", True),
+        (ws / ".ai-orchestration" / "orchestration.toml", ".ai-orchestration/orchestration.toml", True),
+        (ws / "tasks" / "orchestration.toml", "tasks/orchestration.toml", True),
+        (ws / ".ai-orchestration.toml", ".ai-orchestration.toml", True),
+    ]
+    write_path = local_dot if local_dot.is_file() else ext_path
+    existing: list[dict[str, Any]] = []
+    seen_resolved: set[pathlib.Path] = set()
+    for p, lbl, is_leg in cands:
+        if not p.is_file():
+            continue
+        rp = p.resolve()
+        if rp in seen_resolved:
+            continue
+        seen_resolved.add(rp)
+        existing.append({"path": p, "label": lbl, "is_legacy": is_leg})
+    if existing:
+        active = existing[0]
+        active_path, active_label, active_legacy, active_exists = active["path"], active["label"], bool(active["is_legacy"]), True
+    else:
+        active_path, active_label, active_legacy, active_exists = ext_path, ext_label, False, False
+    warnings: list[str] = []
+    for c in existing:
+        if c["is_legacy"]:
+            if c["path"] == active_path:
+                warnings.append(
+                    f"{c['label']}: legacy project config path '{c['path']}' is deprecated and read-only; "
+                    f"move it to '{write_path}' (or '{local_dot}')."
+                )
+            else:
+                warnings.append(
+                    f"{c['label']}: legacy project config path '{c['path']}' is deprecated (read-only) and shadowed by '{active_path}'; "
+                    f"move or merge it into '{write_path}'."
+                )
+    return {
+        "path": active_path,
+        "write_path": write_path,
+        "exists": active_exists,
+        "is_legacy": active_legacy,
+        "label": active_label,
+        "candidates": existing,
+        "legacy_paths": [c["path"] for c in existing if c["is_legacy"]],
+        "warnings": warnings,
+    }
+
 CORE_HEADER_FIELDS: tuple[str, ...] = (
     "id",
     "title",
@@ -414,18 +500,18 @@ def resolve_project_languages(
                         elif current_sec == "use_cases":
                             raw_use_cases = (val_parsed, f"{agents_src_label} [use_cases].language")
 
-    # 2. Check legacy T065 keys in orchestration.toml / .ai-orchestration.local.toml
+    # 2. Check project config files via unified project config lookup
     legacy_lang: tuple[str, str, str] | None = None  # (val, file_name, key_name)
     if t_dir is not None:
         ws_root = t_dir.parent if t_dir.name == "tasks" else t_dir
-        cand_legacy = [
-            (ws_root / "orchestration.toml", "orchestration.toml"),
-            (ws_root / ".ai-orchestration" / "orchestration.toml", ".ai-orchestration/orchestration.toml"),
-            (ws_root / ".ai-orchestration.local.toml", ".ai-orchestration.local.toml"),
-            (t_dir / "orchestration.toml", "tasks/orchestration.toml"),
-        ]
+        cfg_info = _inspect_project_config(ws_root)
+        for w in cfg_info.get("warnings", []):
+            if w not in warnings:
+                warnings.append(w)
         seen_paths: set[pathlib.Path] = set()
-        for cfg_path, cfg_label in cand_legacy:
+        for cand_entry in cfg_info.get("candidates", []):
+            cfg_path = cand_entry["path"]
+            cfg_label = cand_entry["label"]
             resolved_cfg = cfg_path.resolve()
             if resolved_cfg in seen_paths or not cfg_path.is_file():
                 continue
@@ -614,23 +700,21 @@ def get_project_extension_fields(tasks_dir: pathlib.Path) -> tuple[str, ...]:
                     if k and re.match(r"^[a-z][a-z0-9_-]*$", k) and k not in CORE_HEADER_FIELDS and k not in found:
                         found.append(k)
 
-    # 1. Check TOML config files
+    # 1. Check TOML config files via unified project config lookup
     proj_root = tasks_dir.parent if tasks_dir.name == "tasks" else tasks_dir
-    cand_tomls: list[pathlib.Path] = [
-        tasks_dir / "orchestration.toml",
-        proj_root / ".ai-orchestration.local.toml",
-        proj_root / "orchestration.toml",
-    ]
+    proj_cfg_info = _inspect_project_config(proj_root)
+    cand_tomls: list[pathlib.Path] = [c["path"] for c in proj_cfg_info.get("candidates", [])]
     if proj_root.parent != proj_root:
-        cand_tomls.extend([
-            proj_root.parent / ".ai-orchestration.local.toml",
-            proj_root.parent / "orchestration.toml",
-        ])
-    env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
-    gdir = pathlib.Path(env_cfg).expanduser().resolve() if env_cfg else (pathlib.Path.home() / ".config" / "ai-orchestration")
-    if gdir.is_file() or gdir.suffix == ".toml":
-        gdir = gdir.parent
-    cand_tomls.append(gdir / "projects" / proj_root.name / "orchestration.toml")
+        for rel in (
+            ".ai-orchestration.local.toml",
+            "orchestration.toml",
+            ".ai-orchestration/orchestration.toml",
+            "tasks/orchestration.toml",
+            ".ai-orchestration.toml",
+        ):
+            p_cand = proj_root.parent / rel
+            if p_cand.is_file() and p_cand not in cand_tomls:
+                cand_tomls.append(p_cand)
 
     for cfg_file in cand_tomls:
         if cfg_file.is_file() and tomllib is not None:
@@ -1019,11 +1103,24 @@ def resolve_project_tasks_dir(project_slug: str, context_tasks_dir: pathlib.Path
         except Exception:
             pass
 
-    # 2. Try looking for orchestration.toml or .ai-orchestration.local.toml in workspace root or parents
+    # 2. Try looking for project config in workspace root or parents via unified lookup
     curr: pathlib.Path | None = context_tasks_dir.parent
     while curr and curr != curr.parent:
-        for cfg_name in (".ai-orchestration.local.toml", "orchestration.toml"):
-            cfg_file = curr / cfg_name
+        cands = (
+            [c["path"] for c in _inspect_project_config(curr).get("candidates", [])]
+            if curr == context_tasks_dir.parent
+            else [
+                curr / rel
+                for rel in (
+                    ".ai-orchestration.local.toml",
+                    "orchestration.toml",
+                    ".ai-orchestration/orchestration.toml",
+                    "tasks/orchestration.toml",
+                    ".ai-orchestration.toml",
+                )
+            ]
+        )
+        for cfg_file in cands:
             if cfg_file.is_file():
                 try:
                     import tomllib
@@ -1063,11 +1160,24 @@ def is_workspace_task_tree(tasks_dir: pathlib.Path) -> tuple[bool, list[dict[str
         except Exception:
             pass
 
-    # 2. Check orchestration.toml / .ai-orchestration.local.toml
+    # 2. Check project config via unified lookup
     curr: pathlib.Path | None = tasks_dir.parent
     while curr and curr != curr.parent:
-        for cfg_name in (".ai-orchestration.local.toml", "orchestration.toml"):
-            cfg_file = curr / cfg_name
+        cands = (
+            [c["path"] for c in _inspect_project_config(curr).get("candidates", [])]
+            if curr == tasks_dir.parent
+            else [
+                curr / rel
+                for rel in (
+                    ".ai-orchestration.local.toml",
+                    "orchestration.toml",
+                    ".ai-orchestration/orchestration.toml",
+                    "tasks/orchestration.toml",
+                    ".ai-orchestration.toml",
+                )
+            ]
+        )
+        for cfg_file in cands:
             if cfg_file.is_file():
                 try:
                     import tomllib
@@ -17443,9 +17553,9 @@ def resolve_workspace_and_projects(
         except Exception:
             pass
 
-    # 2. Check orchestration.toml or .ai-orchestration.local.toml at ws_root
-    for cfg_name in (".ai-orchestration.local.toml", "orchestration.toml"):
-        cfg_file = ws_root / cfg_name
+    # 2. Check project config at ws_root via unified lookup
+    for cand in _inspect_project_config(ws_root).get("candidates", []):
+        cfg_file = cand["path"]
         if cfg_file.is_file() and tomllib is not None:
             try:
                 cfg_dict = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
@@ -27034,11 +27144,21 @@ def cmd_labels(args: argparse.Namespace) -> int:
 
 def cmd_config(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(getattr(args, "tasks_dir", "tasks")).resolve()
+    ws_root = tasks_dir.parent if tasks_dir.name == "tasks" else tasks_dir
+    cfg_info = _inspect_project_config(ws_root)
     lang_info = resolve_project_languages(tasks_dir)
     ext_fields = list(get_project_extension_fields(tasks_dir))
+    warnings = list(lang_info["warnings"])
+    for w in cfg_info.get("warnings", []):
+        if w not in warnings:
+            warnings.append(w)
     payload = {
         "ok": True,
         "tasks_dir": str(tasks_dir),
+        "project_config_path": str(cfg_info["path"]),
+        "project_config_exists": bool(cfg_info["exists"]),
+        "project_config_write_path": str(cfg_info["write_path"]),
+        "project_config_legacy": bool(cfg_info["is_legacy"]),
         "languages": {
             "tasks": lang_info["tasks"],
             "questions": lang_info["questions"],
@@ -27047,19 +27167,20 @@ def cmd_config(args: argparse.Namespace) -> int:
         "language_sources": lang_info["sources"],
         "declared": lang_info["declared"],
         "extension_fields": ext_fields,
-        "warnings": lang_info["warnings"],
+        "warnings": warnings,
     }
     args._last_result = payload
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
     else:
         print(f"Tasks directory : {tasks_dir}")
+        print(f"Project config  : {cfg_info['path']} (exists={cfg_info['exists']})")
         print("Languages:")
         print(f"  tasks     : {lang_info['tasks']} (source: {lang_info['sources']['tasks']})")
         print(f"  questions : {lang_info['questions']} (source: {lang_info['sources']['questions']})")
         print(f"  use_cases : {lang_info['use_cases']} (source: {lang_info['sources']['use_cases']})")
         print(f"Extension fields: {', '.join(ext_fields) if ext_fields else '-'}")
-        for w in lang_info["warnings"]:
+        for w in warnings:
             print(f"[WARN] {w}")
     return 0
 

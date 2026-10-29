@@ -42,10 +42,25 @@ try:
 except ImportError:
     fcntl = None  # type: ignore
 
-# Add parent directory to path to import companion modules
+# Add parent directory and shared setup scripts to path to import companion modules
 _SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPTS_DIR.parent
+_SETUP_SCRIPTS_DIR = _REPO_ROOT / "plugins" / "shared" / "skills" / "orchestration-setup" / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+if _SETUP_SCRIPTS_DIR.is_dir() and str(_SETUP_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SETUP_SCRIPTS_DIR))
+
+try:
+    from orchestration_config import (
+        default_global_config_path,
+        find_project_config_path,
+        inspect_project_config,
+    )
+except ImportError:
+    default_global_config_path = None  # type: ignore
+    find_project_config_path = None  # type: ignore
+    inspect_project_config = None  # type: ignore
 
 from orchestration_events import (
     check_platform,
@@ -302,32 +317,47 @@ def normalize_trigger_rule(raw_rule: dict[str, Any]) -> dict[str, Any]:
     return rule
 
 
-def find_config_files(workspace: pathlib.Path | str) -> list[pathlib.Path]:
-    """Find candidate orchestration.toml files in order of precedence."""
+def find_config_files(
+    workspace: pathlib.Path | str,
+    global_path: pathlib.Path | str | None = None,
+) -> list[pathlib.Path]:
+    """Find candidate orchestration.toml files in order of precedence via the unified project config lookup."""
     ws = pathlib.Path(workspace).resolve()
     candidates: list[pathlib.Path] = []
 
-    # 1. Local unversioned project config inside repo
-    local_dot = ws / ".ai-orchestration.local.toml"
-    if local_dot.is_file():
-        candidates.append(local_dot)
-
-    # 2. Project config directly in repo root (if present)
-    repo_cfg = ws / "orchestration.toml"
-    if repo_cfg.is_file() and repo_cfg not in candidates:
-        candidates.append(repo_cfg)
-
-    # 3. Project config in ~/.config/ai-orchestration/projects/<name>/orchestration.toml
-    proj_dir = pathlib.Path.home() / ".config" / "ai-orchestration" / "projects" / ws.name / "orchestration.toml"
-    if proj_dir.is_file() and proj_dir not in candidates:
-        candidates.append(proj_dir)
-
-    # 4. Global config in ~/.config/ai-orchestration/orchestration.toml (or env var)
-    env_gpath = os.environ.get("AI_ORCHESTRATION_CONFIG")
-    if env_gpath:
-        gpath = pathlib.Path(env_gpath).expanduser().resolve()
+    if inspect_project_config is not None:
+        proj_info = inspect_project_config(ws, global_path)
+        for cand in proj_info.get("candidates", []):
+            cp = cand["path"]
+            if cp.is_file() and cp not in candidates:
+                candidates.append(cp)
     else:
-        gpath = pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml"
+        for rel in (
+            ".ai-orchestration.local.toml",
+            "orchestration.toml",
+            ".ai-orchestration/orchestration.toml",
+            "tasks/orchestration.toml",
+            ".ai-orchestration.toml",
+        ):
+            cp = ws / rel
+            if cp.is_file() and cp not in candidates:
+                candidates.append(cp)
+        proj_dir = pathlib.Path.home() / ".config" / "ai-orchestration" / "projects" / ws.name / "orchestration.toml"
+        if proj_dir.is_file() and proj_dir not in candidates:
+            candidates.append(proj_dir)
+
+    if global_path is not None:
+        gp = pathlib.Path(global_path).expanduser().resolve()
+        gpath = gp / "orchestration.toml" if gp.is_dir() else gp
+    elif default_global_config_path is not None:
+        gpath = default_global_config_path()
+    else:
+        env_gpath = os.environ.get("AI_ORCHESTRATION_CONFIG")
+        if env_gpath:
+            gp = pathlib.Path(env_gpath).expanduser().resolve()
+            gpath = gp / "orchestration.toml" if gp.is_dir() else gp
+        else:
+            gpath = pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml"
     if gpath.is_file() and gpath not in candidates:
         candidates.append(gpath)
 
@@ -342,12 +372,13 @@ def load_triggers_config(
 
     Returns:
       (meta, normalized_rules, validation_errors)
-      where meta contains 'kill_switch_enabled', 'config_paths', etc.
+      where meta contains 'kill_switch_enabled', 'config_paths', 'project_config_path', 'warnings', etc.
     """
     ws = pathlib.Path(workspace).resolve()
     if tomllib is None:
         raise RuntimeError("Python 3.11+ (stdlib tomllib) is required to parse trigger configuration")
 
+    proj_info = inspect_project_config(ws) if (config_path is None and inspect_project_config is not None) else None
     cfg_paths = [pathlib.Path(config_path).resolve()] if config_path else find_config_files(ws)
 
     kill_switch_enabled = True
@@ -412,6 +443,10 @@ def load_triggers_config(
     meta = {
         "kill_switch_enabled": kill_switch_enabled,
         "config_paths": [str(p) for p in cfg_paths if p.is_file()],
+        "project_config_path": str(proj_info["path"]) if proj_info else (str(cfg_paths[0]) if cfg_paths else None),
+        "project_config_exists": bool(proj_info["exists"]) if proj_info else bool(cfg_paths and cfg_paths[0].is_file()),
+        "project_config_legacy": bool(proj_info and proj_info["is_legacy"]),
+        "warnings": list(proj_info["warnings"]) if proj_info else [],
         "rule_count": len(normalized_rules),
     }
 
