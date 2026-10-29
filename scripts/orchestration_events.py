@@ -16,6 +16,8 @@ import json
 import logging
 import os
 import pathlib
+import re
+import socket
 import subprocess
 import sys
 import threading
@@ -29,6 +31,59 @@ try:
     import fcntl
 except ImportError:
     fcntl = None  # type: ignore
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover
+    tomllib = None  # type: ignore
+
+
+def _normalize_host_id(raw: str | None = None) -> str:
+    if raw is None:
+        try:
+            raw = socket.gethostname()
+        except Exception:
+            raw = "localhost"
+    s = str(raw or "").strip()
+    if "." in s:
+        s = s.split(".", 1)[0]
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9_-]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    s = re.sub(r"^[^a-z0-9]+", "", s)
+    s = s.rstrip("_-")
+    if len(s) > 63:
+        s = s[:63].rstrip("_-")
+    return s if (s and re.match(r"^[a-z0-9][a-z0-9_-]{0,62}$", s)) else "localhost"
+
+
+def _resolve_current_host_id() -> str:
+    try:
+        import orchestration_config
+        return orchestration_config.resolve_host_id()
+    except Exception:
+        pass
+    env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
+    if env_cfg:
+        p = pathlib.Path(env_cfg).expanduser().resolve()
+        gpath = (p / "orchestration.toml") if p.is_dir() else p
+    else:
+        gpath = pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml"
+    if gpath.is_file() and tomllib is not None:
+        try:
+            gcfg = tomllib.loads(gpath.read_text(encoding="utf-8"))
+            host_sec = gcfg.get("host")
+            if isinstance(host_sec, dict):
+                raw_id = host_sec.get("id")
+                if isinstance(raw_id, str) and raw_id.strip():
+                    return raw_id.strip()
+        except Exception:
+            pass
+    env_hid = os.environ.get("AI_ORCH_HOST_ID")
+    if env_hid and env_hid.strip():
+        clean_env = env_hid.strip()
+        return clean_env if re.match(r"^[a-z0-9][a-z0-9_-]{0,62}$", clean_env) else _normalize_host_id(clean_env)
+    return _normalize_host_id()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -432,6 +487,7 @@ def emit(
     origin_session: str | None = None,
     session: str | None = None,
     actor: str | None = None,
+    host: str | None = None,
     event_id: str | None = None,
     max_chunk_size: int | None = None,
     max_chunk_events: int | None = None,
@@ -488,6 +544,11 @@ def emit(
         final_session = resolved_session or resolved_origin
 
         resolved_actor = actor or source
+        resolved_host = host
+        if resolved_host is None and isinstance(payload, dict):
+            resolved_host = payload.get("host")
+        if not resolved_host:
+            resolved_host = _resolve_current_host_id()
 
         event: dict[str, Any] = {
             "seq": next_seq,
@@ -495,6 +556,7 @@ def emit(
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
             "type": type,
             "source": source,
+            "host": resolved_host,
             "payload": payload,
             "data": payload,  # alias for Spec §1
             "subject": resolved_subject,  # Spec §1
@@ -591,6 +653,7 @@ def outbox_prepare(
     origin_session: str | None = None,
     session: str | None = None,
     actor: str | None = None,
+    host: str | None = None,
     pre_images: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Write an outbox record in state 'prepared' before applying file mutations."""
@@ -612,6 +675,7 @@ def outbox_prepare(
         "origin_session": origin_session,
         "session": session or origin_session,
         "actor": actor,
+        "host": host or _resolve_current_host_id(),
         "intended_changes": intended_changes or [],
         "pre_images": pre_images or {},
     }
@@ -649,6 +713,7 @@ def outbox_commit(
             origin_session=record.get("origin_session"),
             session=record.get("session"),
             actor=record.get("actor"),
+            host=record.get("host"),
         )
         record["status"] = "committed"
         record["committed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -704,6 +769,7 @@ def outbox_transaction(
     origin_session: str | None = None,
     session: str | None = None,
     actor: str | None = None,
+    host: str | None = None,
     pre_images: dict[str, str] | None = None,
 ):
     """Context manager for an outbox transaction.
@@ -723,6 +789,7 @@ def outbox_transaction(
         origin_session=origin_session,
         session=session,
         actor=actor,
+        host=host,
         pre_images=pre_images,
     )
     try:
@@ -1184,6 +1251,7 @@ def cmd_emit(args: argparse.Namespace) -> int:
             origin_session=getattr(args, "origin_session", None),
             session=getattr(args, "session", None),
             actor=getattr(args, "actor", None),
+            host=getattr(args, "host", None),
         )
     except Exception as e:
         err = {"ok": False, "error": str(e)}
@@ -1311,6 +1379,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_emit.add_argument("--correlation-id", help="Optional correlation ID", default=None)
     p_emit.add_argument("--subject", help="Optional subject identifier (e.g. task ID)", default=None)
     p_emit.add_argument("--actor", help="Optional actor identifier", default=None)
+    p_emit.add_argument("--host", help="Optional host identifier", default=None)
     p_emit.add_argument("--origin-session", help="Optional origin session ID", default=None)
     p_emit.add_argument("--session", help="Optional session ID", default=None)
     p_emit.add_argument("--workspace", help="Workspace root directory", default=".")

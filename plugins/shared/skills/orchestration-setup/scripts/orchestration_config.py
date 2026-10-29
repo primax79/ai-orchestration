@@ -24,6 +24,7 @@ import os
 import pathlib
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -43,6 +44,35 @@ except ModuleNotFoundError:  # pragma: no cover
     tomllib = None  # type: ignore
 
 WORKSPACE_SLUG_REGEX = re.compile(r"^[a-z0-9][a-z0-9-]{1,47}$")
+HOST_ID_REGEX = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+HOST_ROLES = {"hub", "client"}
+HOST_ALLOWED_KEYS = {
+    "id",
+    "role",
+    "ssh",
+    "ssh_target",
+    "target",
+    "hostname",
+    "user",
+    "agent_user",
+    "agents_user",
+    "description",
+}
+HOST_ENTRY_ALLOWED_KEYS = {
+    "ssh",
+    "ssh_target",
+    "target",
+    "hostname",
+    "user",
+    "agent_user",
+    "agents_user",
+    "role",
+    "port",
+    "identity_file",
+    "ssh_key",
+    "description",
+    "enabled",
+}
 
 
 def is_valid_workspace_slug(slug: Any) -> bool:
@@ -51,6 +81,30 @@ def is_valid_workspace_slug(slug: Any) -> bool:
 
 def is_valid_project_slug(slug: Any) -> bool:
     return isinstance(slug, str) and (slug == "_workspace" or bool(WORKSPACE_SLUG_REGEX.match(slug)))
+
+
+def is_valid_host_id(val: Any) -> bool:
+    return isinstance(val, str) and bool(HOST_ID_REGEX.match(val))
+
+
+def normalize_host_id(raw: str | None = None) -> str:
+    """Normalize a raw hostname into a canonical lowercase host id matching HOST_ID_REGEX."""
+    if raw is None:
+        try:
+            raw = socket.gethostname()
+        except Exception:
+            raw = "localhost"
+    s = str(raw or "").strip()
+    if "." in s:
+        s = s.split(".", 1)[0]
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9_-]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    s = re.sub(r"^[^a-z0-9]+", "", s)
+    s = s.rstrip("_-")
+    if len(s) > 63:
+        s = s[:63].rstrip("_-")
+    return s if (s and is_valid_host_id(s)) else "localhost"
 
 
 def is_valid_uuid4(val: Any) -> bool:
@@ -845,6 +899,100 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     return out
 
 
+def resolve_host_id(
+    cfg: dict[str, Any] | None = None,
+    global_path: pathlib.Path | None = None,
+    hostname: str | None = None,
+) -> str:
+    """Resolve the canonical host id (`[host] id` in global config, fallback to normalized hostname)."""
+    if isinstance(cfg, dict):
+        host_sec = cfg.get("host")
+        if isinstance(host_sec, dict):
+            raw_id = host_sec.get("id")
+            if isinstance(raw_id, str) and raw_id.strip():
+                return raw_id.strip()
+
+    if cfg is None or not isinstance(cfg.get("host"), dict) or not cfg.get("host", {}).get("id"):
+        gpath = global_path or default_global_config_path()
+        if gpath.exists():
+            try:
+                gcfg = load_toml_file(gpath)
+                host_sec = gcfg.get("host")
+                if isinstance(host_sec, dict):
+                    raw_id = host_sec.get("id")
+                    if isinstance(raw_id, str) and raw_id.strip():
+                        return raw_id.strip()
+            except Exception:
+                pass
+
+    if hostname is None:
+        env_hid = os.environ.get("AI_ORCH_HOST_ID")
+        if env_hid and env_hid.strip():
+            clean_env = env_hid.strip()
+            return clean_env if is_valid_host_id(clean_env) else normalize_host_id(clean_env)
+
+    return normalize_host_id(hostname)
+
+
+get_host_id = resolve_host_id
+
+
+def resolve_hosts_table(
+    cfg: dict[str, Any] | None = None,
+    global_path: pathlib.Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return normalized `[hosts.<id>]` table with canonical keys (`id`, `ssh_target`, `agent_user`, `role`)."""
+    if cfg is None:
+        gpath = global_path or default_global_config_path()
+        cfg = load_toml_file(gpath) if gpath.exists() else {}
+    raw_hosts = cfg.get("hosts")
+    if not isinstance(raw_hosts, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for hid, hcfg in raw_hosts.items():
+        if not isinstance(hid, str) or not isinstance(hcfg, dict):
+            continue
+        entry = copy.deepcopy(hcfg)
+        ssh_val = entry.get("ssh_target") or entry.get("ssh") or entry.get("target") or entry.get("hostname")
+        user_val = entry.get("agent_user") or entry.get("user") or entry.get("agents_user")
+        role_val = entry.get("role") or "client"
+        entry["id"] = hid
+        entry["ssh_target"] = ssh_val
+        entry["ssh"] = ssh_val
+        entry["agent_user"] = user_val
+        entry["user"] = user_val
+        entry["role"] = role_val
+        out[hid] = entry
+    return out
+
+
+def get_declared_hosts(
+    cfg: dict[str, Any] | None = None,
+    global_path: pathlib.Path | None = None,
+    workspace: pathlib.Path | None = None,
+) -> set[str]:
+    """Return the set of declared host IDs from `[host] id` and `[hosts.<id>]`."""
+    if cfg is None:
+        cfg, _ = resolve_config(global_path, workspace)
+    declared: set[str] = set()
+    host_sec = cfg.get("host")
+    if isinstance(host_sec, dict):
+        hid = host_sec.get("id")
+        if isinstance(hid, str) and hid.strip():
+            declared.add(hid.strip())
+    hosts_sec = cfg.get("hosts")
+    if isinstance(hosts_sec, dict):
+        for hk, hv in hosts_sec.items():
+            if isinstance(hk, str) and hk.strip() and isinstance(hv, dict):
+                declared.add(hk.strip())
+    tasks_sec = cfg.get("tasks")
+    if isinstance(tasks_sec, dict) and isinstance(tasks_sec.get("hosts"), (list, tuple)):
+        for h in tasks_sec["hosts"]:
+            if isinstance(h, str) and h.strip():
+                declared.add(h.strip())
+    return declared
+
+
 def resolve_config(
     global_path: pathlib.Path | None = None,
     workspace: pathlib.Path | None = None,
@@ -868,6 +1016,7 @@ def resolve_config(
         "global_config_exists": gpath.exists(),
         "project_config_path": str(ppath) if ppath else None,
         "project_config_exists": bool(ppath and ppath.exists()),
+        "host_id": resolve_host_id(merged, gpath),
     }
     return merged, meta
 
@@ -1089,6 +1238,84 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
                                 errors.append(f"[[workspace.projects]] duplicate project path: {ppath!r}.")
                             else:
                                 seen_paths.add(norm_path)
+
+    host_cfg = cfg.get("host")
+    if host_cfg is not None:
+        if not isinstance(host_cfg, dict):
+            errors.append("[host] must be a table.")
+        else:
+            for hk in host_cfg:
+                if hk not in HOST_ALLOWED_KEYS:
+                    errors.append(
+                        f"[host] has unknown key {hk!r} (allowed: {sorted(HOST_ALLOWED_KEYS)})."
+                    )
+            if "id" in host_cfg:
+                hid = host_cfg["id"]
+                if not is_valid_host_id(hid):
+                    errors.append(
+                        f"[host].id = {hid!r} must be a valid host id matching ^[a-z0-9][a-z0-9_-]{{0,62}}$."
+                    )
+            if "role" in host_cfg:
+                hrole = host_cfg["role"]
+                if hrole not in HOST_ROLES:
+                    errors.append(
+                        f"[host].role = {hrole!r} is invalid (must be one of {sorted(HOST_ROLES)})."
+                    )
+            for skey in ("ssh_target", "ssh", "target", "hostname"):
+                if skey in host_cfg:
+                    sval = host_cfg[skey]
+                    if not isinstance(sval, str) or not sval.strip() or sval.strip().startswith("-"):
+                        errors.append(f"[host].{skey} must be a non-empty string (not starting with '-').")
+            for ukey in ("agent_user", "user", "agents_user"):
+                if ukey in host_cfg:
+                    uval = host_cfg[ukey]
+                    if not isinstance(uval, str) or not uval.strip() or uval.strip().startswith("-"):
+                        errors.append(f"[host].{ukey} must be a non-empty string (not starting with '-').")
+
+    hosts_cfg = cfg.get("hosts")
+    if hosts_cfg is not None:
+        if not isinstance(hosts_cfg, dict):
+            errors.append("[hosts] must be a table.")
+        else:
+            for hid, hcfg in hosts_cfg.items():
+                if not is_valid_host_id(hid):
+                    errors.append(
+                        f"[hosts.{hid}] invalid host id {hid!r} (must match ^[a-z0-9][a-z0-9_-]{{0,62}}$)."
+                    )
+                if not isinstance(hcfg, dict):
+                    errors.append(f"[hosts.{hid}] must be a table.")
+                    continue
+                for hk in hcfg:
+                    if hk not in HOST_ENTRY_ALLOWED_KEYS:
+                        errors.append(
+                            f"[hosts.{hid}] has unknown key {hk!r} (allowed: {sorted(HOST_ENTRY_ALLOWED_KEYS)})."
+                        )
+                if "role" in hcfg:
+                    hrole = hcfg["role"]
+                    if hrole not in HOST_ROLES:
+                        errors.append(
+                            f"[hosts.{hid}].role = {hrole!r} is invalid (must be one of {sorted(HOST_ROLES)})."
+                        )
+                for skey in ("ssh_target", "ssh", "target", "hostname"):
+                    if skey in hcfg:
+                        sval = hcfg[skey]
+                        if not isinstance(sval, str) or not sval.strip() or sval.strip().startswith("-"):
+                            errors.append(
+                                f"[hosts.{hid}].{skey} must be a non-empty string (not starting with '-')."
+                            )
+                for ukey in ("agent_user", "user", "agents_user"):
+                    if ukey in hcfg:
+                        uval = hcfg[ukey]
+                        if not isinstance(uval, str) or not uval.strip() or uval.strip().startswith("-"):
+                            errors.append(
+                                f"[hosts.{hid}].{ukey} must be a non-empty string (not starting with '-')."
+                            )
+                if "port" in hcfg:
+                    pval = hcfg["port"]
+                    if isinstance(pval, bool) or not isinstance(pval, int) or not (1 <= pval <= 65535):
+                        errors.append(
+                            f"[hosts.{hid}].port = {pval!r} must be an integer between 1 and 65535."
+                        )
 
     return errors, warnings
 

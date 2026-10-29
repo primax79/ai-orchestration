@@ -37,6 +37,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from orchestration_events import (
+    _resolve_current_host_id,
     check_platform,
     emit,
     ensure_git_exclude,
@@ -253,6 +254,7 @@ def register_session(
     cursor: int | None = None,
     reason: str | None = None,
     metadata: dict[str, Any] | None = None,
+    host: str | None = None,
 ) -> dict[str, Any]:
     """Register a new orchestration session under session_lock.
 
@@ -266,6 +268,7 @@ def register_session(
 
     prov_sess_id = provider_session_id or resume_id
     now_iso = _now_iso()
+    resolved_host = host or _resolve_current_host_id()
 
     with session_lock(ws):
         sessions_dir = ws / ".ai-orchestration" / "sessions"
@@ -339,6 +342,7 @@ def register_session(
                         "provider_session_id": prov_sess_id,
                         "tool": tool,
                         "kind": kind,
+                        "host": resolved_host,
                         "started": now_iso,
                         "turns": 0,
                         "last_usage": None,
@@ -357,12 +361,14 @@ def register_session(
                             "previous_session_id": old_sess_id,
                             "previous_tool": old_tool,
                             "tool": tool,
+                            "host": resolved_host,
                             "reason": reason or "succession",
                             "cursor": inherited_cursor,
                         },
                         subject="orchestrator",
                         origin_session=reg_session_id,
                         actor=tool,
+                        host=resolved_host,
                     )
                     final_generation = new_gen
                     final_cursor = inherited_cursor
@@ -380,6 +386,7 @@ def register_session(
                         "provider_session_id": prov_sess_id,
                         "tool": tool,
                         "kind": kind,
+                        "host": resolved_host,
                         "started": now_iso,
                         "turns": cur_info.get("turns", 0),
                         "last_usage": cur_info.get("last_usage"),
@@ -401,6 +408,7 @@ def register_session(
                         "provider_session_id": prov_sess_id,
                         "tool": tool,
                         "kind": kind,
+                        "host": resolved_host,
                         "started": now_iso,
                         "turns": 0,
                         "last_usage": None,
@@ -434,6 +442,7 @@ def register_session(
                         "registry_session_id": reg_session_id,
                         "provider_session_id": prov_sess_id,
                         "tool": tool,
+                        "host": resolved_host,
                         "started": now_iso,
                         "status": "active",
                     }
@@ -449,12 +458,14 @@ def register_session(
                             "session_id": reg_session_id,
                             "previous_session_id": old_sess_id,
                             "tool": tool,
+                            "host": resolved_host,
                             "reason": reason or "succession",
                             "cursor": inherited_cursor,
                         },
                         subject=role,
                         origin_session=reg_session_id,
                         actor=tool,
+                        host=resolved_host,
                     )
                 else:
                     final_generation = old_gen
@@ -472,6 +483,7 @@ def register_session(
                         "registry_session_id": reg_session_id,
                         "provider_session_id": prov_sess_id,
                         "tool": tool,
+                        "host": resolved_host,
                         "started": now_iso,
                         "status": "active",
                     },
@@ -507,6 +519,7 @@ def register_session(
             "generation": final_generation,
             "tool": tool,
             "kind": kind,
+            "host": resolved_host,
             "provider_session_id": prov_sess_id,
             "resume": resume_block,
             "created_at": created_at,
@@ -529,6 +542,7 @@ def register_session(
             subject=reg_session_id,
             origin_session=reg_session_id,
             actor=tool,
+            host=resolved_host,
         )
 
         return session_record
@@ -756,9 +770,10 @@ def list_sessions(
     role: str | None = None,
     status: str | None = None,
     tool: str | None = None,
+    host: str | None = None,
     stale_timeout_sec: float = DEFAULT_STALE_TIMEOUT_SEC,
 ) -> list[dict[str, Any]]:
-    """List sessions matching optional filters (role, status, tool)."""
+    """List sessions matching optional filters (role, status, tool, host)."""
     ws = pathlib.Path(workspace).resolve()
     sessions_dir = ws / ".ai-orchestration" / "sessions"
     if not sessions_dir.is_dir():
@@ -777,6 +792,8 @@ def list_sessions(
         if role is not None and data.get("role") != role:
             continue
         if tool is not None and data.get("tool") != tool:
+            continue
+        if host is not None and data.get("host") != host:
             continue
         if status is not None and status != "all":
             if data.get("status") != status:
@@ -818,6 +835,7 @@ def get_role_holder(
                     "registry_session_id": sess_id,
                     "provider_session_id": cur.get("provider_session_id"),
                     "tool": cur.get("tool"),
+                    "host": (session_obj.get("host") if session_obj else None) or cur.get("host"),
                     "status": session_obj.get("status") if session_obj else cur.get("status", "unknown"),
                     "current": cur,
                     "session": session_obj,
@@ -838,6 +856,7 @@ def get_role_holder(
             "registry_session_id": active_sess.get("session_id"),
             "provider_session_id": active_sess.get("provider_session_id"),
             "tool": active_sess.get("tool"),
+            "host": active_sess.get("host"),
             "status": active_sess.get("status"),
             "session": active_sess,
         }
@@ -904,6 +923,7 @@ def build_parser() -> argparse.ArgumentParser:
     reg.add_argument("--subscribe", "--subscriptions", nargs="*", default=[], help="Event subscription patterns")
     reg.add_argument("--cursor", type=int, default=None, help="Initial cursor sequence number")
     reg.add_argument("--reason", help="Reason for registration or succession")
+    reg.add_argument("--host", default=None, help="Optional host identifier override")
     reg.add_argument("--workspace", "-w", default=None, help="Path to workspace root")
     reg.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
@@ -919,6 +939,7 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--role", "-r", help="Filter by role")
     ls.add_argument("--status", choices=["active", "stale", "retired", "deregistered", "all"], help="Filter by status")
     ls.add_argument("--tool", "-t", help="Filter by tool")
+    ls.add_argument("--host", default=None, help="Filter by host")
     ls.add_argument("--stale-timeout", type=float, default=DEFAULT_STALE_TIMEOUT_SEC, help="Staleness threshold in seconds")
     ls.add_argument("--workspace", "-w", default=None, help="Path to workspace root")
     ls.add_argument("--json", action="store_true", help="Output machine-readable JSON")
@@ -995,6 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
                 subscriptions=args.subscribe,
                 cursor=args.cursor,
                 reason=args.reason,
+                host=getattr(args, "host", None),
             )
             if is_json:
                 print(json.dumps(sess, indent=2))
@@ -1021,6 +1043,7 @@ def main(argv: list[str] | None = None) -> int:
                 role=args.role,
                 status=args.status,
                 tool=args.tool,
+                host=getattr(args, "host", None),
                 stale_timeout_sec=args.stale_timeout,
             )
             if is_json:
