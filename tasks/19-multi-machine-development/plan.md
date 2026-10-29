@@ -23,7 +23,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.1 - Lookup unico della configurazione di progetto
 
-- **Status:** `open` · **Short:** Lookup config unico · **Size:** M · **Kind:** fix · **Depends on:** - · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-29; kilo (gemini-4-argon) in screen su alf_ubuntu, worktree ../.worktrees/ai-orchestration/19.1-config-lookup) · **Short:** Lookup config unico · **Size:** M · **Kind:** fix · **Depends on:** - · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
 - **Goal:** una sola funzione decide dove sta la configurazione di progetto e tutti la usano: oggi `orchestration_config.find_project_config_path` (`.ai-orchestration.local.toml`, poi `~/.config/ai-orchestration/projects/<dir>/orchestration.toml`), `tasks_engine` (`tasks/orchestration.toml`, `<proj>/orchestration.toml`, `tasks/AGENTS.md`: `tasks_engine.py:425`, `:596-685`) e i trigger (`orchestration_triggers.py:305-311`) leggono percorsi diversi. Fissare l'ordine (documentato), mantenere i percorsi legacy in sola lettura con un avviso, correggere `docs/00-QUICKSTART-AND-PLAYBOOK.md:117-149`, `plugins/shared/skills/orchestration-setup/SKILL.md:68,138` (template, non il generato) e `specs/orchestration-config-and-agents-md.md` §3.
 - **Verification:** test che per ogni posizione legacy lo stesso valore (es. `extension_fields`, una regola di trigger) viene letto da tutti e tre i sottosistemi; `ai-orch tasks config` e `ai-orch env status` riportano lo stesso percorso; `grep -rn "tasks/orchestration.toml" docs plugins/*/skills/*/SKILL.template.md` non trova istruzioni a scriverci; suite completa verde.
 
@@ -41,7 +41,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.4 - Identità dell'host
 
-- **Status:** `open` · **Short:** Identità dell'host · **Size:** S · **Kind:** feature · **Depends on:** - · **Use cases:** UC039, UC040 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-29; kilo (gemini-4-argon) in screen su alf_ubuntu, worktree ../.worktrees/ai-orchestration/19.4-host-identity) · **Short:** Identità dell'host · **Size:** S · **Kind:** feature · **Depends on:** - · **Use cases:** UC039, UC040 · **Repo:** `ai-orchestration/`
 - **Goal:** id canonico dell'host (`[host] id` nella config globale, fallback hostname normalizzato) e tabella `[hosts.<id>]` (ssh target, utente per gli agenti, ruolo `hub`/`client`). L'id va in `run.json`, negli eventi, nei record di sessione. Nuovo campo task opzionale `host` con valore validato (id dichiarati), anche nei microtask; niente `run-ref` (si usa `run-id`).
 - **Verification:** test unitari su risoluzione dell'id e validazione; un run nuovo ha `host`; `tasks validate` rifiuta un `host` non dichiarato; run e task esistenti senza `host` restano validi.
 
@@ -104,6 +104,12 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 - **Status:** `open` · **Short:** Registro progetti hub · **Size:** M · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** N079. Il registro attuale (`orchestration_registry.py`, SQLite per macchina) identifica i workspace con `canonical_path`, `device`, `inode` e non si può condividere. Registro dei progetti sull'hub con identità portabile (uuid), percorsi per host, host primario, repository di riferimento e mirror, `convention_version`; il SQLite locale diventa una cache. Assorbire `~/works/MIGRATION_REGISTRY.json` (importazione una tantum, nessun secondo registro). Coordinarsi con la risposta Q026=A (scoperta dei workspace non registrati) e con T073.
 - **Verification:** importazione del file di migrazione su una copia; lo stesso progetto ha lo stesso uuid sul Mac e sull'hub; `console status` elenca i progetti dal registro dell'hub; il registro locale resta utilizzabile con l'hub irraggiungibile.
+
+### 19.17 - Allineamento automatico dei checkout dopo un push
+
+- **Status:** `open` · **Short:** Sync automatico checkout · **Size:** M · **Kind:** feature · **Depends on:** 19.4, 19.16 · **Use cases:** UC040 · **Repo:** `ai-orchestration/`
+- **Goal:** richiesta dell'owner (2026-10-29): dopo un push, i checkout degli altri host si aggiornano da soli, senza `git pull` a mano. Nessun webhook da GitHub/Gitea verso l'hub (richiederebbe un endpoint pubblico). Tre meccanismi, in ordine: (1) per i repository di riferimento sull'hub (bare), un hook `post-receive` che fa fast-forward dei checkout registrati sull'hub e manda il mirror su Gitea; (2) per i repository con origin esterno (es. GitHub), un timer `systemd --user` sull'hub (e `launchd` sul Mac) che fa `fetch` + solo fast-forward ogni N minuti; (3) un hook `post-push` lato client facoltativo che avvisa subito l'hub via ssh. In tutti i casi: mai toccare checkout sporchi, in avanti o divergenti (li segnala a `doctor`), mai worktree di executor attivi; elenco dei checkout dal registro (19.16).
+- **Verification:** test con repo bare locale: push → checkout pulito aggiornato, checkout sporco lasciato com'è e segnalato; timer simulato con fetch da un origin che è avanzato; nessuna modifica a worktree attivi.
 
 ### 19.14 - Riconciliare ruoli, interlocutore e handoff con Iniziativa 18 e T073
 
