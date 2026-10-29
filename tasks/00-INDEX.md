@@ -23,7 +23,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 13 | 13 | [Rielaborazione del Doctor: rilievi reali, azionabili e risolvibili](done/13-doctor-rework/plan.md) | done with a caveat (done: 13.1–13.7) | 06 | M |
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
-| 17 | 17 | [Gli use case guidano i task](17-use-cases-drive-tasks/plan.md) | in progress (done: 17.1–17.9, 17.11, 17.14; to verify: 17.10, 17.12–17.13) | - | M |
+| 17 | 17 | [Gli use case guidano i task](done/17-use-cases-drive-tasks/plan.md) | done | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -37,6 +37,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | [events-and-triggers](specs/events-and-triggers.md) | - |
 | [executor-housekeeping-and-completion](specs/executor-housekeeping-and-completion.md) | - |
 | [inbox-notes](specs/inbox-notes.md) | - |
+| [multi-machine-development-architecture](specs/multi-machine-development-architecture.md) | - |
 | [orchestration-broker-mcp](specs/orchestration-broker-mcp.md) | - |
 | [orchestration-config-and-agents-md](specs/orchestration-config-and-agents-md.md) | - |
 | [orchestration-extension-spec](specs/orchestration-extension-spec.md) | - |
@@ -139,7 +140,6 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T079 (Workspace da sottocartella) | P2 | [I comandi lanciati da una sottocartella risolvono il workspace che la contiene](engine/T079-i-comandi-lanciati-da-una-sottocartella-risolvono.md) | open | kilo | - |
 | T081 (Branch e sblocco dipendenti) | P2 | [tasks_engine: list --branches, sblocco dei dipendenti e validate --branch](engine/T081-tasks-engine-list-branches-sblocco-dei-dipendenti.md) | open | kilo | - |
 | T083 (Rinomina sessione per provider) | P3 | [L'id del provider identifica la sessione: un nome nuovo rinomina il record invece di crearne un altro](engine/T083-l-id-del-provider-identifica-la-sessione-un-nome-n.md) | open | kilo | - |
-| T086 (Approvare use case) | P1 | [Approvazione degli use case da CLI e UI](engine/T086-approvazione-degli-use-case-da-cli-e-ui.md) | delivered (verify-by: owner) | kilo | 17.11 |
 
 ### methodology
 
@@ -159,7 +159,6 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T075 (Valida e chiudi da UI) | P2 | [Pulsante Valida e chiudi sulla colonna Delivered e sul singolo task](ui/T075-pulsante-richiedi-validazione-sulla-colonna-done-e.md) | delivered (verify-by: owner) | kilo | - |
 | T084 (Test backend UI rossi) | P1 | [Test del backend della UI rossi su main](ui/T084-test-del-backend-della-ui-rossi-su-main.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
@@ -252,6 +251,8 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 | T070 (Reassign su sessione attuale) | [orchestrator reassign lega il ruolo a una sessione interattiva esistente](done/engine/T070-orchestrator-reassign-lega-il-ruolo-a-una-sessione.md) | done | 2026-10-27 |
 | T071 (Invito a registrarsi) | [Le sessioni che orchestrano vengono invitate a registrarsi come orchestratore](done/engine/T071-le-sessioni-che-orchestrano-vengono-invitate-a-reg.md) | done | 2026-10-28 |
 | T085 (Espansione iniziative) | [adopt-links espande i collegamenti a iniziative nei loro task](done/engine/T085-adopt-links-espande-i-collegamenti-a-iniziative-ne.md) | done | 2026-10-28 |
+| T086 (Approvare use case) | [Approvazione degli use case da CLI e UI](done/engine/T086-approvazione-degli-use-case-da-cli-e-ui.md) | done | 2026-10-29 |
+| T075 (Valida e chiudi da UI) | [Pulsante Valida e chiudi sulla colonna Delivered e sul singolo task](done/ui/T075-pulsante-richiedi-validazione-sulla-colonna-done-e.md) | done | 2026-10-29 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

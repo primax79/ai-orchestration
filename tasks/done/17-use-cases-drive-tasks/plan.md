@@ -1,6 +1,6 @@
 # 17 — Gli use case guidano i task — Piano di implementazione
 
-**Spec:** [`specs/use-cases-drive-tasks.md`](../specs/use-cases-drive-tasks.md) (v2, rivista da Codex)
+**Spec:** [`specs/use-cases-drive-tasks.md`](../../specs/use-cases-drive-tasks.md) (v2, rivista da Codex)
 **Perché:** richiesta del proprietario 2026-10-27 (nota N072), priorità massima: i task nascono dagli use case, un use
 case dipende dai suoi task (molti a molti), la validazione gira solo sugli use case pronti, il lavoro nuovo parte dagli
 use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failing` use case in bozza senza task.
@@ -9,21 +9,6 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 17.6 lo sostituisce con l'ambito basato sulla prontezza e ne conserva la regola su `untested`.
 
 ## Tasks
-
-### 17.10 - UI web ed estensione VS Code
-
-- **Status:** `delivered` (2026-10-28; manca l'approvazione (T086)) · **Verify-by:** owner · **Short:** UI use case e task · **Size:** M · **Depends on:** 17.9
-- **Goal:** badge di stadio e approvazione, task collegati, filtro per use case, coda di rivalidazione, nella UI web e nell'estensione (sync del webview); il proprietario la valida usandola.
-
-### 17.12 - Migrazione ai-orchestration
-
-- **Status:** `delivered` (2026-10-28; operator; 2026-10-28; Applicata (76506eb): 109 collegamenti su 91 task, 37 use case con approval proposed; validate ok. Al proprietario: approvare gli use case) · **Verify-by:** owner · **Short:** Migrazione ai-orchestration · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
-- **Goal:** adopt-links e collegamenti mancanti per UC001-UC037; anteprima, report, validate pulito.
-
-### 17.13 - Migrazione ai-swissknife
-
-- **Status:** `delivered` (2026-10-28; validate pulito. Al proprietario: approvare gli use case) · **Verify-by:** owner · **Short:** Migrazione ai-swissknife · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
-- **Goal:** come 17.12 per UC001-UC034 di ai-swissknife.
 
 ## Closed
 
@@ -86,3 +71,18 @@ use case. Caso concreto: in git-code-rag due campagne hanno segnato come `failin
 
 - **Status:** `done` (2026-10-28, kilo: aggiunta sezione "Superseded fields" nella spec, help allineato in tasks_engine e bin/ai-orch, documentate regole use case in task-pipeline e redatta guida di migrazione in docs/use-case-migration.md; done 2026-10-28, verifier ai-coding-tools-87) · **Short:** Documentazione use case · **Size:** S · **Depends on:** 17.5, 17.7
 - **Goal:** nota "Superseded fields" in `use-case-management-and-ai-validation.md`, help dei comandi, regole di task-pipeline, guida di migrazione.
+
+### 17.10 - UI web ed estensione VS Code
+
+- **Status:** `done` (2026-10-28; manca l'approvazione (T086); 2026-10-29; orchestrator; Verified by orchestrator agent; owner-approved; done 2026-10-29) · **Verify-by:** owner · **Short:** UI use case e task · **Size:** M · **Depends on:** 17.9
+- **Goal:** badge di stadio e approvazione, task collegati, filtro per use case, coda di rivalidazione, nella UI web e nell'estensione (sync del webview); il proprietario la valida usandola.
+
+### 17.12 - Migrazione ai-orchestration
+
+- **Status:** `done` (2026-10-28; owner-approved; done 2026-10-29) · **Verify-by:** owner · **Short:** Migrazione ai-orchestration · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
+- **Goal:** adopt-links e collegamenti mancanti per UC001-UC037; anteprima, report, validate pulito.
+
+### 17.13 - Migrazione ai-swissknife
+
+- **Status:** `done` (2026-10-28; validate pulito. Al proprietario: approvare gli use case; 2026-10-29; orchestrator; Verified by orchestrator agent; owner-approved; done 2026-10-29) · **Verify-by:** owner · **Short:** Migrazione ai-swissknife · **Size:** S · **Depends on:** 17.3, 17.5, 17.6
+- **Goal:** come 17.12 per UC001-UC034 di ai-swissknife.
