@@ -4,7 +4,7 @@
 - title: tasks upgrade: proteggere le modifiche dell'utente nel blocco gestito di tasks/AGENTS.md
 - kind: fix
 - priority: P2
-- state: open
+- state: in progress
 - executor: kilo
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, scripts/orchestration_env.py
 - depends-on: -
@@ -24,3 +24,7 @@ Align it with the rule already in place for the root AGENTS.md (19.3):
 - otherwise keep it, report it for manual review, and do not apply the upgrade to that block.
 
 Add a test with a user edit inside the block, and a test showing that an unmodified block is still updated normally.
+
+## Log (newest first)
+
+- 2026-10-30, orchestrator: state `open` -> `in progress` — kilo (gemini-4-argon) come utente kilo su alf_ubuntu, /srv/agents, base integration/19 — primo executor con utente agenti
