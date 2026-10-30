@@ -4359,6 +4359,132 @@ def test_parse_frontmatter_without_pyyaml_nested_lists_and_literal_vs_folded_neg
     assert "tags" in cmp_dirs["changed_fm_keys"]
 
 
+def test_parse_frontmatter_without_pyyaml_block_scalar_indentation_indicators_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T088 Bounce 2 (B1): Block scalars with indentation indicators (`|2`, `>1`, `|2-`, `|-2`, `>+3`, `>3+`)
+    are parsed as block scalars (never misparsed as plain multiline scalars joining the header token),
+    preserve explicit leading indentation, and fail closed on invalid/unsupported block-scalar headers.
+    """
+    import orchestration_env as oe
+
+    monkeypatch.setattr(oe, "yaml", None)
+
+    # 1. Exact Codex probe: `description: |2\n  alpha beta` vs `description: "|2 alpha beta"` must be False
+    probe_block = (
+        "---\n"
+        "name: probe-skill\n"
+        "description: |2\n"
+        "  alpha beta\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    probe_quoted_header = (
+        "---\n"
+        "name: probe-skill\n"
+        'description: "|2 alpha beta"\n'
+        "---\n\n"
+        "# Body\n"
+    )
+    fm_probe, _ = oe.parse_frontmatter_and_body(probe_block)
+    assert fm_probe is not None
+    assert fm_probe["description"] == "alpha beta\n"
+    assert oe.compare_skill_md(probe_block, probe_quoted_header) == (False, ["description"], False)
+
+    # 2. All valid indentation + chomping combinations (`>1`, `|2-`, `|-2`, `>+3`, `>3+`)
+    for header in ("|2", ">1", "|2-", "|-2", ">+3", ">3+"):
+        ind_digits = [int(ch) for ch in header if ch.isdigit()]
+        pad = " " * ind_digits[0]
+        doc_block = (
+            "---\n"
+            "name: hdr-skill\n"
+            f"description: {header}\n"
+            f"{pad}alpha beta\n"
+            "---\n\n"
+            "# Body\n"
+        )
+        doc_fake_plain = (
+            "---\n"
+            "name: hdr-skill\n"
+            f'description: "{header} alpha beta"\n'
+            "---\n\n"
+            "# Body\n"
+        )
+        fm_hdr, _ = oe.parse_frontmatter_and_body(doc_block)
+        assert fm_hdr is not None
+        assert fm_hdr["description"].strip() == "alpha beta"
+        assert oe.compare_skill_md(doc_block, doc_fake_plain) == (False, ["description"], False)
+
+    # 3. Literal vs folded with indentation indicators (`|2-` vs `>2-`) must not compare equal on multiline content
+    lit_ind = (
+        "---\n"
+        "name: ind-style\n"
+        "description: |2-\n"
+        "  first line\n"
+        "  second line\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    fold_ind = (
+        "---\n"
+        "name: ind-style\n"
+        "description: >2-\n"
+        "  first line\n"
+        "  second line\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    fm_lit_ind, _ = oe.parse_frontmatter_and_body(lit_ind)
+    fm_fold_ind, _ = oe.parse_frontmatter_and_body(fold_ind)
+    assert fm_lit_ind is not None and fm_fold_ind is not None
+    assert fm_lit_ind["description"] == "first line\nsecond line"
+    assert fm_fold_ind["description"] == "first line second line"
+    assert oe.compare_skill_md(lit_ind, fold_ind) == (False, ["description"], False)
+
+    # 4. Explicit indentation indicator preserving leading spaces on first content line (`|2` with 4 spaces vs `|4` with 4 spaces)
+    ind2_leading = (
+        "---\n"
+        "name: lead-space\n"
+        "description: |2\n"
+        "    indented line\n"
+        "  normal line\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    ind2_no_leading = (
+        "---\n"
+        "name: lead-space\n"
+        "description: |2\n"
+        "  indented line\n"
+        "  normal line\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    fm_lead, _ = oe.parse_frontmatter_and_body(ind2_leading)
+    assert fm_lead is not None
+    assert fm_lead["description"] == "  indented line\nnormal line\n"
+    assert oe.compare_skill_md(ind2_leading, ind2_no_leading) == (False, ["description"], False)
+
+    # 5. Negative fail-closed tests on invalid or unsupported block-scalar headers
+    invalid_headers = [
+        "description: |0\n  alpha\n",
+        "description: |10\n  alpha\n",
+        "description: |2-+\n  alpha\n",
+        "description: |2#comment-without-space\n  alpha\n",
+        "description: >foo\n  alpha\n",
+        "description: |2\n too_shallow\n",
+        "metadata:\n  notes: |3\n    too_shallow\n",
+        "metadata:\n  tags:\n    - |2\n      alpha\n",
+    ]
+    for bad_yaml in invalid_headers:
+        bad_doc = f"---\nname: bad-block\n{bad_yaml}---\n\n# Body\n"
+        other_doc = "---\nname: bad-block\ndescription: alpha\n---\n\n# Body\n"
+        fm_bad, _ = oe.parse_frontmatter_and_body(bad_doc)
+        assert fm_bad is None, f"Expected fail-closed None for {bad_yaml!r}, got {fm_bad!r}"
+        assert oe.compare_skill_md(bad_doc, bad_doc) == (False, ["<unparsed-frontmatter>"], False)
+        assert oe.compare_skill_md(bad_doc, other_doc) == (False, ["<unparsed-frontmatter>"], False)
+
+
 # ---------------------------------------------------------------------------
 # Task 19.2: Project Doctor (`ai-orch doctor`) & Convention Drift Detection
 # ---------------------------------------------------------------------------
@@ -5507,6 +5633,409 @@ def test_19_2_b6_no_fixture_builders_in_production_module_and_checked_in_fixture
     assert (FIXTURES_DIR / "project_2026_10_17" / "tasks" / "scrapers" / "T001-autoscout-adapter.md").is_file()
     assert (FIXTURES_DIR / "project_updated" / "AGENTS.md").is_file()
     assert (FIXTURES_DIR / "project_updated" / "tasks" / "scrapers" / "T001-autoscout-adapter.md").is_file()
+
+
+# ===========================================================================
+# Task 19.3 Bounce 1 Regression Tests (B1..B5)
+# ===========================================================================
+
+
+def test_19_3_b1_plan_hash_covers_after_content_hash_and_refuses_on_config_or_registry_change(
+    tmp_path: pathlib.Path,
+) -> None:
+    """B1: Every write and registry operation in `upgrade_project` includes `after_hash` in the plan,
+    and a global config, project config, or registry mutation between preview and apply alters `plan_hash`
+    and causes `--apply --expect-hash` to refuse without modifying disk."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "ricerca_auto"
+    create_2026_10_17_fixture(proj_dir)
+
+    gcfg_path = fake_home / ".config" / "ai-orchestration" / "orchestration.toml"
+    gcfg_path.parent.mkdir(parents=True, exist_ok=True)
+    gcfg_path.write_text(
+        '[routing]\ndefault_orchestrator = "claude"\ndefault_executor = "kilo"\n',
+        encoding="utf-8",
+    )
+
+    prev = oe.upgrade_project(proj_dir, home=fake_home, global_config=gcfg_path)
+    assert prev["ok"] is True
+    assert len(prev["plan"]) > 0
+    for op in prev["plan"]:
+        assert "after_hash" in op, f"missing after_hash on operation {op}"
+        if op["action"] == "remove":
+            assert op["after_hash"] == ""
+        else:
+            assert len(op["after_hash"]) == 64, f"expected sha256 after_hash on {op}"
+
+    before_files = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+
+    # Case 1: Mutate global config between preview and apply (changes proposed AGENTS.md output bytes
+    # without changing any file inside proj_dir) -> apply must refuse with plan-hash-mismatch
+    gcfg_path.write_text(
+        '[routing]\ndefault_orchestrator = "claude"\ndefault_executor = "codex"\n',
+        encoding="utf-8",
+    )
+    res_refused_gcfg = oe.upgrade_project(
+        proj_dir,
+        home=fake_home,
+        global_config=gcfg_path,
+        apply=True,
+        expect_hash=prev["plan_hash"],
+    )
+    assert res_refused_gcfg["ok"] is False
+    assert res_refused_gcfg["applied"] is False
+    assert res_refused_gcfg["changed"] is False
+    assert res_refused_gcfg["error_code"] == "plan-hash-mismatch"
+    assert res_refused_gcfg["plan_hash"] != prev["plan_hash"]
+
+    after_refused_files = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+    assert after_refused_files == before_files
+
+    # Restore global config -> hash matches prev["plan_hash"] again
+    gcfg_path.write_text(
+        '[routing]\ndefault_orchestrator = "claude"\ndefault_executor = "kilo"\n',
+        encoding="utf-8",
+    )
+    prev_restored = oe.upgrade_project(proj_dir, home=fake_home, global_config=gcfg_path)
+    assert prev_restored["plan_hash"] == prev["plan_hash"]
+
+    # Case 2: Mutate workspace registry between preview and apply -> refuses with plan-hash-mismatch
+    reg = oe._load_orchestration_registry()
+    cdir = oe.get_config_dir(fake_home)
+    ws_plan = reg.plan_workspace_register(proj_dir, title="Custom Changed Title", config_dir=cdir)
+    reg.apply_workspace_register(ws_plan, expect_hash=ws_plan["plan_hash"], config_dir=cdir)
+    # Remove the config file written by apply_workspace_register so only registry state differs or config differs
+    res_refused_reg = oe.upgrade_project(
+        proj_dir,
+        home=fake_home,
+        global_config=gcfg_path,
+        apply=True,
+        expect_hash=prev["plan_hash"],
+    )
+    assert res_refused_reg["ok"] is False
+    assert res_refused_reg["applied"] is False
+    assert res_refused_reg["error_code"] == "plan-hash-mismatch"
+
+
+def test_19_3_b2_active_executor_worktree_guard_has_no_force_bypass_on_preview_or_apply(
+    tmp_path: pathlib.Path,
+) -> None:
+    """B2: `--force` bypass is removed; active executor worktree guard refuses both preview and apply."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "ricerca_auto"
+    create_2026_10_17_fixture(proj_dir)
+
+    # 1. Obtain a valid preview plan_hash while no active worktrees exist
+    prev_clean = oe.upgrade_project(proj_dir, home=fake_home)
+    assert prev_clean["ok"] is True
+    valid_hash = prev_clean["plan_hash"]
+
+    # 2. Create an active executor worktree
+    sibling_wt = tmp_path / ".worktrees" / proj_dir.name / "run-19-3"
+    sibling_wt.mkdir(parents=True)
+
+    # 3. Preview refuses
+    res_prev = oe.upgrade_project(proj_dir, home=fake_home)
+    assert res_prev["ok"] is False
+    assert res_prev["applied"] is False
+    assert res_prev["error_code"] == "active-executor-worktrees"
+
+    # 4. Apply (even with the valid preview hash) refuses
+    res_apply = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=valid_hash)
+    assert res_apply["ok"] is False
+    assert res_apply["applied"] is False
+    assert res_apply["error_code"] == "active-executor-worktrees"
+
+    # 5. Python API does not accept `force` parameter
+    with pytest.raises(TypeError):
+        oe.upgrade_project(proj_dir, home=fake_home, force=True)  # type: ignore[call-arg]
+
+    # 6. CLI rejects `--force` flag and refuses both preview and apply when active worktree exists
+    res_cli_force = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "upgrade",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--force",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_cli_force.returncode != 0
+
+    res_cli_apply = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "upgrade",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--apply",
+            "--expect-hash",
+            valid_hash,
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_cli_apply.returncode != 0
+    cli_apply_data = json.loads(res_cli_apply.stdout)
+    assert cli_apply_data["ok"] is False
+    assert cli_apply_data["applied"] is False
+    assert cli_apply_data["error_code"] == "active-executor-worktrees"
+
+
+def test_19_3_b3_agents_md_removes_only_positively_matched_legacy_sections_and_reports_preserved_for_manual_review(
+    tmp_path: pathlib.Path,
+) -> None:
+    """B3: `upgrade_project` reuses the 19.2 B1 positive-matching predicate so only sections positively
+    matched to a known legacy rendering are removed, while generic-heading user sections are preserved
+    byte-for-byte and reported in `manual_review_sections` and `warnings`."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "ricerca_auto"
+    create_2026_10_17_fixture(proj_dir)
+
+    user_prefix = (
+        "# ricerca_auto — Custom Architecture\n\n"
+        "Domain intro paragraph.\n\n"
+        "## Required Skills\n\n"
+        "- Playwright scraping & anti-bot evasion.\n"
+        "- SQLAlchemy 2.0 async sessions.\n\n"
+        "## Core Operating Rules\n\n"
+        "- Respect rate limits per target portal.\n\n"
+    )
+    legacy_duplicated = (
+        "## 1. Required Skills\n\n"
+        "Load and follow these skills whenever planning, delegating, executing, or reviewing work:\n"
+        "- `orchestration-workflow` and `task-spec-authoring`\n"
+        "- `task-pipeline` and `executor-contract`\n\n"
+        "## 2. Core Operating Rules\n\n"
+        "### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)\n\n"
+        "Legacy Rule 1 body.\n\n"
+        "### Rule 2: Define Execution Tasks Before Delegating\n\n"
+        "Include `focus_files`, Disjoint Write Scope, One Task = One Commit.\n\n"
+    )
+    stale_managed = (
+        "<!-- BEGIN ai-orchestration -->\n"
+        "# Agent Orchestration & Development Guidelines\n"
+        "Stale 2026-10-17 block.\n"
+        "<!-- END ai-orchestration -->\n"
+    )
+    user_suffix = (
+        "\n## Orchestration Lifecycle\n\n"
+        "Airflow DAGs trigger nightly at 02:00 UTC.\n"
+    )
+
+    (proj_dir / "AGENTS.md").write_text(
+        user_prefix + legacy_duplicated + stale_managed + user_suffix,
+        encoding="utf-8",
+    )
+
+    prev = oe.upgrade_project(proj_dir, home=fake_home)
+    assert prev["ok"] is True
+    assert "## 1. Required Skills" in prev["removed_duplicated_sections"]
+    assert "## 2. Core Operating Rules" in prev["removed_duplicated_sections"]
+    assert "## Required Skills" not in prev["removed_duplicated_sections"]
+    assert "## Core Operating Rules" not in prev["removed_duplicated_sections"]
+    assert "## Orchestration Lifecycle" not in prev["removed_duplicated_sections"]
+
+    assert prev["manual_review_sections"] == [
+        "## Required Skills",
+        "## Core Operating Rules",
+        "## Orchestration Lifecycle",
+    ]
+    assert any("manual review" in w for w in prev["warnings"])
+
+    app = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=prev["plan_hash"])
+    assert app["ok"] is True
+    assert app["applied"] is True
+    assert app["manual_review_sections"] == [
+        "## Required Skills",
+        "## Core Operating Rules",
+        "## Orchestration Lifecycle",
+    ]
+
+    raw_bytes = (proj_dir / "AGENTS.md").read_bytes()
+    b_pos = raw_bytes.index(b"<!-- BEGIN ai-orchestration -->\n")
+    e_pos = raw_bytes.index(b"<!-- END ai-orchestration -->\n") + len(b"<!-- END ai-orchestration -->\n")
+    assert raw_bytes[:b_pos] == user_prefix.encode("utf-8")
+    assert raw_bytes[e_pos:] == user_suffix.encode("utf-8")
+
+
+def test_19_3_b4_legacy_config_trashed_with_home_and_reason_and_restorable_from_manifest(
+    tmp_path: pathlib.Path,
+) -> None:
+    """B4: `trash_path` is called with `home=h` and a clear `reason`, writing a valid `manifest.json`
+    under `<home>/.config/ai-orchestration/trash/general/project-<name>-<hash>/<ts>/manifest.json`
+    from which the legacy config can be restored byte-for-byte."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "ricerca_auto"
+    create_2026_10_17_fixture(proj_dir)
+
+    legacy_cfg = proj_dir / "tasks" / "orchestration.toml"
+    legacy_bytes = (
+        b'[project]\nname = "ricerca_auto"\nprimary_orchestrator = "claude"\n'
+        b'extension_fields = ["portal-target"]\n'
+    )
+    legacy_cfg.write_bytes(legacy_bytes)
+
+    prev = oe.upgrade_project(proj_dir, home=fake_home)
+    assert prev["ok"] is True
+    app = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=prev["plan_hash"])
+    assert app["ok"] is True
+    assert app["applied"] is True
+    assert not legacy_cfg.exists()
+
+    trash_root = fake_home / ".config" / "ai-orchestration" / "trash" / "general"
+    assert trash_root.is_dir(), f"Expected trash root at {trash_root}"
+    manifests = list(trash_root.rglob("manifest.json"))
+    assert len(manifests) == 1
+    manifest_path = manifests[0]
+    assert f"project-{proj_dir.name}-" in str(manifest_path)
+
+    manifest_entries = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert isinstance(manifest_entries, list) and len(manifest_entries) == 1
+    entry = manifest_entries[0]
+    assert pathlib.Path(entry["original_path"]).resolve() == legacy_cfg.resolve()
+    trashed_file = pathlib.Path(entry["trashed_path"])
+    assert trashed_file.is_file()
+    assert trashed_file.parent.name == "config"
+    assert trashed_file.read_bytes() == legacy_bytes
+    assert "migrated legacy project config" in entry["reason"]
+
+    # Verify restoration from manifest entry
+    restored_target = tmp_path / "restored_orchestration.toml"
+    shutil.copy2(trashed_file, restored_target)
+    assert restored_target.read_bytes() == legacy_bytes
+
+
+def test_19_3_b5_upgrade_apply_is_transactional_and_rolls_back_all_mutations_on_step_failure(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B5: `upgrade_project(..., apply=True)` prevalidates under locks and rolls back all file,
+    legacy-config trash, and SQLite registry mutations if any step fails during apply."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "ricerca_auto"
+    create_2026_10_17_fixture(proj_dir)
+
+    legacy_cfg = proj_dir / "tasks" / "orchestration.toml"
+    legacy_cfg.write_text('[project]\nname = "ricerca_auto"\n', encoding="utf-8")
+
+    prev = oe.upgrade_project(proj_dir, home=fake_home)
+    assert prev["ok"] is True
+    plan_hash = prev["plan_hash"]
+
+    before_proj_snapshot = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+    canon_cfg = fake_home / ".config" / "ai-orchestration" / "projects" / "ricerca_auto" / "orchestration.toml"
+    reg = oe._load_orchestration_registry()
+    db_path = reg.get_db_path(oe.get_config_dir(fake_home))
+
+    # 1. Simulate a failure inside `tasks_engine.upgrade_tasks_tree` during apply (after project-config,
+    #    workspace-register, and AGENTS.md have already been written, and after partial write in tasks/)
+    te = oe._load_tasks_engine()
+    real_upgrade_tasks = te.upgrade_tasks_tree
+
+    def _failing_apply_tasks_tree(tasks_dir: pathlib.Path, *args: object, **kwargs: object) -> dict[str, object]:
+        if kwargs.get("dry_run"):
+            return real_upgrade_tasks(tasks_dir, *args, **kwargs)
+        # Perform a partial mutation inside tasks_dir before failing
+        (pathlib.Path(tasks_dir) / "convention_version").write_text("partial-write\n", encoding="utf-8")
+        (pathlib.Path(tasks_dir) / "00-INDEX.md").write_text("corrupted partial index\n", encoding="utf-8")
+        return {
+            "ok": False,
+            "applied": False,
+            "error": "simulated mid-apply failure in tasks upgrade",
+            "errors": ["simulated mid-apply failure in tasks upgrade"],
+            "warnings": [],
+        }
+
+    with monkeypatch.context() as mp:
+        mp.setattr(te, "upgrade_tasks_tree", _failing_apply_tasks_tree)
+        res_fail = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=plan_hash)
+
+    assert res_fail["ok"] is False
+    assert res_fail["applied"] is False
+    assert res_fail["changed"] is False
+    assert "simulated mid-apply failure" in res_fail["error"]
+
+    # Verify full rollback of project directory, canonical config, legacy config, and registry
+    after_fail_proj_snapshot = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+    assert after_fail_proj_snapshot == before_proj_snapshot
+    assert not canon_cfg.exists()
+    assert legacy_cfg.is_file()
+    nearest_ws, _ = reg.resolve_workspace_for_path(proj_dir, config_dir=oe.get_config_dir(fake_home))
+    assert nearest_ws is None
+
+    # 2. Simulate an exception in `trash_path` at the very end of apply -> everything rolls back
+    def _boom_trash(*_args: object, **_kwargs: object) -> pathlib.Path:
+        raise OSError("simulated disk full during trash_path")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(oe, "trash_path", _boom_trash)
+        res_trash_fail = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=plan_hash)
+
+    assert res_trash_fail["ok"] is False
+    assert res_trash_fail["applied"] is False
+    assert res_trash_fail["changed"] is False
+    after_trash_fail_snapshot = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+    assert after_trash_fail_snapshot == before_proj_snapshot
+    assert not canon_cfg.exists()
+    assert legacy_cfg.is_file()
+    assert not db_path.exists() or reg.resolve_workspace_for_path(proj_dir, config_dir=oe.get_config_dir(fake_home))[0] is None
+
+    # 3. Normal apply without injected fault now succeeds with the exact same plan_hash
+    res_ok = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=plan_hash)
+    assert res_ok["ok"] is True
+    assert res_ok["applied"] is True
+    assert res_ok["changed"] is True
+    assert canon_cfg.is_file()
+    assert not legacy_cfg.exists()
+
 
 
 
