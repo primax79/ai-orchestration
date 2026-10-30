@@ -8895,8 +8895,14 @@ def inspect_project_doctor(
     if te is not None and tasks_dir.is_dir() and tasks_agents_path.is_file():
         try:
             t_agents_text = tasks_agents_path.read_text(encoding="utf-8", errors="replace")
-            if te.render_upgraded_agents_md(t_agents_text, tasks_dir=tasks_dir) != t_agents_text:
+            try:
+                if te.render_upgraded_agents_md(t_agents_text, tasks_dir=tasks_dir) != t_agents_text:
+                    tasks_agents_stale = True
+            except getattr(te, "TasksAgentsMdManagedBlockModifiedError", ValueError):
                 tasks_agents_stale = True
+                t_canon_label = "tasks/AGENTS.md <!-- ai-orch:managed begin --> block"
+                if t_canon_label not in agents_manual_review_sections:
+                    agents_manual_review_sections.append(t_canon_label)
         except Exception as exc:
             agents_check_failed = True
             _emit_check_failed("tasks-agents-md", tasks_agents_path, exc, f"ai-orch tasks upgrade --tasks-dir {tasks_dir}")
@@ -9975,6 +9981,15 @@ def upgrade_project(
                     return _prevalidation_error(
                         str(tasks_upg_preview.get("error") or "tasks upgrade prevalidation failed"),
                         "tasks-upgrade-failed",
+                    )
+                t_manual_rev = tasks_upg_preview.get("manual_review_sections") or []
+                if t_manual_rev:
+                    for mr_item in t_manual_rev:
+                        if mr_item not in manual_review_sections:
+                            manual_review_sections.append(mr_item)
+                    warnings.append(
+                        f"tasks/AGENTS.md: preserved {len(t_manual_rev)} block(s) for manual review "
+                        f"({', '.join(t_manual_rev)})"
                     )
                 for t_op in tasks_upg_preview.get("plan", []):
                     op_rel = t_op.get("path", "")

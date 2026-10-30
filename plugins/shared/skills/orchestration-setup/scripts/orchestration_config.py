@@ -3802,6 +3802,13 @@ def _extract_managed_block_inner(block_text: str) -> str:
         txt = txt[len(BEGIN_MARKER) :]
     if txt.endswith(END_MARKER):
         txt = txt[: -len(END_MARKER)]
+    m_tasks = re.match(
+        r"^<!--\s*ai-orch:managed\s+begin\s*-->(.*)<!--\s*ai-orch:managed\s+end\s*-->\Z",
+        txt,
+        flags=re.DOTALL,
+    )
+    if m_tasks:
+        txt = m_tasks.group(1)
     return txt
 
 
@@ -3939,10 +3946,12 @@ def _get_historical_orchestration_sections() -> dict[str, list[str]]:
 def _managed_block_matches_known_rendering(
     block_text: str,
     current_block: str | None = None,
+    historical_blocks: list[str] | tuple[str, ...] | None = None,
 ) -> bool:
-    """Return True if and only if a managed (`<!-- BEGIN ai-orchestration -->`) block's content
-    is an exact match (after whitespace normalization) to what the renderer produces now or to
-    a known historical rendering. Any user edit inside the block causes this to return False.
+    """Return True if and only if a managed (`<!-- BEGIN ai-orchestration -->` or
+    `<!-- ai-orch:managed begin -->`) block's content is an exact match (after whitespace
+    normalization) to what the renderer produces now or to a known historical rendering.
+    Any user edit inside the block causes this to return False.
     """
     inner = _extract_managed_block_inner(block_text)
     norm_cand = _normalize_legacy_orchestration_section(inner)
@@ -3953,6 +3962,12 @@ def _managed_block_matches_known_rendering(
         norm_curr = _normalize_legacy_orchestration_section(_extract_managed_block_inner(current_block))
         if norm_cand == norm_curr:
             return True
+
+    if historical_blocks is not None:
+        for raw_hb in historical_blocks:
+            if norm_cand == _normalize_legacy_orchestration_section(_extract_managed_block_inner(raw_hb)):
+                return True
+        return False
 
     if norm_cand in _get_historical_managed_blocks():
         return True
