@@ -139,7 +139,106 @@ HEADLESS_ALLOWED_KEYS = {
     "permission_mode",
     "sandbox",
     "allowed_tools",
+    "agent",
+    "backend",
+    "run_backend",
 }
+
+VALID_RUN_BACKENDS = {"setsid", "supervisor", "screen"}
+
+
+def normalize_run_backend(raw: Any) -> str | None:
+    """Normalize a run backend identifier ('setsid' / 'supervisor' -> 'setsid', 'screen' -> 'screen')."""
+    if not isinstance(raw, str):
+        return None
+    val = raw.strip().lower()
+    if val in ("setsid", "supervisor"):
+        return "setsid"
+    if val == "screen":
+        return "screen"
+    return None
+
+
+def _extract_tool_backend(cfg: dict[str, Any] | None, tool: str | None) -> Any:
+    if not isinstance(cfg, dict) or not tool:
+        return None
+    tools = cfg.get("tools")
+    if not isinstance(tools, dict):
+        return None
+    tcfg = tools.get(tool)
+    if not isinstance(tcfg, dict):
+        return None
+    headless = tcfg.get("headless")
+    if isinstance(headless, dict):
+        for k in ("backend", "run_backend"):
+            if headless.get(k) is not None:
+                return headless.get(k)
+    for k in ("backend", "run_backend"):
+        if tcfg.get(k) is not None:
+            return tcfg.get(k)
+    return None
+
+
+def _extract_project_level_backend(cfg: dict[str, Any] | None) -> Any:
+    if not isinstance(cfg, dict):
+        return None
+    for sec_name in ("project", "runs", "run", "routing", "workspace"):
+        sec = cfg.get(sec_name)
+        if isinstance(sec, dict):
+            for k in ("run_backend", "backend"):
+                if sec.get(k) is not None:
+                    return sec.get(k)
+    for k in ("run_backend", "backend"):
+        if cfg.get(k) is not None:
+            return cfg.get(k)
+    return None
+
+
+def resolve_run_backend(
+    requested_backend: str | None = None,
+    tool: str | None = None,
+    merged_cfg: dict[str, Any] | None = None,
+    project_cfg: dict[str, Any] | None = None,
+    global_cfg: dict[str, Any] | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve run backend ('setsid' default or 'screen') with precedence:
+    CLI -> project tool -> project default -> global tool -> global default -> merged -> 'setsid'.
+    Returns (canonical_backend, error_message).
+    """
+    candidates: list[tuple[str, Any]] = []
+    if requested_backend is not None:
+        candidates.append(("cli", requested_backend))
+    if project_cfg is not None:
+        tb = _extract_tool_backend(project_cfg, tool)
+        if tb is not None:
+            candidates.append((f"project.tools.{tool}", tb))
+        pb = _extract_project_level_backend(project_cfg)
+        if pb is not None:
+            candidates.append(("project", pb))
+    if global_cfg is not None:
+        gtb = _extract_tool_backend(global_cfg, tool)
+        if gtb is not None:
+            candidates.append((f"global.tools.{tool}", gtb))
+        gpb = _extract_project_level_backend(global_cfg)
+        if gpb is not None:
+            candidates.append(("global", gpb))
+    if merged_cfg is not None:
+        mtb = _extract_tool_backend(merged_cfg, tool)
+        if mtb is not None:
+            candidates.append((f"merged.tools.{tool}", mtb))
+        mpb = _extract_project_level_backend(merged_cfg)
+        if mpb is not None:
+            candidates.append(("merged", mpb))
+
+    for source, raw in candidates:
+        norm = normalize_run_backend(raw)
+        if norm is not None:
+            return norm, None
+        return None, (
+            f"Invalid run backend {raw!r} from {source} "
+            f"(expected one of {sorted(VALID_RUN_BACKENDS)})"
+        )
+    return "setsid", None
 HEADLESS_ALLOWED_TOOLS_MODES = {"execute", "verify", "orchestrate"}
 ALLOWED_PLACEHOLDERS = {
     "cwd",
@@ -1313,6 +1412,20 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
                             f"Tool '{tname}' headless 'allowed_tools' must be a list of strings or a table with keys {sorted(HEADLESS_ALLOWED_TOOLS_MODES)}."
                         )
 
+                for bk in ("backend", "run_backend"):
+                    if bk in headless and headless[bk] is not None:
+                        if normalize_run_backend(headless[bk]) is None:
+                            errors.append(
+                                f"Tool '{tname}' headless '{bk}' must be one of {sorted(VALID_RUN_BACKENDS)} (got {headless[bk]!r})."
+                            )
+
+        for bk in ("backend", "run_backend"):
+            if bk in tcfg and tcfg[bk] is not None:
+                if normalize_run_backend(tcfg[bk]) is None:
+                    errors.append(
+                        f"Tool '{tname}' '{bk}' must be one of {sorted(VALID_RUN_BACKENDS)} (got {tcfg[bk]!r})."
+                    )
+
         if not tcfg.get("enabled", True):
             continue
         profiles = tcfg.get("profiles", {})
@@ -1342,6 +1455,22 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
             errors.append(f"[routing].{key} = {val!r} refers to unknown tool (known: {sorted(tools)}).")
         elif val and not tools.get(val, {}).get("enabled", True):
             warnings.append(f"[routing].{key} = {val!r} refers to a disabled tool.")
+
+    for sec_name in ("project", "runs", "run", "routing", "workspace"):
+        sec_val = cfg.get(sec_name)
+        if isinstance(sec_val, dict):
+            for bk in ("run_backend", "backend"):
+                if bk in sec_val and sec_val[bk] is not None:
+                    if normalize_run_backend(sec_val[bk]) is None:
+                        errors.append(
+                            f"[{sec_name}].{bk} = {sec_val[bk]!r} is invalid (must be one of {sorted(VALID_RUN_BACKENDS)})."
+                        )
+    for bk in ("run_backend", "backend"):
+        if bk in cfg and not isinstance(cfg[bk], dict) and cfg[bk] is not None:
+            if normalize_run_backend(cfg[bk]) is None:
+                errors.append(
+                    f"{bk} = {cfg[bk]!r} is invalid (must be one of {sorted(VALID_RUN_BACKENDS)})."
+                )
 
     ver = cfg.get("verification", {})
     vmode = ver.get("default_mode", "cross-agent")

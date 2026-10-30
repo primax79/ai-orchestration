@@ -144,6 +144,9 @@ try:
         run_verification_checks,
         cmd_preflight,
         cmd_verify_checks,
+        VALID_RUN_BACKENDS,
+        normalize_run_backend,
+        resolve_run_backend,
     )
 except ImportError:
     resolve_config = None  # type: ignore
@@ -159,6 +162,31 @@ except ImportError:
     run_verification_checks = None  # type: ignore
     cmd_preflight = None  # type: ignore
     cmd_verify_checks = None  # type: ignore
+    VALID_RUN_BACKENDS = {"setsid", "supervisor", "screen"}
+
+    def normalize_run_backend(raw: Any) -> str | None:  # type: ignore
+        if not isinstance(raw, str):
+            return None
+        val = raw.strip().lower()
+        if val in ("setsid", "supervisor"):
+            return "setsid"
+        if val == "screen":
+            return "screen"
+        return None
+
+    def resolve_run_backend(  # type: ignore
+        requested_backend: str | None = None,
+        tool: str | None = None,
+        merged_cfg: dict[str, Any] | None = None,
+        project_cfg: dict[str, Any] | None = None,
+        global_cfg: dict[str, Any] | None = None,
+    ) -> tuple[str | None, str | None]:
+        if requested_backend is not None:
+            norm = normalize_run_backend(requested_backend)
+            if norm is None:
+                return None, f"Invalid run backend {requested_backend!r}"
+            return norm, None
+        return "setsid", None
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -173,7 +201,8 @@ VALID_TOOLS = {"kilo", "claude", "codex"}
 NOTE_ID_RE = re.compile(r"^N\d{3,}$")
 
 ACTIVE_STATES = {"starting", "running"}
-TERMINAL_STATES = {"succeeded", "failed", "cancelled", "lost"}
+SUCCEEDED_STATES = {"succeeded", "completed"}
+TERMINAL_STATES = {"succeeded", "completed", "failed", "cancelled", "lost"}
 
 SECRET_FLAG_RE = re.compile(
     r"^(?:--|-)[a-zA-Z0-9_-]*(?:token|key|secret|password)[a-zA-Z0-9_-]*$",
@@ -614,6 +643,8 @@ def read_log_chunks(
         legacy = run_dir / "events.jsonl"
         if legacy.is_file():
             chunk_files = [legacy]
+        elif (run_dir / "session.log").is_file():
+            chunk_files = [run_dir / "session.log"]
 
     if not chunk_files:
         return 0, 0, b""
@@ -747,8 +778,10 @@ def parse_log_events(data_bytes: bytes) -> list[dict[str, Any]]:
 
 
 def read_all_log_events(run_dir: pathlib.Path) -> list[dict[str, Any]]:
-    """Read all log events from events.*.jsonl chunks in order."""
+    """Read all log events from events.*.jsonl chunks (or session.log fallback) in order."""
     chunks = sorted(run_dir.glob("events.*.jsonl"))
+    if not chunks and (run_dir / "session.log").is_file():
+        chunks = [run_dir / "session.log"]
     all_events: list[dict[str, Any]] = []
     for chunk in chunks:
         try:
@@ -782,6 +815,8 @@ def read_stream_objects(run_dir: pathlib.Path) -> list[dict[str, Any]]:
     chunks = sorted(run_dir.glob("events.*.jsonl"))
     if not chunks and (run_dir / "events.jsonl").is_file():
         chunks = [run_dir / "events.jsonl"]
+    if not chunks and (run_dir / "session.log").is_file():
+        chunks = [run_dir / "session.log"]
     for chunk in chunks:
         try:
             text = chunk.read_text(encoding="utf-8", errors="replace")
@@ -913,7 +948,18 @@ def extract_assistant_messages(run_dir: pathlib.Path) -> list[str]:
 def extract_final_assistant_message(run_dir: pathlib.Path) -> str | None:
     """Extract the final assistant message content from run logs (used for verdicts and questions)."""
     messages = extract_assistant_messages(run_dir)
-    return messages[-1] if messages else None
+    if messages:
+        return messages[-1]
+    if read_stream_objects(run_dir):
+        return None
+    sess_log = run_dir / "session.log"
+    if sess_log.is_file():
+        try:
+            raw = sess_log.read_text(encoding="utf-8", errors="replace").strip()
+            return raw or None
+        except OSError:
+            pass
+    return None
 
 
 def final_report_from_messages(messages: list[str]) -> str | None:
@@ -936,7 +982,10 @@ def extract_final_report_from_run(run_dir: pathlib.Path) -> str | None:
     if read_stream_objects(run_dir):
         return None
     full_text = ""
-    for chunk in sorted(run_dir.glob("events.*.jsonl")):
+    chunks = sorted(run_dir.glob("events.*.jsonl"))
+    if not chunks and (run_dir / "session.log").is_file():
+        chunks = [run_dir / "session.log"]
+    for chunk in chunks:
         try:
             full_text += chunk.read_text(encoding="utf-8", errors="replace") + "\n"
         except OSError:
@@ -2911,6 +2960,287 @@ def run_lock(workspace: pathlib.Path):
         os.close(fd)
 
 
+def resolve_worktree_path(target_repo: pathlib.Path, run_id: str = "<run_id>") -> pathlib.Path:
+    """Return canonical worktree directory `<target_repo.parent>/.worktrees/<target_repo.name>/<run_id>` (Spec §5.4, Task 19.6)."""
+    return target_repo.parent / ".worktrees" / target_repo.name / run_id
+
+
+def _sanitize_session_token(raw: Any, fallback: str = "x") -> str:
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", str(raw or "").strip()).strip("-._")
+    return s or fallback
+
+
+def resolve_project_slug(
+    workspace: pathlib.Path,
+    target_repo: pathlib.Path | None = None,
+    merged_cfg: dict[str, Any] | None = None,
+    project_cfg: dict[str, Any] | None = None,
+) -> str:
+    """Resolve safe project slug for screen session naming (`agent-<project>-<task>`)."""
+    for cfg in (project_cfg, merged_cfg):
+        if isinstance(cfg, dict):
+            proj = cfg.get("project")
+            if isinstance(proj, dict):
+                for key in ("id", "name"):
+                    val = proj.get(key)
+                    if isinstance(val, str) and val.strip() and val.strip() != "_workspace":
+                        return _sanitize_session_token(val.strip(), "project")
+            ws_sec = cfg.get("workspace")
+            if isinstance(ws_sec, dict):
+                ws_id = ws_sec.get("id")
+                if isinstance(ws_id, str) and ws_id.strip() and ws_id.strip() != "_workspace":
+                    return _sanitize_session_token(ws_id.strip(), "project")
+    base_dir = target_repo if target_repo is not None else workspace
+    return _sanitize_session_token(base_dir.name, "project")
+
+
+def build_screen_session_name(
+    mode: str,
+    project_slug: str,
+    task_id: str,
+    suffix: str | None = None,
+) -> str:
+    """Build deterministic screen session name: `agent-<project>-<task>` (verify: `verify-<project>-<task>`)."""
+    prefix = "verify" if mode == "verify" else "agent"
+    proj = _sanitize_session_token(project_slug, "project")
+    tid = _sanitize_session_token(task_id, "task")
+    name = f"{prefix}-{proj}-{tid}"
+    if suffix:
+        name = f"{name}-{_sanitize_session_token(suffix, '1')}"
+    return name
+
+
+def list_screen_sessions() -> list[dict[str, Any]]:
+    """List live GNU screen sessions reported by `screen -ls`."""
+    if not shutil.which("screen"):
+        return []
+    try:
+        res = subprocess.run(
+            ["screen", "-ls"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    combined = f"{res.stdout or ''}\n{res.stderr or ''}"
+    sessions: list[dict[str, Any]] = []
+    for line in combined.splitlines():
+        m = re.match(r"^\s*(\d+)\.([^\s\t()]+)\s*(.*)$", line)
+        if not m:
+            continue
+        try:
+            pid = int(m.group(1))
+        except ValueError:
+            continue
+        name = m.group(2).strip()
+        info = m.group(3).strip()
+        info_low = info.lower()
+        if "dead" in info_low or "removed" in info_low:
+            continue
+        if not is_process_alive(pid):
+            continue
+        sessions.append({
+            "pid": pid,
+            "name": name,
+            "full": f"{pid}.{name}",
+            "info": info,
+        })
+    return sessions
+
+
+def is_screen_session_alive(session_name: str | None, expected_pid: int | None = None) -> bool:
+    """Return True if a live screen session matching `session_name` exists in `screen -ls`."""
+    if not session_name or not isinstance(session_name, str):
+        return False
+    for entry in list_screen_sessions():
+        if entry["name"] == session_name:
+            if expected_pid is None or entry["pid"] == expected_pid:
+                return True
+    if expected_pid is not None:
+        for entry in list_screen_sessions():
+            if entry["name"] == session_name:
+                return True
+    return False
+
+
+def get_screen_session_pid(session_name: str | None) -> int | None:
+    """Return the screen daemon PID for `session_name` if alive, else None."""
+    if not session_name or not isinstance(session_name, str):
+        return None
+    for entry in list_screen_sessions():
+        if entry["name"] == session_name:
+            return int(entry["pid"])
+    return None
+
+
+def close_screen_session(
+    session_name: str | None,
+    pid: int | None = None,
+    timeout: float = 1.5,
+) -> bool:
+    """Terminate a GNU screen session by name/PID and wait until it disappears from `screen -ls`."""
+    if not session_name and pid is None:
+        return True
+    if not shutil.which("screen"):
+        return True
+
+    matched = [
+        e for e in list_screen_sessions()
+        if (session_name and e["name"] == session_name) or (pid is not None and e["pid"] == pid)
+    ]
+    targets = [e["full"] for e in matched]
+    if not targets and session_name:
+        targets = [session_name]
+
+    for tgt in targets:
+        try:
+            subprocess.run(
+                ["screen", "-S", tgt, "-X", "quit"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    deadline = time.monotonic() + max(0.1, timeout)
+    half = time.monotonic() + max(0.05, timeout * 0.5)
+    escalated = False
+    while time.monotonic() < deadline:
+        if not is_screen_session_alive(session_name):
+            break
+        if not escalated and time.monotonic() >= half:
+            escalated = True
+            for e in list_screen_sessions():
+                if (session_name and e["name"] == session_name) or (pid is not None and e["pid"] == pid):
+                    try:
+                        os.kill(int(e["pid"]), signal.SIGTERM)
+                    except OSError:
+                        pass
+        time.sleep(0.03)
+
+    if is_screen_session_alive(session_name):
+        for e in list_screen_sessions():
+            if (session_name and e["name"] == session_name) or (pid is not None and e["pid"] == pid):
+                try:
+                    os.kill(int(e["pid"]), signal.SIGKILL)
+                except OSError:
+                    pass
+        if session_name:
+            try:
+                subprocess.run(
+                    ["screen", "-wipe", session_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+        time.sleep(0.03)
+
+    return not is_screen_session_alive(session_name)
+
+
+def find_final_report_pointer(
+    workspace: pathlib.Path,
+    run_dir: pathlib.Path,
+    record: dict[str, Any],
+    report_text: str | None = None,
+) -> str | None:
+    """Resolve pointer to the Final Report on disk (worktree notes file or extracted report in run_dir)."""
+    task_id = str(record.get("task_id") or "").strip()
+    search_roots: list[pathlib.Path] = []
+    for candidate in (record.get("worktree_path"), record.get("cwd"), str(workspace)):
+        if isinstance(candidate, str) and candidate.strip():
+            p = pathlib.Path(candidate)
+            if p.is_dir() and p not in search_roots:
+                search_roots.append(p)
+
+    if task_id and task_id != "batch":
+        for root in search_roots:
+            tasks_dir = root / "tasks"
+            if tasks_dir.is_dir():
+                matches = sorted(tasks_dir.glob(f"**/notes/*{task_id}*final-report*.md"))
+                if matches:
+                    return str(matches[-1])
+
+    if report_text and report_text.strip():
+        out_path = run_dir / "final_report.md"
+        try:
+            out_path.write_text(report_text.rstrip() + "\n", encoding="utf-8")
+            return str(out_path)
+        except OSError:
+            if (run_dir / "session.log").is_file():
+                return str(run_dir / "session.log")
+
+    if (run_dir / "final_report.md").is_file():
+        return str(run_dir / "final_report.md")
+    return None
+
+
+def read_screen_status_file(run_dir: pathlib.Path) -> dict[str, Any] | None:
+    """Read `.ai-orchestration/runs/<run_id>/status.json` if present and valid."""
+    status_path = run_dir / "status.json"
+    if not status_path.is_file():
+        return None
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def write_screen_status_file(
+    run_dir: pathlib.Path,
+    record: dict[str, Any],
+    exit_code: int,
+    ended_at: str,
+    final_report_path: str | None = None,
+) -> dict[str, Any]:
+    """Atomically write `.ai-orchestration/runs/<run_id>/status.json` on screen run exit."""
+    rec_status = record.get("status")
+    is_ok = exit_code == 0 and rec_status in SUCCEEDED_STATES
+    payload: dict[str, Any] = {
+        "run_id": record.get("run_id"),
+        "screen_session": record.get("screen_session") or record.get("session_name"),
+        "status": "completed" if is_ok else ("failed" if rec_status == "failed" or exit_code != 0 else rec_status),
+        "state": "completed" if is_ok else ("failed" if rec_status == "failed" or exit_code != 0 else rec_status),
+        "outcome": "succeeded" if is_ok else ("failed" if rec_status == "failed" or exit_code != 0 else rec_status),
+        "completed": True,
+        "exit_code": int(exit_code),
+        "started_at": record.get("started_at"),
+        "ended_at": ended_at,
+        "final_report": record.get("final_report"),
+        "final_report_path": final_report_path,
+        "final_report_pointer": final_report_path,
+        "final_commit": record.get("final_commit"),
+    }
+    status_path = run_dir / "status.json"
+    fd, tmp_path = tempfile.mkstemp(dir=str(run_dir), prefix="status.json.tmp.", text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp_path, str(status_path))
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    return payload
+
+
 def generate_run_id(task_id: str, tool: str) -> str:
     """Generate run_id: <YYYYMMDD-HHMMSS>-<task>-<tool>-<4 hex>."""
     now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -3071,35 +3401,121 @@ def reconcile(
     if status not in ACTIVE_STATES:
         return record
 
-    sup = record.get("supervisor", {})
-    sup_pid = sup.get("pid")
-    sup_start = sup.get("start_time")
+    if record.get("backend") == "screen":
+        run_dir = ws / ".ai-orchestration" / "runs" / record["run_id"] if ws else None
+        status_data = read_screen_status_file(run_dir) if run_dir else None
+        if status_data is not None and ws is not None and run_dir is not None:
+            exit_code = int(status_data.get("exit_code", 0))
+            ended_at = status_data.get("ended_at")
+            if status_data.get("final_report") and not record.get("final_report"):
+                record["final_report"] = status_data["final_report"]
+            if status_data.get("final_report_path") and not record.get("final_report_path"):
+                record["final_report_path"] = status_data["final_report_path"]
+            return _finalize_run_completion(
+                workspace=ws,
+                record=record,
+                run_dir=run_dir,
+                exit_code=exit_code,
+                ended_at=ended_at if isinstance(ended_at, str) else None,
+                write_status_file=True,
+            )
 
-    is_lost = False
+        screen_session = record.get("screen_session") or record.get("session_name")
+        screen_alive = is_screen_session_alive(screen_session)
+        if not screen_alive and record.get("status") == "starting":
+            started_age = _compute_timestamp_age(record.get("started_at"))
+            sup = record.get("supervisor", {})
+            sup_pid = sup.get("pid")
+            if started_age is not None and started_age < 2.0 and (sup_pid is None or is_process_alive(sup_pid)):
+                return record
 
-    if sup_pid is None:
-        started_at = record.get("started_at")
-        if started_at:
+        if not screen_alive and run_dir is not None:
+            time.sleep(0.03)
+            status_data = read_screen_status_file(run_dir)
+            if status_data is not None and ws is not None:
+                exit_code = int(status_data.get("exit_code", 0))
+                ended_at = status_data.get("ended_at")
+                if status_data.get("final_report") and not record.get("final_report"):
+                    record["final_report"] = status_data["final_report"]
+                if status_data.get("final_report_path") and not record.get("final_report_path"):
+                    record["final_report_path"] = status_data["final_report_path"]
+                return _finalize_run_completion(
+                    workspace=ws,
+                    record=record,
+                    run_dir=run_dir,
+                    exit_code=exit_code,
+                    ended_at=ended_at if isinstance(ended_at, str) else None,
+                    write_status_file=True,
+                )
+
+        if screen_alive:
+            if record.get("status") == "starting":
+                record["status"] = "running"
+                scr_pid = get_screen_session_pid(screen_session)
+                if scr_pid:
+                    record["screen"] = {
+                        "session_name": screen_session,
+                        "pid": scr_pid,
+                        "start_time": get_process_start_time(scr_pid),
+                    }
+                if ws:
+                    try:
+                        save_run_record(ws, record)
+                    except Exception:
+                        pass
+            last_hb = _extract_run_heartbeat(record)
+            if last_hb is not None:
+                hb_age = _compute_timestamp_age(last_hb)
+                record["last_heartbeat"] = last_hb
+                record["heartbeat_age_sec"] = hb_age
+                record["heartbeat_age"] = hb_age
+                record["last_heartbeat_age_sec"] = hb_age
+            return record
+
+        is_lost = True
+        if screen_session and shutil.which("screen"):
             try:
-                started_str = started_at.replace("Z", "+00:00")
-                dt = datetime.datetime.fromisoformat(started_str)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=datetime.timezone.utc)
-                now = datetime.datetime.now(datetime.timezone.utc)
-                if (now - dt).total_seconds() > 60:
-                    is_lost = True
-            except Exception:
+                subprocess.run(
+                    ["screen", "-wipe", screen_session],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
                 pass
     else:
-        if not is_process_alive(sup_pid):
-            is_lost = True
+        sup = record.get("supervisor", {})
+        sup_pid = sup.get("pid")
+        sup_start = sup.get("start_time")
+
+        is_lost = False
+
+        if sup_pid is None:
+            started_at = record.get("started_at")
+            if started_at:
+                try:
+                    started_str = started_at.replace("Z", "+00:00")
+                    dt = datetime.datetime.fromisoformat(started_str)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=datetime.timezone.utc)
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    if (now - dt).total_seconds() > 60:
+                        is_lost = True
+                except Exception:
+                    pass
         else:
-            cur_sup_start = get_process_start_time(sup_pid)
-            if cur_sup_start is not None and sup_start is not None and cur_sup_start != sup_start:
+            if not is_process_alive(sup_pid):
                 is_lost = True
+            else:
+                cur_sup_start = get_process_start_time(sup_pid)
+                if cur_sup_start is not None and sup_start is not None and cur_sup_start != sup_start:
+                    is_lost = True
 
     if is_lost:
         record["status"] = "lost"
+        if record.get("backend") == "screen":
+            record["state"] = "lost"
         record["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         agent = record.get("agent", {})
@@ -3174,14 +3590,23 @@ def create_run_record(
     members: dict[str, Any] | None = None,
     origin_session: str | None = None,
     host: str | None = None,
+    backend: str = "setsid",
+    screen_session: str | None = None,
+    log_file: str | None = None,
+    status_file: str | None = None,
 ) -> dict[str, Any]:
-    """Initialize a run.json record structure (Spec §5.1, R2, R3, R8, Task 09.4)."""
+    """Initialize a run.json record structure (Spec §5.1, R2, R3, R8, Task 09.4, Task 19.6)."""
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     resolved_host = host or (resolve_host_id() if resolve_host_id is not None else "localhost")
     return {
         "run_id": run_id,
         "task_id": task_id,
         "host": resolved_host,
+        "backend": backend,
+        "screen_session": screen_session,
+        "session_name": screen_session,
+        "log_file": log_file,
+        "status_file": status_file,
         "is_batch": is_batch,
         "batch_members": list(batch_members or []),
         "members": dict(members or {}),
@@ -3260,7 +3685,7 @@ def save_run_record(workspace: pathlib.Path, record: dict[str, Any]) -> None:
                     raise ValueError(
                         f"Monotonic guard: cannot overwrite terminal status '{ex_st}' with '{new_st}'"
                     )
-                if ex_st in ("cancelled", "lost") and new_st in ("succeeded", "failed"):
+                if ex_st in ("cancelled", "lost") and new_st in ("succeeded", "completed", "failed"):
                     record["status"] = ex_st
             except (json.JSONDecodeError, OSError):
                 pass
@@ -3738,16 +4163,30 @@ def validate_run_request(
         if mode == "execute":
             if isolation == "worktree":
                 planned_branch = f"run/{run_batch_slug}"
-                planned_worktree = str(target_repo.parent / ".worktrees" / target_repo.name / f"run-{run_batch_slug}")
+                planned_worktree = str(resolve_worktree_path(target_repo))
                 cwd = planned_worktree
             else:
                 cwd = str(target_repo)
         elif mode == "verify":
             planned_branch = None
-            planned_worktree = str(target_repo.parent / ".worktrees" / target_repo.name / f"verify-{run_batch_slug}")
+            planned_worktree = str(resolve_worktree_path(target_repo))
             cwd = planned_worktree
         else:
             cwd = str(ws)
+
+        backend, backend_err = resolve_run_backend(
+            requested_backend=getattr(args, "backend", None),
+            tool=tool,
+            merged_cfg=merged_cfg,
+            project_cfg=project_cfg,
+            global_cfg=global_cfg,
+        )
+        if backend_err or not backend:
+            return False, ("invalid-run-backend", backend_err or "Invalid run backend"), None
+        if backend == "screen" and not shutil.which("screen"):
+            return False, ("screen-not-installed", "Backend 'screen' requires GNU screen ('screen' binary not found on PATH)"), None
+        project_slug = resolve_project_slug(ws, target_repo, merged_cfg, project_cfg)
+        screen_session = build_screen_session_name(mode, project_slug, run_batch_slug) if backend == "screen" else None
 
         all_runs = list_run_records(ws)
         active_runs = [r for r in all_runs if r.get("status") in ACTIVE_STATES]
@@ -3767,7 +4206,7 @@ def validate_run_request(
             target_run_id = args.target_run
             if not target_run_id:
                 succeeded_runs = [
-                    r for r in all_runs if r.get("mode") == "execute" and r.get("status") == "succeeded" and (r.get("is_batch") or any(tid in r.get("batch_members", []) for tid in batch_ids))
+                    r for r in all_runs if r.get("mode") == "execute" and r.get("status") in SUCCEEDED_STATES and (r.get("is_batch") or any(tid in r.get("batch_members", []) for tid in batch_ids))
                 ]
                 if succeeded_runs:
                     target_run_id = succeeded_runs[0]["run_id"]
@@ -3779,7 +4218,7 @@ def validate_run_request(
                 matched_run = next((r for r in all_runs if r.get("run_id") == target_run_id), None)
                 if not matched_run:
                     return False, ("target-run-not-found", f"Target run '{target_run_id}' not found"), None
-                if matched_run.get("status") != "succeeded":
+                if matched_run.get("status") not in SUCCEEDED_STATES:
                     return False, (
                         "target-run-not-succeeded",
                         f"Target run '{target_run_id}' status is '{matched_run.get('status')}', must be 'succeeded'",
@@ -3869,6 +4308,9 @@ def validate_run_request(
             "variant": variant,
         }
 
+        if backend != "setsid":
+            canonical_request["backend"] = backend
+
         bundle_hash = hashlib.sha256("".join(sorted(t.get("bundle_sha256", "") for t in task_list)).encode("utf-8")).hexdigest()
         repo_head = get_repo_head(target_repo)
         plan_hash = compute_plan_hash(
@@ -3903,6 +4345,10 @@ def validate_run_request(
             "variant": variant,
             "effort": effort,
             "isolation": isolation,
+            "backend": backend,
+            "screen_session": screen_session,
+            "session_name": screen_session,
+            "project_slug": project_slug,
             "cwd": cwd,
             "planned_branch": planned_branch,
             "planned_worktree": planned_worktree,
@@ -4025,6 +4471,20 @@ def validate_run_request(
         planned_worktree = None
         target_repo = ws
 
+        backend, backend_err = resolve_run_backend(
+            requested_backend=getattr(args, "backend", None),
+            tool=tool,
+            merged_cfg=merged_cfg,
+            project_cfg=project_cfg,
+            global_cfg=global_cfg,
+        )
+        if backend_err or not backend:
+            return False, ("invalid-run-backend", backend_err or "Invalid run backend"), None
+        if backend == "screen" and not shutil.which("screen"):
+            return False, ("screen-not-installed", "Backend 'screen' requires GNU screen ('screen' binary not found on PATH)"), None
+        project_slug = resolve_project_slug(ws, target_repo, merged_cfg, project_cfg)
+        screen_session = build_screen_session_name(mode, project_slug, target_id) if backend == "screen" else None
+
         all_runs = list_run_records(ws, task_id=target_id)
         active_runs = [r for r in all_runs if r.get("status") in ACTIVE_STATES]
         task_act_valid, task_act_err = check_same_task_active(target_id, active_runs, force=args.force)
@@ -4120,6 +4580,9 @@ def validate_run_request(
             "variant": variant,
         }
 
+        if backend != "setsid":
+            canonical_request["backend"] = backend
+
         bundle_hash = note.get("bundle_sha256") or ""
         repo_head = get_repo_head(ws)
         plan_hash = compute_plan_hash(
@@ -4153,6 +4616,10 @@ def validate_run_request(
             "variant": variant,
             "effort": effort,
             "isolation": isolation,
+            "backend": backend,
+            "screen_session": screen_session,
+            "session_name": screen_session,
+            "project_slug": project_slug,
             "cwd": cwd,
             "planned_branch": None,
             "planned_worktree": None,
@@ -4232,7 +4699,7 @@ def validate_run_request(
         target_run_id = args.target_run
         if not target_run_id:
             succeeded_runs = [
-                r for r in all_runs if r.get("mode") == "execute" and r.get("status") == "succeeded"
+                r for r in all_runs if r.get("mode") == "execute" and r.get("status") in SUCCEEDED_STATES
             ]
             if succeeded_runs:
                 target_run_id = succeeded_runs[0]["run_id"]
@@ -4244,7 +4711,7 @@ def validate_run_request(
             matched_run = next((r for r in all_runs if r.get("run_id") == target_run_id), None)
             if not matched_run:
                 return False, ("target-run-not-found", f"Target run '{target_run_id}' not found"), None
-            if matched_run.get("status") != "succeeded":
+            if matched_run.get("status") not in SUCCEEDED_STATES:
                 return (
                     False,
                     (
@@ -4350,16 +4817,30 @@ def validate_run_request(
     if mode == "execute":
         if isolation == "worktree":
             planned_branch = f"run/{task_id}"
-            planned_worktree = str(target_repo.parent / ".worktrees" / target_repo.name / f"run-{task_id}")
+            planned_worktree = str(resolve_worktree_path(target_repo))
             cwd = planned_worktree
         else:
             cwd = str(target_repo)
     elif mode == "verify":
         planned_branch = None
-        planned_worktree = str(target_repo.parent / ".worktrees" / target_repo.name / f"verify-{task_id}")
+        planned_worktree = str(resolve_worktree_path(target_repo))
         cwd = planned_worktree
     else:  # orchestrate
         cwd = str(ws)
+
+    backend, backend_err = resolve_run_backend(
+        requested_backend=getattr(args, "backend", None),
+        tool=tool,
+        merged_cfg=merged_cfg,
+        project_cfg=project_cfg,
+        global_cfg=global_cfg,
+    )
+    if backend_err or not backend:
+        return False, ("invalid-run-backend", backend_err or "Invalid run backend"), None
+    if backend == "screen" and not shutil.which("screen"):
+        return False, ("screen-not-installed", "Backend 'screen' requires GNU screen ('screen' binary not found on PATH)"), None
+    project_slug = resolve_project_slug(ws, target_repo, merged_cfg, project_cfg)
+    screen_session = build_screen_session_name(mode, project_slug, task_id) if backend == "screen" else None
 
     active_runs = [r for r in all_runs if r.get("status") in ACTIVE_STATES]
     task_act_valid, task_act_err = check_same_task_active(task_id, active_runs, force=args.force)
@@ -4468,6 +4949,9 @@ def validate_run_request(
         "variant": variant,
     }
 
+    if backend != "setsid":
+        canonical_request["backend"] = backend
+
     bundle_hash = task.get("bundle_sha256") or (task_bundle_sha256(task) if task_bundle_sha256 else "")
     repo_head = get_repo_head(target_repo)
     plan_hash = compute_plan_hash(
@@ -4499,6 +4983,10 @@ def validate_run_request(
         "variant": variant,
         "effort": effort,
         "isolation": isolation,
+        "backend": backend,
+        "screen_session": screen_session,
+        "session_name": screen_session,
+        "project_slug": project_slug,
         "cwd": cwd,
         "planned_branch": planned_branch,
         "planned_worktree": planned_worktree,
@@ -4532,6 +5020,9 @@ def cmd_preview(args: argparse.Namespace) -> int:
         "tool": data["tool"],  # type: ignore
         "profile": data["profile"],  # type: ignore
         "model": data["model"],  # type: ignore
+        "backend": data.get("backend", "setsid"),  # type: ignore
+        "screen_session": data.get("screen_session"),  # type: ignore
+        "session_name": data.get("session_name"),  # type: ignore
         "prompt": data["prompt"],  # type: ignore
         "prompt_sha256": data["prompt_sha256"],  # type: ignore
         "argv_display": data["argv_display"],  # type: ignore
@@ -4574,6 +5065,153 @@ def cmd_preview(args: argparse.Namespace) -> int:
             for w in data["warnings"]:  # type: ignore
                 print(f"  [WARN] {w}")
     return 0
+
+
+def _launch_run_backend(
+    workspace: pathlib.Path,
+    run_dir: pathlib.Path,
+    record: dict[str, Any],
+    gpath: pathlib.Path | str | None = None,
+    force: bool = False,
+) -> tuple[bool, str | None]:
+    """Launch the run supervisor either via detached setsid (default) or inside a named GNU screen session."""
+    backend = record.get("backend") or "setsid"
+    sup_cmd = [
+        sys.executable,
+        str(pathlib.Path(__file__).resolve()),
+        "_supervise",
+        str(run_dir),
+    ]
+    if gpath:
+        sup_cmd.extend(["--global-config", str(gpath)])
+
+    if backend == "setsid":
+        subprocess.Popen(
+            sup_cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        return True, None
+
+    if backend != "screen":
+        return False, f"Unsupported run backend '{backend}'"
+
+    if not shutil.which("screen"):
+        return False, "Backend 'screen' requires GNU screen ('screen' binary not found on PATH)"
+
+    screen_session = record.get("screen_session") or record.get("session_name")
+    if not screen_session:
+        screen_session = build_screen_session_name(
+            str(record.get("mode") or "execute"),
+            pathlib.Path(record.get("workspace") or workspace).name,
+            str(record.get("task_id") or "task"),
+        )
+        record["screen_session"] = screen_session
+        record["session_name"] = screen_session
+
+    if is_screen_session_alive(screen_session):
+        if not force:
+            return False, f"Screen session '{screen_session}' is already active"
+        close_screen_session(screen_session)
+
+    session_log_path = run_dir / "session.log"
+    if not session_log_path.exists():
+        session_log_path.write_text("", encoding="utf-8")
+        try:
+            os.chmod(session_log_path, 0o600)
+        except OSError:
+            pass
+
+    screenrc_path = run_dir / "screenrc"
+    screenrc_path.write_text(
+        f"logfile {session_log_path}\nlogfile flush 1\ndeflog on\n",
+        encoding="utf-8",
+    )
+    try:
+        os.chmod(screenrc_path, 0o600)
+    except OSError:
+        pass
+
+    screen_cmd = [
+        "screen",
+        "-c",
+        str(screenrc_path),
+        "-L",
+        "-Logfile",
+        str(session_log_path),
+        "-dmS",
+        screen_session,
+        *sup_cmd,
+    ]
+    clean_env = {
+        k: v for k, v in os.environ.items()
+        if k not in ("STY", "WINDOW", "ORCHESTRATION_SUBAGENT")
+    }
+    cwd_str = record.get("cwd") or str(workspace)
+    res_scr = subprocess.run(
+        screen_cmd,
+        cwd=cwd_str if pathlib.Path(cwd_str).is_dir() else str(workspace),
+        env=clean_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if res_scr.returncode != 0:
+        err_detail = (res_scr.stderr or res_scr.stdout or "").strip()
+        return False, f"Failed to start screen session '{screen_session}': {err_detail}"
+
+    return True, None
+
+
+def _await_screen_startup(
+    workspace: pathlib.Path,
+    run_dir: pathlib.Path,
+    record: dict[str, Any],
+    timeout: float = 1.0,
+) -> None:
+    """Wait briefly after `screen -dmS` so the screen socket and running state are visible immediately."""
+    if record.get("backend") != "screen":
+        return
+    screen_session = record.get("screen_session") or record.get("session_name")
+    if not screen_session:
+        return
+    deadline = time.monotonic() + max(0.1, timeout)
+    scr_pid: int | None = None
+    while time.monotonic() < deadline:
+        if (run_dir / "status.json").is_file():
+            break
+        scr_pid = get_screen_session_pid(screen_session)
+        if scr_pid is not None:
+            break
+        time.sleep(0.02)
+
+    run_file = run_dir / "run.json"
+    if not run_file.is_file():
+        return
+    try:
+        cur = json.loads(run_file.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    changed = False
+    if scr_pid is not None and not isinstance(cur.get("screen"), dict):
+        cur["screen"] = {
+            "session_name": screen_session,
+            "pid": scr_pid,
+            "start_time": get_process_start_time(scr_pid),
+        }
+        changed = True
+    if cur.get("status") == "starting" and (scr_pid is not None or is_screen_session_alive(screen_session)):
+        cur["status"] = "running"
+        changed = True
+    if changed:
+        try:
+            save_run_record(workspace, cur)
+            record.update(cur)
+        except Exception:
+            pass
 
 
 def cmd_start(args: argparse.Namespace) -> int:
@@ -4747,6 +5385,8 @@ def cmd_start(args: argparse.Namespace) -> int:
             )
             argv_display = redact_argv(resume_raw_argv)
 
+            cont_backend = source_record.get("backend") or "setsid"
+            cont_screen_session = source_record.get("screen_session") or source_record.get("session_name")
             record = create_run_record(
                 run_id=run_id,
                 task_id=task_id,
@@ -4773,6 +5413,10 @@ def cmd_start(args: argparse.Namespace) -> int:
                 verification_mode=source_record.get("verification_mode"),
                 keep_worktree=bool(getattr(args, "keep_worktree", False) or source_record.get("keep_worktree", False)),
                 host=resolve_host_id(merged_cfg, gpath) if resolve_host_id is not None else None,
+                backend=cont_backend,
+                screen_session=cont_screen_session,
+                log_file=str(run_dir / "session.log") if cont_backend == "screen" else None,
+                status_file=str(run_dir / "status.json") if cont_backend == "screen" else None,
             )
             record["session_id"] = session_id
             record["origin_session"] = getattr(args, "origin_session", None) or source_record.get("origin_session")
@@ -4787,24 +5431,14 @@ def cmd_start(args: argparse.Namespace) -> int:
                 },
             )
 
-            sup_cmd = [
-                sys.executable,
-                str(pathlib.Path(__file__).resolve()),
-                "_supervise",
-                str(run_dir),
-            ]
-            if gpath:
-                sup_cmd.extend(["--global-config", str(gpath)])
-
-            subprocess.Popen(
-                sup_cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                close_fds=True,
+            launch_ok, launch_err = _launch_run_backend(
+                ws, run_dir, record, gpath=gpath, force=True
             )
+            if not launch_ok:
+                print_error(args.json, "launch-failed", launch_err or "Failed to launch run backend")
+                return 1
 
+        _await_screen_startup(ws, run_dir, record)
         if args.json:
             print(json.dumps({"ok": True, "run_id": run_id, "status": "starting", "continued_from": args.continue_run_id}, indent=2))
         else:
@@ -4912,6 +5546,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             panel_id = f"panel-{task_id}-{uuid.uuid4().hex[:6]}"
             target_commit = data["target_commit"]  # type: ignore
             run_ids = []
+            panel_launched: list[tuple[pathlib.Path, dict[str, Any]]] = []
 
             for rev in panel_reviewers:
                 rev_tool, rev_profile = rev.split(":", 1) if ":" in rev else (rev, "deep-reasoning")
@@ -4927,7 +5562,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                 except OSError:
                     pass
 
-                wt_dir = target_repo.parent / ".worktrees" / target_repo.name / r_id
+                wt_dir = resolve_worktree_path(target_repo, r_id)
                 wt_dir.parent.mkdir(parents=True, exist_ok=True)
                 res_wt = subprocess.run(
                     ["git", "worktree", "add", "--detach", str(wt_dir), target_commit],
@@ -4962,6 +5597,25 @@ def cmd_start(args: argparse.Namespace) -> int:
                 rev_argv_display = redact_argv(rev_raw_argv)
 
                 session_id = str(uuid.uuid4()) if rev_tool == "claude" else None
+                rev_backend, _ = resolve_run_backend(
+                    requested_backend=getattr(args, "backend", None),
+                    tool=rev_tool,
+                    merged_cfg=data["merged_cfg"],  # type: ignore
+                    project_cfg=data.get("project_cfg"),
+                    global_cfg=data.get("global_cfg"),
+                )
+                rev_backend = rev_backend or "setsid"
+                rev_suffix = rev_tool if len(panel_reviewers) > 1 else None
+                rev_screen_session = (
+                    build_screen_session_name(
+                        "verify",
+                        data.get("project_slug") or resolve_project_slug(ws, target_repo, data["merged_cfg"], data.get("project_cfg")),  # type: ignore
+                        task_id,
+                        suffix=rev_suffix,
+                    )
+                    if rev_backend == "screen"
+                    else None
+                )
 
                 rec = create_run_record(
                     run_id=r_id,
@@ -4988,6 +5642,10 @@ def cmd_start(args: argparse.Namespace) -> int:
                     keep_worktree=bool(getattr(args, "keep_worktree", False)),
                     created_worktree=str(wt_dir),
                     host=resolve_host_id(data["merged_cfg"], getattr(args, "global_config", None)) if resolve_host_id is not None else None,  # type: ignore
+                    backend=rev_backend,
+                    screen_session=rev_screen_session,
+                    log_file=str(r_dir / "session.log") if rev_backend == "screen" else None,
+                    status_file=str(r_dir / "status.json") if rev_backend == "screen" else None,
                 )
                 if session_id:
                     rec["session_id"] = session_id
@@ -5003,26 +5661,18 @@ def cmd_start(args: argparse.Namespace) -> int:
                     },
                 )
 
-                sup_cmd = [
-                    sys.executable,
-                    str(pathlib.Path(__file__).resolve()),
-                    "_supervise",
-                    str(r_dir),
-                ]
                 gpath = getattr(args, "global_config", None)
-                if gpath:
-                    sup_cmd.extend(["--global-config", str(gpath)])
-
-                subprocess.Popen(
-                    sup_cmd,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                    close_fds=True,
+                launch_ok, launch_err = _launch_run_backend(
+                    ws, r_dir, rec, gpath=gpath, force=bool(getattr(args, "force", False))
                 )
+                if not launch_ok:
+                    print_error(args.json, "launch-failed", launch_err or "Failed to launch panel run")
+                    return 1
+                panel_launched.append((r_dir, rec))
                 run_ids.append(r_id)
 
+            for r_dir, rec in panel_launched:
+                _await_screen_startup(ws, r_dir, rec)
             if args.json:
                 print(json.dumps({"ok": True, "panel_id": panel_id, "run_ids": run_ids, "status": "starting"}, indent=2))
             else:
@@ -5049,7 +5699,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
         created_worktree = None
         if data["mode"] == "execute" and data["isolation"] == "worktree":  # type: ignore
-            worktree_dir = target_repo.parent / ".worktrees" / target_repo.name / run_id
+            worktree_dir = resolve_worktree_path(target_repo, run_id)
             worktree_dir.parent.mkdir(parents=True, exist_ok=True)
             branch_name = f"run/{run_id}"
             base_commit = get_repo_head(target_repo)
@@ -5068,7 +5718,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             created_worktree = str(worktree_dir)
 
         elif data["mode"] == "verify":  # type: ignore
-            worktree_dir = target_repo.parent / ".worktrees" / target_repo.name / run_id
+            worktree_dir = resolve_worktree_path(target_repo, run_id)
             worktree_dir.parent.mkdir(parents=True, exist_ok=True)
             res_wt = subprocess.run(
                 ["git", "worktree", "add", "--detach", str(worktree_dir), target_commit],
@@ -5137,6 +5787,8 @@ def cmd_start(args: argparse.Namespace) -> int:
                     "transition_note": None,
                 }
 
+        run_backend = data.get("backend") or "setsid"
+        run_screen_session = data.get("screen_session")
         record = create_run_record(
             run_id=run_id,
             task_id="batch" if data.get("is_batch") else task_id,
@@ -5168,6 +5820,10 @@ def cmd_start(args: argparse.Namespace) -> int:
             batch_members=data.get("batch_members"),
             members=members_map,
             host=resolve_host_id(data["merged_cfg"], getattr(args, "global_config", None)) if resolve_host_id is not None else None,  # type: ignore
+            backend=run_backend,
+            screen_session=run_screen_session,
+            log_file=str(run_dir / "session.log") if run_backend == "screen" else None,
+            status_file=str(run_dir / "status.json") if run_backend == "screen" else None,
         )
         if session_id:
             record["session_id"] = session_id
@@ -5185,27 +5841,26 @@ def cmd_start(args: argparse.Namespace) -> int:
             },
         )
 
-        sup_cmd = [
-            sys.executable,
-            str(pathlib.Path(__file__).resolve()),
-            "_supervise",
-            str(run_dir),
-        ]
         gpath = getattr(args, "global_config", None)
-        if gpath:
-            sup_cmd.extend(["--global-config", str(gpath)])
-
-        subprocess.Popen(
-            sup_cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
+        launch_ok, launch_err = _launch_run_backend(
+            ws, run_dir, record, gpath=gpath, force=bool(getattr(args, "force", False))
         )
+        if not launch_ok:
+            print_error(args.json, "launch-failed", launch_err or "Failed to launch run backend")
+            return 1
 
+    _await_screen_startup(ws, run_dir, record)
     if args.json:
-        out_obj = {"ok": True, "run_id": run_id, "status": "starting", "plan_hash": data["plan_hash"]}
+        out_obj: dict[str, Any] = {
+            "ok": True,
+            "run_id": run_id,
+            "status": "starting",
+            "plan_hash": data["plan_hash"],
+            "backend": run_backend,
+        }
+        if run_screen_session:
+            out_obj["screen_session"] = run_screen_session
+            out_obj["session_name"] = run_screen_session
         if data.get("is_batch"):
             out_obj["is_batch"] = True
             out_obj["batch_members"] = data["batch_members"]
@@ -5218,187 +5873,72 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_supervise(args: argparse.Namespace) -> int:
-    run_dir = pathlib.Path(args.run_dir).resolve()
-    run_file = run_dir / "run.json"
-    if not run_file.is_file():
-        return 1
+def _transition_execute_task_to_in_progress(workspace: pathlib.Path, record: dict[str, Any]) -> None:
+    if record.get("mode") != "execute":
+        return
     try:
-        record = json.loads(run_file.read_text(encoding="utf-8"))
-    except Exception:
-        return 1
-
-    workspace = pathlib.Path(record["workspace"])
-
-    # 1. Record supervisor identity FIRST (Instruction 2)
-    my_pid = os.getpid()
-    my_start_time = get_process_start_time(my_pid)
-    record["supervisor"] = {"pid": my_pid, "start_time": my_start_time}
-    save_run_record(workspace, record)
-
-    # 2. Prepare adapter argv
-    gpath = getattr(args, "global_config", None)
-    merged_cfg, _ = resolve_config(gpath, workspace)
-    tool_cfg = merged_cfg.get("tools", {}).get(record["tool"], {})
-    headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
-
-    session_id = record.get("session_id")
-    if not session_id and record["tool"] == "claude":
-        session_id = str(uuid.uuid4())
-        record["session_id"] = session_id
-
-    prompt_path = run_dir / "prompt.md"
-    is_resume = bool(record.get("continued_from"))
-    raw_argv = build_adapter_argv(
-        tool=record["tool"],
-        tool_cfg=tool_cfg,
-        mode=record["mode"],
-        cwd=record["cwd"],
-        model=record["model"],
-        variant=record.get("variant"),
-        effort=record.get("effort"),
-        session_id=session_id or "{session_id}",
-        prompt_file=str(prompt_path),
-        is_resume=is_resume,
-        attachment_paths=record.get("attachment_paths"),
-        git_common_dir=(
-            git_common_dir_of(pathlib.Path(record["cwd"]))
-            if record["tool"] == "codex" and record.get("mode") == "execute"
-            and record.get("isolation") == "worktree" and pathlib.Path(record["cwd"]).is_dir()
-            else None
-        ),
-    )
-
-    prompt_via = headless_cfg.get("prompt_via")
-    if not prompt_via:
-        if is_resume:
-            if record["tool"] == "kilo" or ("{prompt_file}" in headless_cfg.get("resume_argv", [])):
-                prompt_via = "file"
-            else:
-                prompt_via = "stdin"
-        else:
-            if record["tool"] == "kilo" or ("{prompt_file}" in headless_cfg.get("argv", [])):
-                prompt_via = "file"
-            else:
-                prompt_via = "stdin"
-
-    expanded_argv = expand_secret_env_vars(raw_argv)
-    prompt_text = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else ""
-
-    cwd_path = pathlib.Path(record["cwd"])
-    if not cwd_path.is_dir():
-        record["status"] = "failed"
-        record["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        record["exit_code"] = 1
-        record["invariant_error"] = f"Working directory '{cwd_path}' does not exist"
-        with open(run_dir / "stderr.log", "a", encoding="utf-8") as f:
-            f.write(f"Working directory '{cwd_path}' does not exist; refusing to run in non-existent directory\n")
-        save_run_record(workspace, record)
-        _emit_run_event(
-            workspace,
-            "run.finished",
-            record,
-            data={
-                "status": "failed",
-                "exit_code": 1,
-                "invariant_error": record["invariant_error"],
-            },
-        )
-        return 1
-
-    # 3. Supervised invocation in isolated process group (Spec §0c E4, E5)
-    inv = SupervisedInvocation(
-        argv=expanded_argv,
-        cwd=cwd_path,
-        prompt_text=prompt_text if prompt_via == "stdin" else None,
-        prompt_via=prompt_via,
-        log_dir=run_dir,
-        max_chunk_size=DEFAULT_LOG_CHUNK_SIZE,
-        stderr_path=run_dir / "stderr.log",
-        timeout=getattr(args, "timeout", None) or record.get("timeout"),
-    )
-
-    def on_started(inv_proc: SupervisedInvocation) -> None:
-        agent_pid = inv_proc.pid
-        agent_pgid = inv_proc.pgid
-        agent_start_time = inv_proc.start_time
-        record["agent"] = {"pid": agent_pid, "pgid": agent_pgid, "start_time": agent_start_time}
-        record["status"] = "running"
-        save_run_record(workspace, record)
-        _emit_run_event(
-            workspace,
-            "run.started",
-            record,
-            data={"status": "running", "agent": record["agent"]},
-        )
-
-        # 6. Execute mode: transition task to "in progress" (Instruction 2)
-        if record.get("mode") == "execute":
-            try:
-                tasks_dir = workspace / "tasks"
-                if tasks_dir.is_dir() and transition_task:
-                    if record.get("is_batch"):
-                        for m_id in record.get("batch_members", []):
-                            t = resolve_task_by_id(tasks_dir, m_id)
-                            state = t.get("canonical_state") if t else None
-                            if state in ("open", "bounced"):
-                                ok, trans_res = transition_task(
-                                    tasks_dir=tasks_dir,
-                                    task_id=m_id,
-                                    new_state="in progress",
-                                    actor=record.get("tool"),
-                                )
-                                if ok:
-                                    if "members" in record and isinstance(record["members"], dict) and m_id in record["members"]:
-                                        record["members"][m_id]["state"] = "in progress"
-                                else:
-                                    record.setdefault("task_transition_errors", {})[m_id] = trans_res.get("error") or str(trans_res)
-                        save_run_record(workspace, record)
-                    else:
-                        t = resolve_task_by_id(tasks_dir, record["task_id"])
-                        state = t.get("canonical_state") if t else None
-                        if state in ("open", "bounced"):
-                            ok, trans_res = transition_task(
-                                tasks_dir=tasks_dir,
-                                task_id=record["task_id"],
-                                new_state="in progress",
-                                actor=record.get("tool"),
-                            )
-                            if not ok:
-                                record["task_transition_error"] = trans_res.get("error") or str(trans_res)
-                                save_run_record(workspace, record)
-            except Exception as e:
-                record["task_transition_error"] = str(e)
+        tasks_dir = workspace / "tasks"
+        if tasks_dir.is_dir() and transition_task:
+            if record.get("is_batch"):
+                for m_id in record.get("batch_members", []):
+                    t = resolve_task_by_id(tasks_dir, m_id)
+                    state = t.get("canonical_state") if t else None
+                    if state in ("open", "bounced"):
+                        ok, trans_res = transition_task(
+                            tasks_dir=tasks_dir,
+                            task_id=m_id,
+                            new_state="in progress",
+                            actor=record.get("tool"),
+                        )
+                        if ok:
+                            if "members" in record and isinstance(record["members"], dict) and m_id in record["members"]:
+                                record["members"][m_id]["state"] = "in progress"
+                        else:
+                            record.setdefault("task_transition_errors", {})[m_id] = trans_res.get("error") or str(trans_res)
                 save_run_record(workspace, record)
-
-    try:
-        inv.start(on_started=on_started)
+            else:
+                t = resolve_task_by_id(tasks_dir, record["task_id"])
+                state = t.get("canonical_state") if t else None
+                if state in ("open", "bounced"):
+                    ok, trans_res = transition_task(
+                        tasks_dir=tasks_dir,
+                        task_id=record["task_id"],
+                        new_state="in progress",
+                        actor=record.get("tool"),
+                    )
+                    if not ok:
+                        record["task_transition_error"] = trans_res.get("error") or str(trans_res)
+                        save_run_record(workspace, record)
     except Exception as e:
-        record["status"] = "failed"
-        record["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        record["exit_code"] = 1
-        with open(run_dir / "stderr.log", "a", encoding="utf-8") as f:
-            f.write(f"Failed to spawn agent: {e}\n")
+        record["task_transition_error"] = str(e)
         save_run_record(workspace, record)
-        _emit_run_event(
-            workspace,
-            "run.finished",
-            record,
-            data={"status": "failed", "exit_code": 1, "agent_error": str(e)},
-        )
-        return 1
 
-    inv_res = inv.wait()
-    exit_code = inv_res.exit_code
-    if inv_res.timed_out:
-        record["status"] = "failed"
-        record["invariant_error"] = f"Execution timed out after {inv.timeout}s"
 
-    # 8. Completion handling
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    cur_record = load_run_record(workspace, record["run_id"])
-    if cur_record and cur_record.get("status") in TERMINAL_STATES:
+def _finalize_run_completion(
+    workspace: pathlib.Path,
+    record: dict[str, Any],
+    run_dir: pathlib.Path,
+    exit_code: int,
+    ended_at: str | None = None,
+    write_status_file: bool = False,
+) -> dict[str, Any]:
+    """Finalize run record on completion (shared by setsid supervisor, screen runner, and screen reconcile)."""
+    now_iso = ended_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
+    run_file = run_dir / "run.json"
+    cur_record = None
+    if run_file.is_file():
+        try:
+            cur_record = json.loads(run_file.read_text(encoding="utf-8"))
+        except Exception:
+            cur_record = None
+
+    if cur_record and cur_record.get("status") in TERMINAL_STATES and cur_record.get("finalized_at"):
+        return cur_record
+
+    if cur_record and cur_record.get("status") in ("cancelled", "lost"):
         final_status = cur_record["status"]
+    elif record.get("status") == "failed" and record.get("invariant_error"):
+        final_status = "failed"
     else:
         final_status = "succeeded" if exit_code == 0 else "failed"
 
@@ -5420,10 +5960,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     elif sid and sid != record["session_id"]:
         record["observed_session_id"] = sid
         record["session_mismatch"] = True
-        # §5.5: a continuation never silently starts a fresh session. Live, Codex
-        # `exec resume <non-uuid>` treats the id as a thread name and, when none
-        # matches, starts a new thread and exits 0.
-        if record.get("continued_from") and final_status == "succeeded":
+        if record.get("continued_from") and final_status in SUCCEEDED_STATES:
             final_status = "failed"
             record["status"] = "failed"
             record["invariant_error"] = (
@@ -5434,8 +5971,11 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     if final_status in ("failed", "lost"):
         agent_err = agent_error_from_objects(read_stream_objects(run_dir))
         if not agent_err:
+            err_file = run_dir / "stderr.log"
+            if not err_file.is_file() and (run_dir / "session.log").is_file():
+                err_file = run_dir / "session.log"
             try:
-                err_lines = [ln.strip() for ln in (run_dir / "stderr.log").read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+                err_lines = [ln.strip() for ln in err_file.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
                 agent_err = re.sub(r"\x1b\[[0-9;]*m", "", err_lines[-1]) if err_lines else None
             except OSError:
                 agent_err = None
@@ -5443,15 +5983,17 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             record["agent_error"] = agent_err[:2000]
 
     # Normalized usage of this turn (spec 12 §0c E8)
-    # Codex reports cumulative session usage: diff against the nearest earlier run
-    # of the chain that recorded totals (a crashed or cancelled run records none).
     prev_totals = None
     src_id = record.get("continued_from")
     seen_ids: set[str] = set()
     while src_id and src_id not in seen_ids and prev_totals is None:
         seen_ids.add(src_id)
-        src_rec = load_run_record(workspace, src_id)
-        if not src_rec:
+        src_file = workspace / ".ai-orchestration" / "runs" / src_id / "run.json"
+        if not src_file.is_file():
+            break
+        try:
+            src_rec = json.loads(src_file.read_text(encoding="utf-8"))
+        except Exception:
             break
         if isinstance(src_rec.get("usage"), dict):
             prev_totals = src_rec["usage"].get("session_totals")
@@ -5465,7 +6007,6 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     # Extract verdict if verify mode
     if record.get("mode") == "verify":
         record["verdict"] = extract_verdict_from_run(run_dir)
-        # 07.10 / T022: verify run throwaway worktree auto-removal (only if created by this run)
         if record.get("keep_worktree") or not record.get("created_worktree"):
             record["worktree_removed"] = False
         else:
@@ -5524,7 +6065,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     process_run_questions(workspace, record, run_dir)
 
     # Invariants check for execute mode (R7)
-    if record.get("mode") == "execute" and final_status == "succeeded":
+    if record.get("mode") == "execute" and final_status in SUCCEEDED_STATES:
         worktree_path_str = record.get("worktree_path")
         if worktree_path_str and record.get("isolation") == "worktree":
             wt_path = pathlib.Path(worktree_path_str)
@@ -5592,7 +6133,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
                 record["commits_after_base"] = 0
 
     # Batch run mapping of commits (07.11)
-    if record.get("mode") == "execute" and record.get("status") == "succeeded" and record.get("is_batch"):
+    if record.get("mode") == "execute" and record.get("status") in SUCCEEDED_STATES and record.get("is_batch"):
         try:
             tasks_dir = workspace / "tasks"
             wt_path = pathlib.Path(record.get("worktree_path") or record.get("cwd"))
@@ -5728,6 +6269,20 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         except Exception as e:
             record["task_transition_error"] = str(e)
 
+    if record.get("backend") == "screen" or write_status_file:
+        final_report_path = record.get("final_report_path") or find_final_report_pointer(
+            workspace, run_dir, record, record.get("final_report")
+        )
+        record["final_report_path"] = final_report_path
+        record["state"] = "completed" if record.get("status") in SUCCEEDED_STATES else record.get("status")
+        write_screen_status_file(
+            run_dir,
+            record,
+            exit_code=exit_code,
+            ended_at=now_iso,
+            final_report_path=final_report_path,
+        )
+
     save_run_record(workspace, record)
     _emit_run_event(
         workspace,
@@ -5745,10 +6300,302 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             "proposal_status": record.get("proposal_status"),
         },
     )
-    # The terminal status is saved several times above, before `run.finished` exists in the event store. Readers that
-    # wait for "the run is over, its event is there" wait for `finalized_at`, written only after the event.
     record["finalized_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     save_run_record(workspace, record)
+    return record
+
+
+def cmd_supervise(args: argparse.Namespace) -> int:
+    run_dir = pathlib.Path(args.run_dir).resolve()
+    run_file = run_dir / "run.json"
+    if not run_file.is_file():
+        return 1
+    try:
+        record = json.loads(run_file.read_text(encoding="utf-8"))
+    except Exception:
+        return 1
+
+    workspace = pathlib.Path(record["workspace"])
+
+    # 1. Record supervisor identity FIRST (Instruction 2)
+    my_pid = os.getpid()
+    my_start_time = get_process_start_time(my_pid)
+    record["supervisor"] = {"pid": my_pid, "start_time": my_start_time}
+    if record.get("backend") == "screen":
+        scr_name = record.get("screen_session") or record.get("session_name")
+        scr_pid = get_screen_session_pid(scr_name)
+        if scr_pid:
+            record["screen"] = {
+                "session_name": scr_name,
+                "pid": scr_pid,
+                "start_time": get_process_start_time(scr_pid),
+            }
+    save_run_record(workspace, record)
+
+    # 2. Prepare adapter argv
+    gpath = getattr(args, "global_config", None)
+    merged_cfg, _ = resolve_config(gpath, workspace)
+    tool_cfg = merged_cfg.get("tools", {}).get(record["tool"], {})
+    headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
+
+    session_id = record.get("session_id")
+    if not session_id and record["tool"] == "claude":
+        session_id = str(uuid.uuid4())
+        record["session_id"] = session_id
+
+    prompt_path = run_dir / "prompt.md"
+    is_resume = bool(record.get("continued_from"))
+    raw_argv = build_adapter_argv(
+        tool=record["tool"],
+        tool_cfg=tool_cfg,
+        mode=record["mode"],
+        cwd=record["cwd"],
+        model=record["model"],
+        variant=record.get("variant"),
+        effort=record.get("effort"),
+        session_id=session_id or "{session_id}",
+        prompt_file=str(prompt_path),
+        is_resume=is_resume,
+        attachment_paths=record.get("attachment_paths"),
+        git_common_dir=(
+            git_common_dir_of(pathlib.Path(record["cwd"]))
+            if record["tool"] == "codex" and record.get("mode") == "execute"
+            and record.get("isolation") == "worktree" and pathlib.Path(record["cwd"]).is_dir()
+            else None
+        ),
+    )
+
+    prompt_via = headless_cfg.get("prompt_via")
+    if not prompt_via:
+        if is_resume:
+            if record["tool"] == "kilo" or ("{prompt_file}" in headless_cfg.get("resume_argv", [])):
+                prompt_via = "file"
+            else:
+                prompt_via = "stdin"
+        else:
+            if record["tool"] == "kilo" or ("{prompt_file}" in headless_cfg.get("argv", [])):
+                prompt_via = "file"
+            else:
+                prompt_via = "stdin"
+
+    expanded_argv = expand_secret_env_vars(raw_argv)
+    prompt_text = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else ""
+
+    cwd_path = pathlib.Path(record["cwd"])
+    if not cwd_path.is_dir():
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        record["status"] = "failed"
+        record["ended_at"] = now_iso
+        record["exit_code"] = 1
+        record["invariant_error"] = f"Working directory '{cwd_path}' does not exist"
+        with open(run_dir / "stderr.log", "a", encoding="utf-8") as f:
+            f.write(f"Working directory '{cwd_path}' does not exist; refusing to run in non-existent directory\n")
+        if record.get("backend") == "screen":
+            record["state"] = "failed"
+            write_screen_status_file(run_dir, record, exit_code=1, ended_at=now_iso, final_report_path=None)
+        save_run_record(workspace, record)
+        _emit_run_event(
+            workspace,
+            "run.finished",
+            record,
+            data={
+                "status": "failed",
+                "exit_code": 1,
+                "invariant_error": record["invariant_error"],
+            },
+        )
+        return 1
+
+    if record.get("backend") == "screen":
+        child_proc: subprocess.Popen[bytes] | None = None
+        child_pgid: int | None = None
+
+        def _on_screen_signal(signum: int, _frame: Any) -> None:
+            if child_proc is not None and child_proc.poll() is None:
+                try:
+                    if child_pgid:
+                        os.killpg(child_pgid, signal.SIGTERM)
+                    else:
+                        child_proc.terminate()
+                except OSError:
+                    pass
+                try:
+                    child_proc.kill()
+                except OSError:
+                    pass
+            os._exit(128 + signum)
+
+        signal.signal(signal.SIGHUP, _on_screen_signal)
+        signal.signal(signal.SIGTERM, _on_screen_signal)
+
+        clean_env = {k: v for k, v in os.environ.items() if k != "ORCHESTRATION_SUBAGENT"}
+        stdin_fh = None
+        try:
+            if prompt_via == "stdin" and prompt_path.is_file():
+                stdin_fh = open(prompt_path, "rb")
+            child_proc = subprocess.Popen(
+                expanded_argv,
+                cwd=str(cwd_path),
+                env=clean_env,
+                stdin=stdin_fh if stdin_fh is not None else subprocess.DEVNULL,
+                stdout=None,
+                stderr=None,
+                close_fds=True,
+            )
+        except Exception as e:
+            if stdin_fh is not None:
+                try:
+                    stdin_fh.close()
+                except OSError:
+                    pass
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            record["status"] = "failed"
+            record["state"] = "failed"
+            record["ended_at"] = now_iso
+            record["exit_code"] = 1
+            record["agent_error"] = str(e)
+            write_screen_status_file(run_dir, record, exit_code=1, ended_at=now_iso, final_report_path=None)
+            save_run_record(workspace, record)
+            _emit_run_event(
+                workspace,
+                "run.finished",
+                record,
+                data={"status": "failed", "exit_code": 1, "agent_error": str(e)},
+            )
+            return 1
+        finally:
+            if stdin_fh is not None:
+                try:
+                    stdin_fh.close()
+                except OSError:
+                    pass
+
+        try:
+            child_pgid = os.getpgid(child_proc.pid)
+        except OSError:
+            child_pgid = child_proc.pid
+        record["agent"] = {
+            "pid": child_proc.pid,
+            "pgid": child_pgid,
+            "start_time": get_process_start_time(child_proc.pid),
+        }
+        record["status"] = "running"
+        save_run_record(workspace, record)
+        _emit_run_event(
+            workspace,
+            "run.started",
+            record,
+            data={"status": "running", "agent": record["agent"]},
+        )
+        _transition_execute_task_to_in_progress(workspace, record)
+
+        timeout_val = getattr(args, "timeout", None) or record.get("timeout")
+        timed_out = False
+        start_mono = time.monotonic()
+        while True:
+            rc = child_proc.poll()
+            if rc is not None:
+                break
+            if timeout_val is not None and (time.monotonic() - start_mono) > float(timeout_val):
+                timed_out = True
+                try:
+                    child_proc.terminate()
+                    child_proc.wait(timeout=1.0)
+                except Exception:
+                    try:
+                        child_proc.kill()
+                    except Exception:
+                        pass
+                rc = child_proc.wait()
+                break
+            time.sleep(0.05)
+
+        exit_code = int(rc)
+        if not timed_out:
+            if exit_code < 0 and (-exit_code) in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):
+                os._exit(128 - exit_code)
+            if exit_code in (128 + signal.SIGHUP, 128 + signal.SIGTERM, 128 + signal.SIGKILL):
+                time.sleep(0.05)
+                if not is_screen_session_alive(record.get("screen_session") or record.get("session_name")):
+                    os._exit(exit_code)
+
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        time.sleep(0.05)
+
+        if timed_out:
+            record["status"] = "failed"
+            record["invariant_error"] = f"Execution timed out after {timeout_val}s"
+
+        _finalize_run_completion(
+            workspace=workspace,
+            record=record,
+            run_dir=run_dir,
+            exit_code=exit_code,
+            write_status_file=True,
+        )
+        return 0
+
+    # 3. Supervised invocation in isolated process group (Spec §0c E4, E5)
+    inv = SupervisedInvocation(
+        argv=expanded_argv,
+        cwd=cwd_path,
+        prompt_text=prompt_text if prompt_via == "stdin" else None,
+        prompt_via=prompt_via,
+        log_dir=run_dir,
+        max_chunk_size=DEFAULT_LOG_CHUNK_SIZE,
+        stderr_path=run_dir / "stderr.log",
+        timeout=getattr(args, "timeout", None) or record.get("timeout"),
+    )
+
+    def on_started(inv_proc: SupervisedInvocation) -> None:
+        agent_pid = inv_proc.pid
+        agent_pgid = inv_proc.pgid
+        agent_start_time = inv_proc.start_time
+        record["agent"] = {"pid": agent_pid, "pgid": agent_pgid, "start_time": agent_start_time}
+        record["status"] = "running"
+        save_run_record(workspace, record)
+        _emit_run_event(
+            workspace,
+            "run.started",
+            record,
+            data={"status": "running", "agent": record["agent"]},
+        )
+        _transition_execute_task_to_in_progress(workspace, record)
+
+    try:
+        inv.start(on_started=on_started)
+    except Exception as e:
+        record["status"] = "failed"
+        record["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        record["exit_code"] = 1
+        with open(run_dir / "stderr.log", "a", encoding="utf-8") as f:
+            f.write(f"Failed to spawn agent: {e}\n")
+        save_run_record(workspace, record)
+        _emit_run_event(
+            workspace,
+            "run.finished",
+            record,
+            data={"status": "failed", "exit_code": 1, "agent_error": str(e)},
+        )
+        return 1
+
+    inv_res = inv.wait()
+    exit_code = inv_res.exit_code
+    if inv_res.timed_out:
+        record["status"] = "failed"
+        record["invariant_error"] = f"Execution timed out after {inv.timeout}s"
+
+    _finalize_run_completion(
+        workspace=workspace,
+        record=record,
+        run_dir=run_dir,
+        exit_code=exit_code,
+        write_status_file=False,
+    )
     return 0
 
 
@@ -5864,6 +6711,8 @@ def cmd_cancel(args: argparse.Namespace) -> int:
                 return 1
 
         record["status"] = "cancelled"
+        if record.get("backend") == "screen":
+            record["state"] = "cancelled"
         record["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         save_run_record(ws, record)
         _emit_run_event(
@@ -5877,7 +6726,12 @@ def cmd_cancel(args: argparse.Namespace) -> int:
             },
         )
 
-    # Outside the flock, kill process group
+    # Outside the flock, close screen session if backend == screen, and kill process group
+    screen_session = record.get("screen_session") or record.get("session_name")
+    screen_info = record.get("screen") if isinstance(record.get("screen"), dict) else {}
+    if record.get("backend") == "screen" or screen_session:
+        close_screen_session(screen_session, pid=screen_info.get("pid"))
+
     agent = record.get("agent", {})
     agent_pid = agent.get("pid")
     agent_pgid = agent.get("pgid")
@@ -5985,7 +6839,7 @@ def cmd_mark_delivered(args: argparse.Namespace) -> int:
     tasks_dir = ws / "tasks"
     with safe_task_write_lock(tasks_dir):
         # 1. run succeeded
-        if record.get("status") != "succeeded":
+        if record.get("status") not in SUCCEEDED_STATES:
             print_error(args.json, "run-not-succeeded", f"Run '{run_id}' status is '{record.get('status')}', expected 'succeeded'")
             return 1
 
@@ -7124,6 +7978,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_prev.add_argument("--variant", default=None, help="Reasoning variant")
     p_prev.add_argument("--effort", default=None, help="Reasoning effort")
     p_prev.add_argument("--isolation", choices=("worktree", "none"), default=None)
+    p_prev.add_argument("--backend", "--run-backend", dest="backend", default=None, help="Run execution backend (setsid or screen)")
     p_prev.add_argument("--target-run", default=None, help="Target execute run ID for verify mode (or 'none')")
     p_prev.add_argument("--instructions", default=None, help="Additional prompt instructions")
     p_prev.add_argument("--allow-same-tool", action="store_true", help="Allow same tool for verify (downgrades to independent-session)")
@@ -7148,6 +8003,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--variant", default=None, help="Reasoning variant")
     p_start.add_argument("--effort", default=None, help="Reasoning effort")
     p_start.add_argument("--isolation", choices=("worktree", "none"), default=None)
+    p_start.add_argument("--backend", "--run-backend", dest="backend", default=None, help="Run execution backend (setsid or screen)")
     p_start.add_argument("--target-run", default=None, help="Target execute run ID for verify mode (or 'none')")
     p_start.add_argument("--instructions", default=None, help="Additional prompt instructions")
     p_start.add_argument("--allow-same-tool", action="store_true", help="Allow same tool for verify (downgrades to independent-session)")

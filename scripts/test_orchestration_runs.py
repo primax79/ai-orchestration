@@ -911,7 +911,9 @@ def test_preview_verify_and_orchestrate_modes(sample_workspace: pathlib.Path):
     res_ver = subprocess.run(cmd_ver, capture_output=True, text=True, check=True)
     data_ver = json.loads(res_ver.stdout)
     assert data_ver["ok"] is True
-    assert "verify-T007" in data_ver["cwd"]
+    expected_wt = str(sample_workspace.resolve().parent / ".worktrees" / sample_workspace.resolve().name / "<run_id>")
+    assert data_ver["cwd"] == expected_wt
+    assert data_ver["planned_worktree"] == expected_wt
     assert "Verification Guidelines" in data_ver["prompt"]
     assert "ai-orch-verdict" in data_ver["prompt"]
 
@@ -7529,4 +7531,598 @@ def test_19_7_run_start_integration_all_check_types_and_no_preflight(
         assert start_marker.exists()
         rec_all = wait_for_terminal(sample_workspace, data_all_ok["run_id"])
         assert rec_all["status"] == "succeeded"
+
+
+# ---------------------------------------------------------------------------
+# Task 19.6 — Screen Run Backend & Run Preview Worktree Path Fix
+# ---------------------------------------------------------------------------
+
+
+def test_preview_worktree_path_matches_created_worktree(sample_workspace: pathlib.Path):
+    """Task 19.6: `run preview` reports `<repo.parent>/.worktrees/<repo.name>/<run_id>`, matching `run start`."""
+    ws_resolved = sample_workspace.resolve()
+    expected_template = str(ws_resolved.parent / ".worktrees" / ws_resolved.name / "<run_id>")
+
+    # 1. Single-task execute preview
+    res_exec = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data_exec = json.loads(res_exec.stdout)
+    assert data_exec["ok"] is True
+    assert data_exec["planned_worktree"] == expected_template
+    assert data_exec["cwd"] == expected_template
+    assert "run-T007" not in data_exec["planned_worktree"]
+
+    # 2. Single-task verify preview (requires task in delivered state)
+    t007_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    orig_t007 = t007_file.read_text(encoding="utf-8")
+    t007_file.write_text(orig_t007.replace("- state: open", "- state: delivered"), encoding="utf-8")
+    res_ver = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "verify",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data_ver = json.loads(res_ver.stdout)
+    assert data_ver["ok"] is True
+    assert data_ver["planned_worktree"] == expected_template
+    assert data_ver["cwd"] == expected_template
+    assert "verify-T007" not in data_ver["planned_worktree"]
+    t007_file.write_text(orig_t007, encoding="utf-8")
+
+    # 3. Real start creates the exact worktree path predicted by preview template
+    res_exec2 = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data_exec2 = json.loads(res_exec2.stdout)
+    res_start = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--expect-plan-hash",
+            data_exec2["plan_hash"],
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id = json.loads(res_start.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["worktree_path"] == expected_template.replace("<run_id>", run_id)
+
+
+def test_screen_backend_selection_and_session_naming(sample_workspace: pathlib.Path):
+    """Task 19.6: Backend selectable per project or per tool (setsid default); session named agent-<project>-<task> / verify-<project>-<task>."""
+    # 1. Default backend is setsid
+    res_def = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    d_def = json.loads(res_def.stdout)
+    assert d_def["backend"] == "setsid"
+    assert d_def["screen_session"] is None
+
+    # 2. Project-level run_backend = "screen"
+    cfg_path = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = cfg_path.read_text(encoding="utf-8")
+    cfg_path.write_text(
+        orig_cfg.replace('[project]\nname = "sample"', '[project]\nname = "sample"\nrun_backend = "screen"'),
+        encoding="utf-8",
+    )
+    res_proj = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    d_proj = json.loads(res_proj.stdout)
+    assert d_proj["backend"] == "screen"
+    assert d_proj["screen_session"] == "agent-sample-T007"
+    assert d_proj["session_name"] == "agent-sample-T007"
+
+    # Verify mode uses verify-<project>-<task>
+    t007_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    orig_t007 = t007_file.read_text(encoding="utf-8")
+    t007_file.write_text(orig_t007.replace("- state: open", "- state: delivered"), encoding="utf-8")
+    res_ver = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "verify",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    d_ver = json.loads(res_ver.stdout)
+    assert d_ver["backend"] == "screen"
+    assert d_ver["screen_session"] == "verify-sample-T007"
+    assert d_ver["session_name"] == "verify-sample-T007"
+    t007_file.write_text(orig_t007, encoding="utf-8")
+
+    # 3. Per-tool backend override ([tools.kilo.headless] backend = "screen" with project default setsid)
+    cfg_path.write_text(
+        orig_cfg + '\n[tools.kilo.headless]\nbackend = "screen"\n',
+        encoding="utf-8",
+    )
+    res_kilo = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--tool",
+            "kilo",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(res_kilo.stdout)["backend"] == "screen"
+
+    res_claude = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--tool",
+            "claude",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(res_claude.stdout)["backend"] == "setsid"
+
+    # 4. Invalid backend rejected
+    res_bad = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--backend",
+            "tmux-nonexistent",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_bad.returncode != 0
+    assert json.loads(res_bad.stdout)["reason"] == "invalid-run-backend"
+
+
+@pytest.mark.skipif(shutil.which("screen") is None, reason="GNU screen not installed")
+def test_screen_backend_real_run_lifecycle_and_status_file(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+):
+    """Task 19.6 Verification: real run in screen with fake tool that sleeps and writes a commit."""
+    from orchestration_runs import close_screen_session
+
+    fake_tool = tmp_path / "fake_screen_executor.py"
+    fake_tool.write_text(
+        f"""#!{sys.executable}
+import pathlib, subprocess, sys, time
+
+print("FAKE_SCREEN_TOOL_START", flush=True)
+time.sleep(1.2)
+wt = pathlib.Path.cwd()
+(wt / "feature_19_6.txt").write_text("implemented in screen\\n", encoding="utf-8")
+notes_dir = wt / "tasks" / "micro" / "notes"
+notes_dir.mkdir(parents=True, exist_ok=True)
+report_file = notes_dir / "T007-final-report.md"
+report_file.write_text("## Final Report\\n- **Outcome:** delivered\\n", encoding="utf-8")
+subprocess.run(["git", "add", "feature_19_6.txt", str(report_file)], check=True)
+subprocess.run(["git", "commit", "-m", "feat: screen backend test commit (T007)"], check=True)
+print("## Final Report\\n- **Outcome:** delivered\\n- **Files changed:** feature_19_6.txt", flush=True)
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+
+    proj_name = f"proj196ok{os.getpid()}"
+    expected_sess = f"agent-{proj_name}-T007"
+    close_screen_session(expected_sess)
+
+    cfg_path = sample_workspace / ".ai-orchestration.local.toml"
+    cfg_path.write_text(
+        f"""schema_version = 1
+
+[project]
+name = "{proj_name}"
+primary_orchestrator = "kilo"
+run_backend = "screen"
+
+[routing]
+default_orchestrator = "kilo"
+default_executor = "kilo"
+
+[tools.kilo]
+enabled = true
+binary = "{fake_tool}"
+
+[tools.kilo.headless]
+argv = ["{fake_tool}", "{{prompt_file}}"]
+prompt_via = "file"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        res_start = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "start",
+                "--task",
+                "T007",
+                "--mode",
+                "execute",
+                "--allow-dirty-base",
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        start_data = json.loads(res_start.stdout)
+        assert start_data["ok"] is True
+        assert start_data["backend"] == "screen"
+        assert start_data["screen_session"] == expected_sess
+        run_id = start_data["run_id"]
+
+        # While sleeping: `screen -ls` shows expected session name and `run list` sees it alive
+        ls_out = subprocess.run(["screen", "-ls"], capture_output=True, text=True, check=False)
+        combined_ls = (ls_out.stdout or "") + "\n" + (ls_out.stderr or "")
+        assert expected_sess in combined_ls
+
+        res_list = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "list",
+                "--active",
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        active_runs = json.loads(res_list.stdout)["runs"]
+        assert any(r["run_id"] == run_id and r["status"] in ("starting", "running") for r in active_runs)
+
+        # Wait for completion
+        rec = wait_for_terminal(sample_workspace, run_id, timeout=15.0)
+        assert rec["status"] == "succeeded"
+        assert rec["state"] == "completed"
+        assert rec["exit_code"] == 0
+        assert rec["backend"] == "screen"
+        assert rec["screen_session"] == expected_sess
+        assert rec["session_name"] == expected_sess
+        assert rec["final_commit"] is not None
+        assert rec["commits_after_base"] == 1
+
+        # Verify session.log written by `screen -L`
+        run_dir = sample_workspace / ".ai-orchestration" / "runs" / run_id
+        session_log = run_dir / "session.log"
+        assert session_log.is_file()
+        assert "FAKE_SCREEN_TOOL_START" in session_log.read_text(encoding="utf-8", errors="replace")
+
+        # Verify exit status file (`status.json`) written on exit
+        status_file = run_dir / "status.json"
+        assert status_file.is_file()
+        status_data = json.loads(status_file.read_text(encoding="utf-8"))
+        assert status_data["status"] == "completed"
+        assert status_data["outcome"] == "succeeded"
+        assert status_data["exit_code"] == 0
+        assert status_data["ended_at"]
+        assert status_data["final_report_path"]
+        assert status_data["final_report_pointer"] == status_data["final_report_path"]
+        assert pathlib.Path(status_data["final_report_path"]).is_file()
+    finally:
+        close_screen_session(expected_sess)
+
+
+@pytest.mark.skipif(shutil.which("screen") is None, reason="GNU screen not installed")
+def test_screen_backend_killed_session_becomes_lost(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+):
+    """Task 19.6 Verification: killing the screen session mid-run marks the run `lost`."""
+    from orchestration_runs import close_screen_session, is_screen_session_alive
+
+    fake_tool = tmp_path / "fake_screen_sleeper.py"
+    fake_tool.write_text(
+        f"""#!{sys.executable}
+import time
+print("SLEEPING_IN_SCREEN", flush=True)
+time.sleep(30)
+""",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+
+    proj_name = f"proj196kill{os.getpid()}"
+    expected_sess = f"agent-{proj_name}-T007"
+    close_screen_session(expected_sess)
+
+    cfg_path = sample_workspace / ".ai-orchestration.local.toml"
+    cfg_path.write_text(
+        f"""schema_version = 1
+
+[project]
+name = "{proj_name}"
+primary_orchestrator = "kilo"
+run_backend = "screen"
+
+[routing]
+default_orchestrator = "kilo"
+default_executor = "kilo"
+
+[tools.kilo]
+enabled = true
+binary = "{fake_tool}"
+
+[tools.kilo.headless]
+argv = ["{fake_tool}", "{{prompt_file}}"]
+prompt_via = "file"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        res_start = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "start",
+                "--task",
+                "T007",
+                "--mode",
+                "execute",
+                "--allow-dirty-base",
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        run_id = json.loads(res_start.stdout)["run_id"]
+        assert is_screen_session_alive(expected_sess)
+
+        # Kill the screen session directly
+        close_screen_session(expected_sess)
+        assert not is_screen_session_alive(expected_sess)
+
+        # Reconcile via `run show` / `run list` marks the run `lost`
+        res_show = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "show",
+                run_id,
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        rec = json.loads(res_show.stdout)["run"]
+        assert rec["status"] == "lost"
+        run_dir = sample_workspace / ".ai-orchestration" / "runs" / run_id
+        assert not (run_dir / "status.json").exists()
+    finally:
+        close_screen_session(expected_sess)
+
+
+@pytest.mark.skipif(shutil.which("screen") is None, reason="GNU screen not installed")
+def test_screen_backend_cancel_closes_session(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+):
+    """Task 19.6 Verification: `run cancel` closes the screen session and marks the run `cancelled`."""
+    from orchestration_runs import close_screen_session, is_screen_session_alive
+
+    fake_tool = tmp_path / "fake_screen_cancel.py"
+    fake_tool.write_text(
+        f"""#!{sys.executable}
+import time
+print("WAITING_FOR_CANCEL", flush=True)
+time.sleep(30)
+""",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+
+    proj_name = f"proj196cancel{os.getpid()}"
+    expected_sess = f"agent-{proj_name}-T007"
+    close_screen_session(expected_sess)
+
+    cfg_path = sample_workspace / ".ai-orchestration.local.toml"
+    cfg_path.write_text(
+        f"""schema_version = 1
+
+[project]
+name = "{proj_name}"
+primary_orchestrator = "kilo"
+run_backend = "screen"
+
+[routing]
+default_orchestrator = "kilo"
+default_executor = "kilo"
+
+[tools.kilo]
+enabled = true
+binary = "{fake_tool}"
+
+[tools.kilo.headless]
+argv = ["{fake_tool}", "{{prompt_file}}"]
+prompt_via = "file"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        res_start = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "start",
+                "--task",
+                "T007",
+                "--mode",
+                "execute",
+                "--allow-dirty-base",
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        run_id = json.loads(res_start.stdout)["run_id"]
+        assert is_screen_session_alive(expected_sess)
+
+        res_cancel = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "cancel",
+                run_id,
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        cancel_data = json.loads(res_cancel.stdout)
+        assert cancel_data["ok"] is True
+        assert cancel_data["status"] == "cancelled"
+        assert not is_screen_session_alive(expected_sess)
+
+        ls_out = subprocess.run(["screen", "-ls"], capture_output=True, text=True, check=False)
+        combined_ls = (ls_out.stdout or "") + "\n" + (ls_out.stderr or "")
+        assert expected_sess not in combined_ls
+    finally:
+        close_screen_session(expected_sess)
+
 
