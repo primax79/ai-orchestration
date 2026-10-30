@@ -21,7 +21,9 @@ import json
 import logging
 import os
 import pathlib
+import concurrent.futures
 import re
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -3752,6 +3754,11 @@ def _resolve_merged_hosts_table(
     workspace: pathlib.Path | str | None = None,
 ) -> dict[str, dict[str, Any]]:
     hosts_table = resolve_hosts_table(gcfg, gpath)
+    raw_g_hosts = gcfg.get("hosts") if isinstance(gcfg.get("hosts"), dict) else {}
+    for hid, hcfg in hosts_table.items():
+        raw_entry = raw_g_hosts.get(hid) if isinstance(raw_g_hosts.get(hid), dict) else {}
+        hcfg["_explicit_agent_user"] = raw_entry.get("agent_user") or raw_entry.get("agents_user")
+        hcfg["_explicit_user"] = raw_entry.get("user")
     cand_ws: list[pathlib.Path] = []
     if workspace is not None:
         cand_ws.append(pathlib.Path(workspace).expanduser().resolve())
@@ -3765,12 +3772,22 @@ def _resolve_merged_hosts_table(
             if pinfo.get("exists") and pinfo["path"].is_file():
                 pcfg = load_toml_file(pinfo["path"])
                 p_hosts = resolve_hosts_table(pcfg, gpath)
+                raw_p_hosts = pcfg.get("hosts") if isinstance(pcfg.get("hosts"), dict) else {}
                 for hid, hcfg in p_hosts.items():
+                    raw_p_entry = raw_p_hosts.get(hid) if isinstance(raw_p_hosts.get(hid), dict) else {}
+                    p_exp_agent = raw_p_entry.get("agent_user") or raw_p_entry.get("agents_user")
+                    p_exp_user = raw_p_entry.get("user")
                     if hid not in hosts_table:
+                        hcfg["_explicit_agent_user"] = p_exp_agent
+                        hcfg["_explicit_user"] = p_exp_user
                         hosts_table[hid] = hcfg
                     else:
                         merged = dict(hosts_table[hid])
                         merged.update({k: v for k, v in hcfg.items() if v is not None})
+                        if p_exp_agent is not None:
+                            merged["_explicit_agent_user"] = p_exp_agent
+                        if p_exp_user is not None:
+                            merged["_explicit_user"] = p_exp_user
                         hosts_table[hid] = merged
         except Exception:
             pass
@@ -3811,7 +3828,8 @@ def _query_remote_host_console_status(
     id_file = hcfg.get("identity_file") or hcfg.get("ssh_key")
     if isinstance(id_file, str) and id_file.strip() and not id_file.strip().startswith("-"):
         ssh_cmd.extend(["-i", id_file.strip()])
-    ssh_cmd.extend([ssh_target, "ai-orch", "console", "status", "--local", "--json"])
+    remote_cmd = shlex.join(["ai-orch", "console", "status", "--local", "--json"])
+    ssh_cmd.extend([ssh_target, remote_cmd])
 
     try:
         proc = subprocess.run(
@@ -3845,7 +3863,12 @@ def get_console_status_projects(
     local_only: bool = False,
     explicit_timeout: bool = False,
 ) -> dict[str, Any]:
-    """Aggregate multi-host console status: projects, tasks by state and host, runs, open questions, and deliveries to verify."""
+    """Aggregate multi-host console status: projects, tasks by state and host, runs, open questions, and deliveries to verify.
+
+    Default mode (`all_hosts=False`): queries the local host and the declared remote hub host (if any).
+    All-hosts mode (`all_hosts=True`): queries all declared remote hosts concurrently, each with its own timeout,
+    and merges the results deterministically in declaration order.
+    """
     cdir = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
     gpath = cdir / "orchestration.toml"
     gcfg = load_toml_file(gpath) if gpath.is_file() else {}
@@ -3878,73 +3901,98 @@ def get_console_status_projects(
         }
     }
 
-    # 1. If not local_only and a remote hub host is declared, query it over ssh
-    if not local_only and hub_host_id and hub_host_id != cur_host and hub_host_cfg is not None:
-        hub_t = _resolve_effective_host_timeout(hub_host_cfg, ssh_timeout, explicit_timeout=explicit_timeout)
-        ok_hub, remote_data, err_hub, timed_out_hub = _query_remote_host_console_status(
-            hub_host_id,
-            hub_host_cfg,
-            hub_t,
-        )
-        if ok_hub and remote_data is not None:
-            remote_items = (
-                remote_data.get("items")
-                if "items" in remote_data
-                else remote_data.get("projects")
-            )
-            if isinstance(remote_items, list):
-                remote_snap_ver = remote_data.get("snapshot_version")
-                with registry_lock(cdir):
-                    snap_doc = replace_hub_snapshot_cache(
-                        cdir,
-                        remote_items,
-                        host_id=cur_host,
-                        snapshot_version=int(remote_snap_ver) if isinstance(remote_snap_ver, int) else None,
-                    )
-                    snapshot_version = int(snap_doc.get("snapshot_version", 1))
-                remote_payloads[hub_host_id] = remote_data
+    # 1. Determine which remote hosts to query:
+    #    - local_only=True: none
+    #    - all_hosts=False (default): only the remote hub host (if declared and distinct from cur_host)
+    #    - all_hosts=True: the remote hub host + all other enabled hosts in [hosts.<id>], queried concurrently
+    hosts_to_query: list[tuple[str, dict[str, Any], float, str]] = []
+    if not local_only:
+        seen_query_hosts: set[str] = {cur_host}
+        if hub_host_id and hub_host_id != cur_host and hub_host_cfg is not None and hub_host_cfg.get("enabled", True) is not False:
+            hub_t = _resolve_effective_host_timeout(hub_host_cfg, ssh_timeout, explicit_timeout=explicit_timeout)
+            hosts_to_query.append((hub_host_id, hub_host_cfg, hub_t, "hub"))
+            seen_query_hosts.add(hub_host_id)
+        if all_hosts:
+            for hid, hcfg in hosts_table.items():
+                if hid in seen_query_hosts or hcfg.get("enabled", True) is False:
+                    continue
+                host_t = _resolve_effective_host_timeout(hcfg, ssh_timeout, explicit_timeout=explicit_timeout)
+                h_role = str(hcfg.get("role") or "client")
+                hosts_to_query.append((hid, hcfg, host_t, h_role))
+                seen_query_hosts.add(hid)
+
+    # 2. Query remote hosts concurrently (each with its own timeout) and merge deterministically in order
+    query_results: dict[str, tuple[bool, dict[str, Any] | None, str | None, bool]] = {}
+    if len(hosts_to_query) == 1:
+        q_hid, q_cfg, q_t, _ = hosts_to_query[0]
+        query_results[q_hid] = _query_remote_host_console_status(q_hid, q_cfg, q_t)
+    elif len(hosts_to_query) > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(hosts_to_query)) as pool:
+            fut_map = {
+                q_hid: pool.submit(_query_remote_host_console_status, q_hid, q_cfg, q_t)
+                for q_hid, q_cfg, q_t, _ in hosts_to_query
+            }
+            for q_hid, _, q_t, _ in hosts_to_query:
+                try:
+                    query_results[q_hid] = fut_map[q_hid].result()
+                except Exception as exc:
+                    query_results[q_hid] = (False, None, str(exc), False)
+
+    for q_hid, q_cfg, q_t, q_role in hosts_to_query:
+        ok_h, r_data, err_h, timed_out_h = query_results[q_hid]
+        if q_hid == hub_host_id:
+            if ok_h and r_data is not None:
+                remote_items = (
+                    r_data.get("items")
+                    if "items" in r_data
+                    else r_data.get("projects")
+                )
+                if isinstance(remote_items, list):
+                    remote_snap_ver = r_data.get("snapshot_version")
+                    with registry_lock(cdir):
+                        snap_doc = replace_hub_snapshot_cache(
+                            cdir,
+                            remote_items,
+                            host_id=cur_host,
+                            snapshot_version=int(remote_snap_ver) if isinstance(remote_snap_ver, int) else None,
+                        )
+                        snapshot_version = int(snap_doc.get("snapshot_version", 1))
+                    remote_payloads[hub_host_id] = r_data
+                else:
+                    hub_reachable = False
+                    registry_source = "local_cache"
+                    hub_error = "Invalid hub workspace list JSON response"
             else:
                 hub_reachable = False
                 registry_source = "local_cache"
-                hub_error = "Invalid hub workspace list JSON response"
+                hub_error = err_h
+
+            hosts_status[hub_host_id] = {
+                "host": hub_host_id,
+                "reachable": hub_reachable,
+                "local": False,
+                "role": "hub",
+                "timeout_sec": q_t,
+                "timed_out": timed_out_h if not hub_reachable else False,
+                "error": hub_error,
+            }
         else:
-            hub_reachable = False
-            registry_source = "local_cache"
-            hub_error = err_hub
-
-        hosts_status[hub_host_id] = {
-            "host": hub_host_id,
-            "reachable": hub_reachable,
-            "local": False,
-            "role": "hub",
-            "timeout_sec": hub_t,
-            "timed_out": timed_out_hub if not hub_reachable else False,
-            "error": hub_error,
-        }
-
-    # 2. Query all other declared remote hosts in [hosts.<id>] when not local_only
-    if not local_only:
-        for hid, hcfg in hosts_table.items():
-            if hid in hosts_status or hcfg.get("enabled", True) is False:
-                continue
-            host_t = _resolve_effective_host_timeout(hcfg, ssh_timeout, explicit_timeout=explicit_timeout)
-            ok_h, r_data, err_h, timed_out_h = _query_remote_host_console_status(hid, hcfg, host_t)
             if ok_h and r_data is not None:
-                remote_payloads[hid] = r_data
-                hosts_status[hid] = {
-                    "host": hid,
+                remote_payloads[q_hid] = r_data
+                hosts_status[q_hid] = {
+                    "host": q_hid,
                     "reachable": True,
                     "local": False,
-                    "role": hcfg.get("role") or "client",
-                    "timeout_sec": host_t,
+                    "role": q_role,
+                    "timeout_sec": q_t,
                 }
             else:
-                hosts_status[hid] = {
-                    "host": hid,
+                hosts_status[q_hid] = {
+                    "host": q_hid,
                     "reachable": False,
                     "local": False,
-                    "role": hcfg.get("role") or "client",
-                    "timeout_sec": host_t,
+                    "role": q_role,
+                    "timeout_sec": q_t,
                     "timed_out": timed_out_h,
                     "error": err_h,
                 }
@@ -4208,6 +4256,7 @@ def get_console_status_projects(
         "host": cur_host,
         "hub_host": hub_host_id or cur_host,
         "hub_reachable": hub_reachable,
+        "all_hosts": bool(all_hosts),
         "registry_source": registry_source,
         "snapshot_version": snapshot_version,
         "hub_error": hub_error,
@@ -4370,15 +4419,39 @@ def resolve_console_attach(
     if not base_target or base_target.startswith("-") or not SAFE_SSH_TARGET_RE.match(base_target):
         raise ValueError(f"Invalid SSH target {base_target!r} for host {run_host!r}")
 
-    agent_user = hcfg.get("agent_user") or hcfg.get("user") or hcfg.get("agents_user")
-    if not agent_user and role == "hub":
-        agent_user = "kilo"
+    if role == "hub":
+        # Review §10.6 (B2): hub agents run as a dedicated user (default `kilo`).
+        # Generic `user` must not override `agent_user` / `kilo` fallback on the hub.
+        explicit_agent_user = (
+            hcfg.get("_explicit_agent_user")
+            if "_explicit_agent_user" in hcfg
+            else (hcfg.get("agent_user") or hcfg.get("agents_user"))
+        )
+        agent_user = str(explicit_agent_user).strip() if explicit_agent_user else "kilo"
+    else:
+        raw_user = (
+            hcfg.get("_explicit_agent_user")
+            if "_explicit_agent_user" in hcfg and hcfg.get("_explicit_agent_user")
+            else (hcfg.get("agent_user") or hcfg.get("user") or hcfg.get("agents_user"))
+        )
+        agent_user = str(raw_user).strip() if raw_user is not None and str(raw_user).strip() else None
+
     if agent_user is not None:
-        agent_user = str(agent_user).strip()
         if not agent_user or agent_user.startswith("-") or not SAFE_AGENT_USER_RE.match(agent_user):
             raise ValueError(f"Invalid agent_user {agent_user!r} for host {run_host!r}")
 
-    if agent_user and "@" not in base_target:
+    if "@" in base_target:
+        target_user, target_host = base_target.split("@", 1)
+        if not target_host or target_host.startswith("-"):
+            raise ValueError(f"Invalid SSH target {base_target!r} for host {run_host!r}")
+        if role == "hub":
+            # Strip any conflicting username (e.g. `owner@hub`) so hub attach always uses `agent_user` (`kilo@hub`)
+            attach_target = f"{agent_user}@{target_host}"
+        elif agent_user and target_user != agent_user:
+            attach_target = f"{agent_user}@{target_host}"
+        else:
+            attach_target = base_target
+    elif agent_user:
         attach_target = f"{agent_user}@{base_target}"
     else:
         attach_target = base_target
@@ -4409,7 +4482,8 @@ def resolve_console_attach(
         if clean_id.startswith("-"):
             raise ValueError(f"Invalid identity_file {clean_id!r}")
         ssh_cmd.extend(["-i", clean_id])
-    ssh_cmd.extend([attach_target, "screen", "-x", screen_session])
+    remote_attach_cmd = shlex.join(["screen", "-x", screen_session])
+    ssh_cmd.extend([attach_target, remote_attach_cmd])
 
     return {
         "ok": True,

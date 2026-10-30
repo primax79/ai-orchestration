@@ -6,8 +6,10 @@ import copy
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
+import time
 import uuid
 import pytest
 
@@ -1593,9 +1595,22 @@ def test_19_8_console_attach_resolves_host_and_screen_session_and_rejects_unsafe
     fake_ssh = fake_bin / "ssh"
     fake_ssh.write_text(
         f"""#!{sys.executable}
-import json, os, subprocess, sys
+import json, os, shlex, subprocess, sys
 args = sys.argv[1:]
-if "status" in args and "--local" in args:
+# Emulate OpenSSH concatenating trailing command arguments and parsing via remote shell
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-o", "-p", "-i", "-l", "-F", "-J", "-b", "-c", "-D", "-E", "-e", "-I", "-L", "-m", "-O", "-Q", "-R", "-S", "-W", "-w"):
+        i += 2
+    elif a.startswith("-"):
+        i += 1
+    else:
+        break
+target = args[i] if i < len(args) else ""
+remote_cmd_str = " ".join(args[i + 1:]) if i + 1 < len(args) else ""
+parsed_remote_argv = shlex.split(remote_cmd_str) if remote_cmd_str else []
+if "status" in parsed_remote_argv and "--local" in parsed_remote_argv:
     env = dict(os.environ, AI_ORCHESTRATION_CONFIG={str(hub_cfg_dir)!r})
     res = subprocess.run(
         [{sys.executable!r}, {str(BIN_AI_ORCH)!r}, "console", "status", "--local", "--config-dir", {str(hub_cfg_dir)!r}, "--json"],
@@ -1615,7 +1630,7 @@ sys.exit(0)
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(client_cfg_dir))
 
-    # 1. Attach to hub run by task_id (`T205`) -> opens `ssh -t kilo@alf_ubuntu screen -x agent-ricerca-auto-T205`
+    # 1. Attach to hub run by task_id (`T205`) -> opens `ssh -t kilo@alf_ubuntu 'screen -x agent-ricerca-auto-T205'`
     res_attach_hub = subprocess.run(
         [sys.executable, str(BIN_AI_ORCH), "console", "attach", "T205", "--config-dir", str(client_cfg_dir)],
         capture_output=True,
@@ -1624,7 +1639,7 @@ sys.exit(0)
     )
     assert res_attach_hub.returncode == 0
     logged_calls = [json.loads(line) for line in attach_log.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert logged_calls[-1] == ["-t", "kilo@alf_ubuntu", "screen", "-x", "agent-ricerca-auto-T205"]
+    assert logged_calls[-1] == ["-t", "kilo@alf_ubuntu", "screen -x agent-ricerca-auto-T205"]
 
     # 2. Attach to hub run by run_id (`run_hub_id`) with `--json`
     res_attach_hub_id = subprocess.run(
@@ -1638,10 +1653,10 @@ sys.exit(0)
     assert hub_attach_data["host"] == "alf_ubuntu"
     assert hub_attach_data["ssh_target"] == "kilo@alf_ubuntu"
     assert hub_attach_data["screen_session"] == "agent-ricerca-auto-T205"
-    assert hub_attach_data["command"] == ["ssh", "-t", "kilo@alf_ubuntu", "screen", "-x", "agent-ricerca-auto-T205"]
+    assert hub_attach_data["command"] == ["ssh", "-t", "kilo@alf_ubuntu", "screen -x agent-ricerca-auto-T205"]
     assert hub_attach_data["actor"] == "owner (via console@mac)"
 
-    # 3. Attach to client run (`T010` on `mac`) -> opens `ssh -t mac screen -x agent-local-app-T010` (no `kilo@` prefix)
+    # 3. Attach to client run (`T010` on `mac`) -> opens `ssh -t mac 'screen -x agent-local-app-T010'` (no `kilo@` prefix)
     res_attach_mac = subprocess.run(
         [sys.executable, str(BIN_AI_ORCH), "console", "attach", "T010", "--config-dir", str(client_cfg_dir), "--json"],
         capture_output=True,
@@ -1652,7 +1667,7 @@ sys.exit(0)
     assert mac_attach_data["ok"] is True
     assert mac_attach_data["host"] == "mac"
     assert mac_attach_data["ssh_target"] == "mac"
-    assert mac_attach_data["command"] == ["ssh", "-t", "mac", "screen", "-x", "agent-local-app-T010"]
+    assert mac_attach_data["command"] == ["ssh", "-t", "mac", "screen -x agent-local-app-T010"]
 
     # 4. Rejects non-screen (`setsid`) run
     res_setsid = subprocess.run(
@@ -1740,12 +1755,24 @@ def test_19_8_per_host_timeout_and_undeclared_host_attach_rejection(
     fake_ssh = fake_bin / "ssh"
     fake_ssh.write_text(
         f"""#!{sys.executable}
-import json, sys, time
+import json, shlex, sys, time
 args = sys.argv[1:]
-if "hanging_host" in args:
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-o", "-p", "-i", "-l", "-F", "-J"):
+        i += 2
+    elif a.startswith("-"):
+        i += 1
+    else:
+        break
+target = args[i] if i < len(args) else ""
+remote_cmd_str = " ".join(args[i + 1:]) if i + 1 < len(args) else ""
+parsed_remote = shlex.split(remote_cmd_str) if remote_cmd_str else []
+if target == "hanging_host":
     time.sleep(5)
     sys.exit(0)
-if "alf_ubuntu" in args and "status" in args:
+if target == "alf_ubuntu" and "status" in parsed_remote:
     print(json.dumps({{"ok": True, "host": "alf_ubuntu", "snapshot_version": 1, "items": [], "runs": []}}))
     sys.exit(0)
 sys.exit(0)
@@ -1769,11 +1796,323 @@ sys.exit(0)
     # Hub without explicit agent_user defaults to `kilo@alf_ubuntu` and includes `-p 2222`
     att = reg.resolve_console_attach("T301", config_dir=cfg_dir, workspace=ws)
     assert att["ssh_target"] == "kilo@alf_ubuntu"
-    assert att["command"] == ["ssh", "-t", "-p", "2222", "kilo@alf_ubuntu", "screen", "-x", "agent-ws-T301"]
+    assert att["command"] == ["ssh", "-t", "-p", "2222", "kilo@alf_ubuntu", "screen -x agent-ws-T301"]
 
     # Undeclared host in run record is rejected
     with pytest.raises(ValueError, match="not declared in \\[hosts\\]"):
         reg.resolve_console_attach(run_evil_id, config_dir=cfg_dir, workspace=ws)
+
+
+def test_19_8_bounce1_shlex_single_remote_arg_and_shell_parsing(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1 (high): Remote commands are built as ONE single remote-command argument with `shlex.join()`,
+    both for `status` and for `screen -x`, keeping argv for the local invocation.
+    Fake-ssh test emulating OpenSSH concatenation (`' '.join(remote_args)`) and remote shell parsing (`sh -c`)."""
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir(parents=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+
+    run_hub_id = "20261030-140000-T401-kilo-1234"
+    _seed_project_with_tasks_questions_and_runs(
+        ws,
+        proj_slug="ws",
+        host_id="mac",
+        tasks_spec=[],
+        questions_spec=[],
+        runs_spec=[
+            {
+                "run_id": run_hub_id,
+                "task_id": "T401",
+                "status": "running",
+                "host": "alf_ubuntu",
+                "backend": "screen",
+                "screen_session": "agent-ws-T401",
+            }
+        ],
+    )
+
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\n',
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    ssh_records_file = tmp_path / "ssh_records.jsonl"
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        f"""#!{sys.executable}
+import json, shlex, subprocess, sys
+args = sys.argv[1:]
+# Parse ssh flags vs target vs remote command args
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-o", "-p", "-i", "-l", "-F", "-J"):
+        i += 2
+    elif a.startswith("-"):
+        i += 1
+    else:
+        break
+ssh_flags = args[:i]
+target = args[i] if i < len(args) else ""
+remote_args = args[i + 1:] if i + 1 < len(args) else []
+# Emulate OpenSSH concatenating remote_args with spaces and passing to remote login shell (`sh -c`)
+concat_cmd = " ".join(remote_args)
+shell_tokens = shlex.split(concat_cmd)
+with open({str(ssh_records_file)!r}, "a", encoding="utf-8") as f:
+    f.write(json.dumps({{
+        "ssh_flags": ssh_flags,
+        "target": target,
+        "remote_args": remote_args,
+        "remote_args_count": len(remote_args),
+        "concat_cmd": concat_cmd,
+        "shell_tokens": shell_tokens,
+    }}) + "\\n")
+
+if shell_tokens == ["ai-orch", "console", "status", "--local", "--json"]:
+    print(json.dumps({{"ok": True, "host": "alf_ubuntu", "snapshot_version": 1, "items": [], "runs": []}}))
+    sys.exit(0)
+if shell_tokens and shell_tokens[0] == "screen":
+    sys.exit(0)
+sys.exit(255)
+""",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    # 1. Verify `console status` passes exactly 1 remote command argument built with `shlex.join()`
+    status_res = reg.get_console_status_projects(config_dir=cfg_dir, all_hosts=False, workspace=ws)
+    assert status_res["hub_reachable"] is True
+
+    # 2. Verify `console attach` passes local argv + target + 1 single shlex-joined remote command argument
+    att_res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "attach", "T401", "--workspace", str(ws), "--config-dir", str(cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    att_payload = json.loads(att_res.stdout)
+    assert att_payload["ok"] is True
+    assert att_payload["command"] == ["ssh", "-t", "kilo@alf_ubuntu", shlex.join(["screen", "-x", "agent-ws-T401"])]
+
+    records = [json.loads(line) for line in ssh_records_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(records) == 2
+
+    status_rec, attach_rec = records[0], records[1]
+    assert status_rec["remote_args_count"] == 1
+    assert status_rec["remote_args"] == [shlex.join(["ai-orch", "console", "status", "--local", "--json"])]
+    assert status_rec["shell_tokens"] == ["ai-orch", "console", "status", "--local", "--json"]
+
+    assert attach_rec["ssh_flags"] == ["-t"]
+    assert attach_rec["target"] == "kilo@alf_ubuntu"
+    assert attach_rec["remote_args_count"] == 1
+    assert attach_rec["remote_args"] == [shlex.join(["screen", "-x", "agent-ws-T401"])]
+    assert attach_rec["shell_tokens"] == ["screen", "-x", "agent-ws-T401"]
+
+
+def test_19_8_bounce1_hub_attach_enforces_agent_user_over_generic_user_and_ssh_target_prefix(
+    tmp_path: pathlib.Path,
+) -> None:
+    """B2 (high): Attach on the hub reliably uses the agents user (review §10.6):
+    1. A generic `user = "alfredo"` on the hub does NOT win over the `kilo` fallback when `agent_user` is omitted.
+    2. An `ssh_target = "owner@alf_ubuntu"` that already contains a conflicting username has its username stripped/replaced
+       by `agent_user` (`kilo@alf_ubuntu` or explicit `agent_user`)."""
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir(parents=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+
+    run_hub_id = "20261030-141000-T402-kilo-5678"
+    _seed_project_with_tasks_questions_and_runs(
+        ws,
+        proj_slug="ws",
+        host_id="mac",
+        tasks_spec=[],
+        questions_spec=[],
+        runs_spec=[
+            {
+                "run_id": run_hub_id,
+                "task_id": "T402",
+                "status": "running",
+                "host": "alf_ubuntu",
+                "backend": "screen",
+                "screen_session": "agent-ws-T402",
+            }
+        ],
+    )
+
+    # Conflict 1: Hub has generic `user = "alfredo"` and no `agent_user` -> must still use `kilo` fallback on the hub
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nuser = "alfredo"\nrole = "hub"\n',
+        encoding="utf-8",
+    )
+    att1 = reg.resolve_console_attach("T402", config_dir=cfg_dir, workspace=ws)
+    assert att1["agent_user"] == "kilo"
+    assert att1["ssh_target"] == "kilo@alf_ubuntu"
+    assert att1["command"] == ["ssh", "-t", "kilo@alf_ubuntu", "screen -x agent-ws-T402"]
+
+    # Conflict 2: Hub has `ssh_target = "owner@alf_ubuntu"` (and even `user = "owner"`) -> conflicting user stripped, uses `kilo@alf_ubuntu`
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "owner@alf_ubuntu"\nuser = "owner"\nrole = "hub"\n',
+        encoding="utf-8",
+    )
+    att2 = reg.resolve_console_attach("T402", config_dir=cfg_dir, workspace=ws)
+    assert att2["agent_user"] == "kilo"
+    assert att2["ssh_target"] == "kilo@alf_ubuntu"
+    assert att2["command"] == ["ssh", "-t", "kilo@alf_ubuntu", "screen -x agent-ws-T402"]
+
+    # Conflict 3: Hub has `ssh_target = "owner@alf_ubuntu"` and explicit `agent_user = "kilo_agent"` -> uses `kilo_agent@alf_ubuntu`
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "owner@alf_ubuntu"\nuser = "owner"\nagent_user = "kilo_agent"\nrole = "hub"\n',
+        encoding="utf-8",
+    )
+    att3 = reg.resolve_console_attach("T402", config_dir=cfg_dir, workspace=ws)
+    assert att3["agent_user"] == "kilo_agent"
+    assert att3["ssh_target"] == "kilo_agent@alf_ubuntu"
+    assert att3["command"] == ["ssh", "-t", "kilo_agent@alf_ubuntu", "screen -x agent-ws-T402"]
+
+
+def test_19_8_bounce1_concurrent_host_queries_and_all_hosts_flag_contract(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B3 (medium) & B4 (low):
+    - B3: Hosts are queried concurrently, each with its own timeout, and merged deterministically.
+      A hanging host placed BEFORE a reachable one does not delay the reachable host, and the reachable host's
+      timestamp shows it was queried in parallel while the hanging host was still sleeping.
+    - B4: Default behaviour (`all_hosts=False`, i.e. without `--all-hosts`) queries only local + remote hub.
+      `--all-hosts` (`all_hosts=True`) queries all declared remote hosts (hub + clients).
+      JSON contract tests verify both modes."""
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir(parents=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+
+    # Declare `aaa_hanging` BEFORE `zzz_fast_client` and `alf_ubuntu` in `orchestration.toml`
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.aaa_hanging]\nssh_target = "aaa_hanging"\nrole = "client"\ntimeout = 0.8\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\ntimeout = 2.0\n\n'
+        '[hosts.zzz_fast_client]\nssh_target = "zzz_fast_client"\nrole = "client"\ntimeout = 2.0\n',
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    timing_log = tmp_path / "timing.jsonl"
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        f"""#!{sys.executable}
+import json, sys, time
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-o", "-p", "-i", "-l", "-F", "-J"):
+        i += 2
+    elif a.startswith("-"):
+        i += 1
+    else:
+        break
+target = args[i] if i < len(args) else ""
+t_start = time.time()
+with open({str(timing_log)!r}, "a", encoding="utf-8") as f:
+    f.write(json.dumps({{"target": target, "event": "start", "ts": t_start}}) + "\\n")
+
+if target == "aaa_hanging":
+    time.sleep(5.0)
+    sys.exit(0)
+if target == "alf_ubuntu":
+    print(json.dumps({{
+        "ok": True,
+        "host": "alf_ubuntu",
+        "snapshot_version": 2,
+        "items": [{{"slug": "hub-proj", "uuid": "00000000-0000-4000-8000-000000000001", "canonical_path": "/hub/proj", "paths": {{"alf_ubuntu": "/hub/proj"}}}}],
+        "tasks": [{{"id": "T501", "project": "hub-proj", "title": "Hub task", "state": "open", "host": "alf_ubuntu"}}],
+        "runs": [],
+    }}))
+    sys.exit(0)
+if target == "zzz_fast_client":
+    print(json.dumps({{
+        "ok": True,
+        "host": "zzz_fast_client",
+        "items": [],
+        "tasks": [{{"id": "T502", "project": "hub-proj", "title": "Fast client task", "state": "in progress", "host": "zzz_fast_client"}}],
+        "runs": [{{
+            "run_id": "20261030-150000-T502-kilo-fast",
+            "task_id": "T502",
+            "project": "hub-proj",
+            "status": "running",
+            "host": "zzz_fast_client",
+            "backend": "screen",
+            "screen_session": "agent-hub-proj-T502",
+        }}],
+    }}))
+    sys.exit(0)
+sys.exit(255)
+""",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    # 1. Default mode (without `--all-hosts`): queries ONLY local (`mac`) + remote hub (`alf_ubuntu`).
+    #    Does NOT query `aaa_hanging` or `zzz_fast_client`.
+    res_default = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--config-dir", str(cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    default_data = json.loads(res_default.stdout)
+    assert default_data["ok"] is True
+    assert default_data["all_hosts"] is False
+    assert set(default_data["hosts"].keys()) == {"mac", "alf_ubuntu"}
+    assert default_data["hosts"]["alf_ubuntu"]["reachable"] is True
+    assert {t["id"] for t in default_data["tasks"]} == {"T501"}
+    assert default_data["runs"] == []
+
+    events_default = [json.loads(line) for line in timing_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [e["target"] for e in events_default] == ["alf_ubuntu"]
+
+    # 2. `--all-hosts` mode: queries all declared remote hosts concurrently (`alf_ubuntu`, `aaa_hanging`, `zzz_fast_client`).
+    timing_log.unlink()
+    t0 = time.monotonic()
+    res_all = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--all-hosts", "--config-dir", str(cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    elapsed_all = time.monotonic() - t0
+    all_data = json.loads(res_all.stdout)
+    assert all_data["ok"] is True
+    assert all_data["all_hosts"] is True
+    # Deterministic host order: local (`mac`), hub (`alf_ubuntu`), then declared clients (`aaa_hanging`, `zzz_fast_client`)
+    assert list(all_data["hosts"].keys()) == ["mac", "alf_ubuntu", "aaa_hanging", "zzz_fast_client"]
+    assert all_data["hosts"]["alf_ubuntu"]["reachable"] is True
+    assert all_data["hosts"]["aaa_hanging"]["reachable"] is False
+    assert all_data["hosts"]["aaa_hanging"]["timed_out"] is True
+    assert all_data["hosts"]["zzz_fast_client"]["reachable"] is True
+    assert {t["id"] for t in all_data["tasks"]} == {"T501", "T502"}
+    assert [r["run_id"] for r in all_data["runs"]] == ["20261030-150000-T502-kilo-fast"]
+
+    # Verify concurrent execution: `zzz_fast_client` (placed AFTER `aaa_hanging` which has timeout=0.8s)
+    # started within <0.4s of `aaa_hanging`, not after 0.8s.
+    events_all = [json.loads(line) for line in timing_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    start_by_target = {e["target"]: e["ts"] for e in events_all if e["event"] == "start"}
+    assert {"alf_ubuntu", "aaa_hanging", "zzz_fast_client"} == set(start_by_target.keys())
+    assert abs(start_by_target["zzz_fast_client"] - start_by_target["aaa_hanging"]) < 0.5
+    assert elapsed_all < 2.5
 
 
 
