@@ -4203,6 +4203,368 @@ def test_parse_frontmatter_and_compare_without_pyyaml(monkeypatch: pytest.Monkey
     assert body_diff2 is False
 
 
+# ---------------------------------------------------------------------------
+# Task 19.2: Project Doctor (`ai-orch doctor`) & Convention Drift Detection
+# ---------------------------------------------------------------------------
+
+AI_ORCH_BIN = SCRIPT.parent.parent / "bin" / "ai-orch"
+
+
+def test_19_2_project_doctor_2026_10_17_fixture_reports_all_expected_findings_with_severity(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Fixture with a '2026-10-17 style' project (reconstructed from N078) reports all expected findings with severity and fix commands."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "ricerca_auto_2026_10_17"
+    oe.create_2026_10_17_fixture(proj_dir)
+
+    res = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    report = json.loads(res.stdout)
+
+    assert report["ok"] is False
+    assert report["drifted"] is True
+    assert report["convention_version"] is None
+    assert report["tool_convention_version"] == oe.CONVENTION_VERSION
+
+    findings = report["findings"]
+    kinds = {f["kind"] for f in findings}
+    expected_kinds = {
+        "missing-project-config",
+        "unregistered-workspace",
+        "index-missing-markers",
+        "stale-agents-md",
+        "legacy-task-headers",
+        "convention-version-drift",
+    }
+    assert expected_kinds.issubset(kinds)
+
+    for f in findings:
+        assert f["severity"] in ("error", "warning")
+        assert f["fix_command"] and isinstance(f["fix_command"], str)
+        assert f["fix"] == f["fix_command"]
+        assert f["message"] and isinstance(f["message"], str)
+
+    # Check specific AGENTS.md duplicated hand-written block detection
+    agents_finding = next(f for f in findings if f["group_key"] == "project-drift:stale-agents-md")
+    assert agents_finding["duplicated_blocks"] is True
+    assert agents_finding["stale_rendered"] is True
+    assert any("Required Skills" in h for h in agents_finding["duplicated_sections"])
+    assert any("Core Operating Rules" in h for h in agents_finding["duplicated_sections"])
+
+    # Check legacy task headers details
+    hdr_finding = next(f for f in findings if f["kind"] == "legacy-task-headers")
+    assert hdr_finding["severity"] == "error"
+    assert hdr_finding["error_count"] > 0
+    assert any("status" in issue or "header field" in issue for issue in hdr_finding["issues"])
+    assert any("verification pending:" in issue for issue in hdr_finding["issues"])
+    assert any("missing 'approval' header field" in issue for issue in hdr_finding["issues"])
+
+
+def test_19_2_project_doctor_updated_project_reports_zero_findings(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Updated project reports zero findings and records convention_version in tasks/convention_version."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "ricerca_auto_updated"
+    oe.create_updated_project_fixture(proj_dir, home=fake_home)
+
+    # Verify versioned tasks/convention_version file exists on disk
+    conv_file = proj_dir / "tasks" / "convention_version"
+    assert conv_file.is_file()
+    assert conv_file.read_text(encoding="utf-8").strip() == oe.CONVENTION_VERSION
+
+    res = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    report = json.loads(res.stdout)
+
+    assert report["ok"] is True
+    assert report["drifted"] is False
+    assert report["convention_version"] == oe.CONVENTION_VERSION
+    assert report["tool_convention_version"] == oe.CONVENTION_VERSION
+    assert report["findings"] == []
+    assert report["summary"]["total"] == 0
+    assert report["summary"]["error"] == 0
+    assert report["summary"]["warning"] == 0
+
+
+def test_19_2_project_doctor_json_stability_and_ack_unack(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`ai-orch doctor --json` is deterministic across runs and supports ack/unack on project drift findings."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "proj_json_stable"
+    oe.create_2026_10_17_fixture(proj_dir)
+
+    r1 = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    r2 = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert r1.stdout == r2.stdout
+    j1 = json.loads(r1.stdout)
+    expected_keys = {
+        "ok",
+        "drifted",
+        "project",
+        "project_path",
+        "workspace",
+        "tasks_dir",
+        "convention_version",
+        "tool_convention_version",
+        "convention_version_info",
+        "findings",
+        "finding_groups",
+        "groups",
+        "summary",
+        "severity_counts",
+        "checks",
+    }
+    assert expected_keys.issubset(set(j1.keys()))
+
+    # Test ack and unack of a project drift finding via `ai-orch doctor ack` / `unack`
+    ack_res = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "doctor",
+            "ack",
+            "project-drift:missing-project-config",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--note",
+            "defer config init",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    ack_payload = json.loads(ack_res.stdout)
+    assert ack_payload["ok"] is True
+    assert ack_payload["acknowledged"] is True
+
+    r_after_ack = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    j_ack = json.loads(r_after_ack.stdout)
+    cfg_f = next(f for f in j_ack["findings"] if f["group_key"] == "project-drift:missing-project-config")
+    assert cfg_f["acknowledged"] is True
+    assert cfg_f["severity"] == "info"
+    assert j_ack["summary"]["acknowledged"] == 1
+
+    unack_res = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "doctor",
+            "unack",
+            "project-drift:missing-project-config",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(unack_res.stdout)["unacknowledged"] is True
+
+
+def test_19_2_global_skill_drift_detected_with_two_fake_installed_versions(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Global skill drift is detected when two fake installed versions are present across global skill roots."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "proj_clean"
+    oe.create_updated_project_fixture(proj_dir, home=fake_home)
+
+    # Install two fake skill versions in global scope (e.g. v0.9.0 in Claude and v1.0.0 in Kilo)
+    claude_skill_dir = fake_home / ".claude" / "skills" / "task-pipeline"
+    claude_skill_dir.mkdir(parents=True)
+    (claude_skill_dir / "SKILL.md").write_text(
+        "---\nname: task-pipeline\ndescription: Fake v0.9.0\nversion: 0.9.0\n---\n# Fake 0.9.0\n",
+        encoding="utf-8",
+    )
+    (claude_skill_dir / ".ai-orch-source.json").write_text(
+        json.dumps({
+            "repo": "ai-orchestration",
+            "plugin": "architect-side",
+            "name": "task-pipeline",
+            "version": "0.9.0",
+            "source_hash": "fake_hash_090",
+            "mode": "copy",
+        }),
+        encoding="utf-8",
+    )
+
+    kilo_skill_dir = fake_home / ".kilo" / "skills" / "task-pipeline"
+    kilo_skill_dir.mkdir(parents=True)
+    (kilo_skill_dir / "SKILL.md").write_text(
+        "---\nname: task-pipeline\ndescription: Fake v1.0.0\nversion: 1.0.0\n---\n# Fake 1.0.0\n",
+        encoding="utf-8",
+    )
+    (kilo_skill_dir / ".ai-orch-source.json").write_text(
+        json.dumps({
+            "repo": "ai-orchestration",
+            "plugin": "architect-side",
+            "name": "task-pipeline",
+            "version": "1.0.0",
+            "source_hash": "fake_hash_100",
+            "mode": "copy",
+        }),
+        encoding="utf-8",
+    )
+
+    res = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    report = json.loads(res.stdout)
+
+    assert report["ok"] is False
+    assert report["drifted"] is True
+    assert len(report["findings"]) == 1
+    sk_finding = report["findings"][0]
+    assert sk_finding["kind"] == "global-skill-drift"
+    assert sk_finding["severity"] == "warning"
+    assert "task-pipeline" in sk_finding["names"]
+    assert set(sk_finding["versions_found"]) == {"0.9.0", "1.0.0"}
+    assert "install-skills" in sk_finding["fix_command"]
+
+
+def test_19_2_one_line_drift_warning_on_ai_orch_commands_and_disable_mechanisms(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Running any ai-orch command in a project with drift emits a single-line warning on stderr (disablable)."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    drifted_proj = tmp_path / "drifted_proj"
+    oe.create_2026_10_17_fixture(drifted_proj)
+
+    env_base = os.environ.copy()
+    env_base["AI_ORCH_HOME"] = str(fake_home)
+    env_base.pop("AI_ORCH_NO_DRIFT_WARNING", None)
+    env_base.pop("AI_ORCH_DRIFT_WARNING", None)
+
+    # 1. Running `ai-orch tasks list --json` in the drifted project emits 1-line warning on stderr,
+    #    while stdout remains valid JSON.
+    res_warn = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "tasks", "list", "--tasks-dir", str(drifted_proj / "tasks"), "--json"],
+        cwd=str(drifted_proj),
+        env=env_base,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    parsed_stdout = json.loads(res_warn.stdout)
+    assert isinstance(parsed_stdout, dict)
+    stderr_lines = [ln for ln in res_warn.stderr.splitlines() if ln.strip()]
+    assert len(stderr_lines) == 1
+    assert "[ai-orch] warning: project 'drifted_proj' has convention drift" in stderr_lines[0]
+    assert "ai-orch doctor" in stderr_lines[0]
+
+    # 2. Disable via AI_ORCH_NO_DRIFT_WARNING=1
+    env_disabled = dict(env_base)
+    env_disabled["AI_ORCH_NO_DRIFT_WARNING"] = "1"
+    res_no_warn_env = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "tasks", "list", "--tasks-dir", str(drifted_proj / "tasks"), "--json"],
+        cwd=str(drifted_proj),
+        env=env_disabled,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "[ai-orch] warning:" not in res_no_warn_env.stderr
+
+    # 3. Disable via CLI flag --no-drift-warning
+    res_no_warn_flag = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "--no-drift-warning",
+            "tasks",
+            "list",
+            "--tasks-dir",
+            str(drifted_proj / "tasks"),
+            "--json",
+        ],
+        cwd=str(drifted_proj),
+        env=env_base,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "[ai-orch] warning:" not in res_no_warn_flag.stderr
+
+    # 4. Disable via [doctor] drift_warning = false in project config
+    (drifted_proj / ".ai-orchestration.local.toml").write_text(
+        "[doctor]\ndrift_warning = false\n",
+        encoding="utf-8",
+    )
+    res_no_warn_cfg = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "tasks", "list", "--tasks-dir", str(drifted_proj / "tasks"), "--json"],
+        cwd=str(drifted_proj),
+        env=env_base,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "[ai-orch] warning:" not in res_no_warn_cfg.stderr
+
+    # 5. Updated project emits zero warning even with warnings enabled
+    clean_proj = tmp_path / "clean_proj"
+    oe.create_updated_project_fixture(clean_proj, home=fake_home)
+    res_clean = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "tasks", "list", "--tasks-dir", str(clean_proj / "tasks"), "--json"],
+        cwd=str(clean_proj),
+        env=env_base,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "[ai-orch] warning:" not in res_clean.stderr
+
+
+
 
 
 
