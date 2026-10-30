@@ -603,3 +603,34 @@ def test_cli_sessions_lifecycle(ws: pathlib.Path):
     dreg_data = json.loads(res.stdout)
     assert dreg_data["status"] == "deregistered"
     assert dreg_data["retired"]["reason"] == "task_complete"
+
+
+def test_19_4_session_records_include_host_and_backward_compat(
+    ws: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Task 19.4: session records and role files include host; legacy sessions without host remain valid."""
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    s1 = register_session(ws, tool="claude", role="orchestrator")
+    assert s1["host"] == "alf_ubuntu"
+    holder = get_role_holder(ws, role="orchestrator")
+    assert holder is not None
+    assert holder["host"] == "alf_ubuntu"
+    assert holder["current"]["host"] == "alf_ubuntu"
+
+    s2 = register_session(ws, tool="kilo", host="mac")
+    assert s2["host"] == "mac"
+    assert [s["session_id"] for s in list_sessions(ws, host="mac")] == [s2["session_id"]]
+
+    # Legacy session file without 'host' remains valid
+    legacy_path = ws / ".ai-orchestration" / "sessions" / "legacy-sess.json"
+    legacy_data = dict(s2)
+    legacy_data["session_id"] = "legacy-sess"
+    legacy_data.pop("host", None)
+    legacy_path.write_text(json.dumps(legacy_data), encoding="utf-8")
+    loaded_legacy = get_session(ws, "legacy-sess")
+    assert loaded_legacy["session_id"] == "legacy-sess"
+    assert "legacy-sess" in [s["session_id"] for s in list_sessions(ws)]
+

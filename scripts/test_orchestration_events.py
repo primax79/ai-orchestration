@@ -856,3 +856,30 @@ def test_tail_session_filter_follow_mode(ws: pathlib.Path):
     assert [e["type"] for e in collected] == ["test.match1", "test.match2"]
 
 
+def test_19_4_events_include_host_id(ws: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+    """Task 19.4: emitted events and outbox commits record canonical host id."""
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    ev1 = emit(ws, "task.created", {"task_id": "T001"})
+    assert ev1["host"] == "alf_ubuntu"
+
+    ev2 = emit(ws, "run.started", {"run_id": "r1"}, host="mac")
+    assert ev2["host"] == "mac"
+
+    with outbox_transaction(
+        ws,
+        "mut-host-1",
+        [],
+        "task.transitioned",
+        {"task_id": "T001"},
+        source="tasks_engine",
+    ):
+        pass
+
+    events = read_events(ws)
+    assert [e["host"] for e in events] == ["alf_ubuntu", "mac", "alf_ubuntu"]
+
+
+

@@ -2500,6 +2500,82 @@ def test_config_show_defaults_to_cwd(tmp_path: pathlib.Path, monkeypatch: pytest
     assert data_other["meta"]["project_config_exists"] is False
 
 
+def test_19_4_host_id_resolution_and_normalization(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Task 19.4: canonical host id from [host] id in global config with fallback to normalized hostname."""
+    monkeypatch.delenv("AI_ORCH_HOST_ID", raising=False)
+    assert oc.normalize_host_id("Alf-MacBook-Pro.local") == "alf-macbook-pro"
+    assert oc.normalize_host_id("alf_ubuntu") == "alf_ubuntu"
+    assert oc.normalize_host_id("  My Host!  ") == "my-host"
+    assert oc.normalize_host_id("") == "localhost"
+    assert oc.is_valid_host_id("alf_ubuntu") is True
+    assert oc.is_valid_host_id("mac-pro-1") is True
+    assert oc.is_valid_host_id("Invalid Host") is False
+    assert oc.is_valid_host_id("-bad") is False
+
+    # Fallback to normalized hostname when [host] id is absent
+    missing_cfg = tmp_path / "nonexistent.toml"
+    assert oc.resolve_host_id(global_path=missing_cfg, hostname="MacBook-Pro.local") == "macbook-pro"
+
+    # Global config [host] id wins over hostname
+    gpath = tmp_path / "orchestration.toml"
+    gpath.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    assert oc.resolve_host_id(global_path=gpath, hostname="MacBook-Pro.local") == "alf_ubuntu"
+    assert oc.get_host_id({"host": {"id": "mac"}}, global_path=gpath) == "mac"
+
+    # Host config in project config goes through 19.1's unified lookup (canonical and legacy positions)
+    ws = tmp_path / "proj_host_lookup"
+    (ws / ".ai-orchestration").mkdir(parents=True)
+    (ws / ".ai-orchestration" / "orchestration.toml").write_text(
+        '[hosts.mac]\nssh_target = "mac.lan"\nrole = "client"\n',
+        encoding="utf-8",
+    )
+    assert oc.get_declared_hosts(global_path=gpath, workspace=ws) == {"alf_ubuntu", "mac"}
+
+
+def test_19_4_hosts_table_and_validation() -> None:
+    """Task 19.4: [host] and [hosts.<id>] table (ssh target, agent user, role hub/client) validation."""
+    cfg = copy.deepcopy(oc.DEFAULT_GLOBAL_CONFIG)
+    cfg["host"] = {"id": "alf_ubuntu", "role": "hub"}
+    cfg["hosts"] = {
+        "alf_ubuntu": {
+            "ssh_target": "alf_ubuntu",
+            "agent_user": "kilo",
+            "role": "hub",
+        },
+        "mac": {
+            "ssh": "mac.lan",
+            "user": "alfredo",
+            "role": "client",
+        },
+    }
+    errors, _ = oc.validate_config(cfg)
+    assert errors == []
+
+    table = oc.resolve_hosts_table(cfg)
+    assert table["alf_ubuntu"]["ssh_target"] == "alf_ubuntu"
+    assert table["alf_ubuntu"]["agent_user"] == "kilo"
+    assert table["alf_ubuntu"]["role"] == "hub"
+    assert table["mac"]["ssh_target"] == "mac.lan"
+    assert table["mac"]["agent_user"] == "alfredo"
+    assert table["mac"]["role"] == "client"
+    assert oc.get_declared_hosts(cfg) == {"alf_ubuntu", "mac"}
+
+    # Invalid host id, role, ssh_target, and unknown key
+    bad_cfg = copy.deepcopy(oc.DEFAULT_GLOBAL_CONFIG)
+    bad_cfg["host"] = {"id": "BAD HOST!", "role": "worker"}
+    bad_cfg["hosts"] = {
+        "Invalid Id": {"role": "hub"},
+        "mac": {"role": "invalid_role", "ssh_target": "-oProxyCommand=evil", "unknown_field": 123},
+    }
+    bad_errors, _ = oc.validate_config(bad_cfg)
+    assert any("[host].id" in e for e in bad_errors)
+    assert any("[host].role" in e for e in bad_errors)
+    assert any("[hosts.Invalid Id]" in e for e in bad_errors)
+    assert any("[hosts.mac].role" in e for e in bad_errors)
+    assert any("[hosts.mac].ssh_target" in e for e in bad_errors)
+    assert any("unknown key 'unknown_field'" in e for e in bad_errors)
+
+
 def test_19_1_unified_config_lookup_across_all_subsystems_and_legacy_positions(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,

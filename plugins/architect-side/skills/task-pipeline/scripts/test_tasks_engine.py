@@ -18211,6 +18211,116 @@ def test_n075_plan_task_multiple_questions_and_stale_warning(tmp_path: pathlib.P
     assert tree_final["01.1"].waiting_on is None
 
 
+def test_19_4_task_and_microtask_host_validation_and_backward_compat(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 19.4: optional validated 'host' field on tasks, microtasks, and plan nodes; no 'run-ref'; existing tasks without 'host' stay valid."""
+    monkeypatch.delenv("AI_ORCH_HOST_ID", raising=False)
+    monkeypatch.delenv("AI_ORCH_DECLARED_HOSTS", raising=False)
+    cfg_file = tmp_path / "global_orchestration.toml"
+    cfg_file.write_text(
+        '[host]\nid = "alf_ubuntu"\n\n[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nagent_user = "kilo"\nrole = "hub"\n\n[hosts.mac]\nssh_target = "mac"\nagent_user = "alfredo"\nrole = "client"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "backend").mkdir(parents=True)
+    (tasks_dir / "micro").mkdir(parents=True)
+    (tasks_dir / "01-core").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # 1. Existing task and plan node without 'host' remain valid even when no hosts are declared
+    empty_cfg = tmp_path / "empty.toml"
+    empty_cfg.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(empty_cfg))
+
+    (tasks_dir / "01-core" / "plan.md").write_text(
+        "# 01 — Core\n\n- **Status:** `in progress`\n\n## Tasks\n\n### 01.1 - Base task\n\n- **Status:** `open`\n- **Goal:** Do base work.\n- **Verification:** pytest\n",
+        encoding="utf-8",
+    )
+    t1_path = tasks_dir / "backend" / "T001-no-host.md"
+    t1_path.write_text(
+        "# T001 No host\n\n"
+        "- id: T001\n- title: No host\n- category: backend\n- priority: P2\n"
+        "- priority-reason: test\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: do T001\n"
+        "- short: No host\n\n## Goal\nG\n\n## Steps\n- [ ] S\n\n## Verification\n- V\n",
+        encoding="utf-8",
+    )
+    errs0, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errs0 == []
+
+    # Restore config with declared hosts: alf_ubuntu, mac
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+    assert te.resolve_host_id(tasks_dir) == "alf_ubuntu"
+    assert te.get_declared_hosts(tasks_dir) == {"alf_ubuntu", "mac"}
+
+    # 2. Emergent task with declared host & run-id is valid
+    t2_path = tasks_dir / "backend" / "T002-with-host.md"
+    t2_path.write_text(
+        "# T002 With host\n\n"
+        "- id: T002\n- title: With host\n- category: backend\n- priority: P2\n"
+        "- priority-reason: test\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: do T002\n"
+        "- run-id: 20261029-120000-T002-kilo-1234\n- host: alf_ubuntu\n- short: With host\n\n"
+        "## Goal\nG\n\n## Steps\n- [ ] S\n\n## Verification\n- V\n",
+        encoding="utf-8",
+    )
+    # 3. Microtask created with declared host is valid and promotes preserving host
+    ok_m, res_m = te.tasks_micro(tasks_dir, title="Quick fix on mac", kind="fix", host="mac")
+    assert ok_m is True, res_m
+    assert res_m["host"] == "mac"
+
+    errs1, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errs1 == []
+    tree1 = te.discover_task_tree(tasks_dir)
+    assert tree1["T002"].host == "alf_ubuntu"
+    assert tree1[res_m["id"]].host == "mac"
+
+    ok_p, res_p = te.tasks_promote(tasks_dir, res_m["id"], category="backend")
+    assert ok_p is True, res_p
+    errs_p, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errs_p == []
+    tree_p = te.discover_task_tree(tasks_dir)
+    assert tree_p[res_m["id"]].host == "mac"
+
+    # 4. Undeclared host on emergent task, microtask, and plan node is rejected by tasks validate
+    t2_path.write_text(
+        t2_path.read_text(encoding="utf-8").replace("- host: alf_ubuntu", "- host: undeclared_box"),
+        encoding="utf-8",
+    )
+    m_bad = tasks_dir / "micro" / "T004-bad-micro-host.md"
+    m_bad.write_text(
+        "# T004 Bad micro host\n\n"
+        "- id: T004\n- title: Bad micro host\n- kind: fix\n- priority: P2\n"
+        "- state: open\n- executor: kilo\n- paths: -\n- depends-on: -\n"
+        "- host: ghost_host\n- short: Bad micro host\n\n## What\nFix.\n",
+        encoding="utf-8",
+    )
+    (tasks_dir / "01-core" / "plan.md").write_text(
+        "# 01 — Core\n\n- **Status:** `in progress`\n\n## Tasks\n\n### 01.1 - Base task\n\n- **Status:** `open` · **Host:**mars_host\n- **Goal:** Do base work.\n- **Verification:** pytest\n",
+        encoding="utf-8",
+    )
+    errs_bad, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("undeclared host 'undeclared_box'" in e for e in errs_bad)
+    assert any("undeclared host 'ghost_host'" in e for e in errs_bad)
+    assert any("undeclared host 'mars_host'" in e for e in errs_bad)
+
+    # 5. 'run-ref' is rejected (must use 'run-id')
+    assert "run-ref" not in te.OPTIONAL_EXTENSION_FIELDS
+    assert "run-ref" not in te.MICRO_HEADER_FIELDS
+    t2_path.write_text(
+        t2_path.read_text(encoding="utf-8")
+        .replace("- host: undeclared_box", "- host: alf_ubuntu")
+        .replace("- run-id:", "- run-ref:"),
+        encoding="utf-8",
+    )
+    errs_ref, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("run-ref" in e for e in errs_ref)
+
+
+
 
 
 

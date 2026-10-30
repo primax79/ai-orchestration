@@ -174,6 +174,7 @@ OPTIONAL_EXTENSION_FIELDS: tuple[str, ...] = (
     "branch",
     "worktree",
     "run-id",
+    "host",
     "use-cases",
     "use_cases",
     "coordinates",
@@ -187,6 +188,7 @@ OPTIONAL_HEADER_FIELDS: tuple[str, ...] = OPTIONAL_EXTENSION_FIELDS
 
 VALID_KINDS: set[str] = {"feature", "bug", "fix", "chore", "docs", "investigation"}
 LABEL_RE: re.Pattern = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
+HOST_ID_RE: re.Pattern = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 MICRO_HEADER_FIELDS: tuple[str, ...] = (
     "id",
@@ -199,6 +201,7 @@ MICRO_HEADER_FIELDS: tuple[str, ...] = (
     "depends-on",
     "size",
     "labels",
+    "host",
     "use-cases",
     "use_cases",
     "conditions",
@@ -745,7 +748,13 @@ def get_project_extension_fields(tasks_dir: pathlib.Path) -> tuple[str, ...]:
             for item in items:
                 if isinstance(item, str):
                     k = item.strip().strip("`'\"").lower()
-                    if k and re.match(r"^[a-z][a-z0-9_-]*$", k) and k not in CORE_HEADER_FIELDS and k not in found:
+                    if (
+                        k
+                        and re.match(r"^[a-z][a-z0-9_-]*$", k)
+                        and k not in CORE_HEADER_FIELDS
+                        and k not in ("run-ref", "run_ref")
+                        and k not in found
+                    ):
                         found.append(k)
 
     # 1. Check TOML config files via unified project config lookup (active file only; lower-priority files are shadowed)
@@ -827,6 +836,170 @@ def get_project_extension_fields(tasks_dir: pathlib.Path) -> tuple[str, ...]:
             pass
 
     return tuple(found)
+
+
+def normalize_host_id(raw: str | None = None) -> str:
+    """Normalize a raw hostname into a canonical lowercase host id matching HOST_ID_RE."""
+    if raw is None:
+        try:
+            raw = socket.gethostname()
+        except Exception:
+            raw = "localhost"
+    s = str(raw or "").strip()
+    if "." in s:
+        s = s.split(".", 1)[0]
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9_-]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    s = re.sub(r"^[^a-z0-9]+", "", s)
+    s = s.rstrip("_-")
+    if len(s) > 63:
+        s = s[:63].rstrip("_-")
+    return s if (s and HOST_ID_RE.match(s)) else "localhost"
+
+
+def resolve_host_id(
+    tasks_dir: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+    hostname: str | None = None,
+) -> str:
+    """Resolve canonical host id from global/project config `[host] id`, falling back to normalized hostname."""
+    proj_root: pathlib.Path | None = None
+    if tasks_dir is not None:
+        tdir = pathlib.Path(tasks_dir).resolve()
+        proj_root = tdir.parent if tdir.name == "tasks" else tdir
+
+    if orchestration_config is not None and hasattr(orchestration_config, "resolve_host_id"):
+        return orchestration_config.resolve_host_id(
+            global_path=global_config,
+            hostname=hostname,
+            workspace=proj_root,
+        )
+
+    cand_tomls: list[pathlib.Path] = []
+    if global_config is not None:
+        gp = pathlib.Path(global_config).expanduser().resolve()
+        cand_tomls.append((gp / "orchestration.toml") if gp.is_dir() else gp)
+    elif os.environ.get("AI_ORCHESTRATION_CONFIG", "").strip():
+        p = pathlib.Path(os.environ["AI_ORCHESTRATION_CONFIG"]).expanduser().resolve()
+        cand_tomls.append((p / "orchestration.toml") if p.is_dir() else p)
+    else:
+        cand_tomls.append(pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml")
+
+    if proj_root is not None:
+        for cand in _inspect_project_config(proj_root, global_config).get("candidates", []):
+            cand_tomls.append(cand["path"])
+
+    for cfg_file in cand_tomls:
+        if cfg_file.is_file() and tomllib is not None:
+            try:
+                data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+                host_sec = data.get("host")
+                if isinstance(host_sec, dict):
+                    hid = host_sec.get("id")
+                    if isinstance(hid, str) and hid.strip():
+                        return hid.strip()
+            except Exception:
+                pass
+
+    if hostname is None:
+        env_hid = os.environ.get("AI_ORCH_HOST_ID")
+        if env_hid and env_hid.strip():
+            clean_env = env_hid.strip()
+            return clean_env if HOST_ID_RE.match(clean_env) else normalize_host_id(clean_env)
+
+    return normalize_host_id(hostname)
+
+
+def get_declared_hosts(
+    tasks_dir: pathlib.Path,
+    global_config: pathlib.Path | None = None,
+) -> set[str]:
+    """Discover declared host IDs from `[host] id`, `[hosts.<id>]`, and `[tasks] hosts` via unified config lookup."""
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    declared: set[str] = set()
+
+    def _collect_from_dict(data: dict[str, Any]) -> None:
+        host_sec = data.get("host")
+        if isinstance(host_sec, dict):
+            hid = host_sec.get("id")
+            if isinstance(hid, str) and hid.strip() and HOST_ID_RE.match(hid.strip()):
+                declared.add(hid.strip())
+        hosts_sec = data.get("hosts")
+        if isinstance(hosts_sec, dict):
+            for hk, hv in hosts_sec.items():
+                if isinstance(hk, str) and hk.strip() and isinstance(hv, dict) and HOST_ID_RE.match(hk.strip()):
+                    declared.add(hk.strip())
+        tasks_sec = data.get("tasks")
+        if isinstance(tasks_sec, dict) and isinstance(tasks_sec.get("hosts"), (list, tuple)):
+            for item in tasks_sec["hosts"]:
+                if isinstance(item, str) and item.strip() and HOST_ID_RE.match(item.strip()):
+                    declared.add(item.strip())
+
+    proj_root = tasks_dir.parent if tasks_dir.name == "tasks" else tasks_dir
+    if orchestration_config is not None and hasattr(orchestration_config, "get_declared_hosts"):
+        declared.update(
+            orchestration_config.get_declared_hosts(
+                global_path=global_config,
+                workspace=proj_root,
+            )
+        )
+    else:
+        cand_tomls: list[pathlib.Path] = []
+        if global_config is not None:
+            gp = pathlib.Path(global_config).expanduser().resolve()
+            cand_tomls.append((gp / "orchestration.toml") if gp.is_dir() else gp)
+        elif os.environ.get("AI_ORCHESTRATION_CONFIG", "").strip():
+            p = pathlib.Path(os.environ["AI_ORCHESTRATION_CONFIG"]).expanduser().resolve()
+            cand_tomls.append((p / "orchestration.toml") if p.is_dir() else p)
+        else:
+            cand_tomls.append(pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml")
+
+        for check_ws in ([proj_root, proj_root.parent] if proj_root.parent != proj_root else [proj_root]):
+            for cand in _inspect_project_config(check_ws, global_config).get("candidates", []):
+                if cand["path"] not in cand_tomls:
+                    cand_tomls.append(cand["path"])
+
+        for cfg_file in cand_tomls:
+            if cfg_file.is_file() and tomllib is not None:
+                try:
+                    data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        _collect_from_dict(data)
+                except Exception:
+                    pass
+
+    agents_md = tasks_dir / "AGENTS.md"
+    if agents_md.is_file() and tomllib is not None:
+        try:
+            raw_agents = agents_md.read_text(encoding="utf-8")
+            unmanaged = re.sub(
+                r"<!--\s*ai-orch:managed\s+begin\s*-->.*?<!--\s*ai-orch:managed\s+end\s*-->",
+                "",
+                raw_agents,
+                flags=re.DOTALL,
+            )
+            for m_fence in re.finditer(r"```(?:toml|tasks-config)\s*\n(.*?)```", unmanaged, re.DOTALL):
+                try:
+                    bdata = tomllib.loads(m_fence.group(1))
+                    if isinstance(bdata, dict):
+                        _collect_from_dict(bdata)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    env_hosts = os.environ.get("AI_ORCH_DECLARED_HOSTS")
+    if env_hosts:
+        for h in env_hosts.split(","):
+            hc = h.strip()
+            if hc and HOST_ID_RE.match(hc):
+                declared.add(hc)
+    env_hid = os.environ.get("AI_ORCH_HOST_ID")
+    if env_hid and env_hid.strip() and HOST_ID_RE.match(env_hid.strip()):
+        declared.add(env_hid.strip())
+
+    return declared
 
 
 TASK_ID_RE = re.compile(r"^(?:T\d{3,}(?:\.\d+)*|\d{2,}(?:\.\d+[a-z]?)*)$")
@@ -2598,6 +2771,7 @@ class TaskNode:
     use_cases: list[str] = field(default_factory=list)
     waiting_on: str | None = None
     verify_by: str | None = None
+    host: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         res = {
@@ -2614,6 +2788,7 @@ class TaskNode:
             "waiting_on": self.waiting_on,
             "verify_by": self.verify_by,
             "verify-by": self.verify_by,
+            "host": self.host,
             "parent": self.parent,
             "depth": self.depth,
             "node_type": self.node_type,
@@ -3755,6 +3930,9 @@ def parse_child_blocks(
             if leaf_vb and (not str(leaf_vb).strip() or str(leaf_vb).strip() == "-"):
                 leaf_vb = None
 
+            leaf_host_raw = own_fields.get("host")
+            leaf_host = str(leaf_host_raw).strip() if (leaf_host_raw and str(leaf_host_raw).strip() != "-") else None
+
             leaf_ucs = parse_use_cases_field(own_fields.get("use_cases") or own_fields.get("use-cases"))
 
             leaf_node = TaskNode(
@@ -3806,6 +3984,7 @@ def parse_child_blocks(
                 use_cases=leaf_ucs,
                 waiting_on=leaf_wo,
                 verify_by=str(leaf_vb).strip() if leaf_vb else None,
+                host=leaf_host,
             )
             nodes.append(leaf_node)
 
@@ -3869,10 +4048,12 @@ def propagate_inheritance(tree: dict[str, TaskNode], node_id: str) -> None:
         "source": "own" if own_deps else (f"inherited:{parent.id}" if parent and inherited_deps else "own"),
     }
 
-    # 4. Non-inherited fields: kind, decider, status, verifier, verification_mode, verify_by, goal, handoff
-    for f in ("kind", "decider", "status", "verifier", "verification_mode", "verify_by", "verify-by", "goal", "handoff"):
+    # 4. Non-inherited fields: kind, decider, status, verifier, verification_mode, verify_by, goal, handoff, host
+    for f in ("kind", "decider", "status", "verifier", "verification_mode", "verify_by", "verify-by", "goal", "handoff", "host"):
         if f in node.own_fields:
             node.fields[f] = {"value": node.own_fields[f], "source": "own"}
+    if "host" in node.own_fields and node.own_fields["host"] and str(node.own_fields["host"]).strip() != "-":
+        node.host = str(node.own_fields["host"]).strip()
     if node.use_cases:
         node.fields["use_cases"] = {"value": list(node.use_cases), "source": "own"}
     if "verify_by" in node.own_fields or "verify-by" in node.own_fields:
@@ -4245,6 +4426,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
             use_cases=list(et.get("use_cases") or parse_use_cases_field(et.get("headers", {}).get("use-cases") or et.get("headers", {}).get("use_cases"))),
             waiting_on=et.get("waiting_on"),
             verify_by=et.get("verify_by") or et.get("headers", {}).get("verify-by") or et.get("headers", {}).get("verify_by") or et.get("verifier"),
+            host=et.get("host"),
         )
         tree[tid] = node
         for sn in sub_nodes:
@@ -4324,6 +4506,7 @@ def discover_task_tree(tasks_dir: pathlib.Path) -> dict[str, TaskNode]:
                             own_conditions=et_parsed.get("conditions_ids", []),
                             use_cases=list(et_parsed.get("use_cases") or parse_use_cases_field(et_parsed.get("headers", {}).get("use-cases") or et_parsed.get("headers", {}).get("use_cases"))),
                             waiting_on=et_parsed.get("waiting_on"),
+                            host=et_parsed.get("host"),
                         )
 
     # 4. Connect children
@@ -9333,6 +9516,9 @@ def parse_emergent_task_file(
     else:
         wo_val = extract_waiting_on(raw_state)
 
+    raw_host = headers.get("host")
+    host_val = str(raw_host).strip() if (raw_host and str(raw_host).strip() and str(raw_host).strip() != "-") else None
+
     task_dict = {
         "kind": headers.get("kind") or "emergent",
         "id": headers.get("id", ""),
@@ -9350,6 +9536,7 @@ def parse_emergent_task_file(
         "canonical_state": normalize_state(raw_state or ("open" if is_micro else "")),
         "waiting_on": wo_val,
         "executor": headers.get("executor", "kilo" if is_micro else ""),
+        "host": host_val,
         "depends_on": depends_list,
         "depends_on_raw": raw_depends,
         "depends_on_free_text": depends_free_text,
@@ -12275,6 +12462,22 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 warnings.append(f"{rel}: node {nid} depends on empty container {dep!r} (dependency will never be satisfied).")
 
         if node.block_text is not None:
+            if "run_ref" in node.own_fields or "run-ref" in node.own_fields:
+                errors.append(f"{rel}: 'run-ref' is not allowed on node {nid} (use 'run-id').")
+            if "host" in node.own_fields:
+                raw_h = str(node.own_fields["host"]).strip() if node.own_fields["host"] is not None else ""
+                if raw_h == "":
+                    errors.append(f"{rel}: field 'host' on node {nid} cannot be empty (use '-' when empty).")
+                elif raw_h != "-":
+                    declared_hosts = get_declared_hosts(tasks_dir)
+                    if not HOST_ID_RE.match(raw_h):
+                        errors.append(
+                            f"{rel}: invalid host {raw_h!r} on node {nid} (must match '^[a-z0-9][a-z0-9_-]{{0,62}}$' and be a declared host)."
+                        )
+                    elif raw_h not in declared_hosts:
+                        errors.append(
+                            f"{rel}: undeclared host {raw_h!r} on node {nid} (declared hosts: {sorted(declared_hosts) if declared_hosts else 'none'})."
+                        )
             if "size" in node.own_fields and node.own_fields["size"]:
                 s_val = str(node.own_fields["size"]).strip().upper()
                 if s_val not in VALID_SIZES:
@@ -12478,6 +12681,22 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                     if not LABEL_RE.match(lbl):
                         errors.append(f"{rel}: invalid label {lbl!r} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$').")
 
+            # Host (optional)
+            if "host" in task.get("headers", {}):
+                raw_h = task["headers"]["host"].strip()
+                if raw_h == "":
+                    errors.append(f"{rel}: header field 'host' cannot be empty (use '-' when empty).")
+                elif raw_h != "-":
+                    declared_hosts = get_declared_hosts(tasks_dir)
+                    if not HOST_ID_RE.match(raw_h):
+                        errors.append(
+                            f"{rel}: invalid host {raw_h!r} (must match '^[a-z0-9][a-z0-9_-]{{0,62}}$' and be a declared host)."
+                        )
+                    elif raw_h not in declared_hosts:
+                        errors.append(
+                            f"{rel}: undeclared host {raw_h!r} (declared hosts: {sorted(declared_hosts) if declared_hosts else 'none'})."
+                        )
+
             # Short title (optional)
             if "short" in task.get("headers", {}) and task["headers"]["short"] and task["headers"]["short"] != "-":
                 s_val = task["headers"]["short"].strip()
@@ -12601,6 +12820,22 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                 for lbl in [l.strip() for l in raw_labels.split(",") if l.strip()]:
                     if not LABEL_RE.match(lbl):
                         errors.append(f"{rel}: invalid label {lbl!r} (must match '^[a-z0-9][a-z0-9-]{{0,23}}$').")
+
+            # Host (optional)
+            if "host" in task.get("headers", {}):
+                raw_h = task["headers"]["host"].strip()
+                if raw_h == "":
+                    errors.append(f"{rel}: header field 'host' cannot be empty (use '-' when empty).")
+                elif raw_h != "-":
+                    declared_hosts = get_declared_hosts(tasks_dir)
+                    if not HOST_ID_RE.match(raw_h):
+                        errors.append(
+                            f"{rel}: invalid host {raw_h!r} (must match '^[a-z0-9][a-z0-9_-]{{0,62}}$' and be a declared host)."
+                        )
+                    elif raw_h not in declared_hosts:
+                        errors.append(
+                            f"{rel}: undeclared host {raw_h!r} (declared hosts: {sorted(declared_hosts) if declared_hosts else 'none'})."
+                        )
 
             # Short title (optional)
             if "short" in task.get("headers", {}) and task["headers"]["short"] and task["headers"]["short"] != "-":
@@ -13541,7 +13776,7 @@ def _update_task_file_headers_and_state(
 
     if verifier is not None and verifier_line_idx is None and handoff_line_idx is not None:
         insert_pos = header_end
-        fields_after_verifier = {"verify-by", "verify_by", "size", "kind", "labels", "branch", "worktree", "run-id", "use-cases", "use_cases", "coordinates", "moved-to", "conditions", "waiting-on", "waiting_on", "short"}
+        fields_after_verifier = {"verify-by", "verify_by", "size", "kind", "labels", "branch", "worktree", "run-id", "host", "use-cases", "use_cases", "coordinates", "moved-to", "conditions", "waiting-on", "waiting_on", "short"}
         for i in range(handoff_line_idx + 1, header_end):
             m_key = HEADER_LINE_RE.match(lines[i])
             if m_key and m_key.group(1) in fields_after_verifier:
@@ -13554,7 +13789,7 @@ def _update_task_file_headers_and_state(
 
     if verify_by is not None and not clear_verify_by and verify_by.strip() not in ("", "-") and verify_by_line_idx is None and handoff_line_idx is not None:
         insert_pos = header_end
-        fields_after_verify_by = {"size", "kind", "labels", "branch", "worktree", "run-id", "use-cases", "use_cases", "coordinates", "moved-to", "conditions", "waiting-on", "waiting_on", "short"}
+        fields_after_verify_by = {"size", "kind", "labels", "branch", "worktree", "run-id", "host", "use-cases", "use_cases", "coordinates", "moved-to", "conditions", "waiting-on", "waiting_on", "short"}
         for i in range(handoff_line_idx + 1, header_end):
             m_key = HEADER_LINE_RE.match(lines[i])
             if m_key and m_key.group(1) in fields_after_verify_by:
@@ -25078,6 +25313,7 @@ def tasks_new_from_note(
     from_use_case: str | None = None,
     steps_range: str | None = None,
     warn_missing_kind: bool = False,
+    host: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Create an emergent task `T###`, from an inbox note (`from_note`), from a use case (`from_use_case`),
     or standalone (then `goal` and `priority_reason` are required), or as a child under `parent`."""
@@ -25475,6 +25711,8 @@ def tasks_new_from_note(
             opt_headers: list[str] = []
             if eff_kind:
                 opt_headers.append(f"- kind: {eff_kind}")
+            if host and str(host).strip() and str(host).strip() != "-":
+                opt_headers.append(f"- host: {str(host).strip()}")
             if resolved_ucs:
                 opt_headers.append(f"- use-cases: {', '.join(resolved_ucs)}")
             opt_headers.append(f"- short: {short_val}")
@@ -25566,6 +25804,8 @@ def tasks_new_from_note(
             }
             if eff_kind:
                 ret_res["kind"] = eff_kind
+            if host and str(host).strip() and str(host).strip() != "-":
+                ret_res["host"] = str(host).strip()
             if resolved_ucs:
                 ret_res["use_cases"] = resolved_ucs
             return True, ret_res
@@ -25588,6 +25828,7 @@ def tasks_micro(
     executor: str = "kilo",
     what: str | None = None,
     short: str | None = None,
+    host: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if not is_platform_supported():
         return False, {
@@ -25684,6 +25925,8 @@ def tasks_micro(
                 hdr_lines.append(f"- size: {size_clean}")
             if clean_labels:
                 hdr_lines.append(f"- labels: {', '.join(clean_labels)}")
+            if host and str(host).strip() and str(host).strip() != "-":
+                hdr_lines.append(f"- host: {str(host).strip()}")
             short_val = short.strip() if short and short.strip() and short.strip() != "-" else derive_short_title(title.strip())
             hdr_lines.append(f"- short: {short_val}")
 
@@ -25724,7 +25967,7 @@ def tasks_micro(
                 actor="owner",
             )
 
-            return True, {
+            ret_micro: dict[str, Any] = {
                 "ok": True,
                 "id": t_id,
                 "title": title.strip(),
@@ -25735,6 +25978,9 @@ def tasks_micro(
                 "rel_path": rel_task,
                 "file_path": str(task_file_path),
             }
+            if host and str(host).strip() and str(host).strip() != "-":
+                ret_micro["host"] = str(host).strip()
+            return True, ret_micro
     except Exception as e:
         return False, {"ok": False, "error": str(e)}
 
@@ -25811,6 +26057,8 @@ def tasks_promote(
                 hdr_lines.append(f"- kind: {headers['kind']}")
             if "labels" in headers and headers["labels"] and headers["labels"] != "-":
                 hdr_lines.append(f"- labels: {headers['labels']}")
+            if "host" in headers and headers["host"] and headers["host"] != "-":
+                hdr_lines.append(f"- host: {headers['host']}")
 
             body_content = parsed.get("what_body") or f"Goal for {title}."
             full_content = "\n".join(hdr_lines) + f"\n\n## Goal\n\n{body_content}\n\n## Steps\n\n- [ ] Implement task steps.\n\n## Verification\n\n- [ ] Verify task implementation.\n"
@@ -27380,6 +27628,7 @@ def cmd_tasks_new(args: argparse.Namespace) -> int:
         from_use_case=getattr(args, "from_use_case", None),
         steps_range=getattr(args, "steps_range", None),
         warn_missing_kind=True,
+        host=getattr(args, "host", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -27405,6 +27654,7 @@ def cmd_tasks_micro(args: argparse.Namespace) -> int:
         executor=getattr(args, "executor", "kilo"),
         what=getattr(args, "what", None),
         short=getattr(args, "short", None),
+        host=getattr(args, "host", None),
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2))
@@ -28127,6 +28377,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--depends-on", default="-", help="Dependencies")
     p_new.add_argument("--decider", default="-", help="Decider")
     p_new.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
+    p_new.add_argument("--host", default=None, help="Optional declared host id")
     p_new.add_argument("--step", action="append", dest="steps", metavar="STEP", default=None, help="Add a step item under ## Steps (repeatable)")
     p_new.add_argument("--verification", action="append", dest="verifications", metavar="VERIFICATION", default=None, help="Add a verification item under ## Verification (repeatable)")
     p_new.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
@@ -28411,6 +28662,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_micro.add_argument("--executor", default="kilo", help="Assigned executor (default: kilo)")
     p_micro.add_argument("--what", default=None, help="What section body")
     p_micro.add_argument("--short", default=None, help="Short title (1-5 words, <=40 chars); derived when omitted")
+    p_micro.add_argument("--host", default=None, help="Optional declared host id")
     p_micro.add_argument("--tasks-dir", default="tasks", help="Path to tasks/ directory")
     p_micro.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output structured JSON")
     p_micro.set_defaults(func=cmd_tasks_micro)

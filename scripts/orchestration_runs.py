@@ -132,6 +132,8 @@ def safe_task_write_lock(tasks_dir: pathlib.Path):
 try:
     from orchestration_config import (
         resolve_config,
+        resolve_host_id,
+        normalize_host_id,
         find_project_config_path,
         default_global_config_path,
         load_toml_file,
@@ -145,6 +147,8 @@ try:
     )
 except ImportError:
     resolve_config = None  # type: ignore
+    resolve_host_id = None  # type: ignore
+    normalize_host_id = None  # type: ignore
     find_project_config_path = None  # type: ignore
     default_global_config_path = None  # type: ignore
     load_toml_file = None  # type: ignore
@@ -275,6 +279,8 @@ def _emit_run_event(
             payload["session_id"] = session_id
     if record.get("task_id") and "task_id" not in payload:
         payload["task_id"] = record["task_id"]
+    if record.get("host") and "host" not in payload:
+        payload["host"] = record["host"]
 
     try:
         ev = orch_events.emit(
@@ -285,6 +291,7 @@ def _emit_run_event(
             subject=resolved_subject,
             origin_session=origin_session,
             session=session_id,
+            host=record.get("host"),
         )
         return ev
     except Exception as e:
@@ -3020,12 +3027,15 @@ def create_run_record(
     batch_members: list[str] | None = None,
     members: dict[str, Any] | None = None,
     origin_session: str | None = None,
+    host: str | None = None,
 ) -> dict[str, Any]:
     """Initialize a run.json record structure (Spec §5.1, R2, R3, R8, Task 09.4)."""
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    resolved_host = host or (resolve_host_id() if resolve_host_id is not None else "localhost")
     return {
         "run_id": run_id,
         "task_id": task_id,
+        "host": resolved_host,
         "is_batch": is_batch,
         "batch_members": list(batch_members or []),
         "members": dict(members or {}),
@@ -4616,6 +4626,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                 panel_id=source_record.get("panel_id"),
                 verification_mode=source_record.get("verification_mode"),
                 keep_worktree=bool(getattr(args, "keep_worktree", False) or source_record.get("keep_worktree", False)),
+                host=resolve_host_id(merged_cfg, gpath) if resolve_host_id is not None else None,
             )
             record["session_id"] = session_id
             record["origin_session"] = getattr(args, "origin_session", None) or source_record.get("origin_session")
@@ -4830,6 +4841,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                     verification_mode="panel",
                     keep_worktree=bool(getattr(args, "keep_worktree", False)),
                     created_worktree=str(wt_dir),
+                    host=resolve_host_id(data["merged_cfg"], getattr(args, "global_config", None)) if resolve_host_id is not None else None,  # type: ignore
                 )
                 if session_id:
                     rec["session_id"] = session_id
@@ -5009,6 +5021,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             is_batch=bool(data.get("is_batch")),
             batch_members=data.get("batch_members"),
             members=members_map,
+            host=resolve_host_id(data["merged_cfg"], getattr(args, "global_config", None)) if resolve_host_id is not None else None,  # type: ignore
         )
         if session_id:
             record["session_id"] = session_id

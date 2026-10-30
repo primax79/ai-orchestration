@@ -6426,6 +6426,77 @@ def test_kilo_agent_command_preview_and_apply(tmp_path: pathlib.Path):
     assert (tmp_path / "aio-unattended.md").read_text(encoding="utf-8") == "changed"
 
 
+def test_19_4_new_run_has_host_and_existing_runs_without_host_remain_valid(
+    sample_workspace: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Task 19.4: a new run has host in run.json and events; existing runs without host remain valid."""
+    import orchestration_runs as _runs
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    rec = _runs.create_run_record(
+        run_id="20261029-120000-T001-kilo-1234",
+        task_id="T001",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="inplace",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+    )
+    assert rec["host"] == "alf_ubuntu"
+
+    # Existing run.json without 'host' remains valid when loaded/listed/reconciled
+    legacy_run_id = "20261029-110000-T001-kilo-abcd"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / legacy_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    legacy_rec = dict(rec)
+    legacy_rec["run_id"] = legacy_run_id
+    legacy_rec["status"] = "succeeded"
+    legacy_rec["exit_code"] = 0
+    legacy_rec.pop("host", None)
+    (run_dir / "run.json").write_text(json.dumps(legacy_rec, indent=2), encoding="utf-8")
+
+    loaded = _runs.load_run_record(sample_workspace, legacy_run_id)
+    assert loaded is not None
+    assert loaded["run_id"] == legacy_run_id
+    assert "host" not in loaded
+    reconciled = _runs.reconcile(loaded, sample_workspace)
+    assert reconciled["status"] == "succeeded"
+    all_runs = _runs.list_run_records(sample_workspace)
+    assert any(r["run_id"] == legacy_run_id for r in all_runs)
+
+    # Also verify a real launched run via CLI writes 'host' in run.json
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG=str(cfg_file))
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_start = subprocess.run(cmd_start, capture_output=True, text=True, env=env, check=True)
+    new_run_id = json.loads(res_start.stdout)["run_id"]
+    term_rec = wait_for_terminal(sample_workspace, new_run_id)
+    assert term_rec["host"] == "alf_ubuntu"
+
+
 def test_19_7_run_start_refuses_missing_preflight_binary_and_starts_when_ok(
     sample_workspace: pathlib.Path,
     tmp_path: pathlib.Path,
