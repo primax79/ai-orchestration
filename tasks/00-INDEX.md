@@ -24,7 +24,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
 | 17 | 17 | [Gli use case guidano i task](done/17-use-cases-drive-tasks/plan.md) | done | - | M |
-| 19 | 19 | [Sviluppo multi-macchina: hub, executor su ogni host, console centrale](19-multi-machine-development/plan.md) | in progress (to verify: 19.1–19.8, 19.16) | - | M |
+| 19 | 19 | [Sviluppo multi-macchina: hub, executor su ogni host, console centrale](19-multi-machine-development/plan.md) | in progress (running: 19.18; to verify: 19.1–19.8, 19.16) | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -121,8 +121,8 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | UC036 (Sync Redmine tracker links) | P2 | [Architect links tasks to Redmine issues and synchronizes progress](use-cases/UC036-architect-links-tasks-to-redmine-issues-and-synchronizes-progress.md) | draft (proposed) | Architect session | - |
 | UC037 (Requester verifies task) | P1 | [Requester session validates a delivered task addressed to it](use-cases/UC037-requester-session-validates-a-delivered-task-addressed-to-its-workspace.md) | untested (proposed) | Requester session | T044, T047 |
 | UC038 (Project drift upgrade) | P1 | [Owner detects and upgrades a project that drifted from the current ai-orchestration conventions](use-cases/UC038-owner-detects-and-upgrades-a-project-that-drifted-from-the-current-ai-orchestration-conventions.md) | untested (proposed) | Owner | 19.1, 19.2, 19.3 |
-| UC039 (Multi-host console attach) | P1 | [Owner sees every run on every machine and attaches to its live terminal from one console](use-cases/UC039-owner-sees-every-run-on-every-machine-and-attaches-to-its-live-terminal-from-one-console.md) | in development (proposed) | Owner | 19.4, 19.5, 19.6, 19.8, 19.9, 19.15, 19.16 |
-| UC040 (Shared queue across hosts) | P1 | [Executors on the Mac and on the hub take tasks from one queue without double claims, and keep working when the hub is down](use-cases/UC040-executors-on-the-mac-and-on-the-hub-take-tasks-from-one-queue-without-double-claims-and-keep-working-when-the-hub-is-down.md) | in development (proposed) | Orchestrator | 19.4, 19.7, 19.10, 19.11, 19.12, 19.13, 19.17 |
+| UC039 (Multi-host console attach) | P1 | [Owner sees every run on every machine and attaches to its live terminal from one console](use-cases/UC039-owner-sees-every-run-on-every-machine-and-attaches-to-its-live-terminal-from-one-console.md) | in development (proposed) | Owner | 19.4, 19.5, 19.6, 19.8, 19.9, 19.15, 19.16, 19.18 |
+| UC040 (Shared queue across hosts) | P1 | [Executors on the Mac and on the hub take tasks from one queue without double claims, and keep working when the hub is down](use-cases/UC040-executors-on-the-mac-and-on-the-hub-take-tasks-from-one-queue-without-double-claims-and-keep-working-when-the-hub-is-down.md) | in development (proposed) | Orchestrator | 19.4, 19.7, 19.10, 19.11, 19.12, 19.13, 19.17, 19.18 |
 <!-- /ai-orch:generated use-cases -->
 
 ## Next up
