@@ -3163,134 +3163,625 @@ CANONICAL_RULE_SUBHEADING_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
     re.compile(r"^###\s+Rule\s+2:\s+Define Execution Tasks Before Delegating\b", re.IGNORECASE),
-    re.compile(r"^###\s+Rule\s+3:\s+Delegate Maximum Work\b", re.IGNORECASE),
-    re.compile(r"^###\s+Rule\s+4:\s+Select the Right Model\b", re.IGNORECASE),
 )
 
-LEGACY_INTRO_SIGNATURES: tuple[str, ...] = (
-    "architect / executor",
-    "primary_orchestrator",
-    "default_executor",
-    "verification_mode",
-    "managed by `ai-orchestration`",
-    "render-agents-md",
-    "orchestration.toml",
-    "roles.toml",
-    "architect & orchestrator",
+HISTORICAL_SECTION_MIN_SIMILARITY = 0.85
+
+# Real historical rendered blocks from the git history of `render_agents_md_block`:
+# - 2026-10-15 (commit 927244a: initial renderer & ricerca_auto configuration)
+# - 2026-10-17 (commit 0eef7a8: T011 topology-aware renderer, default & strict_main_session)
+# - 2026-10-28 (commit 5101a75: T071 orchestrator registration & heartbeat bullet)
+EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS: tuple[str, ...] = (
+    # 1. 2026-10-15 commit 927244a (default configuration)
+    """# Agent Orchestration & Development Guidelines (`AGENTS.md`)
+
+> **Managed by `ai-orchestration` (`orchestration_config.py render-agents-md`).**
+> Edit `tasks/orchestration.toml` (project) or `~/.config/ai-orchestration/orchestration.toml` (global) and re-run `render-agents-md --apply` to update.
+
+This repository uses an **Architect / Executor** development workflow (`primary_orchestrator = "kilo"`, `default_executor = "kilo"`, `verification_mode = "cross-agent"`). The **main session** acts strictly as the **Architect & Orchestrator** (discovery, task specification, parallel dispatch, verification, and integration), delegating implementation and heavy exploration to isolated **Worktree sessions** and **Subagents**.
+
+---
+
+## 1. Required Skills
+
+Load and follow these skills whenever planning, delegating, executing, or reviewing work:
+
+- **`orchestration-workflow`** (or **`kilo-mcp-orchestrator`** when driving via MCP) — Core 6-phase Architect/Executor loop (Discovery → Isolation → Delegation → Monitoring → Verification → Closure & Merge).
+- **`task-spec-authoring`** — Authoring unambiguous, grounded task specs (`focus_files`, caller tracing, negative-claim rule, disjoint parallel write scopes, one-task-one-commit, risk-calibrated verification).
+- **`task-pipeline`** — Structuring multi-task initiatives, specs, and emergent mid-session tasks inside `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `specs/`, `NN-<slug>/plan.md`, `T###-<slug>`).
+- **`task-worktree-ops`** — Operational git/worktree mechanics for inspecting, fixing, and merging Executor worktrees safely without racing active sessions.
+- **`executor-contract`** — Behavioral contract for all delegated Executor sessions (zero interactivity, strict scope adherence, real verification before reporting, structured `Final Report`).
+- **`conflict-resolver`** — Resolving merge conflicts across parallel Executor branches while preserving the semantics of each feature.
+- **`orchestration-setup`** — Mapping abstract role profiles (`deep-reasoning`, `orchestration`, `bulk-execution`, `exploration`) to concrete models and reasoning variants.
+
+---
+
+## 2. Core Operating Rules
+
+### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)
+
+- The main session exists to **analyze requirements, design task specs, orchestrate parallel execution, and evaluate/verify results** with the user.
+- **Do not perform feature implementation or multi-file coding in the main session**, even when a change looks quick ("it's small, I'll just do it" is forbidden).
+- **Only exception:** During Phase 5 (Verification), the Architect may apply a trivial 1–5 line fix (e.g., typo, missing import) directly in the Executor's worktree rather than doing a full round-trip. Any logic or multi-line change must be bounced back to the Executor session.
+- **Capture emergent work immediately:** If a bug, follow-up, or side requirement surfaces mid-conversation and won't be finished in the current turn, record it in `tasks/` (`task-pipeline`) and update `tasks/00-INDEX.md` before continuing. Keep the main session's context lean.
+
+### Rule 2: Define Execution Tasks Before Delegating
+
+Every delegated unit of work must have a well-defined specification (inline in the delegation prompt for a single self-contained task, or as a task file in `tasks/` for multi-step/parallel initiatives) containing:
+
+1. **Goal & Non-Goals:** Exact outcome expected and explicit exclusions to prevent scope creep.
+2. **Grounded `focus_files` & Callers:** Real file paths and symbol/line references verified via `grep`/`read` (never guessed). Instruct the Executor to re-`grep` if line numbers may have shifted. Trace all callers of any modified function or API route.
+3. **Disjoint Write Scope (for Parallel Batches):**
+   - Assign each parallel task an explicit, non-overlapping file/directory scope.
+   - If multiple tasks must touch a shared file, either serialize those tasks, pre-assign exact sections/symbols.
+4. **One Task = One Commit:** Instruct the Executor to create a single, atomic commit scoped strictly to its task.
+5. **Runnable Verification Criteria:** Concrete commands the Executor must run before reporting `delivered`. If correctness relies on a **negative claim** ("X is unused / dead code"), mandate a full regression check across the codebase.
+
+### Rule 3: Delegate Maximum Work & Evaluate Worktree vs. Local/Subtask Isolation
+
+Before dispatching, explicitly evaluate whether the task requires **Git Worktree isolation** or can run as a **same-tree Subagent / Local session**:
+
+| Execution Mode | Tool / Mechanism | When to Use |
+| :--- | :--- | :--- |
+| **Isolated Git Worktree** *(Default for parallel code changes)* | `agent_manager(mode="worktree")` | Parallel implementation tasks modifying tracked files; multi-file features or refactors; comparing alternative implementations; long-running implementation work while keeping the main session clean. |
+| **Background / Foreground Subagent** *(Read-only or strictly disjoint single-file work)* | `task` (`explore` or `general`) | Codebase discovery, caller tracing, architectural analysis, **independent blind review of a draft spec or delivered task**, or strictly isolated single-file creation when no other git writer is active. |
+| **Local / Follow-up Session** | `agent_manager(mode="local")` | Follow-up steering inside an already-created worktree or single sequential task when explicitly requested in the current checkout. |
+
+**Isolation Safety Checks (Shared Host Resources Are NOT Isolated by Worktrees):**
+
+- **Never run concurrent code-modifying tasks in the same working tree** unless their write scopes are 100% file-disjoint and neither runs git mutations while the other is active. When in doubt, use worktree isolation.
+  - **Git Config (`.git/config`):** Shared across all worktrees. Delegated tasks must never run `git config` or install hooks automatically.
+
+### Rule 4: Select the Right Model & Reasoning Effort per Task
+
+When dispatching tasks, explicitly select the `model` and reasoning effort/variant matching the task's role profile (configured in `orchestration.toml`):
+
+| Role Profile | Configured Model & Variant / Effort | Typical Tasks |
+| :--- | :--- | :--- |
+| **`deep-reasoning`** *(High complexity / silent-failure risk)* | **kilo**: `google/gemini-4-argon` (`high`)<br>**claude**: `opus` (`high`)<br>**codex**: `gpt-5-codex` (`high`) | Complex multi-file architecture & core logic, tricky bug root-cause analysis, blind spec/code review (`task-spec-authoring`), and semantic merge-conflict resolution (`conflict-resolver`). |
+| **`orchestration`** *(Planning, dispatch & verification)* | **kilo**: `google/gemini-4-argon` (`medium`)<br>**claude**: `sonnet` (`medium`)<br>**codex**: `gpt-5-codex` (`medium`) | Main session task decomposition, spec drafting, integration verification, and evaluating Executor outputs. |
+| **`bulk-execution`** *(Well-specified implementation)* | **kilo**: `google/gemini-3.8-flash` (`medium`)<br>**claude**: `sonnet` (`medium`)<br>**codex**: `gpt-5-codex-mini` (`medium`) | Executing self-contained task specs with clear `focus_files`, isolated modules/plugins, UI adjustments, and unit/smoke tests. |
+| **`exploration`** *(Fast read-only discovery & checks)* | **kilo**: `google/gemini-3.8-flash` (`low`)<br>**claude**: `haiku` (`low`)<br>**codex**: `gpt-5-codex-mini` (`low`) | Fast codebase search (`explore` / RAG), caller tracing, catalog/JSON inspection, and running read-only verification checks. |
+
+---
+
+## 3. Orchestration Lifecycle & Cross-Agent Verification Gate
+
+Track every task through explicit states (`open` → `in progress` → `delivered` → `verified` → `done`). **An Executor can only mark a task `delivered`; `verified` must be set by someone other than the Executor (or after explicit owner approval recorded in `PROGRESS.md`).**
+
+1. **Discover:** Use fast read-only searches (`grep`, `glob`, `read`, or exploration subagents/RAG) to gather ground-truth context.
+2. **Specify & Dispatch:** Write the task spec(s) and launch non-blocking parallel sessions.
+3. **Monitor & Intervene:** Monitor progress (or await via `kilo_task_wait` / background completion watcher). If a session drifts off-spec or stalls, cancel/stop early and steer the same session.
+4. **Verify Independently (Default mode: `cross-agent`, fallback order: `claude:deep-reasoning`, `kilo:deep-reasoning`, `codex:deep-reasoning`):**
+   - Never trust the Executor's `Final Report` alone. Inspect `git status` and `git diff` in the Executor's worktree.
+   - Re-run the task's Verification checks (directly or by dispatching an independent **Cross-Agent Verifier != Executor** on the `deep-reasoning` profile):
+     - Run the project's build, lint, and test commands against a disposable environment.
+   - If any criterion fails, mark the task `bounced` and send the exact failing criterion / `B1..Bn` findings back to the **same** Executor session.
+5. **Integrate & Clean Up:**
+   - Always checkout the target integration branch explicitly before merging:
+     `git status --short` → `git checkout <target-branch>` → `git merge --no-ff <task-branch> -m "Merge <task-id>: <summary>"` → `git log --oneline --graph -5`.
+   - **Post-Merge Integration Gate:** Run lint, tests, and a full consuming build on the integrated tree.
+   - Remove completed worktrees (`git worktree remove <path>`) on merge, cancellation, or discard.
+""",
+    # 2. 2026-10-15 commit 927244a (ricerca_auto configuration from docs/05)
+    """# Agent Orchestration & Development Guidelines (`AGENTS.md`)
+
+> **Managed by `ai-orchestration` (`orchestration_config.py render-agents-md`).**
+> Edit `tasks/orchestration.toml` (project) or `~/.config/ai-orchestration/orchestration.toml` (global) and re-run `render-agents-md --apply` to update.
+
+This repository uses an **Architect / Executor** development workflow (`primary_orchestrator = "kilo"`, `default_executor = "kilo"`, `verification_mode = "cross-agent"`). The **main session** acts strictly as the **Architect & Orchestrator** (discovery, task specification, parallel dispatch, verification, and integration), delegating implementation and heavy exploration to isolated **Worktree sessions** and **Subagents**.
+
+---
+
+## 1. Required Skills
+
+Load and follow these skills whenever planning, delegating, executing, or reviewing work:
+
+- **`orchestration-workflow`** (or **`kilo-mcp-orchestrator`** when driving via MCP) — Core 6-phase Architect/Executor loop (Discovery → Isolation → Delegation → Monitoring → Verification → Closure & Merge).
+- **`task-spec-authoring`** — Authoring unambiguous, grounded task specs (`focus_files`, caller tracing, negative-claim rule, disjoint parallel write scopes, one-task-one-commit, risk-calibrated verification).
+- **`task-pipeline`** — Structuring multi-task initiatives, specs, and emergent mid-session tasks inside `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `specs/`, `NN-<slug>/plan.md`, `T###-<slug>`).
+- **`task-worktree-ops`** — Operational git/worktree mechanics for inspecting, fixing, and merging Executor worktrees safely without racing active sessions.
+- **`executor-contract`** — Behavioral contract for all delegated Executor sessions (zero interactivity, strict scope adherence, real verification before reporting, structured `Final Report`).
+- **`conflict-resolver`** — Resolving merge conflicts across parallel Executor branches while preserving the semantics of each feature.
+- **`orchestration-setup`** — Mapping abstract role profiles (`deep-reasoning`, `orchestration`, `bulk-execution`, `exploration`) to concrete models and reasoning variants.
+- **`portal-scraper-builder`** (`.kilo/skills/portal-scraper-builder/SKILL.md`) — Delegating new portal scrapers under backend/scrapers/.
+
+---
+
+## 2. Core Operating Rules
+
+### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)
+
+- The main session exists to **analyze requirements, design task specs, orchestrate parallel execution, and evaluate/verify results** with the user.
+- **Do not perform feature implementation or multi-file coding in the main session**, even when a change looks quick ("it's small, I'll just do it" is forbidden).
+- **Only exception:** During Phase 5 (Verification), the Architect may apply a trivial 1–5 line fix (e.g., typo, missing import) directly in the Executor's worktree rather than doing a full round-trip. Any logic or multi-line change must be bounced back to the Executor session.
+- **Capture emergent work immediately:** If a bug, follow-up, or side requirement surfaces mid-conversation and won't be finished in the current turn, record it in `tasks/` (`task-pipeline`) and update `tasks/00-INDEX.md` before continuing. Keep the main session's context lean.
+
+### Rule 2: Define Execution Tasks Before Delegating
+
+Every delegated unit of work must have a well-defined specification (inline in the delegation prompt for a single self-contained task, or as a task file in `tasks/` for multi-step/parallel initiatives) containing:
+
+1. **Goal & Non-Goals:** Exact outcome expected and explicit exclusions to prevent scope creep.
+2. **Grounded `focus_files` & Callers:** Real file paths and symbol/line references verified via `grep`/`read` (never guessed). Instruct the Executor to re-`grep` if line numbers may have shifted. Trace all callers of any modified function or API route.
+3. **Disjoint Write Scope (for Parallel Batches):**
+   - Assign each parallel task an explicit, non-overlapping file/directory scope.
+   - If multiple tasks must touch a shared file (e.g., `backend/app.py`, `frontend/index.html`), either serialize those tasks, pre-assign exact sections/symbols or use the zero-conflict registry pattern (`backend/scrapers/registry.py`).
+4. **One Task = One Commit:** Instruct the Executor to create a single, atomic commit scoped strictly to its task.
+5. **Runnable Verification Criteria:** Concrete commands the Executor must run before reporting `delivered`. If correctness relies on a **negative claim** ("X is unused / dead code"), mandate a full regression check across the codebase.
+
+### Rule 3: Delegate Maximum Work & Evaluate Worktree vs. Local/Subtask Isolation
+
+Before dispatching, explicitly evaluate whether the task requires **Git Worktree isolation** or can run as a **same-tree Subagent / Local session**:
+
+| Execution Mode | Tool / Mechanism | When to Use |
+| :--- | :--- | :--- |
+| **Isolated Git Worktree** *(Default for parallel code changes)* | `agent_manager(mode="worktree")` | Parallel implementation tasks modifying tracked files; multi-file features or refactors; comparing alternative implementations; long-running implementation work while keeping the main session clean. |
+| **Background / Foreground Subagent** *(Read-only or strictly disjoint single-file work)* | `task` (`explore` or `general`) | Codebase discovery, caller tracing, architectural analysis, **independent blind review of a draft spec or delivered task**, or strictly isolated single-file creation when no other git writer is active. |
+| **Local / Follow-up Session** | `agent_manager(mode="local")` | Follow-up steering inside an already-created worktree or single sequential task when explicitly requested in the current checkout. |
+
+**Isolation Safety Checks (Shared Host Resources Are NOT Isolated by Worktrees):**
+
+- **Never run concurrent code-modifying tasks in the same working tree** unless their write scopes are 100% file-disjoint and neither runs git mutations while the other is active. When in doubt, use worktree isolation.
+  - **Databases (`./data/car_search.db`, `PostgreSQL :5433`):** Delegated tasks must **never** mutate or lock live databases during testing. Always use a disposable copy or ephemeral test DB for verification.
+  - **Ports & Containers (`:8765`, `:5433`):** If parallel tasks start a server/container, assign each task a distinct port in the task spec (assign worker ports from `8766..8779`) so they do not collide.
+  - **Git Config (`.git/config`):** Shared across all worktrees. Delegated tasks must never run `git config` or install hooks automatically.
+
+### Rule 4: Select the Right Model & Reasoning Effort per Task
+
+When dispatching tasks, explicitly select the `model` and reasoning effort/variant matching the task's role profile (configured in `orchestration.toml`):
+
+| Role Profile | Configured Model & Variant / Effort | Typical Tasks |
+| :--- | :--- | :--- |
+| **`deep-reasoning`** *(High complexity / silent-failure risk)* | **kilo**: `google/gemini-4-argon` (`high`)<br>**claude**: `opus` (`high`)<br>**codex**: `gpt-5-codex` (`high`) | Complex multi-file architecture & core logic, tricky bug root-cause analysis, blind spec/code review (`task-spec-authoring`), and semantic merge-conflict resolution (`conflict-resolver`). |
+| **`orchestration`** *(Planning, dispatch & verification)* | **kilo**: `google/gemini-4-argon` (`medium`)<br>**claude**: `sonnet` (`medium`)<br>**codex**: `gpt-5-codex` (`medium`) | Main session task decomposition, spec drafting, integration verification, and evaluating Executor outputs. |
+| **`bulk-execution`** *(Well-specified implementation)* | **kilo**: `google/gemini-3.8-flash` (`medium`)<br>**claude**: `sonnet` (`medium`)<br>**codex**: `gpt-5-codex-mini` (`medium`) | Executing self-contained task specs with clear `focus_files`, isolated modules/plugins, UI adjustments, and unit/smoke tests. |
+| **`exploration`** *(Fast read-only discovery & checks)* | **kilo**: `google/gemini-3.8-flash` (`low`)<br>**claude**: `haiku` (`low`)<br>**codex**: `gpt-5-codex-mini` (`low`) | Fast codebase search (`explore` / RAG), caller tracing, catalog/JSON inspection, and running read-only verification checks. |
+
+---
+
+## 3. Orchestration Lifecycle & Cross-Agent Verification Gate
+
+Track every task through explicit states (`open` → `in progress` → `delivered` → `verified` → `done`). **An Executor can only mark a task `delivered`; `verified` must be set by someone other than the Executor (or after explicit owner approval recorded in `PROGRESS.md`).**
+
+1. **Discover:** Use fast read-only searches (`grep`, `glob`, `read`, or exploration subagents/RAG) to gather ground-truth context.
+2. **Specify & Dispatch:** Write the task spec(s) and launch non-blocking parallel sessions.
+3. **Monitor & Intervene:** Monitor progress (or await via `kilo_task_wait` / background completion watcher). If a session drifts off-spec or stalls, cancel/stop early and steer the same session.
+4. **Verify Independently (Default mode: `cross-agent`, fallback order: `claude:deep-reasoning`, `kilo:deep-reasoning`, `codex:deep-reasoning`):**
+   - Never trust the Executor's `Final Report` alone. Inspect `git status` and `git diff` in the Executor's worktree.
+   - Re-run the task's Verification checks (directly or by dispatching an independent **Cross-Agent Verifier != Executor** on the `deep-reasoning` profile):
+     - **backend**: Verify module import, schema compatibility, and endpoint responses: `PYTHONPATH=. .venv/bin/python -c "import backend.app"`
+     - **scrapers**: Verify registry auto-discovery and parser/classifier output: `PYTHONPATH=. .venv/bin/python -c "from backend.scrapers.registry import discover_scrapers; print(len(discover_scrapers()))"`
+   - If any criterion fails, mark the task `bounced` and send the exact failing criterion / `B1..Bn` findings back to the **same** Executor session.
+5. **Integrate & Clean Up:**
+   - Always checkout the target integration branch explicitly before merging:
+     `git status --short` → `git checkout <target-branch>` → `git merge --no-ff <task-branch> -m "Merge <task-id>: <summary>"` → `git log --oneline --graph -5`.
+   - **Post-Merge Integration Gate:** Run lint, tests, and a full consuming build on the integrated tree.
+   - Remove completed worktrees (`git worktree remove <path>`) on merge, cancellation, or discard.
+""",
+    # 3. 2026-10-17 commit 0eef7a8 (T011 default configuration)
+    """# Agent Orchestration & Development Guidelines (`AGENTS.md`)
+
+> **Managed by `ai-orchestration` (`orchestration_config.py render-agents-md`).**
+> Edit `/Users/Alfredo/.config/ai-orchestration/projects/ricerca_auto/orchestration.toml` (project) or `/Users/Alfredo/.config/ai-orchestration/orchestration.toml` (global) and re-run `render-agents-md --apply` to update.
+
+This repository uses an **Architect / Executor** development workflow (`primary_orchestrator = "kilo"`, `default_executor = "kilo"`, `verification_mode = "cross-agent"`). The **main session** acts primarily as the **Architect & Orchestrator** (discovery, task specification, parallel dispatch, verification, and integration), delegating larger implementation work and heavy exploration to isolated **Worktree sessions** and **Subagents**.
+
+---
+
+## 1. Required Skills
+
+Load and follow these skills whenever planning, delegating, executing, or reviewing work:
+
+- **`orchestration-workflow`** — Core 6-phase Architect/Executor loop (Discovery → Isolation → Delegation → Monitoring → Verification → Closure & Merge).
+- **`task-spec-authoring`** — Authoring unambiguous, grounded task specs (`focus_files`, caller tracing, negative-claim rule, disjoint parallel write scopes, one-task-one-commit, risk-calibrated verification).
+- **`task-pipeline`** — Structuring multi-task initiatives, specs, and emergent mid-session tasks inside `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `specs/`, `NN-<slug>/plan.md`, `T###-<slug>`).
+- **`task-worktree-ops`** — Operational git/worktree mechanics for inspecting, fixing, and merging Executor worktrees safely without racing active sessions.
+- **`executor-contract`** — Behavioral contract for all delegated Executor sessions (zero interactivity, strict scope adherence, real verification before reporting, structured `Final Report`).
+- **`conflict-resolver`** — Resolving merge conflicts across parallel Executor branches while preserving the semantics of each feature.
+- **`orchestration-setup`** — Mapping abstract role profiles (`deep-reasoning`, `orchestration`, `bulk-execution`, `exploration`) to concrete models and reasoning variants.
+
+---
+
+## 2. Core Operating Rules
+
+### Rule 1: Focus the Main Session on Architecture & Orchestration
+
+- The main session focuses on **analyzing requirements, designing task specs, orchestrating execution, and evaluating/verifying results** with the user.
+- **Prefer delegating multi-file implementations, large refactors, or parallel tasks** to isolated worktrees or subagents to keep the main session context clean and focused. Small, direct adjustments and surgical edits may be performed in the main session when appropriate.
+- **Capture emergent work immediately:** If a bug, follow-up, or side requirement surfaces mid-conversation and won't be finished in the current turn, record it in `tasks/` (`task-pipeline`) and update `tasks/00-INDEX.md` before continuing. Keep the main session's context lean.
+
+### Rule 2: Define Execution Tasks Before Delegating
+
+Every delegated unit of work must have a well-defined specification (inline in the delegation prompt for a single self-contained task, or as a task file in `tasks/` for multi-step/parallel initiatives) containing:
+
+1. **Goal & Non-Goals:** Exact outcome expected and explicit exclusions to prevent scope creep.
+2. **Grounded `focus_files` & Callers:** Real file paths and symbol/line references verified via `grep`/`read` (never guessed). Instruct the Executor to re-`grep` if line numbers may have shifted. Trace all callers of any modified function or API route.
+3. **Disjoint Write Scope (for Parallel Batches):**
+   - Assign each parallel task an explicit, non-overlapping file/directory scope.
+   - If multiple tasks must touch a shared file, either serialize those tasks, pre-assign exact sections/symbols.
+4. **One Task = One Commit:** Instruct the Executor to create a single, atomic commit scoped strictly to its task.
+5. **Runnable Verification Criteria:** Concrete commands the Executor must run before reporting `delivered`. If correctness relies on a **negative claim** ("X is unused / dead code"), mandate a full regression check across the codebase.
+
+### Rule 3: Delegate Maximum Work & Evaluate Worktree vs. Local/Subtask Isolation
+
+Before dispatching, explicitly evaluate whether the task requires **Git Worktree isolation** or can run as a **same-tree Subagent / Local session**:
+
+| Execution Mode | Tool / Mechanism | When to Use |
+| :--- | :--- | :--- |
+| **Isolated Git Worktree** *(Default for parallel code changes)* | `agent_manager(mode="worktree")` | Parallel implementation tasks modifying tracked files; multi-file features or refactors; comparing alternative implementations; long-running implementation work while keeping the main session clean. |
+| **Background / Foreground Subagent** *(Read-only or strictly disjoint single-file work)* | `task` (`explore` or `general`) | Codebase discovery, caller tracing, architectural analysis, **independent blind review of a draft spec or delivered task**, or strictly isolated single-file creation when no other git writer is active. |
+| **Local / Follow-up Session** | `agent_manager(mode="local")` | Follow-up steering inside an already-created worktree or single sequential task when explicitly requested in the current checkout. |
+
+**Isolation Safety Checks (Shared Host Resources Are NOT Isolated by Worktrees):**
+
+- **Never run concurrent code-modifying tasks in the same working tree** unless their write scopes are 100% file-disjoint and neither runs git mutations while the other is active. When in doubt, use worktree isolation.
+  - **Git Config (`.git/config`):** Shared across all worktrees. Delegated tasks must never run `git config` or install hooks automatically.
+
+### Rule 4: Select the Right Model & Reasoning Effort per Task
+
+When dispatching tasks, explicitly select the `model` and reasoning effort/variant matching the task's role profile (configured in `orchestration.toml`):
+
+| Role Profile | Configured Model & Variant / Effort | Typical Tasks |
+| :--- | :--- | :--- |
+| **`deep-reasoning`** *(High complexity / silent-failure risk)* | **kilo**: `google/gemini-4-argon` (`high`)<br>**claude**: `opus` (`high`)<br>**codex**: `gpt-5-codex` (`high`) | Complex multi-file architecture & core logic, tricky bug root-cause analysis, blind spec/code review (`task-spec-authoring`), and semantic merge-conflict resolution (`conflict-resolver`). |
+| **`orchestration`** *(Planning, dispatch & verification)* | **kilo**: `google/gemini-4-argon` (`medium`)<br>**claude**: `sonnet` (`medium`)<br>**codex**: `gpt-5-codex` (`medium`) | Main session task decomposition, spec drafting, integration verification, and evaluating Executor outputs. |
+| **`bulk-execution`** *(Well-specified implementation)* | **kilo**: `google/gemini-3.8-flash` (`medium`)<br>**claude**: `sonnet` (`medium`)<br>**codex**: `gpt-5-codex-mini` (`medium`) | Executing self-contained task specs with clear `focus_files`, isolated modules/plugins, UI adjustments, and unit/smoke tests. |
+| **`exploration`** *(Fast read-only discovery & checks)* | **kilo**: `google/gemini-3.8-flash` (`low`)<br>**claude**: `haiku` (`low`)<br>**codex**: `gpt-5-codex-mini` (`low`) | Fast codebase search (`explore` / RAG), caller tracing, catalog/JSON inspection, and running read-only verification checks. |
+
+---
+
+## 3. Orchestration Lifecycle & Cross-Agent Verification Gate
+
+Track every task through explicit states (`open` → `in progress` → `delivered` → `verified` → `done`). **An Executor can only mark a task `delivered`; `verified` must be set by someone other than the Executor (or after explicit owner approval recorded in `PROGRESS.md`).**
+
+1. **Discover:** Use fast read-only searches (`grep`, `glob`, `read`, or exploration subagents/RAG) to gather ground-truth context.
+2. **Specify & Dispatch:** Write the task spec(s) and launch non-blocking parallel sessions.
+3. **Monitor & Intervene:** Monitor progress (via background completion watcher or status checks). If a session drifts off-spec or stalls, cancel/stop early and steer the same session.
+4. **Verify Independently (Default mode: `cross-agent`, fallback order: `claude:deep-reasoning`, `kilo:deep-reasoning`, `codex:deep-reasoning`):**
+   - Never trust the Executor's `Final Report` alone. Inspect `git status` and `git diff` in the Executor's worktree.
+   - Re-run the task's Verification checks (directly or by dispatching an independent **Cross-Agent Verifier != Executor** on the `deep-reasoning` profile):
+     - Run the project's build, lint, and test commands against a disposable environment.
+   - If any criterion fails, mark the task `bounced` and send the exact failing criterion / `B1..Bn` findings back to the **same** Executor session.
+5. **Integrate & Clean Up:**
+   - Always checkout the target integration branch explicitly before merging:
+     `git status --short` → `git checkout <target-branch>` → `git merge --no-ff <task-branch> -m "Merge <task-id>: <summary>"` → `git log --oneline --graph -5`.
+   - **Post-Merge Integration Gate:** Run lint, tests, and a full consuming build on the integrated tree.
+   - Remove completed worktrees (`git worktree remove <path>`) on merge, cancellation, or discard.
+""",
+    # 4. 2026-10-17 commit 0eef7a8 (T011 strict_main_session = true, kilo -> kilo)
+    """# Agent Orchestration & Development Guidelines (`AGENTS.md`)
+
+> **Managed by `ai-orchestration` (`orchestration_config.py render-agents-md`).**
+> Edit `/Users/Alfredo/.config/ai-orchestration/projects/ricerca_auto/orchestration.toml` (project) or `/Users/Alfredo/.config/ai-orchestration/orchestration.toml` (global) and re-run `render-agents-md --apply` to update.
+
+This repository uses an **Architect / Executor** development workflow (`primary_orchestrator = "kilo"`, `default_executor = "kilo"`, `verification_mode = "cross-agent"`). The **main session** acts strictly as the **Architect & Orchestrator** (discovery, task specification, parallel dispatch, verification, and integration), delegating implementation and heavy exploration to isolated **Worktree sessions** and **Subagents**.
+
+---
+
+## 1. Required Skills
+
+Load and follow these skills whenever planning, delegating, executing, or reviewing work:
+
+- **`orchestration-workflow`** — Core 6-phase Architect/Executor loop (Discovery → Isolation → Delegation → Monitoring → Verification → Closure & Merge).
+- **`task-spec-authoring`** — Authoring unambiguous, grounded task specs (`focus_files`, caller tracing, negative-claim rule, disjoint parallel write scopes, one-task-one-commit, risk-calibrated verification).
+- **`task-pipeline`** — Structuring multi-task initiatives, specs, and emergent mid-session tasks inside `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `specs/`, `NN-<slug>/plan.md`, `T###-<slug>`).
+- **`task-worktree-ops`** — Operational git/worktree mechanics for inspecting, fixing, and merging Executor worktrees safely without racing active sessions.
+- **`executor-contract`** — Behavioral contract for all delegated Executor sessions (zero interactivity, strict scope adherence, real verification before reporting, structured `Final Report`).
+- **`conflict-resolver`** — Resolving merge conflicts across parallel Executor branches while preserving the semantics of each feature.
+- **`orchestration-setup`** — Mapping abstract role profiles (`deep-reasoning`, `orchestration`, `bulk-execution`, `exploration`) to concrete models and reasoning variants.
+
+---
+
+## 2. Core Operating Rules
+
+### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)
+
+- The main session exists to **analyze requirements, design task specs, orchestrate parallel execution, and evaluate/verify results** with the user.
+- **Do not perform feature implementation or multi-file coding in the main session**, even when a change looks quick ("it's small, I'll just do it" is forbidden).
+- **Only exception:** During Phase 5 (Verification), the Architect may apply a trivial 1–5 line fix (e.g., typo, missing import) directly in the Executor's worktree rather than doing a full round-trip. Any logic or multi-line change must be bounced back to the Executor session.
+- **Capture emergent work immediately:** If a bug, follow-up, or side requirement surfaces mid-conversation and won't be finished in the current turn, record it in `tasks/` (`task-pipeline`) and update `tasks/00-INDEX.md` before continuing. Keep the main session's context lean.
+
+### Rule 2: Define Execution Tasks Before Delegating
+
+Every delegated unit of work must have a well-defined specification (inline in the delegation prompt for a single self-contained task, or as a task file in `tasks/` for multi-step/parallel initiatives) containing:
+
+1. **Goal & Non-Goals:** Exact outcome expected and explicit exclusions to prevent scope creep.
+2. **Grounded `focus_files` & Callers:** Real file paths and symbol/line references verified via `grep`/`read` (never guessed). Instruct the Executor to re-`grep` if line numbers may have shifted. Trace all callers of any modified function or API route.
+3. **Disjoint Write Scope (for Parallel Batches):**
+   - Assign each parallel task an explicit, non-overlapping file/directory scope.
+   - If multiple tasks must touch a shared file, either serialize those tasks, pre-assign exact sections/symbols.
+4. **One Task = One Commit:** Instruct the Executor to create a single, atomic commit scoped strictly to its task.
+5. **Runnable Verification Criteria:** Concrete commands the Executor must run before reporting `delivered`. If correctness relies on a **negative claim** ("X is unused / dead code"), mandate a full regression check across the codebase.
+
+### Rule 3: Delegate Maximum Work & Evaluate Worktree vs. Local/Subtask Isolation
+
+Before dispatching, explicitly evaluate whether the task requires **Git Worktree isolation** or can run as a **same-tree Subagent / Local session**:
+
+| Execution Mode | Tool / Mechanism | When to Use |
+| :--- | :--- | :--- |
+| **Isolated Git Worktree** *(Default for parallel code changes)* | `agent_manager(mode="worktree")` | Parallel implementation tasks modifying tracked files; multi-file features or refactors; comparing alternative implementations; long-running implementation work while keeping the main session clean. |
+| **Background / Foreground Subagent** *(Read-only or strictly disjoint single-file work)* | `task` (`explore` or `general`) | Codebase discovery, caller tracing, architectural analysis, **independent blind review of a draft spec or delivered task**, or strictly isolated single-file creation when no other git writer is active. |
+| **Local / Follow-up Session** | `agent_manager(mode="local")` | Follow-up steering inside an already-created worktree or single sequential task when explicitly requested in the current checkout. |
+
+**Isolation Safety Checks (Shared Host Resources Are NOT Isolated by Worktrees):**
+
+- **Never run concurrent code-modifying tasks in the same working tree** unless their write scopes are 100% file-disjoint and neither runs git mutations while the other is active. When in doubt, use worktree isolation.
+  - **Git Config (`.git/config`):** Shared across all worktrees. Delegated tasks must never run `git config` or install hooks automatically.
+
+### Rule 4: Select the Right Model & Reasoning Effort per Task
+
+When dispatching tasks, explicitly select the `model` and reasoning effort/variant matching the task's role profile (configured in `orchestration.toml`):
+
+| Role Profile | Configured Model & Variant / Effort | Typical Tasks |
+| :--- | :--- | :--- |
+| **`deep-reasoning`** *(High complexity / silent-failure risk)* | **kilo**: `google/gemini-4-argon` (`high`)<br>**claude**: `opus` (`high`)<br>**codex**: `gpt-5-codex` (`high`) | Complex multi-file architecture & core logic, tricky bug root-cause analysis, blind spec/code review (`task-spec-authoring`), and semantic merge-conflict resolution (`conflict-resolver`). |
+| **`orchestration`** *(Planning, dispatch & verification)* | **kilo**: `google/gemini-4-argon` (`medium`)<br>**claude**: `sonnet` (`medium`)<br>**codex**: `gpt-5-codex` (`medium`) | Main session task decomposition, spec drafting, integration verification, and evaluating Executor outputs. |
+| **`bulk-execution`** *(Well-specified implementation)* | **kilo**: `google/gemini-3.8-flash` (`medium`)<br>**claude**: `sonnet` (`medium`)<br>**codex**: `gpt-5-codex-mini` (`medium`) | Executing self-contained task specs with clear `focus_files`, isolated modules/plugins, UI adjustments, and unit/smoke tests. |
+| **`exploration`** *(Fast read-only discovery & checks)* | **kilo**: `google/gemini-3.8-flash` (`low`)<br>**claude**: `haiku` (`low`)<br>**codex**: `gpt-5-codex-mini` (`low`) | Fast codebase search (`explore` / RAG), caller tracing, catalog/JSON inspection, and running read-only verification checks. |
+
+---
+
+## 3. Orchestration Lifecycle & Cross-Agent Verification Gate
+
+Track every task through explicit states (`open` → `in progress` → `delivered` → `verified` → `done`). **An Executor can only mark a task `delivered`; `verified` must be set by someone other than the Executor (or after explicit owner approval recorded in `PROGRESS.md`).**
+
+1. **Discover:** Use fast read-only searches (`grep`, `glob`, `read`, or exploration subagents/RAG) to gather ground-truth context.
+2. **Specify & Dispatch:** Write the task spec(s) and launch non-blocking parallel sessions.
+3. **Monitor & Intervene:** Monitor progress (via background completion watcher or status checks). If a session drifts off-spec or stalls, cancel/stop early and steer the same session.
+4. **Verify Independently (Default mode: `cross-agent`, fallback order: `claude:deep-reasoning`, `kilo:deep-reasoning`, `codex:deep-reasoning`):**
+   - Never trust the Executor's `Final Report` alone. Inspect `git status` and `git diff` in the Executor's worktree.
+   - Re-run the task's Verification checks (directly or by dispatching an independent **Cross-Agent Verifier != Executor** on the `deep-reasoning` profile):
+     - Run the project's build, lint, and test commands against a disposable environment.
+   - If any criterion fails, mark the task `bounced` and send the exact failing criterion / `B1..Bn` findings back to the **same** Executor session.
+5. **Integrate & Clean Up:**
+   - Always checkout the target integration branch explicitly before merging:
+     `git status --short` → `git checkout <target-branch>` → `git merge --no-ff <task-branch> -m "Merge <task-id>: <summary>"` → `git log --oneline --graph -5`.
+   - **Post-Merge Integration Gate:** Run lint, tests, and a full consuming build on the integrated tree.
+   - Remove completed worktrees (`git worktree remove <path>`) on merge, cancellation, or discard.
+""",
+    # 5. 2026-10-28 commit 5101a75 (T071 orchestrator registration & heartbeat)
+    """# Agent Orchestration & Development Guidelines (`AGENTS.md`)
+
+> **Managed by `ai-orchestration` (`orchestration_config.py render-agents-md`).**
+> Edit `/Users/Alfredo/.config/ai-orchestration/projects/ricerca_auto/orchestration.toml` (project) or `/Users/Alfredo/.config/ai-orchestration/orchestration.toml` (global) and re-run `render-agents-md --apply` to update.
+
+This repository uses an **Architect / Executor** development workflow (`primary_orchestrator = "claude"`, `default_executor = "kilo"`, `verification_mode = "cross-agent"`). The **main session** acts primarily as the **Architect & Orchestrator** (discovery, task specification, parallel dispatch, verification, and integration), delegating larger implementation work and heavy exploration to isolated **Worktree sessions** and **Subagents**.
+
+---
+
+## 1. Required Skills
+
+Load and follow these skills whenever planning, delegating, executing, or reviewing work:
+
+- **`orchestration-workflow`** (or **`kilo-mcp-orchestrator`** when driving via MCP) — Core 6-phase Architect/Executor loop (Discovery → Isolation → Delegation → Monitoring → Verification → Closure & Merge).
+- **`task-spec-authoring`** — Authoring unambiguous, grounded task specs (`focus_files`, caller tracing, negative-claim rule, disjoint parallel write scopes, one-task-one-commit, risk-calibrated verification).
+- **`task-pipeline`** — Structuring multi-task initiatives, specs, and emergent mid-session tasks inside `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `specs/`, `NN-<slug>/plan.md`, `T###-<slug>`).
+- **`task-worktree-ops`** — Operational git/worktree mechanics for inspecting, fixing, and merging Executor worktrees safely without racing active sessions.
+- **`executor-contract`** — Behavioral contract for all delegated Executor sessions (zero interactivity, strict scope adherence, real verification before reporting, structured `Final Report`).
+- **`conflict-resolver`** — Resolving merge conflicts across parallel Executor branches while preserving the semantics of each feature.
+- **`orchestration-setup`** — Mapping abstract role profiles (`deep-reasoning`, `orchestration`, `bulk-execution`, `exploration`) to concrete models and reasoning variants.
+
+---
+
+## 2. Core Operating Rules
+
+### Rule 1: Focus the Main Session on Architecture & Orchestration
+
+- The main session focuses on **analyzing requirements, designing task specs, orchestrating execution, and evaluating/verifying results** with the user.
+- **Prefer delegating multi-file implementations, large refactors, or parallel tasks** to isolated worktrees or subagents to keep the main session context clean and focused. Small, direct adjustments and surgical edits may be performed in the main session when appropriate.
+- **Capture emergent work immediately:** If a bug, follow-up, or side requirement surfaces mid-conversation and won't be finished in the current turn, record it in `tasks/` (`task-pipeline`) and update `tasks/00-INDEX.md` before continuing. Keep the main session's context lean.
+- **Register as Orchestrator & Heartbeat:** When orchestrating in a workspace with `ai-orch` installed, register this session with `ai-orch sessions register --role orchestrator` and send periodic heartbeats (`ai-orch sessions heartbeat <session_id>`). Interactive sessions (e.g. Claude Code) do not send automatic heartbeats: emit a heartbeat on each turn or periodic check. Note that a "stale" status for an active interactive holder indicates idle time between prompts, not absence.
+
+### Rule 2: Define Execution Tasks Before Delegating
+
+Every delegated unit of work must have a well-defined specification (inline in the delegation prompt for a single self-contained task, or as a task file in `tasks/` for multi-step/parallel initiatives) containing:
+
+1. **Goal & Non-Goals:** Exact outcome expected and explicit exclusions to prevent scope creep.
+2. **Grounded `focus_files` & Callers:** Real file paths and symbol/line references verified via `grep`/`read` (never guessed). Instruct the Executor to re-`grep` if line numbers may have shifted. Trace all callers of any modified function or API route.
+3. **Disjoint Write Scope (for Parallel Batches):**
+   - Assign each parallel task an explicit, non-overlapping file/directory scope.
+   - If multiple tasks must touch a shared file, either serialize those tasks, pre-assign exact sections/symbols.
+4. **One Task = One Commit:** Instruct the Executor to create a single, atomic commit scoped strictly to its task.
+5. **Runnable Verification Criteria:** Concrete commands the Executor must run before reporting `delivered`. If correctness relies on a **negative claim** ("X is unused / dead code"), mandate a full regression check across the codebase.
+
+### Rule 3: Delegate Maximum Work & Evaluate Worktree vs. Local/Subtask Isolation
+
+Before dispatching, explicitly evaluate whether the task requires **Git Worktree isolation** or can run as a **same-tree Subagent / Local session**:
+
+| Execution Mode | Tool / Mechanism | When to Use |
+| :--- | :--- | :--- |
+| **Isolated Git Worktree** *(Default for parallel code changes)* | `kilo_implement(isolation="worktree")` | Parallel implementation tasks modifying tracked files; multi-file features or refactors; comparing alternative implementations; long-running implementation work while keeping the main session clean. |
+| **Background / Foreground Subagent** *(Read-only or strictly disjoint single-file work)* | `Agent` | Codebase discovery, caller tracing, architectural analysis, **independent blind review of a draft spec or delivered task**, or strictly isolated single-file creation when no other git writer is active. |
+| **Local / Follow-up Session** | `kilo_implement(continue_session_id=...)` | Follow-up steering inside an already-created worktree or single sequential task when explicitly requested in the current checkout. |
+
+**Isolation Safety Checks (Shared Host Resources Are NOT Isolated by Worktrees):**
+
+- **Never run concurrent code-modifying tasks in the same working tree** unless their write scopes are 100% file-disjoint and neither runs git mutations while the other is active. When in doubt, use worktree isolation.
+  - **Git Config (`.git/config`):** Shared across all worktrees. Delegated tasks must never run `git config` or install hooks automatically.
+
+### Rule 4: Select the Right Model & Reasoning Effort per Task
+
+When dispatching tasks, explicitly select the `model` and reasoning effort/variant matching the task's role profile (configured in `orchestration.toml`):
+
+| Role Profile | Configured Model & Variant / Effort | Typical Tasks |
+| :--- | :--- | :--- |
+| **`deep-reasoning`** *(High complexity / silent-failure risk)* | **claude**: `opus` (`high`)<br>**kilo**: `google/gemini-4-argon` (`high`)<br>**codex**: `gpt-5-codex` (`high`) | Complex multi-file architecture & core logic, tricky bug root-cause analysis, blind spec/code review (`task-spec-authoring`), and semantic merge-conflict resolution (`conflict-resolver`). |
+| **`orchestration`** *(Planning, dispatch & verification)* | **claude**: `sonnet` (`medium`)<br>**kilo**: `google/gemini-4-argon` (`medium`)<br>**codex**: `gpt-5-codex` (`medium`) | Main session task decomposition, spec drafting, integration verification, and evaluating Executor outputs. |
+| **`bulk-execution`** *(Well-specified implementation)* | **claude**: `sonnet` (`medium`)<br>**kilo**: `google/gemini-3.8-flash` (`medium`)<br>**codex**: `gpt-5-codex-mini` (`medium`) | Executing self-contained task specs with clear `focus_files`, isolated modules/plugins, UI adjustments, and unit/smoke tests. |
+| **`exploration`** *(Fast read-only discovery & checks)* | **claude**: `haiku` (`low`)<br>**kilo**: `google/gemini-3.8-flash` (`low`)<br>**codex**: `gpt-5-codex-mini` (`low`) | Fast codebase search (`explore` / RAG), caller tracing, catalog/JSON inspection, and running read-only verification checks. |
+
+---
+
+## 3. Orchestration Lifecycle & Cross-Agent Verification Gate
+
+Track every task through explicit states (`open` → `in progress` → `delivered` → `verified` → `done`). **An Executor can only mark a task `delivered`; `verified` must be set by someone other than the Executor (or after explicit owner approval recorded in `PROGRESS.md`).**
+
+1. **Discover:** Use fast read-only searches (`grep`, `glob`, `read`, or exploration subagents/RAG) to gather ground-truth context.
+2. **Specify & Dispatch:** Write the task spec(s) and launch non-blocking parallel sessions.
+3. **Monitor & Intervene:** Monitor progress (or await via `kilo_task_wait` / background completion watcher). If a session drifts off-spec or stalls, cancel/stop early and steer the same session.
+4. **Verify Independently (Default mode: `cross-agent`, fallback order: `claude:deep-reasoning`, `kilo:deep-reasoning`, `codex:deep-reasoning`):**
+   - Never trust the Executor's `Final Report` alone. Inspect `git status` and `git diff` in the Executor's worktree.
+   - Re-run the task's Verification checks (directly or by dispatching an independent **Cross-Agent Verifier != Executor** on the `deep-reasoning` profile):
+     - Run the project's build, lint, and test commands against a disposable environment.
+   - If any criterion fails, mark the task `bounced` and send the exact failing criterion / `B1..Bn` findings back to the **same** Executor session.
+5. **Integrate & Clean Up:**
+   - Always checkout the target integration branch explicitly before merging:
+     `git status --short` → `git checkout <target-branch>` → `git merge --no-ff <task-branch> -m "Merge <task-id>: <summary>"` → `git log --oneline --graph -5`.
+   - **Post-Merge Integration Gate:** Run lint, tests, and a full consuming build on the integrated tree.
+   - Remove completed worktrees (`git worktree remove <path>`) on merge, cancellation, or discard.
+""",
 )
 
-LEGACY_REQUIRED_SKILLS_SIGNATURES: tuple[str, ...] = (
-    "`orchestration-workflow`",
-    "`kilo-mcp-orchestrator`",
-    "`task-spec-authoring`",
-    "`task-pipeline`",
-    "`macroplan-authoring`",
-    "`task-worktree-ops`",
-    "`task-delegation`",
-    "`executor-contract`",
-    "`kilo-mcp-executor-contract`",
-    "`conflict-resolver`",
-    "`orchestration-setup`",
-    "`interactive-role-setup`",
-    "load and follow these skills whenever planning, delegating, executing, or reviewing work",
-)
-
-LEGACY_CORE_RULES_SIGNATURES: tuple[str, ...] = (
-    "rule 1: keep the main session free",
-    "rule 1: focus the main session on architecture",
-    "rule 2: define execution tasks before delegating",
-    "rule 3: delegate maximum work",
-    "rule 4: select the right model",
-    "`focus_files`",
-    "disjoint write scope",
-    "one task = one commit",
-    "isolated git worktree",
-    "isolation safety checks",
-    "shared host resources are not isolated by worktrees",
-    "deep-reasoning",
-    "bulk-execution",
-)
-
-LEGACY_LIFECYCLE_SIGNATURES: tuple[str, ...] = (
-    "`open` → `in progress` → `delivered`",
-    "`open` -> `in progress` -> `delivered`",
-    "an executor can only mark a task",
-    "verify independently",
-    "cross-agent verifier",
-    "post-merge integration gate",
-    "git worktree remove",
-    "`final report`",
-)
-
-CANONICAL_REQUIRED_SKILLS_EXCERPT = (
-    "## 1. Required Skills\n\n"
-    "Load and follow these skills whenever planning, delegating, executing, or reviewing work:\n"
-    "- `orchestration-workflow` `task-spec-authoring` `task-pipeline` `task-worktree-ops` `executor-contract`"
-)
-CANONICAL_CORE_RULES_EXCERPT = (
-    "## 2. Core Operating Rules\n\n"
-    "### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)\n"
-    "### Rule 2: Define Execution Tasks Before Delegating\n"
-    "Grounded `focus_files`, Disjoint Write Scope, One Task = One Commit."
-)
-CANONICAL_LIFECYCLE_EXCERPT = (
-    "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate\n\n"
-    "Track every task through explicit states (`open` → `in progress` → `delivered` → `verified` → `done`). "
-    "Verify Independently and run the Post-Merge Integration Gate."
-)
+_HISTORICAL_SECTIONS_CACHE: dict[str, list[str]] | None = None
 
 
-def _count_signature_hits(text_lower: str, signatures: tuple[str, ...]) -> int:
-    return sum(1 for sig in signatures if sig in text_lower)
+def _classify_legacy_orchestration_heading(heading: str) -> str | None:
+    h_stripped = heading.strip()
+    if LEGACY_INTRO_HEADING_RE.match(h_stripped):
+        return "intro"
+    if LEGACY_REQUIRED_SKILLS_HEADING_RE.match(h_stripped):
+        return "required_skills"
+    if LEGACY_CORE_RULES_HEADING_RE.match(h_stripped):
+        return "core_rules"
+    if LEGACY_LIFECYCLE_HEADING_RE.match(h_stripped):
+        return "lifecycle"
+    return None
+
+
+def _normalize_legacy_orchestration_section(section_text: str) -> str:
+    """Normalize a markdown section for whole-section comparison against historical renderings.
+
+    Strips standalone `---` horizontal rule dividers, normalizes optional numbering on the
+    section heading (`## 1. Required Skills` -> `## Required Skills`), and collapses whitespace.
+    """
+    without_hr = re.sub(r"(?m)^\s*---\s*$", "", section_text)
+    normalized_heading = re.sub(
+        r"^(#{1,2})\s+\d+\.\s+",
+        r"\1 ",
+        without_hr.strip(),
+        count=1,
+    )
+    return " ".join(normalized_heading.split()).lower()
+
+
+def _split_markdown_top_sections(segment: str) -> list[tuple[int, int, str]]:
+    """Return `(start_pos, end_pos, heading_stripped)` for `#` and `##` sections outside fenced code blocks."""
+    lines = segment.splitlines(keepends=True)
+    if not lines:
+        return []
+    boundaries: list[tuple[int, str]] = []
+    offset = 0
+    in_fenced = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fenced = not in_fenced
+        elif not in_fenced:
+            if re.match(r"^#{1,2}\s+", stripped):
+                boundaries.append((offset, stripped))
+        offset += len(line)
+
+    if not boundaries:
+        return []
+
+    out: list[tuple[int, int, str]] = []
+    for idx, (start_pos, heading_str) in enumerate(boundaries):
+        end_pos = boundaries[idx + 1][0] if idx + 1 < len(boundaries) else len(segment)
+        out.append((start_pos, end_pos, heading_str))
+    return out
+
+
+def _get_historical_orchestration_sections() -> dict[str, list[str]]:
+    """Load and cache normalized whole-section texts from real historical renderings."""
+    global _HISTORICAL_SECTIONS_CACHE
+    if _HISTORICAL_SECTIONS_CACHE is not None:
+        return _HISTORICAL_SECTIONS_CACHE
+
+    by_category: dict[str, list[str]] = {
+        "intro": [],
+        "required_skills": [],
+        "core_rules": [],
+        "lifecycle": [],
+    }
+
+    raw_blocks: list[str] = list(EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS)
+
+    # Also load any checked-in historical rendering fixtures if present in the repo tree
+    try:
+        repo_root = pathlib.Path(__file__).resolve().parents[5]
+        fixtures_dir = repo_root / "scripts" / "fixtures" / "historical_agents_md"
+        if fixtures_dir.is_dir():
+            for fpath in sorted(fixtures_dir.glob("*.md")):
+                raw_blocks.append(fpath.read_text(encoding="utf-8"))
+    except OSError:
+        pass
+
+    # Also include the current renderer output (default and strict_main_session)
+    try:
+        raw_blocks.append(render_agents_md_block(DEFAULT_GLOBAL_CONFIG))
+        strict_cfg = copy.deepcopy(DEFAULT_GLOBAL_CONFIG)
+        strict_cfg["agents_md"] = {"strict_main_session": True}
+        raw_blocks.append(render_agents_md_block(strict_cfg))
+    except Exception:
+        pass
+
+    for block in raw_blocks:
+        inner = block.replace(BEGIN_MARKER, "").replace(END_MARKER, "")
+        for start_pos, end_pos, heading_str in _split_markdown_top_sections(inner):
+            cat = _classify_legacy_orchestration_heading(heading_str)
+            if cat is None:
+                continue
+            norm_sec = _normalize_legacy_orchestration_section(inner[start_pos:end_pos])
+            if norm_sec and norm_sec not in by_category[cat]:
+                by_category[cat].append(norm_sec)
+
+    _HISTORICAL_SECTIONS_CACHE = by_category
+    return by_category
 
 
 def _section_matches_legacy_orchestration(heading: str, section_text: str) -> tuple[bool, list[str]]:
-    """Positively match a markdown section against known legacy ai-orchestration renderings.
+    """Positively match a markdown section against known historical ai-orchestration renderings.
 
-    Requires multiple canonical signatures (or high sequence similarity to the canonical template)
-    inside the section body so ordinary user-authored sections with similar titles are never
-    treated as orchestration duplicates.
+    Compares the whitespace-normalized whole section against the real historical rendered
+    sections and requires an exact match or >= 0.85 whole-section similarity. Keyword
+    signatures are never used.
     """
     h_stripped = heading.strip()
-    sec_lower = section_text.lower()
-
-    if LEGACY_INTRO_HEADING_RE.match(h_stripped):
-        hits = _count_signature_hits(sec_lower, LEGACY_INTRO_SIGNATURES)
-        if hits >= 2:
-            return (True, [h_stripped])
+    category = _classify_legacy_orchestration_heading(h_stripped)
+    if category is None:
         return (False, [])
 
-    if LEGACY_REQUIRED_SKILLS_HEADING_RE.match(h_stripped):
-        hits = _count_signature_hits(sec_lower, LEGACY_REQUIRED_SKILLS_SIGNATURES)
-        sim = difflib.SequenceMatcher(None, sec_lower, CANONICAL_REQUIRED_SKILLS_EXCERPT.lower()).ratio()
-        if hits >= 2 or sim >= 0.55:
-            return (True, [h_stripped])
+    norm_cand = _normalize_legacy_orchestration_section(section_text)
+    if not norm_cand:
         return (False, [])
 
-    if LEGACY_CORE_RULES_HEADING_RE.match(h_stripped):
-        hits = _count_signature_hits(sec_lower, LEGACY_CORE_RULES_SIGNATURES)
-        sim = difflib.SequenceMatcher(None, sec_lower, CANONICAL_CORE_RULES_EXCERPT.lower()).ratio()
-        if hits >= 2 or sim >= 0.55:
-            matched_headings = [h_stripped]
-            in_fenced = False
-            for raw_line in section_text.splitlines()[1:]:
-                sline = raw_line.strip()
-                if sline.startswith("```"):
-                    in_fenced = not in_fenced
-                    continue
-                if not in_fenced and any(pat.match(sline) for pat in CANONICAL_RULE_SUBHEADING_PATTERNS):
-                    matched_headings.append(sline)
-            return (True, matched_headings)
+    ref_sections = _get_historical_orchestration_sections().get(category, [])
+    matched = False
+    for norm_ref in ref_sections:
+        if norm_cand == norm_ref:
+            matched = True
+            break
+        sim = difflib.SequenceMatcher(None, norm_cand, norm_ref, autojunk=False).ratio()
+        if sim >= HISTORICAL_SECTION_MIN_SIMILARITY:
+            matched = True
+            break
+
+    if not matched:
         return (False, [])
 
-    if LEGACY_LIFECYCLE_HEADING_RE.match(h_stripped):
-        hits = _count_signature_hits(sec_lower, LEGACY_LIFECYCLE_SIGNATURES)
-        sim = difflib.SequenceMatcher(None, sec_lower, CANONICAL_LIFECYCLE_EXCERPT.lower()).ratio()
-        if hits >= 2 or sim >= 0.55:
-            return (True, [h_stripped])
-        return (False, [])
+    if category == "core_rules":
+        matched_headings = [h_stripped]
+        in_fenced = False
+        for raw_line in section_text.splitlines()[1:]:
+            sline = raw_line.strip()
+            if sline.startswith("```"):
+                in_fenced = not in_fenced
+                continue
+            if not in_fenced and any(pat.match(sline) for pat in CANONICAL_RULE_SUBHEADING_PATTERNS):
+                matched_headings.append(sline)
+        return (True, matched_headings)
 
-    return (False, [])
+    return (True, [h_stripped])
 
 
 def _analyze_legacy_orchestration_segment(segment: str) -> tuple[list[tuple[int, int]], list[str]]:
@@ -3300,31 +3791,13 @@ def _analyze_legacy_orchestration_segment(segment: str) -> tuple[list[tuple[int,
     returns `(byte_or_char_spans, matched_headings)` for sections that positively match
     known legacy orchestration renderings.
     """
-    lines = segment.splitlines(keepends=True)
-    if not lines:
-        return ([], [])
-
-    # Locate `#` and `##` section boundaries outside fenced code blocks
-    boundaries: list[tuple[int, int, str]] = []  # (char_offset, heading_level, heading_stripped)
-    offset = 0
-    in_fenced = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            in_fenced = not in_fenced
-        elif not in_fenced:
-            m = re.match(r"^(#{1,2})\s+", stripped)
-            if m:
-                boundaries.append((offset, len(m.group(1)), stripped))
-        offset += len(line)
-
-    if not boundaries:
+    section_bounds = _split_markdown_top_sections(segment)
+    if not section_bounds:
         return ([], [])
 
     spans: list[tuple[int, int]] = []
     matched_headings: list[str] = []
-    for idx, (start_pos, _level, heading_str) in enumerate(boundaries):
-        end_pos = boundaries[idx + 1][0] if idx + 1 < len(boundaries) else len(segment)
+    for start_pos, end_pos, heading_str in section_bounds:
         sec_text = segment[start_pos:end_pos]
         is_match, sec_headings = _section_matches_legacy_orchestration(heading_str, sec_text)
         if is_match:

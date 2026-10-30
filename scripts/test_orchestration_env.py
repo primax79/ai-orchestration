@@ -5249,8 +5249,10 @@ def test_19_2_b1_ordinary_user_sections_not_treated_as_duplicated_orchestration_
     tmp_path: pathlib.Path,
 ) -> None:
     """B1: Ordinary user-authored `## Required Skills`, `## Core Operating Rules`, and
-    `## Orchestration Lifecycle` sections without canonical ai-orchestration signatures are
-    never flagged by `ai-orch doctor` and never deleted by `ai-orch upgrade`."""
+    `## Orchestration Lifecycle` sections — even when they use orchestration vocabulary like
+    `task-pipeline`, `task-spec-authoring`, `focus_files`, and 'one task = one commit' — are
+    never flagged by `ai-orch doctor` and never deleted by `ai-orch upgrade`, whereas real
+    historical renderings (2026-10-15 927244a and 2026-10-17 0eef7a8) are positively detected and removed."""
     import orchestration_env as oe
 
     fake_home = tmp_path / "home"
@@ -5262,12 +5264,16 @@ def test_19_2_b1_ordinary_user_sections_not_treated_as_duplicated_orchestration_
         "# Custom Application Guidelines\n\n"
         "## Required Skills\n\n"
         "- Familiarity with Rust, Tokio, and SQLite WAL internals.\n"
-        "- Knowledge of HTTP/2 framing.\n\n"
+        "- Use `task-pipeline` and `task-spec-authoring` when writing team notes, plus `orchestration-workflow`.\n\n"
         "## Core Operating Rules\n\n"
-        "### Rule 1: Zero Unsafe Blocks\n\n"
-        "All crate modules must compile with `#![forbid(unsafe_code)]`.\n\n"
+        "### Rule 1: Keep the Main Session Free for Reviews\n\n"
+        "All crate modules must compile with `#![forbid(unsafe_code)]`.\n"
+        "List `focus_files` in PR descriptions and follow \"one task = one commit\" with a disjoint write scope.\n\n"
+        "### Rule 2: Define Execution Tasks Before Delegating\n\n"
+        "Run tests in an isolated git worktree before opening a PR.\n\n"
         "## Orchestration Lifecycle\n\n"
-        "Worker pods start via systemd socket activation and drain on SIGTERM.\n\n"
+        "Worker pods move from `open` → `in progress` → `delivered` → `verified` → `done`.\n"
+        "Attach a `Final Report` and run `git worktree remove` after the Post-Merge Integration Gate.\n\n"
     )
     user_footer = (
         "\n## Database Migrations\n\n"
@@ -5310,6 +5316,35 @@ def test_19_2_b1_ordinary_user_sections_not_treated_as_duplicated_orchestration_
     e_pos = after_bytes.index(b"<!-- END ai-orchestration -->\n") + len(b"<!-- END ai-orchestration -->\n")
     assert after_bytes[:b_pos] == user_header.encode("utf-8")
     assert after_bytes[e_pos:] == user_footer.encode("utf-8")
+
+    # 3. Positive test with two real historical renderings (2026-10-15 927244a & 2026-10-17 0eef7a8)
+    for hist_fname in ("2026-10-15_927244a_default.md", "2026-10-17_0eef7a8_default.md"):
+        hist_text = (FIXTURES_DIR / "historical_agents_md" / hist_fname).read_text(encoding="utf-8")
+        unmarked_hist = (
+            hist_text.replace("<!-- BEGIN ai-orchestration -->\n", "")
+            .replace("<!-- END ai-orchestration -->\n", "")
+        )
+        (proj_dir / "AGENTS.md").write_text(user_header + unmarked_hist + managed_block + user_footer, encoding="utf-8")
+
+        doc_hist = oe.inspect_project_doctor(proj_dir, home=fake_home)
+        assert doc_hist["drifted"] is True
+        assert doc_hist["checks"]["agents_md"]["duplicated_blocks"] is True
+        assert "## 1. Required Skills" in doc_hist["checks"]["agents_md"]["duplicated_sections"]
+        assert "## 2. Core Operating Rules" in doc_hist["checks"]["agents_md"]["duplicated_sections"]
+        assert "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate" in doc_hist["checks"]["agents_md"]["duplicated_sections"]
+        assert "## Required Skills" not in doc_hist["checks"]["agents_md"]["duplicated_sections"]
+        assert "## Core Operating Rules" not in doc_hist["checks"]["agents_md"]["duplicated_sections"]
+
+        prev_hist = oe.upgrade_project(proj_dir, home=fake_home)
+        assert "## 1. Required Skills" in prev_hist["removed_duplicated_sections"]
+        app_hist = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=prev_hist["plan_hash"])
+        assert app_hist["ok"] is True
+
+        upgraded_bytes = (proj_dir / "AGENTS.md").read_bytes()
+        b_idx2 = upgraded_bytes.index(b"<!-- BEGIN ai-orchestration -->\n")
+        e_idx2 = upgraded_bytes.index(b"<!-- END ai-orchestration -->\n") + len(b"<!-- END ai-orchestration -->\n")
+        assert upgraded_bytes[:b_idx2] == user_header.encode("utf-8")
+        assert upgraded_bytes[e_idx2:] == user_footer.encode("utf-8")
 
 
 def test_19_2_b2_unrelated_third_party_versioned_global_skills_ignored(
@@ -5394,8 +5429,10 @@ def test_19_2_b4_render_and_import_exceptions_emit_doctor_check_failed_and_never
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """B4: Exceptions during index sync render, AGENTS.md render, or module import are never swallowed
-    as 'in sync' and instead emit a `doctor-check-failed` finding with `severity='error'`."""
+    """B4: Exceptions during index sync render, AGENTS.md render, tasks/AGENTS.md render,
+    task-validation (`validate_tasks_tree`), workspace registry lookup (`resolve_workspace_for_path`),
+    or helper module import are never swallowed as OK/in-sync and instead emit `doctor-check-failed`
+    findings with `severity='error'`."""
     import orchestration_env as oe
 
     fake_home = tmp_path / "home"
@@ -5405,6 +5442,7 @@ def test_19_2_b4_render_and_import_exceptions_emit_doctor_check_failed_and_never
 
     te = oe._load_tasks_engine()
     oc = oe._load_orchestration_config()
+    reg = oe._load_orchestration_registry()
 
     def _boom_index(*_args: object, **_kwargs: object) -> str:
         raise RuntimeError("simulated index render failure")
@@ -5412,9 +5450,22 @@ def test_19_2_b4_render_and_import_exceptions_emit_doctor_check_failed_and_never
     def _boom_agents(*_args: object, **_kwargs: object) -> str:
         raise RuntimeError("simulated agents render failure")
 
+    def _boom_tasks_agents(*_args: object, **_kwargs: object) -> str:
+        raise RuntimeError("simulated tasks agents render failure")
+
+    def _boom_validate(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("simulated tasks validate failure")
+
+    def _boom_registry(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("simulated workspace registry failure")
+
+    # 1. Runtime check exceptions (index-sync, agents-md, tasks-agents-md, tasks-validate, workspace-registry)
     with monkeypatch.context() as mp:
         mp.setattr(te, "render_synced_index", _boom_index)
         mp.setattr(oc, "render_agents_md_block", _boom_agents)
+        mp.setattr(te, "render_upgraded_agents_md", _boom_tasks_agents)
+        mp.setattr(te, "validate_tasks_tree", _boom_validate)
+        mp.setattr(reg, "resolve_workspace_for_path", _boom_registry)
         doc = oe.inspect_project_doctor(proj_dir, home=fake_home)
 
     assert doc["ok"] is False
@@ -5422,12 +5473,54 @@ def test_19_2_b4_render_and_import_exceptions_emit_doctor_check_failed_and_never
     assert doc["checks"]["index_markers"]["in_sync"] is False
     assert doc["checks"]["index_markers"]["ok"] is False
     assert doc["checks"]["agents_md"]["ok"] is False
+    assert doc["checks"]["task_headers"]["ok"] is False
+    assert doc["checks"]["tasks_validation"]["ok"] is False
+    assert doc["checks"]["workspace_registry"]["ok"] is False
 
     failed_findings = [f for f in doc["findings"] if f["kind"] == "doctor-check-failed"]
     failed_checks = {f["check"] for f in failed_findings}
-    assert "index-sync" in failed_checks
-    assert "agents-md" in failed_checks
+    assert {
+        "index-sync",
+        "agents-md",
+        "tasks-agents-md",
+        "tasks-validate",
+        "workspace-registry",
+    }.issubset(failed_checks)
     for ff in failed_findings:
+        assert ff["severity"] == "error"
+
+    # 2. Helper module import failures (`import-tasks-engine`, `import-orchestration-config`, `import-orchestration-registry`)
+    def _boom_import_te() -> object:
+        raise ImportError("simulated tasks_engine import failure")
+
+    def _boom_import_oc() -> object:
+        raise ImportError("simulated orchestration_config import failure")
+
+    def _boom_import_reg() -> object:
+        raise ImportError("simulated orchestration_registry import failure")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(oe, "_load_tasks_engine", _boom_import_te)
+        mp.setattr(oe, "_load_orchestration_config", _boom_import_oc)
+        mp.setattr(oe, "_load_orchestration_registry", _boom_import_reg)
+        doc_imp = oe.inspect_project_doctor(proj_dir, home=fake_home)
+
+    assert doc_imp["ok"] is False
+    assert doc_imp["drifted"] is True
+    assert doc_imp["checks"]["index_markers"]["ok"] is False
+    assert doc_imp["checks"]["agents_md"]["ok"] is False
+    assert doc_imp["checks"]["task_headers"]["ok"] is False
+    assert doc_imp["checks"]["tasks_validation"]["ok"] is False
+    assert doc_imp["checks"]["workspace_registry"]["ok"] is False
+
+    imp_failed = [f for f in doc_imp["findings"] if f["kind"] == "doctor-check-failed"]
+    imp_checks = {f["check"] for f in imp_failed}
+    assert {
+        "import-tasks-engine",
+        "import-orchestration-config",
+        "import-orchestration-registry",
+    }.issubset(imp_checks)
+    for ff in imp_failed:
         assert ff["severity"] == "error"
 
 
