@@ -23,13 +23,13 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.1 - Lookup unico della configurazione di progetto
 
-- **Status:** `in progress` (2026-10-29; Verifica Codex NON OK: vedi tasks/19-multi-machine-development/notes/19.1-verification-codex.md; 2026-10-30; rinviato allo stesso executor su alf_ubuntu con i rilievi) · **Short:** Lookup config unico · **Size:** M · **Kind:** fix · **Depends on:** - · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
+- **Status:** `verified` (2026-10-29; su integration/19, non ancora su main) · **Short:** Lookup config unico · **Size:** M · **Kind:** fix · **Depends on:** - · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
 - **Goal:** una sola funzione decide dove sta la configurazione di progetto e tutti la usano: oggi `orchestration_config.find_project_config_path` (`.ai-orchestration.local.toml`, poi `~/.config/ai-orchestration/projects/<dir>/orchestration.toml`), `tasks_engine` (`tasks/orchestration.toml`, `<proj>/orchestration.toml`, `tasks/AGENTS.md`: `tasks_engine.py:425`, `:596-685`) e i trigger (`orchestration_triggers.py:305-311`) leggono percorsi diversi. Fissare l'ordine (documentato), mantenere i percorsi legacy in sola lettura con un avviso, correggere `docs/00-QUICKSTART-AND-PLAYBOOK.md:117-149`, `plugins/shared/skills/orchestration-setup/SKILL.md:68,138` (template, non il generato) e `specs/orchestration-config-and-agents-md.md` §3.
 - **Verification:** test che per ogni posizione legacy lo stesso valore (es. `extension_fields`, una regola di trigger) viene letto da tutti e tre i sottosistemi; `ai-orch tasks config` e `ai-orch env status` riportano lo stesso percorso; `grep -rn "tasks/orchestration.toml" docs plugins/*/skills/*/SKILL.template.md` non trova istruzioni a scriverci; suite completa verde.
 
 ### 19.2 - `ai-orch doctor` di progetto: rilevare il drift
 
-- **Status:** `in progress` (2026-10-30; Verifica Codex NON OK: vedi tasks/19-multi-machine-development/notes/19.2-verification-codex.md; 2026-10-30; rinviato allo stesso executor su alf_ubuntu con i rilievi) · **Short:** Doctor di progetto · **Size:** M · **Kind:** feature · **Depends on:** 19.1 · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; secondo rinvio allo stesso executor su alf_ubuntu) · **Short:** Doctor di progetto · **Size:** M · **Kind:** feature · **Depends on:** 19.1 · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
 - **Goal:** N078 punti 1, 2, 4. Comando `ai-orch doctor [--project PATH] [--json]` costruito sul doctor di `env` esistente (`orchestration_env.py:410-500`, ack/unack) e sui controlli di `tasks upgrade`: config mancante, workspace non registrato, indice senza marker, AGENTS.md renderizzato vecchio o con blocchi scritti a mano duplicati, campi header di schemi vecchi, skill/config globali di versione diversa da quella del tool. Ogni rilievo ha severità e il comando che lo corregge. Registrare per progetto la versione di convenzione (`convention_version`, file versionato in `tasks/`). Avviso di una riga da ogni comando `ai-orch` lanciato in un progetto con drift (disattivabile).
 - **Verification:** fixture con un progetto "stile 2026-10-17" (ricostruito sullo stato descritto in N078) → tutti i rilievi attesi con severità; progetto aggiornato → nessun rilievo; `--json` stabile; il drift di skill globali è rilevato con due versioni installate finte.
 
@@ -41,13 +41,13 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.4 - Identità dell'host
 
-- **Status:** `in progress` (2026-10-29; kilo (gemini-4-argon) in screen su alf_ubuntu, worktree ../.worktrees/ai-orchestration/19.4-host-identity) · **Short:** Identità dell'host · **Size:** S · **Kind:** feature · **Depends on:** - · **Use cases:** UC039, UC040 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-29; Verifica Codex NON OK: tasks/19-multi-machine-development/notes/19.4-verification-codex.md; 2026-10-30; rinviato allo stesso executor su alf_ubuntu) · **Short:** Identità dell'host · **Size:** S · **Kind:** feature · **Depends on:** - · **Use cases:** UC039, UC040 · **Repo:** `ai-orchestration/`
 - **Goal:** id canonico dell'host (`[host] id` nella config globale, fallback hostname normalizzato) e tabella `[hosts.<id>]` (ssh target, utente per gli agenti, ruolo `hub`/`client`). L'id va in `run.json`, negli eventi, nei record di sessione. Nuovo campo task opzionale `host` con valore validato (id dichiarati), anche nei microtask; niente `run-ref` (si usa `run-id`).
 - **Verification:** test unitari su risoluzione dell'id e validazione; un run nuovo ha `host`; `tasks validate` rifiuta un `host` non dichiarato; run e task esistenti senza `host` restano validi.
 
 ### 19.5 - `reconcile()` consapevole dell'host
 
-- **Status:** `open` · **Short:** Reconcile per host · **Size:** S · **Kind:** fix · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; kilo (gemini) su alf_ubuntu via chain, 2026-10-30) · **Short:** Reconcile per host · **Size:** S · **Kind:** fix · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** `reconcile()` (`orchestration_runs.py:2879-2945`) agisce solo sui run con `host` uguale all'host corrente: mai `lost`, mai `kill_process_group` sui run di altri host; per quelli espone l'ultimo heartbeat e la sua età. I run vecchi senza `host` sono considerati locali.
 - **Verification:** test con un `run.json` di un altro host e pid inesistente: resta nel suo stato, nessun kill, nessun evento `run.lost`; stesso caso con host locale → `lost` come oggi.
 
@@ -59,7 +59,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.7 - Preflight eseguibile e timeout per progetto
 
-- **Status:** `in progress` (2026-10-30; Verifica Codex NON OK: vedi tasks/19-multi-machine-development/notes/19.7-verification-codex.md; 2026-10-30; rinviato allo stesso executor su alf_ubuntu con i rilievi) · **Short:** Preflight per host · **Size:** M · **Kind:** feature · **Depends on:** 19.1 · **Use cases:** UC040 · **Repo:** `ai-orchestration/`
+- **Status:** `verified` (2026-10-30; su integration/19, non ancora su main) · **Short:** Preflight per host · **Size:** M · **Kind:** feature · **Depends on:** 19.1 · **Use cases:** UC040 · **Repo:** `ai-orchestration/`
 - **Goal:** `[project.preflight]` (strumenti con versione minima, porte libere, servizi attivi, spazio disco) eseguito sull'host di destinazione prima di ogni `run start`; se fallisce il dispatch è bloccato con il motivo (caso reale: T205 di ricerca_auto senza `bun`). Timeout dei comandi per progetto, passati all'executor nel prompt. `verification_checks` diventa eseguibile con `ai-orch verify-checks`.
 - **Verification:** test con un preflight che chiede un binario inesistente → `run start` rifiuta con il nome del binario; preflight ok → run parte; timeout presente nel prompt generato.
 
@@ -101,7 +101,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.16 - Registro dei progetti sull'hub
 
-- **Status:** `open` · **Short:** Registro progetti hub · **Size:** M · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; kilo (gemini) su alf_ubuntu via chain, 2026-10-30) · **Short:** Registro progetti hub · **Size:** M · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** N079. Il registro attuale (`orchestration_registry.py`, SQLite per macchina) identifica i workspace con `canonical_path`, `device`, `inode` e non si può condividere. Registro dei progetti sull'hub con identità portabile (uuid), percorsi per host, host primario, repository di riferimento e mirror, `convention_version`; il SQLite locale diventa una cache. Assorbire `~/works/MIGRATION_REGISTRY.json` (importazione una tantum, nessun secondo registro). Coordinarsi con la risposta Q026=A (scoperta dei workspace non registrati) e con T073.
 - **Verification:** importazione del file di migrazione su una copia; lo stesso progetto ha lo stesso uuid sul Mac e sull'hub; `console status` elenca i progetti dal registro dell'hub; il registro locale resta utilizzabile con l'hub irraggiungibile.
 

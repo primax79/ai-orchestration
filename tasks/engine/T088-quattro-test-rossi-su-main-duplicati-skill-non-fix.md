@@ -35,6 +35,9 @@ Riportare verde la suite completa. Baseline 2026-10-29 su alf_ubuntu (uvx pytest
 
 ## Log (newest first)
 
+- 2026-10-30, orchestrator: state `bounced` -> `in progress` — secondo rinvio allo stesso executor su alf_ubuntu
+- 2026-10-30, codex: state `delivered` -> `bounced` — Seconda verifica Codex NON OK: B1 parziale (vedi nota di verifica)
+- 2026-10-30, kilo: state `in progress` -> `delivered` — fix dopo la verifica, unito in integration/19
 - 2026-10-30, orchestrator: state `bounced` -> `in progress` — rinviato allo stesso executor su alf_ubuntu con i rilievi
 - 2026-10-30, codex: state `delivered` -> `bounced` — Verifica Codex NON OK: vedi tasks/engine/notes/T088-verification-codex.md
 - 2026-10-30, kilo: state `in progress` -> `delivered` — commit su kilo/<slug>, unito in integration/19 dalla chain (test verdi a parte la baseline)
