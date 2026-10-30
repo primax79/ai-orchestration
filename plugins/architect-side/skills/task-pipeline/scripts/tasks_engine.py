@@ -887,8 +887,9 @@ def resolve_host_id(
         cand_tomls.append(pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml")
 
     if proj_root is not None:
-        for cand in _inspect_project_config(proj_root, global_config).get("candidates", []):
-            cand_tomls.append(cand["path"])
+        proj_info = _inspect_project_config(proj_root, global_config)
+        if proj_info.get("exists") and isinstance(proj_info.get("path"), pathlib.Path):
+            cand_tomls.append(proj_info["path"])
 
     for cfg_file in cand_tomls:
         if cfg_file.is_file() and tomllib is not None:
@@ -955,10 +956,15 @@ def get_declared_hosts(
         else:
             cand_tomls.append(pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml")
 
-        for check_ws in ([proj_root, proj_root.parent] if proj_root.parent != proj_root else [proj_root]):
-            for cand in _inspect_project_config(check_ws, global_config).get("candidates", []):
-                if cand["path"] not in cand_tomls:
-                    cand_tomls.append(cand["path"])
+        proj_info = _inspect_project_config(proj_root, global_config)
+        if proj_info.get("exists") and isinstance(proj_info.get("path"), pathlib.Path):
+            if proj_info["path"] not in cand_tomls:
+                cand_tomls.append(proj_info["path"])
+        elif proj_root.parent != proj_root:
+            parent_info = _inspect_project_config(proj_root.parent, global_config)
+            if parent_info.get("exists") and isinstance(parent_info.get("path"), pathlib.Path):
+                if parent_info["path"] not in cand_tomls:
+                    cand_tomls.append(parent_info["path"])
 
         for cfg_file in cand_tomls:
             if cfg_file.is_file() and tomllib is not None:

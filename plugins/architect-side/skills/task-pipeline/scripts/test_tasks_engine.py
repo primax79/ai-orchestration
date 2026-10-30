@@ -18320,6 +18320,79 @@ def test_19_4_task_and_microtask_host_validation_and_backward_compat(
     assert any("run-ref" in e for e in errs_ref)
 
 
+def test_19_4_b1_shadowed_legacy_config_hosts_do_not_leak(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 19.4 (B1): When an active canonical config and a shadowed legacy config declare
+    different hosts, neither resolve_host_id() nor get_declared_hosts() nor tasks validate
+    leaks hosts from the shadowed legacy config."""
+    monkeypatch.delenv("AI_ORCH_HOST_ID", raising=False)
+    monkeypatch.delenv("AI_ORCH_DECLARED_HOSTS", raising=False)
+
+    empty_global = tmp_path / "global_empty.toml"
+    empty_global.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(empty_global))
+
+    ws = tmp_path / "proj_shadow"
+    tasks_dir = ws / "tasks"
+    (tasks_dir / "backend").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # Shadowed legacy config in tasks/orchestration.toml declares legacy_hub and legacy_client
+    legacy_cfg = tasks_dir / "orchestration.toml"
+    legacy_cfg.write_text(
+        '[host]\nid = "legacy_hub"\n\n'
+        '[hosts.legacy_client]\nssh_target = "legacy.lan"\nrole = "client"\n\n'
+        '[tasks]\nhosts = ["legacy_extra"]\n',
+        encoding="utf-8",
+    )
+
+    # Active canonical config in .ai-orchestration.local.toml declares only active_box (no [host] id)
+    active_cfg = ws / ".ai-orchestration.local.toml"
+    active_cfg.write_text(
+        '[hosts.active_box]\nssh_target = "active.lan"\nrole = "client"\n',
+        encoding="utf-8",
+    )
+
+    # 1. With orchestration_config integration: legacy hosts do not leak, and resolve_host_id does not read legacy [host] id
+    assert te.get_declared_hosts(tasks_dir, global_config=empty_global) == {"active_box"}
+    assert te.resolve_host_id(tasks_dir, global_config=empty_global, hostname="my-workstation.local") == "my-workstation"
+
+    # 2. Fallback path when orchestration_config is unavailable: identical behavior (no legacy leak)
+    with monkeypatch.context() as mp:
+        mp.setattr(te, "orchestration_config", None)
+        assert te.get_declared_hosts(tasks_dir, global_config=empty_global) == {"active_box"}
+        assert te.resolve_host_id(tasks_dir, global_config=empty_global, hostname="my-workstation.local") == "my-workstation"
+
+    # 3. tasks validate accepts active_box and rejects legacy_client / legacy_hub from the shadowed legacy config
+    t_active = tasks_dir / "backend" / "T001-active-host.md"
+    t_active.write_text(
+        "# T001 Active host\n\n"
+        "- id: T001\n- title: Active host\n- category: backend\n- priority: P2\n"
+        "- priority-reason: test\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: do T001\n"
+        "- host: active_box\n- short: Active host\n\n"
+        "## Goal\nG\n\n## Steps\n- [ ] S\n\n## Verification\n- V\n",
+        encoding="utf-8",
+    )
+    errs_ok, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errs_ok == []
+
+    t_legacy = tasks_dir / "backend" / "T002-legacy-host.md"
+    t_legacy.write_text(
+        "# T002 Legacy host\n\n"
+        "- id: T002\n- title: Legacy host\n- category: backend\n- priority: P2\n"
+        "- priority-reason: test\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: do T002\n"
+        "- host: legacy_client\n- short: Legacy host\n\n"
+        "## Goal\nG\n\n## Steps\n- [ ] S\n\n## Verification\n- V\n",
+        encoding="utf-8",
+    )
+    errs_leak, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("T002" in e and "undeclared host 'legacy_client'" in e for e in errs_leak)
+
+
+
 
 
 

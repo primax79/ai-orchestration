@@ -1073,18 +1073,17 @@ def resolve_host_id(
                 pass
         if workspace is not None:
             proj_info = inspect_project_config(workspace, gpath)
-            for cand in proj_info.get("candidates", []):
-                c_path = cand["path"]
-                if c_path.exists():
-                    try:
-                        pcfg = load_toml_file(c_path)
-                        host_sec = pcfg.get("host")
-                        if isinstance(host_sec, dict):
-                            raw_id = host_sec.get("id")
-                            if isinstance(raw_id, str) and raw_id.strip():
-                                return raw_id.strip()
-                    except Exception:
-                        pass
+            c_path = proj_info["path"]
+            if proj_info["exists"] and c_path.is_file():
+                try:
+                    pcfg = load_toml_file(c_path)
+                    host_sec = pcfg.get("host")
+                    if isinstance(host_sec, dict):
+                        raw_id = host_sec.get("id")
+                        if isinstance(raw_id, str) and raw_id.strip():
+                            return raw_id.strip()
+                except Exception:
+                    pass
 
     if hostname is None:
         env_hid = os.environ.get("AI_ORCH_HOST_ID")
@@ -1171,15 +1170,21 @@ def get_declared_hosts(
         except Exception:
             pass
     if ws_path is not None:
-        for check_ws in ([ws_path, ws_path.parent] if ws_path.parent != ws_path else [ws_path]):
-            proj_info = inspect_project_config(check_ws, gpath)
-            for cand in proj_info.get("candidates", []):
-                c_path = cand["path"]
-                if c_path.exists():
-                    try:
-                        _collect(load_toml_file(c_path))
-                    except Exception:
-                        pass
+        proj_info = inspect_project_config(ws_path, gpath)
+        c_path = proj_info["path"]
+        if proj_info["exists"] and c_path.is_file():
+            try:
+                _collect(load_toml_file(c_path))
+            except Exception:
+                pass
+        elif ws_path.parent != ws_path:
+            parent_info = inspect_project_config(ws_path.parent, gpath)
+            p_path = parent_info["path"]
+            if parent_info["exists"] and p_path.is_file():
+                try:
+                    _collect(load_toml_file(p_path))
+                except Exception:
+                    pass
     return declared
 
 
