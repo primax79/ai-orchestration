@@ -41,7 +41,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.4 - Identità dell'host
 
-- **Status:** `in progress` (2026-10-29; Verifica Codex NON OK: tasks/19-multi-machine-development/notes/19.4-verification-codex.md; 2026-10-30; rinviato allo stesso executor su alf_ubuntu) · **Short:** Identità dell'host · **Size:** S · **Kind:** feature · **Depends on:** - · **Use cases:** UC039, UC040 · **Repo:** `ai-orchestration/`
+- **Status:** `verified` (2026-10-29; fix 1f04d30, unito in integration/19; 2026-10-30; verifier codex; OK: seconda verifica Codex PASS; su integration/19, non ancora su main) · **Short:** Identità dell'host · **Size:** S · **Kind:** feature · **Depends on:** - · **Use cases:** UC039, UC040 · **Repo:** `ai-orchestration/`
 - **Goal:** id canonico dell'host (`[host] id` nella config globale, fallback hostname normalizzato) e tabella `[hosts.<id>]` (ssh target, utente per gli agenti, ruolo `hub`/`client`). L'id va in `run.json`, negli eventi, nei record di sessione. Nuovo campo task opzionale `host` con valore validato (id dichiarati), anche nei microtask; niente `run-ref` (si usa `run-id`).
 - **Verification:** test unitari su risoluzione dell'id e validazione; un run nuovo ha `host`; `tasks validate` rifiuta un `host` non dichiarato; run e task esistenti senza `host` restano validi.
 

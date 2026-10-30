@@ -24,7 +24,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
 | 17 | 17 | [Gli use case guidano i task](done/17-use-cases-drive-tasks/plan.md) | done | - | M |
-| 19 | 19 | [Sviluppo multi-macchina: hub, executor su ogni host, console centrale](19-multi-machine-development/plan.md) | in progress (running: 19.2–19.5, 19.16; to verify: 19.1, 19.7) | - | M |
+| 19 | 19 | [Sviluppo multi-macchina: hub, executor su ogni host, console centrale](19-multi-machine-development/plan.md) | in progress (running: 19.2–19.3, 19.5, 19.16; to verify: 19.1, 19.4, 19.7) | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
