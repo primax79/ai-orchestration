@@ -568,42 +568,23 @@ def find_hub_project_entry(
     doc: dict[str, Any],
     *,
     ws_uuid: str | None = None,
-    ws_slug: str | None = None,
-    canonical_path: str | None = None,
-    host_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Find a matching project/workspace entry in the portable hub registry.
+    """Find a matching project/workspace entry in the portable hub registry strictly by `uuid`.
 
-    Identity is determined by `uuid`, or an already-mapped host `canonical_path`, or an existing
-    hub entry for `ws_slug` that does not yet have a conflicting path on `host_id`.
+    An existing hub entry may be adopted only through an explicit UUID link (same UUID already
+    in the project's config, or an explicit `--link <uuid>`). Never matches by slug or path.
     """
+    if not ws_uuid or not isinstance(ws_uuid, str):
+        return None
+    target_uuid = ws_uuid.strip()
+    if not is_valid_uuid4(target_uuid):
+        return None
     projs = doc.get("projects", [])
     if not isinstance(projs, list):
         return None
-    if ws_uuid:
-        for p in projs:
-            if isinstance(p, dict) and p.get("uuid") == ws_uuid:
-                return p
-        return None
-    if canonical_path:
-        for p in projs:
-            if not isinstance(p, dict):
-                continue
-            paths = p.get("paths")
-            if isinstance(paths, dict) and canonical_path in paths.values():
-                return p
-    if ws_slug:
-        norm_host = normalize_host_id(host_id) if host_id else None
-        for p in projs:
-            if not isinstance(p, dict):
-                continue
-            if p.get("slug") == ws_slug or p.get("id") == ws_slug:
-                if canonical_path and norm_host and isinstance(p.get("paths"), dict):
-                    existing_host_p = p["paths"].get(norm_host)
-                    if existing_host_p and existing_host_p != canonical_path:
-                        # Different path on the same host -> do not auto-merge by slug
-                        continue
-                return p
+    for p in projs:
+        if isinstance(p, dict) and p.get("uuid") == target_uuid:
+            return p
     return None
 
 
@@ -757,7 +738,8 @@ def sync_hub_entry_to_sqlite_conn(
         "SELECT * FROM workspaces WHERE uuid = ?", (ws_uuid,)
     ).fetchone()
 
-    local_path_str = paths.get(current_host)
+    host_own_path = paths.get(current_host)
+    local_path_str = host_own_path
     if not local_path_str and existing is not None:
         local_path_str = existing["canonical_path"]
     if not local_path_str and primary_host and paths.get(primary_host):
@@ -769,18 +751,19 @@ def sync_hub_entry_to_sqlite_conn(
 
     dev = int(existing["device"]) if existing is not None else 0
     ino = int(existing["inode"]) if existing is not None else 0
-    lp = pathlib.Path(local_path_str).expanduser()
-    if lp.exists() and lp.is_dir() and not lp.is_symlink():
-        try:
-            resolved_lp = lp.resolve()
-            local_path_str = str(resolved_lp)
-            paths = dict(paths)
-            paths[current_host] = local_path_str
-            if existing is None or (dev == 0 and ino == 0):
-                st = os.stat(resolved_lp)
-                dev, ino = st.st_dev, st.st_ino
-        except OSError:
-            pass
+    if host_own_path:
+        lp = pathlib.Path(host_own_path).expanduser()
+        if lp.exists() and lp.is_dir() and not lp.is_symlink():
+            try:
+                resolved_lp = lp.resolve()
+                local_path_str = str(resolved_lp)
+                paths = dict(paths)
+                paths[current_host] = local_path_str
+                if existing is None or (dev == 0 and ino == 0):
+                    st = os.stat(resolved_lp)
+                    dev, ino = st.st_dev, st.st_ino
+            except OSError:
+                pass
 
     reg_at = (
         existing["registered_at"]
@@ -1426,6 +1409,119 @@ def replace_projects_in_toml_text(text: str, projects: list[dict[str, Any]]) -> 
 # ---------------------------------------------------------------------------
 
 
+def _get_or_allocate_pending_uuid(
+    config_dir: pathlib.Path | str | None,
+    pending_key: str,
+) -> str:
+    """Return a cached pending random UUID4 for `pending_key`, or allocate and persist a new one."""
+    cdir_pending = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
+    pending_file = cdir_pending / "broker" / "pending_uuids.json"
+    pending_map: dict[str, str] = {}
+    if pending_file.is_file():
+        try:
+            loaded_pm = json.loads(pending_file.read_text(encoding="utf-8"))
+            if isinstance(loaded_pm, dict):
+                pending_map = {str(k): str(v) for k, v in loaded_pm.items() if is_valid_uuid4(v)}
+        except Exception:
+            pending_map = {}
+    cand = pending_map.get(pending_key)
+    if cand and is_valid_uuid4(cand):
+        return cand
+    allocated = allocate_workspace_uuid()
+    pending_map[pending_key] = allocated
+    try:
+        pending_file.parent.mkdir(parents=True, exist_ok=True)
+        pending_file.write_text(json.dumps(pending_map, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+    return allocated
+
+
+def _clear_pending_uuid(
+    config_dir: pathlib.Path | str | None,
+    *pending_keys: str,
+) -> None:
+    """Remove one or more keys from `pending_uuids.json` after registration/import is applied."""
+    cdir_pending = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
+    pending_file = cdir_pending / "broker" / "pending_uuids.json"
+    if not pending_file.is_file():
+        return
+    try:
+        loaded_pm = json.loads(pending_file.read_text(encoding="utf-8"))
+        if isinstance(loaded_pm, dict):
+            removed = False
+            for k in pending_keys:
+                if k in loaded_pm:
+                    del loaded_pm[k]
+                    removed = True
+            if removed:
+                pending_file.write_text(json.dumps(loaded_pm, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_checkout_own_config(
+    canonical: pathlib.Path,
+    config_dir: pathlib.Path | str | None,
+    *,
+    cur_host: str,
+    hub_doc: dict[str, Any],
+    explicit_link_uuid: str | None = None,
+) -> tuple[pathlib.Path, dict[str, Any]]:
+    """Load the project config for `canonical` and return `(write_cfg_path, existing_cfg)`.
+
+    An external config at `<config_dir>/projects/<canonical.name>/orchestration.toml` is keyed by
+    directory basename (slug), so it is only treated as belonging to `canonical` when its
+    `[workspace] uuid` matches `explicit_link_uuid` or is already mapped to `(cur_host, canonical)`
+    in `hub_doc` or SQLite. Otherwise it belongs to another checkout that shares the same folder
+    name and must not be adopted or overwritten by `canonical`.
+    """
+    _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
+    read_cfg_path = find_project_config_path(canonical, _gpath)
+    write_cfg_path = find_project_config_path(canonical, _gpath, for_write=True)
+    if not read_cfg_path.exists():
+        return write_cfg_path, {}
+
+    loaded = load_toml_file(read_cfg_path)
+    try:
+        is_in_tree = canonical.resolve() in read_cfg_path.resolve().parents
+    except Exception:
+        is_in_tree = False
+
+    if is_in_tree:
+        return write_cfg_path, loaded
+
+    # External config under `<config_dir>/projects/<canonical.name>/orchestration.toml`
+    raw_ext_uuid = loaded.get("workspace", {}).get("uuid")
+    ext_uuid = raw_ext_uuid.strip() if isinstance(raw_ext_uuid, str) and raw_ext_uuid.strip() else None
+    if not ext_uuid:
+        return write_cfg_path, loaded
+
+    if explicit_link_uuid and ext_uuid == explicit_link_uuid:
+        return write_cfg_path, loaded
+
+    hub_entry = find_hub_project_entry(hub_doc, ws_uuid=ext_uuid)
+    if hub_entry and isinstance(hub_entry.get("paths"), dict):
+        if hub_entry["paths"].get(cur_host) == str(canonical):
+            return write_cfg_path, loaded
+        return canonical / ".ai-orchestration.local.toml", {}
+
+    db_p = get_db_path(config_dir)
+    if db_p.exists():
+        conn_c = get_connection(db_p)
+        try:
+            row_c = conn_c.execute(
+                "SELECT canonical_path FROM workspaces WHERE uuid = ?",
+                (ext_uuid,),
+            ).fetchone()
+            if row_c and row_c["canonical_path"] == str(canonical):
+                return write_cfg_path, loaded
+        finally:
+            conn_c.close()
+
+    return canonical / ".ai-orchestration.local.toml", {}
+
+
 def plan_workspace_register(
     path: str | pathlib.Path | None = None,
     slug: str | None = None,
@@ -1437,6 +1533,7 @@ def plan_workspace_register(
     reference_repo: str | None = None,
     mirror_repo: str | None = None,
     convention_version: str | None = None,
+    link_uuid: str | None = None,
 ) -> dict[str, Any]:
     """Build a preview plan for registering a workspace."""
     raw_path = pathlib.Path(path or ".").expanduser()
@@ -1450,71 +1547,60 @@ def plan_workspace_register(
 
     dev, ino = check_device_inode(raw_path)
 
-    # Inspect project config
-    _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
-    read_cfg_path = find_project_config_path(canonical, _gpath)
-    cfg_path = find_project_config_path(canonical, _gpath, for_write=True)
-    existing_cfg = load_toml_file(read_cfg_path) if read_cfg_path.exists() else {}
+    explicit_link = link_uuid.strip() if isinstance(link_uuid, str) and link_uuid.strip() else None
+    if explicit_link is not None and not is_valid_uuid4(explicit_link):
+        raise ValueError(f"Invalid --link UUID '{explicit_link}': must be a valid UUID4")
+
+    cur_host = _resolve_current_host_id(config_dir, workspace=canonical, host_override=host)
+    hub_doc = load_hub_registry(config_dir)
+
+    # Inspect project config belonging to this checkout
+    cfg_path, existing_cfg = _load_checkout_own_config(
+        canonical,
+        config_dir,
+        cur_host=cur_host,
+        hub_doc=hub_doc,
+        explicit_link_uuid=explicit_link,
+    )
     ws_cfg = existing_cfg.get("workspace", {})
 
-    ws_slug = slug or ws_cfg.get("id") or sanitize_slug(canonical.name)
+    raw_cfg_uuid = ws_cfg.get("uuid")
+    cfg_uuid = raw_cfg_uuid.strip() if isinstance(raw_cfg_uuid, str) and raw_cfg_uuid.strip() else None
+    if cfg_uuid is not None and not is_valid_uuid4(cfg_uuid):
+        raise ValueError(f"Invalid workspace UUID '{cfg_uuid}': must be a valid UUID4")
+
+    if explicit_link is not None and cfg_uuid is not None and cfg_uuid != explicit_link:
+        raise ValueError(
+            f"Conflicting workspace UUIDs: project config has '{cfg_uuid}', but --link specified '{explicit_link}'"
+        )
+
+    # An existing entry may be adopted ONLY through an explicit link:
+    # (1) same UUID already in the project's config (`cfg_uuid`), or
+    # (2) an explicit `--link <uuid>` (`explicit_link`).
+    linked_uuid = explicit_link or cfg_uuid
+    hub_entry = find_hub_project_entry(hub_doc, ws_uuid=linked_uuid) if linked_uuid else None
+
+    if explicit_link and hub_entry and slug and slug != hub_entry.get("slug"):
+        raise ValueError(
+            f"Cannot link to UUID '{explicit_link}' with conflicting slug '{slug}': "
+            f"hub entry has slug '{hub_entry.get('slug')}'"
+        )
+
+    ws_slug = (
+        slug
+        or ws_cfg.get("id")
+        or (hub_entry.get("slug") if hub_entry else None)
+        or sanitize_slug(canonical.name)
+    )
     if not is_valid_workspace_slug(ws_slug):
         raise ValueError(
             f"Invalid workspace slug '{ws_slug}': must match ^[a-z0-9][a-z0-9-]{{1,47}}$"
         )
 
-    cur_host = _resolve_current_host_id(config_dir, workspace=canonical, host_override=host)
-    hub_doc = load_hub_registry(config_dir)
-    hub_entry = find_hub_project_entry(
-        hub_doc,
-        ws_uuid=ws_cfg.get("uuid"),
-        ws_slug=ws_slug,
-        canonical_path=str(canonical),
-        host_id=cur_host,
-    )
-
-    ws_uuid = (
-        ws_cfg.get("uuid")
-        or (hub_entry.get("uuid") if hub_entry else None)
-    )
-    if not ws_uuid:
-        # Check if already registered at this canonical_path in SQLite
-        db_p_init = get_db_path(config_dir)
-        if db_p_init.exists():
-            conn_init = get_connection(db_p_init)
-            try:
-                r_path = conn_init.execute(
-                    "SELECT uuid FROM workspaces WHERE canonical_path = ?",
-                    (str(canonical),),
-                ).fetchone()
-                if r_path and is_valid_uuid4(r_path["uuid"]):
-                    ws_uuid = str(r_path["uuid"])
-            finally:
-                conn_init.close()
-    if not ws_uuid:
-        # Persist the newly allocated random UUID in a pending registration cache keyed by canonical_path
-        # so preview (`plan_workspace_register`) and subsequent `--apply --expect-hash` produce the exact same plan_hash.
-        cdir_pending = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
-        pending_file = cdir_pending / "broker" / "pending_uuids.json"
-        pending_map: dict[str, str] = {}
-        if pending_file.is_file():
-            try:
-                loaded_pm = json.loads(pending_file.read_text(encoding="utf-8"))
-                if isinstance(loaded_pm, dict):
-                    pending_map = {str(k): str(v) for k, v in loaded_pm.items() if is_valid_uuid4(v)}
-            except Exception:
-                pending_map = {}
-        cand_pending = pending_map.get(str(canonical))
-        if cand_pending and is_valid_uuid4(cand_pending):
-            ws_uuid = cand_pending
-        else:
-            ws_uuid = allocate_workspace_uuid()
-            pending_map[str(canonical)] = ws_uuid
-            try:
-                pending_file.parent.mkdir(parents=True, exist_ok=True)
-                pending_file.write_text(json.dumps(pending_map, indent=2) + "\n", encoding="utf-8")
-            except Exception:
-                pass
+    if linked_uuid:
+        ws_uuid = linked_uuid
+    else:
+        ws_uuid = _get_or_allocate_pending_uuid(config_dir, f"{cur_host}:{canonical}")
 
     ws_title = (
         title
@@ -1561,14 +1647,31 @@ def plan_workspace_register(
             "SELECT * FROM workspaces WHERE uuid = ?", (ws_uuid,)
         ).fetchone()
 
-        # Check if slug taken by another uuid
+        if explicit_link is not None and hub_entry is None and row_by_uuid is None:
+            raise ValueError(
+                f"Cannot link workspace: UUID '{explicit_link}' not found in hub registry"
+            )
+
+        # Refuse if slug is already registered to a different UUID in hub_registry.json or SQLite
+        for hp in hub_doc.get("projects", []):
+            if (
+                isinstance(hp, dict)
+                and (hp.get("slug") == ws_slug or hp.get("id") == ws_slug)
+                and hp.get("uuid") != ws_uuid
+            ):
+                raise ValueError(
+                    f"Slug '{ws_slug}' is already registered in hub registry to workspace '{hp.get('uuid')}' "
+                    f"(use --link {hp.get('uuid')} to link the same project, or --id <slug> for a distinct project)"
+                )
+
         row_by_slug = conn.execute(
             "SELECT * FROM workspaces WHERE slug = ? AND uuid != ?",
             (ws_slug, ws_uuid),
         ).fetchone()
         if row_by_slug:
             raise ValueError(
-                f"Slug '{ws_slug}' is already registered to workspace '{row_by_slug['uuid']}'"
+                f"Slug '{ws_slug}' is already registered to workspace '{row_by_slug['uuid']}' "
+                f"(use --link {row_by_slug['uuid']} to link the same project, or --id <slug> for a distinct project)"
             )
 
         # Check if canonical_path registered by another uuid
@@ -1696,16 +1799,7 @@ def apply_workspace_register(
         write_workspace_to_config(cfg_path, ws_uuid, ws_slug, ws_title)
 
         # Clean up any pending_uuids.json entry for this canonical_path
-        cdir_pending = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
-        pending_file = cdir_pending / "broker" / "pending_uuids.json"
-        if pending_file.is_file():
-            try:
-                loaded_pm = json.loads(pending_file.read_text(encoding="utf-8"))
-                if isinstance(loaded_pm, dict) and str(canonical_path) in loaded_pm:
-                    del loaded_pm[str(canonical_path)]
-                    pending_file.write_text(json.dumps(loaded_pm, indent=2) + "\n", encoding="utf-8")
-            except Exception:
-                pass
+        _clear_pending_uuid(config_dir, f"{cur_host}:{canonical_path}", str(canonical_path))
 
         # 2. Update hub registry JSON
         cfg = load_toml_file(cfg_path)
@@ -1922,7 +2016,7 @@ def _evaluate_workspace_liveness_and_paths(
         pass
 
     hub_entry = (
-        find_hub_project_entry(hub_doc, ws_uuid=ws_uuid, ws_slug=d.get("slug"))
+        find_hub_project_entry(hub_doc, ws_uuid=ws_uuid)
         if hub_doc is not None
         else None
     )
@@ -1933,7 +2027,8 @@ def _evaluate_workspace_liveness_and_paths(
 
     cur_host = _resolve_current_host_id(config_dir)
     if str(cpath) and not str(cpath).startswith("/unmapped/"):
-        paths.setdefault(cur_host, str(cpath))
+        if not paths or cur_host in paths or d.get("registry_source") == "local":
+            paths.setdefault(cur_host, str(cpath))
 
     if not cpath.exists() or not cpath.is_dir():
         stale = True
@@ -2241,8 +2336,6 @@ def plan_projects_discover(
             hub_entry = find_hub_project_entry(
                 hub_doc,
                 ws_uuid=ws_cfg.get("uuid"),
-                ws_slug=ws_slug,
-                canonical_path=str(ws_path),
             )
             ws_uuid = (
                 ws_cfg.get("uuid")
@@ -2721,12 +2814,15 @@ def _normalize_migration_record(
     default_primary_host: str | None = None,
     existing_hub_doc: dict[str, Any] | None = None,
     cur_host: str = "localhost",
+    config_dir: pathlib.Path | str | None = None,
+    pending_key_prefix: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Normalize a single entry from `MIGRATION_REGISTRY.json` into canonical hub registry schema.
 
     Returns `(normalized_entry, generated_new_uuid)` where `generated_new_uuid` is True when
-    `raw_item` had no valid UUID and was not already in `existing_hub_doc`, so a new random UUID4
-    was allocated and should be persisted back into the migration registry file on apply.
+    `raw_item` had no explicit valid UUID (in the migration record or in the local checkout's
+    project config), so a new random UUID4 was allocated and should be persisted back into the
+    migration registry file on apply. Never adopts an existing hub entry by slug alone.
     """
     raw_slug = (
         raw_item.get("slug")
@@ -2748,49 +2844,18 @@ def _normalize_migration_record(
                     break
     ws_slug = sanitize_slug(str(raw_slug or "workspace"))
 
-    hub_existing = (
-        find_hub_project_entry(
-            existing_hub_doc,
-            ws_uuid=raw_item.get("uuid") if isinstance(raw_item.get("uuid"), str) else None,
-            ws_slug=ws_slug,
-        )
-        if existing_hub_doc is not None
-        else None
-    )
-
-    generated_new_uuid = False
-    raw_uuid = raw_item.get("uuid")
-    if isinstance(raw_uuid, str) and is_valid_uuid4(raw_uuid.strip()):
-        ws_uuid = raw_uuid.strip()
-    elif hub_existing and is_valid_uuid4(hub_existing.get("uuid")):
-        ws_uuid = str(hub_existing["uuid"])
-    else:
-        ws_uuid = allocate_workspace_uuid()
-        generated_new_uuid = True
-
-    ws_title = (
-        raw_item.get("title")
-        or raw_item.get("description")
-        or (hub_existing.get("title") if hub_existing else None)
-    )
-
-    paths: dict[str, str] = {}
-    if hub_existing and isinstance(hub_existing.get("paths"), dict):
-        for hk, hv in hub_existing["paths"].items():
-            if isinstance(hk, str) and isinstance(hv, str) and hv.strip():
-                paths[normalize_host_id(hk)] = hv.strip()
-
+    item_paths: dict[str, str] = {}
     for dict_key in ("paths", "hosts", "machines", "locations"):
         sub_map = raw_item.get(dict_key)
         if isinstance(sub_map, dict):
             for hk, hv in sub_map.items():
                 norm_hk = normalize_host_id(str(hk))
                 if isinstance(hv, str) and hv.strip():
-                    paths[norm_hk] = hv.strip()
+                    item_paths[norm_hk] = hv.strip()
                 elif isinstance(hv, dict):
                     p_str = hv.get("path") or hv.get("canonical_path") or hv.get("dir")
                     if isinstance(p_str, str) and p_str.strip():
-                        paths[norm_hk] = p_str.strip()
+                        item_paths[norm_hk] = p_str.strip()
 
     shorthand_hosts = (
         ("mac_path", "mac"),
@@ -2804,20 +2869,75 @@ def _normalize_migration_record(
     for field_name, target_host in shorthand_hosts:
         fval = raw_item.get(field_name)
         if isinstance(fval, str) and fval.strip():
-            paths[normalize_host_id(target_host)] = fval.strip()
+            item_paths[normalize_host_id(target_host)] = fval.strip()
 
     if isinstance(raw_item.get("path"), str) and raw_item["path"].strip():
         p_single = raw_item["path"].strip()
-        if not paths:
-            paths[cur_host] = p_single
+        if not item_paths:
+            item_paths[cur_host] = p_single
         else:
-            paths.setdefault(cur_host, p_single)
+            item_paths.setdefault(cur_host, p_single)
 
-    for hk, hv in paths.items():
+    for hk, hv in item_paths.items():
         if "{{" in hv or "}}" in hv:
             raise ValueError(
                 f"Unexpanded template placeholder in path for project '{ws_slug}' on host '{hk}': {hv}"
             )
+
+    # Resolve explicit UUID link ONLY from:
+    # (1) `raw_item["uuid"]` (or `link` / `link_uuid`), or
+    # (2) `[workspace] uuid` already present in the local checkout's project config.
+    explicit_uuid: str | None = None
+    raw_uuid = raw_item.get("uuid") or raw_item.get("link") or raw_item.get("link_uuid")
+    if raw_uuid is not None:
+        if not (isinstance(raw_uuid, str) and is_valid_uuid4(raw_uuid.strip())):
+            raise ValueError(
+                f"Invalid UUID '{raw_uuid}' in migration record for project '{ws_slug}': must be a valid UUID4"
+            )
+        explicit_uuid = raw_uuid.strip()
+    else:
+        local_cand_init = item_paths.get(cur_host)
+        if local_cand_init:
+            lp_init = pathlib.Path(local_cand_init).expanduser()
+            if lp_init.is_dir() and not lp_init.is_symlink():
+                _, cfg_d = _load_checkout_own_config(
+                    lp_init.resolve(),
+                    config_dir,
+                    cur_host=cur_host,
+                    hub_doc=existing_hub_doc or {"projects": []},
+                )
+                u_cfg = cfg_d.get("workspace", {}).get("uuid")
+                if isinstance(u_cfg, str) and is_valid_uuid4(u_cfg.strip()):
+                    explicit_uuid = u_cfg.strip()
+
+    hub_existing = (
+        find_hub_project_entry(existing_hub_doc, ws_uuid=explicit_uuid)
+        if (existing_hub_doc is not None and explicit_uuid is not None)
+        else None
+    )
+
+    generated_new_uuid = False
+    if explicit_uuid is not None:
+        ws_uuid = explicit_uuid
+    else:
+        if pending_key_prefix:
+            ws_uuid = _get_or_allocate_pending_uuid(config_dir, f"{pending_key_prefix}:{ws_slug}")
+        else:
+            ws_uuid = allocate_workspace_uuid()
+        generated_new_uuid = True
+
+    ws_title = (
+        raw_item.get("title")
+        or raw_item.get("description")
+        or (hub_existing.get("title") if hub_existing else None)
+    )
+
+    paths: dict[str, str] = {}
+    if hub_existing and isinstance(hub_existing.get("paths"), dict):
+        for hk, hv in hub_existing["paths"].items():
+            if isinstance(hk, str) and isinstance(hv, str) and hv.strip():
+                paths[normalize_host_id(hk)] = hv.strip()
+    paths.update(item_paths)
 
     raw_primary = (
         raw_item.get("primary_host")
@@ -3043,6 +3163,8 @@ def plan_import_migration_registry(
     imported_entries: list[dict[str, Any]] = []
     generated_uuids: dict[str, str] = {}
     seen_slugs: set[str] = set()
+    pending_prefix = f"migration:{mpath}:{source_sha256}:{cur_host}"
+    db_p_chk = get_db_path(config_dir)
     for slug_hint, raw_item in raw_items:
         norm, is_new_uuid = _normalize_migration_record(
             raw_item,
@@ -3050,10 +3172,38 @@ def plan_import_migration_registry(
             default_primary_host=default_primary,
             existing_hub_doc=existing_hub_doc,
             cur_host=cur_host,
+            config_dir=config_dir,
+            pending_key_prefix=pending_prefix,
         )
         if norm["slug"] in seen_slugs:
             raise ValueError(f"Duplicate project slug '{norm['slug']}' in migration registry {mpath}")
         seen_slugs.add(norm["slug"])
+
+        for hp in existing_hub_doc.get("projects", []):
+            if (
+                isinstance(hp, dict)
+                and (hp.get("slug") == norm["slug"] or hp.get("id") == norm["slug"])
+                and hp.get("uuid") != norm["uuid"]
+            ):
+                raise ValueError(
+                    f"Slug '{norm['slug']}' is already registered in hub registry to UUID '{hp.get('uuid')}' "
+                    f"(cannot merge migration record without explicit UUID link '{hp.get('uuid')}')"
+                )
+        if db_p_chk.exists():
+            conn_chk = get_connection(db_p_chk)
+            try:
+                row_slug = conn_chk.execute(
+                    "SELECT uuid FROM workspaces WHERE slug = ? AND uuid != ?",
+                    (norm["slug"], norm["uuid"]),
+                ).fetchone()
+                if row_slug:
+                    raise ValueError(
+                        f"Slug '{norm['slug']}' is already registered to workspace '{row_slug['uuid']}' "
+                        f"(cannot merge migration record without explicit UUID link '{row_slug['uuid']}')"
+                    )
+            finally:
+                conn_chk.close()
+
         if is_new_uuid:
             generated_uuids[norm["slug"]] = norm["uuid"]
 
@@ -3201,6 +3351,9 @@ def apply_import_migration_registry(
             tmp_src = source_path.parent / f"{source_path.name}.tmp.{os.getpid()}"
             tmp_src.write_text(json.dumps(raw_source_data, indent=2) + "\n", encoding="utf-8")
             os.replace(str(tmp_src), str(source_path))
+
+        pending_prefix = f"migration:{source_path.resolve()}:{plan.get('source_sha256')}:{cur_host}"
+        _clear_pending_uuid(config_dir, *[f"{pending_prefix}:{e['slug']}" for e in entries if e.get("slug")])
 
         conn = get_connection(db_path)
         try:
@@ -3829,7 +3982,7 @@ def get_console_status_projects(
                 continue
             r_uuid = str(rp.get("uuid") or "")
             r_slug = str(rp.get("slug") or rp.get("id") or "")
-            existing_p = (proj_by_uuid.get(r_uuid) if r_uuid else None) or (proj_by_slug.get(r_slug) if r_slug else None)
+            existing_p = proj_by_uuid.get(r_uuid) if r_uuid else None
             if existing_p is not None:
                 if isinstance(rp.get("paths"), dict):
                     existing_p.setdefault("paths", {}).update(rp["paths"])
@@ -4306,6 +4459,7 @@ def cli_workspace_register(args: argparse.Namespace) -> int:
             reference_repo=getattr(args, "reference_repo", None),
             mirror_repo=getattr(args, "mirror_repo", None),
             convention_version=getattr(args, "convention_version", None),
+            link_uuid=getattr(args, "link_uuid", None),
         )
     except Exception as e:
         if args.json:
@@ -4335,7 +4489,8 @@ def cli_workspace_register(args: argparse.Namespace) -> int:
             print(f"\nPlan hash     : {plan['plan_hash']}")
             cpath = plan["workspace"]["canonical_path"]
             quoted_cpath = f'"{cpath}"' if " " in cpath else cpath
-            print(f"\nTo apply: ai-orch workspace register {quoted_cpath} --apply --expect-hash {plan['plan_hash']}")
+            link_flag = f" --link {args.link_uuid}" if getattr(args, "link_uuid", None) else ""
+            print(f"\nTo apply: ai-orch workspace register {quoted_cpath}{link_flag} --apply --expect-hash {plan['plan_hash']}")
         return 0
 
     try:
@@ -4752,6 +4907,7 @@ def main(argv: list[str] | None = None) -> int:
     p_reg.add_argument("--reference-repo", dest="reference_repo", default=None, help="Reference repository URL/path on hub")
     p_reg.add_argument("--mirror-repo", "--mirror", dest="mirror_repo", default=None, help="Off-site mirror repository URL")
     p_reg.add_argument("--convention-version", dest="convention_version", default=None, help="Project convention_version")
+    p_reg.add_argument("--link", dest="link_uuid", default=None, help="Explicitly link this checkout to an existing workspace UUID in the hub registry")
     p_reg.add_argument("--apply", action="store_true", help="Apply registration")
     p_reg.add_argument("--expect-hash", dest="expect_hash", default=None, help="Expected plan hash")
     p_reg.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")

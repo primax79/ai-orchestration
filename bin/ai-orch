@@ -744,7 +744,7 @@ CLI_DESCRIPTION: dict[str, Any] = {
             "description": "Manage workspace registration, move tracking, and registry queries.",
             "subcommands": {
                 "register": {
-                    "usage": "ai-orch workspace register [PATH] [--id <slug>] [--title <title>] [--host <id>] [--primary-host <id>] [--reference-repo <repo>] [--mirror-repo <repo>] [--convention-version <ver>] [--apply] [--expect-hash <hash>] [--json]",
+                    "usage": "ai-orch workspace register [PATH] [--id <slug>] [--title <title>] [--host <id>] [--primary-host <id>] [--reference-repo <repo>] [--mirror-repo <repo>] [--convention-version <ver>] [--link <uuid>] [--apply] [--expect-hash <hash>] [--json]",
                     "description": "Register a workspace in the portable hub registry and local SQLite cache.",
                 },
                 "unregister": {

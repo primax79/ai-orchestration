@@ -892,57 +892,174 @@ def test_19_16_b2_random_uuid_allocation_and_no_slug_identity_collision(
 ) -> None:
     """19.16 (B2):
     1. Workspace UUIDs are randomly allocated on the authoritative hub, never a hash of the display slug.
-    2. Two unrelated workspaces with the same name/slug on different isolated hubs get distinct random UUIDs.
-    3. `upsert_hub_project_entry()` keys by UUID and refuses to merge two different UUIDs that share a display slug.
-    4. Distributing the hub's allocated UUID to another host (via `hub_registry.json` snapshot or `[workspace] uuid`)
-       preserves the exact same UUID across Mac and hub."""
-    cfg_a = tmp_path / "cfg_a"
-    cfg_b = tmp_path / "cfg_b"
-    cfg_a.mkdir()
-    cfg_b.mkdir()
+    2. Two unrelated workspaces with the same name/slug on ONE shared hub never merge silently:
+       registering the second without an explicit link (`--link <uuid>` or `[workspace] uuid`) refuses with
+       a clear message, and registering with a distinct slug creates a second random UUID.
+    3. `find_hub_project_entry()` never matches by slug or unlinked path.
+    4. Adopting an existing hub entry works ONLY via explicit `--link <uuid>` or matching `[workspace] uuid` in config."""
+    shared_hub = tmp_path / "shared_hub"
+    shared_hub.mkdir()
 
     ws_a = tmp_path / "host_a" / "same_name"
     ws_b = tmp_path / "host_b" / "same_name"
     ws_a.mkdir(parents=True)
     ws_b.mkdir(parents=True)
 
-    # Two unrelated workspaces with the same slug `same-name` allocate distinct random UUIDs
-    plan_a = reg.plan_workspace_register(ws_a, slug="same-name", config_dir=cfg_a, host="alf_ubuntu")
-    plan_b = reg.plan_workspace_register(ws_b, slug="same-name", config_dir=cfg_b, host="mac")
+    # 1. Host `alf_ubuntu` registers `ws_a` (slug `same-name`) on the shared hub
+    plan_a = reg.plan_workspace_register(ws_a, slug="same-name", config_dir=shared_hub, host="alf_ubuntu")
     uuid_a = plan_a["workspace"]["uuid"]
-    uuid_b = plan_b["workspace"]["uuid"]
     assert reg.is_valid_uuid4(uuid_a)
+    reg.apply_workspace_register(plan_a, expect_hash=plan_a["plan_hash"], config_dir=shared_hub)
+
+    # 2. Host `mac` attempts to register an unrelated project `ws_b` with the SAME slug `same-name`
+    #    against the SAME shared hub without `--link` or `[workspace] uuid` -> refused, never merged!
+    with pytest.raises(ValueError, match="Slug 'same-name' is already registered"):
+        reg.plan_workspace_register(ws_b, slug="same-name", config_dir=shared_hub, host="mac")
+
+    # Verify via CLI (`bin/ai-orch workspace register`) against the same shared hub -> also refused, never merged
+    res_cli_unlinked = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "workspace",
+            "register",
+            str(ws_b),
+            "--id",
+            "same-name",
+            "--host",
+            "mac",
+            "--config-dir",
+            str(shared_hub),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_cli_unlinked.returncode == 2
+    err_unlinked = json.loads(res_cli_unlinked.stdout)
+    assert err_unlinked["ok"] is False
+    assert "already registered" in err_unlinked["error"]
+    assert "--link" in err_unlinked["error"]
+
+    # Verify the hub registry still has ONLY `uuid_a` and `ws_b` was NOT merged into `uuid_a`'s paths
+    hub_doc_after = reg.load_hub_registry(shared_hub)
+    assert len(hub_doc_after["projects"]) == 1
+    assert hub_doc_after["projects"][0]["uuid"] == uuid_a
+    assert hub_doc_after["projects"][0]["paths"] == {"alf_ubuntu": str(ws_a.resolve())}
+
+    # 3. Migration import on the SAME shared hub with an unlinked entry sharing slug `same-name` (no `uuid`) -> refused!
+    unlinked_mig = tmp_path / "unlinked_migration.json"
+    unlinked_mig.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "hosts": {
+                    "alf_ubuntu": {"root": str(tmp_path / "host_a")},
+                    "mac": {"root": str(tmp_path / "host_b")},
+                },
+                "projects": [
+                    {
+                        "id": "same-name",
+                        "paths": {"mac": str(ws_b)},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Slug 'same-name' is already registered"):
+        reg.plan_import_migration_registry(unlinked_mig, config_dir=shared_hub, host="mac")
+
+    # 4. If `ws_b` on `mac` is registered on the SAME shared hub with a distinct slug, it gets a second UUID (`uuid_b != uuid_a`)
+    plan_b = reg.plan_workspace_register(ws_b, slug="same-name-mac", config_dir=shared_hub, host="mac")
+    uuid_b = plan_b["workspace"]["uuid"]
     assert reg.is_valid_uuid4(uuid_b)
-    assert uuid_a != uuid_b
+    assert uuid_b != uuid_a
+    reg.apply_workspace_register(plan_b, expect_hash=plan_b["plan_hash"], config_dir=shared_hub)
+    hub_doc_two = reg.load_hub_registry(shared_hub)
+    assert {p["uuid"] for p in hub_doc_two["projects"]} == {uuid_a, uuid_b}
 
-    reg.apply_workspace_register(plan_a, expect_hash=plan_a["plan_hash"], config_dir=cfg_a)
-
-    # Attempting to upsert a second project with a different UUID but the same slug in the same hub registry is refused
-    with pytest.raises(ValueError, match="already registered in hub registry to UUID"):
-        reg.upsert_hub_project_entry(
-            cfg_a,
-            ws_uuid=uuid_b,
-            ws_slug="same-name",
-            host_id="mac",
-            host_path=str(ws_b),
-        )
-
-    # Distributing the hub's entry (`uuid_a`) to Mac and registering the Mac checkout preserves `uuid_a`
-    cfg_mac = tmp_path / "cfg_mac"
-    cfg_mac.mkdir()
-    hub_doc_a = reg.load_hub_registry(cfg_a)
-    reg.replace_hub_snapshot_cache(cfg_mac, hub_doc_a["projects"], host_id="mac")
-
+    # 5. Explicit link via `--link <uuid_a>` (`link_uuid=uuid_a`) adopts `uuid_a` on `mac`
     mac_checkout = tmp_path / "mac_checkouts" / "same_name"
     (mac_checkout / "tasks").mkdir(parents=True)
     (mac_checkout / "tasks" / "convention_version").write_text("1.1.0\n", encoding="utf-8")
-    plan_mac_join = reg.plan_workspace_register(
-        mac_checkout,
-        slug="same-name",
-        config_dir=cfg_mac,
-        host="mac",
+
+    # Without `--link`, registering `mac_checkout` with slug `same-name` on `shared_hub` is refused
+    with pytest.raises(ValueError, match="Slug 'same-name' is already registered"):
+        reg.plan_workspace_register(mac_checkout, slug="same-name", config_dir=shared_hub, host="mac")
+
+    # With explicit `--link <uuid_a>` via CLI, it adopts `uuid_a` and links the `mac` checkout path
+    res_link_prev = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "workspace",
+            "register",
+            str(mac_checkout),
+            "--id",
+            "same-name",
+            "--host",
+            "mac",
+            "--link",
+            uuid_a,
+            "--config-dir",
+            str(shared_hub),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     )
-    assert plan_mac_join["workspace"]["uuid"] == uuid_a
+    link_plan = json.loads(res_link_prev.stdout)
+    assert link_plan["workspace"]["uuid"] == uuid_a
+    assert link_plan["workspace"]["paths"] == {
+        "alf_ubuntu": str(ws_a.resolve()),
+        "mac": str(mac_checkout.resolve()),
+    }
+    res_link_apply = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "workspace",
+            "register",
+            str(mac_checkout),
+            "--id",
+            "same-name",
+            "--host",
+            "mac",
+            "--link",
+            uuid_a,
+            "--apply",
+            "--expect-hash",
+            link_plan["plan_hash"],
+            "--config-dir",
+            str(shared_hub),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(res_link_apply.stdout)["ok"] is True
+
+    # 6. Explicit link via `[workspace] uuid = "<uuid_a>"` already in a third host's project config also adopts `uuid_a`
+    lab_checkout = tmp_path / "lab_checkouts" / "same_name"
+    lab_checkout.mkdir(parents=True)
+    (lab_checkout / ".ai-orchestration.local.toml").write_text(
+        f'[workspace]\nuuid = "{uuid_a}"\nid = "same-name"\n',
+        encoding="utf-8",
+    )
+    plan_lab = reg.plan_workspace_register(lab_checkout, config_dir=shared_hub, host="lab_worker")
+    assert plan_lab["workspace"]["uuid"] == uuid_a
+    reg.apply_workspace_register(plan_lab, expect_hash=plan_lab["plan_hash"], config_dir=shared_hub)
+    entry_a = reg.find_hub_project_entry(reg.load_hub_registry(shared_hub), ws_uuid=uuid_a)
+    assert entry_a is not None
+    assert entry_a["paths"] == {
+        "alf_ubuntu": str(ws_a.resolve()),
+        "mac": str(mac_checkout.resolve()),
+        "lab_worker": str(lab_checkout.resolve()),
+    }
 
 
 def test_19_16_console_status_lists_hub_projects_prunes_deleted_and_falls_back_offline(
