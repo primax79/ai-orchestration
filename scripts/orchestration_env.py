@@ -7797,18 +7797,45 @@ def _extract_installed_skill_version(skill_dir: pathlib.Path) -> str | None:
         except Exception:
             pass
 
-    # 4. Check parent plugin .claude-plugin/plugin.json
+    # 4. Check parent plugin .claude-plugin/plugin.json (only for known orchestration plugins)
     if skill_dir.parent.name == "skills":
         pjson = skill_dir.parent.parent / ".claude-plugin" / "plugin.json"
         if pjson.is_file():
             try:
                 pdata = json.loads(pjson.read_text(encoding="utf-8"))
                 if isinstance(pdata, dict) and pdata.get("version"):
-                    return str(pdata["version"]).strip()
+                    pname = str(pdata.get("name") or "").strip()
+                    if pname in ("architect-side", "executor-side", "shared", "ai-orchestration", "kilo-mcp", "claude-mcp"):
+                        return str(pdata["version"]).strip()
             except Exception:
                 pass
 
     return None
+
+
+KNOWN_MANAGED_SKILL_SOURCES: frozenset[str] = frozenset({"ai-orchestration", "kilo-mcp", "claude-mcp"})
+KNOWN_MANAGED_PLUGIN_NAMES: frozenset[str] = frozenset({"architect-side", "executor-side", "shared"})
+
+
+def _has_managed_skill_receipt(skill_dir: pathlib.Path, catalog_by_name: dict[str, list[dict[str, Any]]]) -> bool:
+    """Return True if `skill_dir` carries a valid `.ai-orch-source.json` receipt from a managed source."""
+    marker = skill_dir / ".ai-orch-source.json"
+    if not marker.is_file():
+        return False
+    try:
+        mdata = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(mdata, dict):
+            return False
+        repo = str(mdata.get("repo") or "").strip()
+        name = str(mdata.get("name") or skill_dir.name).strip()
+        plugin = str(mdata.get("plugin") or "").strip()
+        return bool(
+            repo in KNOWN_MANAGED_SKILL_SOURCES
+            or plugin in KNOWN_MANAGED_PLUGIN_NAMES
+            or name in catalog_by_name
+        )
+    except Exception:
+        return False
 
 
 def inspect_global_skills_and_config_drift(
@@ -7816,7 +7843,12 @@ def inspect_global_skills_and_config_drift(
     global_config: pathlib.Path | None = None,
     catalog: dict[tuple[str, str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Inspect global skills and global config for version/content drift against the tool."""
+    """Inspect global skills and global config for version/content drift against the tool.
+
+    Strictly restricted to catalog skills, skills with an ai-orch receipt, obsolete renamed skills,
+    or known orchestration plugin sources (`ai-orchestration`, `kilo-mcp`, `claude-mcp`).
+    Third-party/unrelated versioned skills are never compared against the ai-orch version.
+    """
     h = (home or get_home_dir()).resolve()
     cat = catalog if catalog is not None else discover_available_skills(h)
     catalog_by_name: dict[str, list[dict[str, Any]]] = {}
@@ -7850,12 +7882,12 @@ def inspect_global_skills_and_config_drift(
                     else ""
                 )
                 inst_ver = _extract_installed_skill_version(child)
-                has_receipt = (child / ".ai-orch-source.json").is_file()
+                has_receipt = _has_managed_skill_receipt(child, catalog_by_name)
                 is_managed = bool(
                     sname in catalog_by_name
                     or has_receipt
                     or sname in OBSOLETE_SKILL_RENAMES
-                    or inst_ver is not None
+                    or (s_repo in KNOWN_MANAGED_SKILL_SOURCES)
                 )
                 rec = {
                     "assistant": assistant,
@@ -7865,7 +7897,7 @@ def inspect_global_skills_and_config_drift(
                     "state": s_state,
                     "installed_version": inst_ver,
                     "installed_hash": inst_hash,
-                    "expected_version": TOOL_VERSION if sname in catalog_by_name or has_receipt else None,
+                    "expected_version": TOOL_VERSION if is_managed else None,
                     "expected_hash": s_hash,
                     "source_repo": s_repo,
                     "has_receipt": has_receipt,
@@ -7874,10 +7906,20 @@ def inspect_global_skills_and_config_drift(
                 installations.append(rec)
                 by_skill.setdefault(sname, []).append(rec)
 
-    # Also inspect Claude plugin skills and stale plugins
+    # Also inspect Claude plugin skills and stale plugins from known managed plugin sources
     stale_plugins = discover_stale_claude_plugins(h)
     for sp in discover_claude_plugin_skills(h):
-        sname = sp["name"]
+        sname = str(sp.get("skill_name") or sp.get("name") or "").strip()
+        if not sname:
+            continue
+        plugin_id = str(sp.get("plugin_id") or "")
+        plugin_short = plugin_id.split("@", 1)[0] if "@" in plugin_id else plugin_id
+        marketplace = plugin_id.split("@", 1)[1] if "@" in plugin_id else str(sp.get("source_repo") or "")
+        is_managed_plugin = bool(
+            sname in catalog_by_name
+            or marketplace in KNOWN_MANAGED_SKILL_SOURCES
+            or plugin_short in KNOWN_MANAGED_PLUGIN_NAMES
+        )
         sp_path = pathlib.Path(sp["path"])
         inst_ver = _extract_installed_skill_version(sp_path) or sp.get("version")
         rec = {
@@ -7888,11 +7930,11 @@ def inspect_global_skills_and_config_drift(
             "state": sp.get("state", "up-to-date"),
             "installed_version": inst_ver,
             "installed_hash": sp.get("installed_hash", ""),
-            "expected_version": TOOL_VERSION if sname in catalog_by_name else None,
+            "expected_version": TOOL_VERSION if is_managed_plugin else None,
             "expected_hash": sp.get("source_hash"),
-            "source_repo": sp.get("source_repo"),
+            "source_repo": marketplace or sp.get("source_repo"),
             "has_receipt": False,
-            "is_managed": bool(sname in catalog_by_name or sp.get("source_repo") in ("ai-orchestration", "kilo-mcp", "claude-mcp")),
+            "is_managed": is_managed_plugin,
         }
         installations.append(rec)
         by_skill.setdefault(sname, []).append(rec)
@@ -7902,14 +7944,14 @@ def inspect_global_skills_and_config_drift(
     versions_found: set[str] = set()
     reasons: list[str] = []
 
-    # 1. Check each installed skill against tool version & catalog hash
+    # 1. Check each managed installed skill against tool version & catalog hash
     for rec in installations:
+        if not rec["is_managed"]:
+            continue
         sname = rec["name"]
         inst_ver = rec["installed_version"]
         if inst_ver:
             versions_found.add(inst_ver)
-        if not rec["is_managed"]:
-            continue
 
         s_state = rec["state"]
         ver_mismatch = bool(inst_ver and inst_ver != TOOL_VERSION)
@@ -7931,38 +7973,39 @@ def inspect_global_skills_and_config_drift(
                 "drift_reason": ", ".join(reason_parts),
             })
 
-    # 2. Check cross-installation version/content divergence for the same skill name
+    # 2. Check cross-installation version/content divergence for the same managed skill name
     #    (e.g. two fake installed versions across assistants or roots)
     for sname, recs in sorted(by_skill.items()):
-        if len(recs) < 2:
+        managed_recs = [r for r in recs if r["is_managed"]]
+        if len(managed_recs) < 2:
             continue
-        distinct_vers = sorted({r["installed_version"] for r in recs if r["installed_version"]})
+        distinct_vers = sorted({r["installed_version"] for r in managed_recs if r["installed_version"]})
         if len(distinct_vers) > 1:
             drifted_names.add(sname)
             reasons.append(f"{sname}: multiple installed versions {distinct_vers}")
-            for r in recs:
+            for r in managed_recs:
                 if r not in drifted_skills:
                     drifted_skills.append({**r, "drift_reason": f"version mismatch across installs {distinct_vers}"})
             continue
-        # Content divergence across global installs of the same skill
-        first_path = pathlib.Path(recs[0]["path"])
+        # Content divergence across global installs of the same managed skill
+        first_path = pathlib.Path(managed_recs[0]["path"])
         diverged = False
-        for other in recs[1:]:
+        for other in managed_recs[1:]:
             other_path = pathlib.Path(other["path"])
-            if recs[0]["installed_hash"] != other["installed_hash"] and not skill_equivalent(first_path, other_path):
+            if managed_recs[0]["installed_hash"] != other["installed_hash"] and not skill_equivalent(first_path, other_path):
                 diverged = True
                 break
         if diverged:
             drifted_names.add(sname)
-            reasons.append(f"{sname}: content/version differs across global installations ({[r['assistant'] for r in recs]})")
-            for r in recs:
+            reasons.append(f"{sname}: content/version differs across global installations ({[r['assistant'] for r in managed_recs]})")
+            for r in managed_recs:
                 if r not in drifted_skills:
                     drifted_skills.append({**r, "drift_reason": "content differs across global installations"})
 
     # 3. Check if multiple explicit versions exist across installed managed skills
     if len(versions_found) > 1:
         for rec in installations:
-            if rec["installed_version"]:
+            if rec["is_managed"] and rec["installed_version"]:
                 drifted_names.add(rec["name"])
                 if rec not in drifted_skills:
                     drifted_skills.append({
@@ -7971,9 +8014,13 @@ def inspect_global_skills_and_config_drift(
                     })
         reasons.append(f"multiple skill versions installed globally: {sorted(versions_found)}")
 
-    # 4. Stale Claude plugins
+    # 4. Stale Claude plugins (only from known managed plugin sources)
     for sp in stale_plugins:
-        pname = sp["plugin"]
+        pname = str(sp.get("plugin") or "")
+        pshort = pname.split("@", 1)[0] if "@" in pname else pname
+        marketplace = str(sp.get("marketplace") or (pname.split("@", 1)[1] if "@" in pname else ""))
+        if marketplace not in KNOWN_MANAGED_SKILL_SOURCES and pshort not in KNOWN_MANAGED_PLUGIN_NAMES:
+            continue
         drifted_names.add(pname)
         reasons.append(
             f"Claude plugin {pname}: cached {sp.get('cached_version')} vs source {sp.get('source_version')}"
@@ -8091,6 +8138,25 @@ def _make_doctor_finding(
     return finding
 
 
+LEGACY_HEADER_DIAGNOSTIC_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bmissing (?:mandatory|required) (?:microtask )?header field", re.IGNORECASE),
+    re.compile(r"\bmissing required '(?:id|kind)' header field\b", re.IGNORECASE),
+    re.compile(r"\bunknown (?:microtask |use-case )?header field", re.IGNORECASE),
+    re.compile(r"\b(?:core |optional |microtask |use-case )?header fields out of order\b", re.IGNORECASE),
+    re.compile(r"\boptional field '[^']+' must appear after 'handoff'", re.IGNORECASE),
+    re.compile(r"\bheader field '[^']+' cannot be empty\b", re.IGNORECASE),
+    re.compile(r"\bis missing 'approval' header field\b", re.IGNORECASE),
+    re.compile(r"\bnon-canonical state spelling\b", re.IGNORECASE),
+    re.compile(r"\blegacy free-text decider\b", re.IGNORECASE),
+    re.compile(r"\bresidual 'verification pending:' line\b", re.IGNORECASE),
+)
+
+
+def _is_legacy_header_diagnostic(msg: str) -> bool:
+    """Return True if a `validate_tasks_tree` diagnostic represents a legacy header schema issue."""
+    return any(pat.search(msg) for pat in LEGACY_HEADER_DIAGNOSTIC_PATTERNS)
+
+
 def inspect_project_doctor(
     workspace: pathlib.Path | str | None = None,
     home: pathlib.Path | None = None,
@@ -8103,9 +8169,10 @@ def inspect_project_doctor(
       2. Unregistered or stale workspace in the registry (`unregistered-workspace`)
       3. `tasks/00-INDEX.md` missing generated-region markers or out of sync (`index-missing-markers` / `index-out-of-sync` / `missing-index`)
       4. Stale rendered `AGENTS.md` or duplicated hand-written orchestration blocks (`stale-agents-md` / `duplicated-agents-md`)
-      5. Task header fields from older schemas / `tasks validate` errors (`legacy-task-headers`)
+      5. Task header fields from older schemas (`legacy-task-headers`) and non-header `tasks validate` errors (`tasks-validation-errors`)
       6. Missing or outdated `tasks/convention_version` (`convention-version-drift`)
       7. Global skills or global config of a different version from the tool (`global-skill-drift` / `global-config-drift`)
+      8. Any internal render, import, or check execution failure (`doctor-check-failed`)
     """
     h = (home or get_home_dir()).resolve()
     ws = pathlib.Path(workspace or ".").resolve()
@@ -8117,11 +8184,70 @@ def inspect_project_doctor(
     )
 
     acks = load_doctor_acks(h)
-    te = _load_tasks_engine()
-    oc = _load_orchestration_config()
-    reg = _load_orchestration_registry()
-
     findings: list[dict[str, Any]] = []
+
+    def _emit_check_failed(check_name: str, target_path: pathlib.Path, exc: Any, fix_cmd: str) -> None:
+        err_str = f"Doctor check '{check_name}' failed for {target_path}: {exc}. Fix: {fix_cmd}"
+        findings.append(
+            _make_doctor_finding(
+                group_key=f"project-drift:doctor-check-failed:{check_name}",
+                kind="doctor-check-failed",
+                title=f"Doctor check failed ({check_name})",
+                severity="error",
+                message=err_str,
+                fix_command=fix_cmd,
+                path=str(target_path),
+                names=[target_path.name or check_name],
+                entries=[{
+                    "name": target_path.name or check_name,
+                    "path": str(target_path),
+                    "scope": "project",
+                    "state": "check-failed",
+                    "installed_hash": hashlib.sha256(str(exc).encode("utf-8")).hexdigest(),
+                }],
+                acks=acks,
+                extra={"check": check_name, "error": str(exc)},
+            )
+        )
+
+    try:
+        te = _load_tasks_engine()
+        if te is None:
+            _emit_check_failed(
+                "import-tasks-engine",
+                ws,
+                "tasks_engine.py could not be loaded",
+                "ai-orch env status",
+            )
+    except Exception as exc:
+        te = None
+        _emit_check_failed("import-tasks-engine", ws, exc, "ai-orch env status")
+
+    try:
+        oc = _load_orchestration_config()
+        if oc is None:
+            _emit_check_failed(
+                "import-orchestration-config",
+                ws,
+                "orchestration_config.py could not be loaded",
+                "ai-orch env status",
+            )
+    except Exception as exc:
+        oc = None
+        _emit_check_failed("import-orchestration-config", ws, exc, "ai-orch env status")
+
+    try:
+        reg = _load_orchestration_registry()
+        if reg is None:
+            _emit_check_failed(
+                "import-orchestration-registry",
+                ws,
+                "orchestration_registry.py could not be loaded",
+                "ai-orch env status",
+            )
+    except Exception as exc:
+        reg = None
+        _emit_check_failed("import-orchestration-registry", ws, exc, "ai-orch env status")
 
     # ------------------------------------------------------------------
     # 1. Convention version check (`tasks/convention_version`)
@@ -8129,11 +8255,16 @@ def inspect_project_doctor(
     conv_file = tasks_dir / "convention_version"
     recorded_conv: str | None = None
     if te is not None and tasks_dir.is_dir():
-        recorded_conv = te.read_convention_version(tasks_dir)
+        try:
+            recorded_conv = te.read_convention_version(tasks_dir)
+        except Exception as exc:
+            _emit_check_failed("convention-version", conv_file, exc, f"ai-orch upgrade --project {ws}")
+            recorded_conv = None
     elif conv_file.is_file():
         try:
             recorded_conv = conv_file.read_text(encoding="utf-8").strip().splitlines()[0].strip()
-        except Exception:
+        except Exception as exc:
+            _emit_check_failed("convention-version", conv_file, exc, f"ai-orch upgrade --project {ws}")
             recorded_conv = None
 
     conv_up_to_date = (recorded_conv == CONVENTION_VERSION)
@@ -8234,6 +8365,7 @@ def inspect_project_doctor(
     # ------------------------------------------------------------------
     ws_registered = False
     ws_stale = False
+    ws_check_failed = False
     ws_stale_reasons: list[str] = []
     ws_record: dict[str, Any] | None = None
     if reg is not None:
@@ -8259,10 +8391,12 @@ def inspect_project_doctor(
                     except OSError:
                         ws_stale = True
                         ws_stale_reasons.append("workspace directory inaccessible")
-        except Exception:
+        except Exception as exc:
             ws_registered = False
+            ws_check_failed = True
+            _emit_check_failed("workspace-registry", ws, exc, f"ai-orch workspace register {ws} --apply")
 
-    if not ws_registered or ws_stale:
+    if (not ws_registered or ws_stale) and not ws_check_failed and reg is not None:
         reg_fix = f"ai-orch workspace register {ws} --apply"
         reg_msg = (
             f"Workspace {ws} is not registered in the workspace registry. Fix: {reg_fix}"
@@ -8296,6 +8430,7 @@ def inspect_project_doctor(
     idx_path = tasks_dir / "00-INDEX.md"
     idx_has_markers = False
     idx_in_sync = False
+    idx_check_failed = False
     if tasks_dir.is_dir() and te is not None:
         if not idx_path.is_file():
             idx_fix = f"ai-orch tasks upgrade --tasks-dir {tasks_dir}"
@@ -8322,8 +8457,13 @@ def inspect_project_doctor(
             )
         else:
             idx_text = idx_path.read_text(encoding="utf-8", errors="replace")
-            idx_has_markers = bool(te.has_generated_markers(idx_text))
-            if not idx_has_markers:
+            try:
+                idx_has_markers = bool(te.has_generated_markers(idx_text))
+            except Exception as exc:
+                idx_has_markers = False
+                idx_check_failed = True
+                _emit_check_failed("index-markers", idx_path, exc, f"ai-orch tasks validate --tasks-dir {tasks_dir}")
+            if not idx_has_markers and not idx_check_failed:
                 idx_fix = f"ai-orch tasks sync-index --tasks-dir {tasks_dir} --adopt --apply"
                 idx_msg = (
                     f"{idx_path} has no generated-region markers (<!-- ai-orch:generated ... -->). "
@@ -8348,13 +8488,15 @@ def inspect_project_doctor(
                         acks=acks,
                     )
                 )
-            else:
+            elif idx_has_markers:
                 try:
                     rendered_idx = te.render_synced_index(tasks_dir, idx_text, adopt=False)
                     idx_in_sync = (rendered_idx.strip() == idx_text.strip())
-                except Exception:
-                    idx_in_sync = True
-                if not idx_in_sync:
+                except Exception as exc:
+                    idx_in_sync = False
+                    idx_check_failed = True
+                    _emit_check_failed("index-sync", idx_path, exc, f"ai-orch tasks validate --tasks-dir {tasks_dir}")
+                if not idx_in_sync and not idx_check_failed:
                     idx_fix = f"ai-orch tasks sync-index --tasks-dir {tasks_dir} --apply"
                     idx_msg = f"{idx_path} is out of sync with task files on disk. Fix: {idx_fix}"
                     findings.append(
@@ -8385,6 +8527,7 @@ def inspect_project_doctor(
     agents_stale_rendered = False
     agents_dup_sections: list[str] = []
     tasks_agents_stale = False
+    agents_check_failed = False
 
     if oc is not None:
         try:
@@ -8404,16 +8547,18 @@ def inspect_project_doctor(
                     replaced = oc.inject_or_replace_agents_block(existing_agents_text, expected_block)
                     if replaced != existing_agents_text:
                         agents_stale_rendered = True
-        except Exception:
-            pass
+        except Exception as exc:
+            agents_check_failed = True
+            _emit_check_failed("agents-md", agents_md_path, exc, f"ai-orch config validate --workspace {ws}")
 
     if te is not None and tasks_dir.is_dir() and tasks_agents_path.is_file():
         try:
             t_agents_text = tasks_agents_path.read_text(encoding="utf-8", errors="replace")
             if te.render_upgraded_agents_md(t_agents_text, tasks_dir=tasks_dir) != t_agents_text:
                 tasks_agents_stale = True
-        except Exception:
-            pass
+        except Exception as exc:
+            agents_check_failed = True
+            _emit_check_failed("tasks-agents-md", tasks_agents_path, exc, f"ai-orch tasks upgrade --tasks-dir {tasks_dir}")
 
     if agents_stale_rendered or agents_dup_sections or tasks_agents_stale:
         agents_fix = (
@@ -8470,23 +8615,31 @@ def inspect_project_doctor(
         )
 
     # ------------------------------------------------------------------
-    # 6. Task header fields from older schemas & validation errors (`legacy-task-headers`)
+    # 6. Task header fields from older schemas (`legacy-task-headers`)
+    #    and separate general task validation errors (`tasks-validation-errors`)
     # ------------------------------------------------------------------
     val_errors: list[str] = []
     val_warnings: list[str] = []
+    header_errors: list[str] = []
     header_issues: list[str] = []
+    other_val_errors: list[str] = []
+    other_val_warnings: list[str] = []
+    tasks_val_check_failed = False
+
     if te is not None and tasks_dir.is_dir():
         try:
             val_errors, val_warnings, emergent, _ = te.validate_tasks_tree(tasks_dir)
             for err in val_errors:
-                header_issues.append(err)
+                if _is_legacy_header_diagnostic(err):
+                    header_errors.append(err)
+                    header_issues.append(err)
+                else:
+                    other_val_errors.append(err)
             for warn in val_warnings:
-                if (
-                    "is missing 'approval' header field" in warn
-                    or "non-canonical state spelling" in warn
-                    or "header field" in warn
-                ):
+                if _is_legacy_header_diagnostic(warn):
                     header_issues.append(warn)
+                else:
+                    other_val_warnings.append(warn)
             for em in emergent:
                 vp = em.get("verification_pending")
                 st_raw = (em.get("headers", {}).get("state") or "").strip().lower()
@@ -8495,22 +8648,23 @@ def inspect_project_doctor(
                         f"{em.get('rel_path')}: residual 'verification pending:' line on task in state {st_raw!r}"
                     )
         except Exception as exc:
-            header_issues.append(f"tasks validation failed: {exc}")
+            tasks_val_check_failed = True
+            _emit_check_failed("tasks-validate", tasks_dir, exc, f"ai-orch tasks validate --tasks-dir {tasks_dir}")
 
     if header_issues:
-        hdr_severity = "error" if val_errors else "warning"
+        hdr_severity = "error" if header_errors else "warning"
         hdr_fix = f"ai-orch upgrade --project {ws}"
         sample = "; ".join(header_issues[:3])
         more = f" (+{len(header_issues) - 3} more)" if len(header_issues) > 3 else ""
         hdr_msg = (
-            f"Found {len(header_issues)} task header / schema validation issue(s) "
-            f"({len(val_errors)} error(s)): {sample}{more}. Fix: {hdr_fix}"
+            f"Found {len(header_issues)} legacy task header / schema issue(s) "
+            f"({len(header_errors)} error(s)): {sample}{more}. Fix: {hdr_fix}"
         )
         findings.append(
             _make_doctor_finding(
                 group_key="project-drift:legacy-task-headers",
                 kind="legacy-task-headers",
-                title="Task header fields from older schemas or validation errors",
+                title="Task header fields from older schemas",
                 severity=hdr_severity,
                 message=hdr_msg,
                 fix_command=hdr_fix,
@@ -8525,10 +8679,44 @@ def inspect_project_doctor(
                 }],
                 acks=acks,
                 extra={
-                    "error_count": len(val_errors),
+                    "error_count": len(header_errors),
                     "issue_count": len(header_issues),
-                    "errors": val_errors,
+                    "errors": header_errors,
                     "issues": header_issues,
+                },
+            )
+        )
+
+    if other_val_errors:
+        val_fix = f"ai-orch tasks validate --tasks-dir {tasks_dir}"
+        sample_val = "; ".join(other_val_errors[:3])
+        more_val = f" (+{len(other_val_errors) - 3} more)" if len(other_val_errors) > 3 else ""
+        val_msg = (
+            f"Found {len(other_val_errors)} task validation error(s): {sample_val}{more_val}. Fix: {val_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:tasks-validation-errors",
+                kind="tasks-validation-errors",
+                title="Task validation errors",
+                severity="error",
+                message=val_msg,
+                fix_command=val_fix,
+                path=str(tasks_dir),
+                names=["tasks"],
+                entries=[{
+                    "name": "tasks",
+                    "path": str(tasks_dir),
+                    "scope": "project",
+                    "state": "validation-errors",
+                    "installed_hash": hashlib.sha256("\n".join(sorted(other_val_errors)).encode("utf-8")).hexdigest(),
+                }],
+                acks=acks,
+                extra={
+                    "error_count": len(other_val_errors),
+                    "warning_count": len(other_val_warnings),
+                    "errors": other_val_errors,
+                    "warnings": other_val_warnings,
                 },
             )
         )
@@ -8669,20 +8857,20 @@ def inspect_project_doctor(
                 "legacy_paths": [str(p) for p in proj_cfg_info.get("legacy_paths", [])],
             },
             "workspace_registry": {
-                "ok": ws_registered and not ws_stale,
+                "ok": ws_registered and not ws_stale and not ws_check_failed and reg is not None,
                 "registered": ws_registered,
                 "stale": ws_stale,
                 "reasons": ws_stale_reasons,
             },
             "index_markers": {
-                "ok": idx_path.is_file() and idx_has_markers and idx_in_sync,
+                "ok": idx_path.is_file() and idx_has_markers and idx_in_sync and not idx_check_failed and te is not None,
                 "exists": idx_path.is_file(),
                 "has_markers": idx_has_markers,
                 "in_sync": idx_in_sync,
                 "path": str(idx_path),
             },
             "agents_md": {
-                "ok": not agents_stale_rendered and not agents_dup_sections and not tasks_agents_stale,
+                "ok": not agents_stale_rendered and not agents_dup_sections and not tasks_agents_stale and not agents_check_failed and oc is not None,
                 "path": str(agents_md_path),
                 "exists": agents_md_path.is_file(),
                 "stale_rendered": agents_stale_rendered,
@@ -8691,11 +8879,18 @@ def inspect_project_doctor(
                 "tasks_agents_stale": tasks_agents_stale,
             },
             "task_headers": {
-                "ok": len(header_issues) == 0,
-                "error_count": len(val_errors),
+                "ok": len(header_issues) == 0 and not tasks_val_check_failed and te is not None,
+                "error_count": len(header_errors),
                 "issue_count": len(header_issues),
-                "errors": val_errors,
+                "errors": header_errors,
                 "issues": header_issues,
+            },
+            "tasks_validation": {
+                "ok": len(other_val_errors) == 0 and not tasks_val_check_failed and te is not None,
+                "error_count": len(other_val_errors),
+                "warning_count": len(other_val_warnings),
+                "errors": other_val_errors,
+                "warnings": other_val_warnings,
             },
             "global_skills": g_skills,
             "global_config": g_cfg,
@@ -8880,270 +9075,6 @@ def maybe_emit_drift_warning(
         out = stream if stream is not None else sys.stderr
         print(line, file=out)
     return line
-
-
-def create_2026_10_17_fixture(project_dir: pathlib.Path) -> pathlib.Path:
-    """Construct a '2026-10-17 style' drifted project fixture reconstructed from N078:
-      - No project orchestration.toml config
-      - Workspace not registered in the registry
-      - tasks/00-INDEX.md without <!-- ai-orch:generated ... --> markers
-      - AGENTS.md containing custom project header + old hand-written orchestration blocks
-        followed by a stale 2026-10-17 rendered block (duplicated content) + custom footer
-      - tasks/AGENTS.md without <!-- ai-orch:managed begin --> markers
-      - Task files with header fields from older schemas (unknown fields, wrong order, missing mandatory fields,
-        residual 'verification pending:' on a done task, use case missing 'approval' field)
-      - No tasks/convention_version recorded
-    """
-    proj = pathlib.Path(project_dir).resolve()
-    tasks_dir = proj / "tasks"
-    (tasks_dir / "scrapers").mkdir(parents=True, exist_ok=True)
-    (tasks_dir / "done" / "scrapers").mkdir(parents=True, exist_ok=True)
-    (tasks_dir / "use-cases").mkdir(parents=True, exist_ok=True)
-
-    # 1. AGENTS.md: custom project intro + duplicated hand-written 2026-10-17 orchestration sections
-    #    + stale rendered block (referencing tasks/orchestration.toml) + custom project footer
-    agents_md_content = (
-        "# ricerca_auto — Project Architecture & Notes\n\n"
-        " Project-specific domain rules and scraper notes that must remain intact.\n\n"
-        "## 1. Required Skills\n\n"
-        "| Skill | Role |\n"
-        "| :--- | :--- |\n"
-        "| `orchestration-workflow` | Old hand-written table from 2026-10-17 |\n\n"
-        "## 2. Core Operating Rules\n\n"
-        "### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)\n\n"
-        "Hand-written Rule 1 before markers were introduced.\n\n"
-        "### Rule 2: Define Execution Tasks Before Delegating\n\n"
-        "Hand-written Rule 2.\n\n"
-        "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate\n\n"
-        "Hand-written lifecycle section.\n\n"
-        "<!-- BEGIN ai-orchestration -->\n"
-        "# Agent Orchestration & Development Guidelines\n"
-        "<!-- Auto-generated from orchestration.toml (2026-10-17 commit 94f31dd). -->\n"
-        "<!-- Edit tasks/orchestration.toml and re-run render-agents-md. -->\n\n"
-        "## 1. Required Skills\n\n"
-        "Stale 2026-10-17 rendered block.\n"
-        "<!-- END ai-orchestration -->\n\n"
-        "## Project Database Notes\n\n"
-        "PostgreSQL port 5432; keep this footer byte-for-byte.\n"
-    )
-    (proj / "AGENTS.md").write_text(agents_md_content, encoding="utf-8")
-
-    # 2. tasks/AGENTS.md without managed markers
-    (tasks_dir / "AGENTS.md").write_text(
-        "# tasks/ — 2026-10-17 hand-written convention\n\n"
-        "Legacy unmarked tasks/AGENTS.md referencing macroplan-authoring.\n",
-        encoding="utf-8",
-    )
-
-    # 3. tasks/00-INDEX.md without generated-region markers
-    (tasks_dir / "00-INDEX.md").write_text(
-        "# Task Index\n\n"
-        "## Next up\n\n"
-        "| Id | Priority | Task | Executor | Handoff |\n"
-        "| --- | --- | --- | --- | --- |\n"
-        "| T001 | P0 | [AutoScout24 adapter](scrapers/T001-autoscout-adapter.md) | kilo | - |\n\n"
-        "## Tasks by category\n\n"
-        "### scrapers\n\n"
-        "| Id | Priority | Task | State | Executor | Depends on |\n"
-        "| --- | --- | --- | --- | --- | --- |\n"
-        "| T001 | P0 | [AutoScout24 adapter](scrapers/T001-autoscout-adapter.md) | in progress | kilo | - |\n\n"
-        "## Decisions waiting\n\n"
-        "| Id | Question | Blocks | Owner |\n"
-        "| --- | --- | --- | --- |\n"
-        "| - | None. | - | - |\n\n"
-        "## Done\n\n"
-        "| Id | Task | Result | Closed |\n"
-        "| --- | --- | --- | --- |\n"
-        "| T002 | [Subito parser](done/scrapers/T002-subito-parser.md) | Merged | 2026-10-17 |\n",
-        encoding="utf-8",
-    )
-
-    # 4. Emergent task with legacy 2026-10-17 header schema (unknown field 'status', missing mandatory fields, out-of-order optional field)
-    (tasks_dir / "scrapers" / "T001-autoscout-adapter.md").write_text(
-        "# T001: AutoScout24 adapter\n\n"
-        "- id: T001\n"
-        "- title: AutoScout24 adapter\n"
-        "- short: AutoScout24 adapter\n"
-        "- category: scrapers\n"
-        "- priority: P0\n"
-        "- status: in progress\n"
-        "- state: in progress\n"
-        "- executor: kilo\n"
-        "- depends-on: -\n"
-        "- paths: src/scrapers/autoscout.py\n"
-        "- handoff: -\n\n"
-        "## Goal\n\n"
-        "Implement the AutoScout24 scraper adapter.\n\n"
-        "## Context\n\n"
-        "- Read `src/scrapers/autoscout.py`.\n\n"
-        "## Steps\n\n"
-        "- [ ] Implement parser.\n\n"
-        "## Verification\n\n"
-        "- `pytest tests/test_autoscout.py` passes.\n\n"
-        "## Progress\n\n"
-        "- 2026-10-17: started.\n",
-        encoding="utf-8",
-    )
-
-    # 5. Closed task with leftover 'verification pending:' line and missing mandatory header fields
-    (tasks_dir / "done" / "scrapers" / "T002-subito-parser.md").write_text(
-        "# T002: Subito parser\n\n"
-        "- id: T002\n"
-        "- title: Subito parser\n"
-        "- category: scrapers\n"
-        "- priority: P1\n"
-        "- priority-reason: core scraper\n"
-        "- next-up: no\n"
-        "- state: done\n"
-        "- executor: kilo\n"
-        "- depends-on: -\n"
-        "- decider: -\n"
-        "- sources: -\n"
-        "- paths: src/scrapers/subito.py\n"
-        "- handoff: -\n"
-        "verification pending: pytest tests/test_subito.py (verify-by: claude:deep-reasoning)\n\n"
-        "## Goal\n\n"
-        "Parse Subito listings.\n\n"
-        "## Context\n\n"
-        "- `src/scrapers/subito.py`.\n\n"
-        "## Steps\n\n"
-        "- [x] Done.\n\n"
-        "## Verification\n\n"
-        "- `pytest tests/test_subito.py` passes.\n\n"
-        "## Progress\n\n"
-        "- 2026-10-17: done.\n\n"
-        "## Result\n\n"
-        "Merged.\n",
-        encoding="utf-8",
-    )
-
-    # 6. Use case with legacy 2026-10-17 'status: verified' instead of 'approval: approved'
-    (tasks_dir / "use-cases" / "UC001-search-cars.md").write_text(
-        "# UC001: Search cars across portals\n\n"
-        "- id: UC001\n"
-        "- status: verified\n"
-        "- priority: P0\n"
-        "- verification-type: e2e-test\n"
-        "- linked-tasks: T001, T002\n\n"
-        "## Actor\n\n"
-        "Buyer searching for used cars.\n\n"
-        "## Goal\n\n"
-        "Find matching cars.\n\n"
-        "## Preconditions\n\n"
-        "- Scrapers configured.\n\n"
-        "## Main Flow\n\n"
-        "1. Run search.\n\n"
-        "## Acceptance Criteria\n\n"
-        "- Results returned.\n\n"
-        "## Verification Spec\n\n"
-        "- `pytest`.\n\n"
-        "## Evidence Log\n\n"
-        "- 2026-10-17: verified.\n",
-        encoding="utf-8",
-    )
-
-    return proj
-
-
-def create_updated_project_fixture(
-    project_dir: pathlib.Path,
-    home: pathlib.Path | None = None,
-    global_config: pathlib.Path | None = None,
-) -> pathlib.Path:
-    """Create a fully up-to-date project fixture that passes `ai-orch doctor` with zero findings."""
-    h = (home or get_home_dir()).resolve()
-    proj = pathlib.Path(project_dir).resolve()
-    tasks_dir = proj / "tasks"
-    (tasks_dir / "scrapers").mkdir(parents=True, exist_ok=True)
-    (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
-    (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
-
-    oc = _load_orchestration_config()
-    te = _load_tasks_engine()
-    reg = _load_orchestration_registry()
-
-    gpath = (
-        pathlib.Path(global_config).resolve()
-        if global_config is not None
-        else (get_config_dir(h) / "orchestration.toml")
-    )
-    if oc is not None and not gpath.is_file():
-        gpath.parent.mkdir(parents=True, exist_ok=True)
-        oc.write_file_atomic(gpath, oc.dump_toml(oc.DEFAULT_GLOBAL_CONFIG))
-
-    # 1. Valid emergent task in current schema
-    (tasks_dir / "scrapers" / "T001-autoscout-adapter.md").write_text(
-        "# T001: AutoScout24 adapter\n\n"
-        "- id: T001\n"
-        "- title: AutoScout24 adapter\n"
-        "- category: scrapers\n"
-        "- priority: P0\n"
-        "- priority-reason: Core portal scraper\n"
-        "- next-up: yes\n"
-        "- state: in progress\n"
-        "- executor: kilo\n"
-        "- depends-on: -\n"
-        "- decider: -\n"
-        "- sources: -\n"
-        "- paths: src/scrapers/autoscout.py\n"
-        "- handoff: -\n"
-        "- short: AutoScout24 adapter\n\n"
-        "## Goal\n\n"
-        "Implement the AutoScout24 scraper adapter.\n\n"
-        "## Context\n\n"
-        "- Read `src/scrapers/autoscout.py`.\n\n"
-        "## Steps\n\n"
-        "- [ ] Implement parser.\n\n"
-        "## Verification\n\n"
-        "- `pytest tests/test_autoscout.py` passes.\n\n"
-        "## Progress\n\n"
-        "- 2026-10-29: in progress.\n",
-        encoding="utf-8",
-    )
-
-    # 2. Initialize project config & register workspace
-    if reg is not None:
-        cdir = get_config_dir(h)
-        plan = reg.plan_workspace_register(proj, title=proj.name, config_dir=cdir)
-        reg.apply_workspace_register(plan, expect_hash=plan["plan_hash"], config_dir=cdir)
-
-    if oc is not None:
-        ppath = oc.find_project_config_path(proj, gpath, for_write=True)
-        existing_pdata = oc.load_toml_file(ppath) if ppath.is_file() else {}
-        pdata = oc.deep_merge(
-            {
-                "project": {
-                    "name": proj.name,
-                    "primary_orchestrator": "claude",
-                },
-                "routing": {
-                    "default_executor": "kilo",
-                },
-                "verification": {
-                    "default_mode": "cross-agent",
-                },
-            },
-            existing_pdata,
-        )
-        oc.write_file_atomic(ppath, oc.dump_toml(pdata))
-
-        # 3. Render root AGENTS.md with current block and preserved custom header/footer
-        cfg, _ = oc.resolve_config(gpath, proj)
-        block = oc.render_agents_md_block(cfg, proj, gpath)
-        agents_text = (
-            "# ricerca_auto — Project Architecture & Notes\n\n"
-            "Project-specific domain rules and scraper notes that must remain intact.\n\n"
-            + block.rstrip()
-            + "\n\n## Project Database Notes\n\n"
-            "PostgreSQL port 5432; keep this footer byte-for-byte.\n"
-        )
-        (proj / "AGENTS.md").write_text(agents_text, encoding="utf-8")
-
-    # 4. Upgrade tasks/ tree (writes tasks/AGENTS.md, .gitignore, .gitattributes, convention_version, 00-INDEX.md)
-    if te is not None:
-        te.upgrade_tasks_tree(tasks_dir, dry_run=False)
-
-    return proj
 
 
 def detect_active_executor_worktrees(workspace: pathlib.Path | str) -> list[dict[str, Any]]:
@@ -9908,6 +9839,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_st = sub.add_parser("status", help="Verify status & drift of CLIs, skills, and MCP servers across Kilo, Claude, and Codex")
     p_st.add_argument("--workspace", default=None, help="Optional project workspace to inspect project-scope installs")
+    p_st.add_argument("--home", dest="sub_home", type=pathlib.Path, default=None, help="Override home directory")
     p_st.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
     p_st.set_defaults(func=cmd_status)
 

@@ -821,11 +821,25 @@ def _extract_flag_value(args: list[str], flags: tuple[str, ...]) -> str | None:
     return None
 
 
+# Command groups/subcommands excluded from the automatic 1-line stderr drift warning:
+# 1. `doctor` / `upgrade` (and `env doctor|upgrade|ack|unack`): these ARE the drift
+#    inspection and remediation commands; emitting a "run ai-orch doctor or ai-orch
+#    upgrade" banner on top of their own output would be redundant self-reference.
+# 2. `mcp` and `broker serve|shim`: stdio JSON-RPC / daemon transport processes where
+#    unsolicited stderr output during protocol startup is undesirable.
+# 3. Help invocations (`-h`, `--help`, `help`): usage output only.
+DRIFT_WARNING_EXCLUDED_GROUPS: frozenset[str] = frozenset({"doctor", "upgrade", "mcp"})
+DRIFT_WARNING_EXCLUDED_ENV_SUBCOMMANDS: frozenset[str] = frozenset({"doctor", "upgrade", "ack", "unack"})
+DRIFT_WARNING_EXCLUDED_BROKER_SUBCOMMANDS: frozenset[str] = frozenset({"serve", "shim"})
+
+
 def _maybe_warn_project_drift(group: str, rest: list[str], raw_argv: list[str]) -> None:
     """Emit a single-line stderr warning if the command runs in a project with convention drift."""
-    if group in ("doctor", "upgrade", "describe", "mcp", "broker", "install-launcher"):
+    if group in DRIFT_WARNING_EXCLUDED_GROUPS:
         return
-    if group == "env" and rest and rest[0] in ("doctor", "upgrade", "ack", "unack"):
+    if group == "env" and rest and rest[0] in DRIFT_WARNING_EXCLUDED_ENV_SUBCOMMANDS:
+        return
+    if group == "broker" and rest and rest[0] in DRIFT_WARNING_EXCLUDED_BROKER_SUBCOMMANDS:
         return
     if any(h in rest for h in ("-h", "--help", "help")):
         return
@@ -840,7 +854,7 @@ def _maybe_warn_project_drift(group: str, rest: list[str], raw_argv: list[str]) 
         sys.modules["_orch_env_drift_mod"] = env_mod
         spec.loader.exec_module(env_mod)
 
-        ws_val = _extract_flag_value(rest, ("--project", "--workspace", "--root"))
+        ws_val = _extract_flag_value(rest, ("--project", "--workspace", "--root", "--dir"))
         if ws_val is None:
             td_val = _extract_flag_value(rest, ("--tasks-dir",))
             if td_val is not None:
@@ -926,6 +940,8 @@ def main() -> int:
     if top_json and "--json" not in rest and group not in ("mcp",):
         rest = rest + ["--json"]
 
+    _maybe_warn_project_drift(group, rest, raw_argv)
+
     if group == "describe":
         if not CLI_DESCRIPTION["commands"]["run"].get("subcommands"):
             CLI_DESCRIPTION["commands"]["run"]["subcommands"] = _get_run_subcommands()
@@ -939,8 +955,6 @@ def main() -> int:
     if group == "upgrade":
         proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), "upgrade", *rest], check=False)
         return proc.returncode
-
-    _maybe_warn_project_drift(group, rest, raw_argv)
 
     if group == "install-launcher":
         proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), "install-launcher", *rest], check=False)

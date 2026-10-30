@@ -2866,3 +2866,70 @@ def test_19_7_ai_orch_verify_checks_execution_and_timeouts(tmp_path: pathlib.Pat
     assert data_slow["checks"][0]["commands"][0]["timed_out"] is True
 
 
+def test_19_2_b1_find_and_strip_duplicated_handwritten_agents_sections_positive_matching_and_negative_cases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1: Duplicate-block detection requires positive matching against known legacy renderings,
+    never reuses destructive stripping as the predicate, and preserves ordinary user-authored
+    `## Required Skills` / `## Core Operating Rules` / `## Orchestration Lifecycle` sections."""
+    user_doc = (
+        "# Project Guidelines\n\n"
+        "## Required Skills\n\n"
+        "- Python 3.12 async programming\n"
+        "- PostgreSQL query tuning\n\n"
+        "## Core Operating Rules\n\n"
+        "### Rule 1: Keep PRs Small\n\n"
+        "Never merge without green CI.\n\n"
+        "## Orchestration Lifecycle\n\n"
+        "Docker Compose services start via `make up` and stop via `make down`.\n\n"
+        "<!-- BEGIN ai-orchestration -->\n"
+        "Managed block.\n"
+        "<!-- END ai-orchestration -->\n"
+    )
+
+    # 1. Verify find_duplicated_handwritten_agents_sections never calls strip_duplicated_handwritten_agents_sections
+    def _forbidden_strip(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("find_duplicated_handwritten_agents_sections must not call strip_duplicated_handwritten_agents_sections")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(oc, "strip_duplicated_handwritten_agents_sections", _forbidden_strip)
+        assert oc.find_duplicated_handwritten_agents_sections(user_doc) == []
+
+    # 2. Stripping on user_doc must be a complete no-op and preserve user sections byte-for-byte
+    cleaned_user, removed_user = oc.strip_duplicated_handwritten_agents_sections(user_doc)
+    assert removed_user == []
+    assert cleaned_user == user_doc
+
+    # 3. Positive match: legacy 2026-10-17 orchestration sections alongside user-authored sections
+    mixed_doc = (
+        "# Project Guidelines\n\n"
+        "## Required Skills\n\n"
+        "- Python 3.12 async programming (user section — must be preserved)\n\n"
+        "## 1. Required Skills\n\n"
+        "Load and follow these skills whenever planning, delegating, executing, or reviewing work:\n"
+        "- `orchestration-workflow` and `task-spec-authoring`\n\n"
+        "## Core Operating Rules\n\n"
+        "- User rule: never drop production tables.\n\n"
+        "## 2. Core Operating Rules\n\n"
+        "### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)\n\n"
+        "### Rule 2: Define Execution Tasks Before Delegating\n\n"
+        "Include `focus_files`, Disjoint Write Scope, and One Task = One Commit.\n\n"
+        "<!-- BEGIN ai-orchestration -->\n"
+        "Managed block.\n"
+        "<!-- END ai-orchestration -->\n"
+    )
+    found_mixed = oc.find_duplicated_handwritten_agents_sections(mixed_doc)
+    assert "## 1. Required Skills" in found_mixed
+    assert "## 2. Core Operating Rules" in found_mixed
+    assert "## Required Skills" not in found_mixed
+    assert "## Core Operating Rules" not in found_mixed
+
+    cleaned_mixed, removed_mixed = oc.strip_duplicated_handwritten_agents_sections(mixed_doc)
+    assert removed_mixed == found_mixed
+    assert "## Required Skills\n\n- Python 3.12 async programming (user section — must be preserved)\n\n" in cleaned_mixed
+    assert "## Core Operating Rules\n\n- User rule: never drop production tables.\n\n" in cleaned_mixed
+    assert "## 1. Required Skills" not in cleaned_mixed
+    assert "## 2. Core Operating Rules" not in cleaned_mixed
+
+
+

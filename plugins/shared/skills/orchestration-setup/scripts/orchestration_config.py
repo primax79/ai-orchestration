@@ -2680,10 +2680,23 @@ def inject_or_replace_agents_block(existing_text: str, new_block: str) -> str:
     return existing_text.rstrip() + "\n\n" + new_block.rstrip() + "\n"
 
 
-ORCHESTRATION_HEADING_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^#\s+Agent Orchestration\s*&\s*Development Guidelines\b", re.IGNORECASE),
-    re.compile(r"^##\s+(?:\d+\.\s+)?Required Skills\b", re.IGNORECASE),
-    re.compile(r"^##\s+(?:\d+\.\s+)?Core Operating Rules\b", re.IGNORECASE),
+LEGACY_INTRO_HEADING_RE = re.compile(
+    r"^#\s+Agent Orchestration\s*&\s*Development Guidelines\b",
+    re.IGNORECASE,
+)
+LEGACY_REQUIRED_SKILLS_HEADING_RE = re.compile(
+    r"^##\s+(?:\d+\.\s+)?Required Skills\b",
+    re.IGNORECASE,
+)
+LEGACY_CORE_RULES_HEADING_RE = re.compile(
+    r"^##\s+(?:\d+\.\s+)?Core Operating Rules\b",
+    re.IGNORECASE,
+)
+LEGACY_LIFECYCLE_HEADING_RE = re.compile(
+    r"^##\s+(?:\d+\.\s+)?Orchestration Lifecycle\b",
+    re.IGNORECASE,
+)
+CANONICAL_RULE_SUBHEADING_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"^###\s+Rule\s+1:\s+(?:Keep the Main Session Free|Focus the Main Session on Architecture)",
         re.IGNORECASE,
@@ -2691,63 +2704,226 @@ ORCHESTRATION_HEADING_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^###\s+Rule\s+2:\s+Define Execution Tasks Before Delegating\b", re.IGNORECASE),
     re.compile(r"^###\s+Rule\s+3:\s+Delegate Maximum Work\b", re.IGNORECASE),
     re.compile(r"^###\s+Rule\s+4:\s+Select the Right Model\b", re.IGNORECASE),
-    re.compile(r"^##\s+(?:\d+\.\s+)?Orchestration Lifecycle\b", re.IGNORECASE),
+)
+
+LEGACY_INTRO_SIGNATURES: tuple[str, ...] = (
+    "architect / executor",
+    "primary_orchestrator",
+    "default_executor",
+    "verification_mode",
+    "managed by `ai-orchestration`",
+    "render-agents-md",
+    "orchestration.toml",
+    "roles.toml",
+    "architect & orchestrator",
+)
+
+LEGACY_REQUIRED_SKILLS_SIGNATURES: tuple[str, ...] = (
+    "`orchestration-workflow`",
+    "`kilo-mcp-orchestrator`",
+    "`task-spec-authoring`",
+    "`task-pipeline`",
+    "`macroplan-authoring`",
+    "`task-worktree-ops`",
+    "`task-delegation`",
+    "`executor-contract`",
+    "`kilo-mcp-executor-contract`",
+    "`conflict-resolver`",
+    "`orchestration-setup`",
+    "`interactive-role-setup`",
+    "load and follow these skills whenever planning, delegating, executing, or reviewing work",
+)
+
+LEGACY_CORE_RULES_SIGNATURES: tuple[str, ...] = (
+    "rule 1: keep the main session free",
+    "rule 1: focus the main session on architecture",
+    "rule 2: define execution tasks before delegating",
+    "rule 3: delegate maximum work",
+    "rule 4: select the right model",
+    "`focus_files`",
+    "disjoint write scope",
+    "one task = one commit",
+    "isolated git worktree",
+    "isolation safety checks",
+    "shared host resources are not isolated by worktrees",
+    "deep-reasoning",
+    "bulk-execution",
+)
+
+LEGACY_LIFECYCLE_SIGNATURES: tuple[str, ...] = (
+    "`open` → `in progress` → `delivered`",
+    "`open` -> `in progress` -> `delivered`",
+    "an executor can only mark a task",
+    "verify independently",
+    "cross-agent verifier",
+    "post-merge integration gate",
+    "git worktree remove",
+    "`final report`",
+)
+
+CANONICAL_REQUIRED_SKILLS_EXCERPT = (
+    "## 1. Required Skills\n\n"
+    "Load and follow these skills whenever planning, delegating, executing, or reviewing work:\n"
+    "- `orchestration-workflow` `task-spec-authoring` `task-pipeline` `task-worktree-ops` `executor-contract`"
+)
+CANONICAL_CORE_RULES_EXCERPT = (
+    "## 2. Core Operating Rules\n\n"
+    "### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)\n"
+    "### Rule 2: Define Execution Tasks Before Delegating\n"
+    "Grounded `focus_files`, Disjoint Write Scope, One Task = One Commit."
+)
+CANONICAL_LIFECYCLE_EXCERPT = (
+    "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate\n\n"
+    "Track every task through explicit states (`open` → `in progress` → `delivered` → `verified` → `done`). "
+    "Verify Independently and run the Post-Merge Integration Gate."
 )
 
 
-def _is_orchestration_heading(line: str) -> tuple[bool, int]:
-    stripped = line.strip()
-    m = re.match(r"^(#{1,6})\s+", stripped)
-    if not m:
-        return (False, 0)
-    level = len(m.group(1))
-    for pat in ORCHESTRATION_HEADING_PATTERNS:
-        if pat.match(stripped):
-            return (True, level)
-    return (False, 0)
+def _count_signature_hits(text_lower: str, signatures: tuple[str, ...]) -> int:
+    return sum(1 for sig in signatures if sig in text_lower)
 
 
-def _strip_orchestration_sections_from_segment(segment: str) -> tuple[str, list[str]]:
-    """Strip hand-written orchestration sections from a text segment outside managed markers,
-    preserving all non-orchestration sections byte-for-byte."""
+def _section_matches_legacy_orchestration(heading: str, section_text: str) -> tuple[bool, list[str]]:
+    """Positively match a markdown section against known legacy ai-orchestration renderings.
+
+    Requires multiple canonical signatures (or high sequence similarity to the canonical template)
+    inside the section body so ordinary user-authored sections with similar titles are never
+    treated as orchestration duplicates.
+    """
+    h_stripped = heading.strip()
+    sec_lower = section_text.lower()
+
+    if LEGACY_INTRO_HEADING_RE.match(h_stripped):
+        hits = _count_signature_hits(sec_lower, LEGACY_INTRO_SIGNATURES)
+        if hits >= 2:
+            return (True, [h_stripped])
+        return (False, [])
+
+    if LEGACY_REQUIRED_SKILLS_HEADING_RE.match(h_stripped):
+        hits = _count_signature_hits(sec_lower, LEGACY_REQUIRED_SKILLS_SIGNATURES)
+        sim = difflib.SequenceMatcher(None, sec_lower, CANONICAL_REQUIRED_SKILLS_EXCERPT.lower()).ratio()
+        if hits >= 2 or sim >= 0.55:
+            return (True, [h_stripped])
+        return (False, [])
+
+    if LEGACY_CORE_RULES_HEADING_RE.match(h_stripped):
+        hits = _count_signature_hits(sec_lower, LEGACY_CORE_RULES_SIGNATURES)
+        sim = difflib.SequenceMatcher(None, sec_lower, CANONICAL_CORE_RULES_EXCERPT.lower()).ratio()
+        if hits >= 2 or sim >= 0.55:
+            matched_headings = [h_stripped]
+            in_fenced = False
+            for raw_line in section_text.splitlines()[1:]:
+                sline = raw_line.strip()
+                if sline.startswith("```"):
+                    in_fenced = not in_fenced
+                    continue
+                if not in_fenced and any(pat.match(sline) for pat in CANONICAL_RULE_SUBHEADING_PATTERNS):
+                    matched_headings.append(sline)
+            return (True, matched_headings)
+        return (False, [])
+
+    if LEGACY_LIFECYCLE_HEADING_RE.match(h_stripped):
+        hits = _count_signature_hits(sec_lower, LEGACY_LIFECYCLE_SIGNATURES)
+        sim = difflib.SequenceMatcher(None, sec_lower, CANONICAL_LIFECYCLE_EXCERPT.lower()).ratio()
+        if hits >= 2 or sim >= 0.55:
+            return (True, [h_stripped])
+        return (False, [])
+
+    return (False, [])
+
+
+def _analyze_legacy_orchestration_segment(segment: str) -> tuple[list[tuple[int, int]], list[str]]:
+    """Pure read-only analysis of a markdown segment outside managed markers.
+
+    Parses top-level (`#`) and second-level (`##`) sections outside fenced code blocks and
+    returns `(byte_or_char_spans, matched_headings)` for sections that positively match
+    known legacy orchestration renderings.
+    """
     lines = segment.splitlines(keepends=True)
-    kept: list[str] = []
-    removed_headings: list[str] = []
-    in_fenced = False
-    skipping_level: int | None = None
+    if not lines:
+        return ([], [])
 
+    # Locate `#` and `##` section boundaries outside fenced code blocks
+    boundaries: list[tuple[int, int, str]] = []  # (char_offset, heading_level, heading_stripped)
+    offset = 0
+    in_fenced = False
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("```"):
             in_fenced = not in_fenced
-        if not in_fenced:
-            is_orch, orch_level = _is_orchestration_heading(line)
-            if is_orch:
-                removed_headings.append(stripped)
-                if skipping_level is None or orch_level < skipping_level:
-                    skipping_level = orch_level
-                continue
-            m_h = re.match(r"^(#{1,6})\s+", stripped)
-            if m_h and skipping_level is not None:
-                cur_level = len(m_h.group(1))
-                # If we entered via `# Agent Orchestration & Development Guidelines` (level 1),
-                # any subsequent non-orchestration `# ` or `## ` exits the skipped header block
-                # unless it's another orchestration heading (handled above).
-                if skipping_level == 1 or cur_level <= skipping_level:
-                    skipping_level = None
-            if skipping_level is not None and stripped == "---":
-                continue
+        elif not in_fenced:
+            m = re.match(r"^(#{1,2})\s+", stripped)
+            if m:
+                boundaries.append((offset, len(m.group(1)), stripped))
+        offset += len(line)
 
-        if skipping_level is None:
-            kept.append(line)
+    if not boundaries:
+        return ([], [])
 
-    return ("".join(kept), removed_headings)
+    spans: list[tuple[int, int]] = []
+    matched_headings: list[str] = []
+    for idx, (start_pos, _level, heading_str) in enumerate(boundaries):
+        end_pos = boundaries[idx + 1][0] if idx + 1 < len(boundaries) else len(segment)
+        sec_text = segment[start_pos:end_pos]
+        is_match, sec_headings = _section_matches_legacy_orchestration(heading_str, sec_text)
+        if is_match:
+            spans.append((start_pos, end_pos))
+            matched_headings.extend(sec_headings)
+
+    return (spans, matched_headings)
+
+
+def find_duplicated_handwritten_agents_sections(existing_text: str) -> list[str]:
+    """Return list of duplicated hand-written orchestration section headings outside markers.
+
+    Pure read-only predicate using positive signature/similarity matching; never invokes
+    destructive stripping.
+    """
+    block_re = re.compile(
+        re.escape(BEGIN_MARKER) + r".*?" + re.escape(END_MARKER) + r"\n?",
+        re.DOTALL,
+    )
+    matches = list(block_re.finditer(existing_text))
+    found: list[str] = []
+
+    if not matches:
+        _, headings = _analyze_legacy_orchestration_segment(existing_text)
+        return headings
+
+    first = matches[0]
+    before = existing_text[: first.start()]
+    after = existing_text[first.end() :]
+
+    if len(matches) > 1:
+        for _ in matches[1:]:
+            found.append("duplicate <!-- BEGIN ai-orchestration --> block")
+        after = block_re.sub("", after)
+
+    _, headings_before = _analyze_legacy_orchestration_segment(before)
+    _, headings_after = _analyze_legacy_orchestration_segment(after)
+    found.extend(headings_before)
+    found.extend(headings_after)
+    return found
+
+
+def _remove_spans_from_segment(segment: str, spans: list[tuple[int, int]]) -> str:
+    if not spans:
+        return segment
+    out: list[str] = []
+    cursor = 0
+    for start_pos, end_pos in spans:
+        if start_pos > cursor:
+            out.append(segment[cursor:start_pos])
+        cursor = end_pos
+    if cursor < len(segment):
+        out.append(segment[cursor:])
+    return "".join(out)
 
 
 def strip_duplicated_handwritten_agents_sections(existing_text: str) -> tuple[str, list[str]]:
-    """Detect and strip duplicated hand-written orchestration sections outside
+    """Strip positively matched legacy orchestration sections outside
     <!-- BEGIN ai-orchestration --> ... <!-- END ai-orchestration --> markers,
-    while preserving non-duplicated blocks outside markers byte-for-byte."""
+    while preserving all user-authored sections outside markers byte-for-byte."""
     block_re = re.compile(
         re.escape(BEGIN_MARKER) + r".*?" + re.escape(END_MARKER) + r"\n?",
         re.DOTALL,
@@ -2756,8 +2932,10 @@ def strip_duplicated_handwritten_agents_sections(existing_text: str) -> tuple[st
     removed: list[str] = []
 
     if not matches:
-        cleaned, rem = _strip_orchestration_sections_from_segment(existing_text)
-        return (cleaned, rem)
+        spans, headings = _analyze_legacy_orchestration_segment(existing_text)
+        if not spans:
+            return (existing_text, [])
+        return (_remove_spans_from_segment(existing_text, spans), headings)
 
     first = matches[0]
     before = existing_text[: first.start()]
@@ -2765,25 +2943,21 @@ def strip_duplicated_handwritten_agents_sections(existing_text: str) -> tuple[st
     after = existing_text[first.end() :]
 
     if len(matches) > 1:
-        for extra in matches[1:]:
+        for _ in matches[1:]:
             removed.append("duplicate <!-- BEGIN ai-orchestration --> block")
         after = block_re.sub("", after)
 
-    cleaned_before, rem_before = _strip_orchestration_sections_from_segment(before)
-    cleaned_after, rem_after = _strip_orchestration_sections_from_segment(after)
+    spans_before, rem_before = _analyze_legacy_orchestration_segment(before)
+    spans_after, rem_after = _analyze_legacy_orchestration_segment(after)
     removed.extend(rem_before)
     removed.extend(rem_after)
 
     if not removed:
         return (existing_text, [])
 
+    cleaned_before = _remove_spans_from_segment(before, spans_before)
+    cleaned_after = _remove_spans_from_segment(after, spans_after)
     return (cleaned_before + managed + cleaned_after, removed)
-
-
-def find_duplicated_handwritten_agents_sections(existing_text: str) -> list[str]:
-    """Return list of duplicated hand-written orchestration section headings outside markers."""
-    _, removed = strip_duplicated_handwritten_agents_sections(existing_text)
-    return removed
 
 
 # ---------------------------------------------------------------------------

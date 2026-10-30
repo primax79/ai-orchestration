@@ -4208,6 +4208,81 @@ def test_parse_frontmatter_and_compare_without_pyyaml(monkeypatch: pytest.Monkey
 # ---------------------------------------------------------------------------
 
 AI_ORCH_BIN = SCRIPT.parent.parent / "bin" / "ai-orch"
+FIXTURES_DIR = SCRIPT.parent / "fixtures"
+
+
+def create_2026_10_17_fixture(project_dir: pathlib.Path) -> pathlib.Path:
+    """Copy the checked-in '2026-10-17 style' drifted project fixture from scripts/fixtures/project_2026_10_17."""
+    proj = pathlib.Path(project_dir).resolve()
+    src = FIXTURES_DIR / "project_2026_10_17"
+    shutil.copytree(src, proj, dirs_exist_ok=True)
+    return proj
+
+
+def create_updated_project_fixture(
+    project_dir: pathlib.Path,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+) -> pathlib.Path:
+    """Copy the checked-in updated project fixture from scripts/fixtures/project_updated and initialize environment state."""
+    import orchestration_env as oe
+
+    h = (home or oe.get_home_dir()).resolve()
+    proj = pathlib.Path(project_dir).resolve()
+    src = FIXTURES_DIR / "project_updated"
+    shutil.copytree(src, proj, dirs_exist_ok=True)
+    tasks_dir = proj / "tasks"
+    (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
+
+    oc = oe._load_orchestration_config()
+    te = oe._load_tasks_engine()
+    reg = oe._load_orchestration_registry()
+
+    gpath = (
+        pathlib.Path(global_config).resolve()
+        if global_config is not None
+        else (oe.get_config_dir(h) / "orchestration.toml")
+    )
+    if oc is not None and not gpath.is_file():
+        gpath.parent.mkdir(parents=True, exist_ok=True)
+        oc.write_file_atomic(gpath, oc.dump_toml(oc.DEFAULT_GLOBAL_CONFIG))
+
+    if reg is not None:
+        cdir = oe.get_config_dir(h)
+        plan = reg.plan_workspace_register(proj, title=proj.name, config_dir=cdir)
+        reg.apply_workspace_register(plan, expect_hash=plan["plan_hash"], config_dir=cdir)
+
+    if oc is not None:
+        ppath = oc.find_project_config_path(proj, gpath, for_write=True)
+        existing_pdata = oc.load_toml_file(ppath) if ppath.is_file() else {}
+        pdata = oc.deep_merge(
+            {
+                "project": {
+                    "name": proj.name,
+                    "primary_orchestrator": "claude",
+                },
+                "routing": {
+                    "default_executor": "kilo",
+                },
+                "verification": {
+                    "default_mode": "cross-agent",
+                },
+            },
+            existing_pdata,
+        )
+        oc.write_file_atomic(ppath, oc.dump_toml(pdata))
+
+        cfg, _ = oc.resolve_config(gpath, proj)
+        block = oc.render_agents_md_block(cfg, proj, gpath)
+        template_agents = (proj / "AGENTS.md").read_text(encoding="utf-8")
+        rendered_agents = oc.inject_or_replace_agents_block(template_agents, block)
+        (proj / "AGENTS.md").write_text(rendered_agents, encoding="utf-8")
+
+    if te is not None:
+        te.upgrade_tasks_tree(tasks_dir, dry_run=False)
+
+    return proj
 
 
 def test_19_2_project_doctor_2026_10_17_fixture_reports_all_expected_findings_with_severity(
@@ -4219,7 +4294,7 @@ def test_19_2_project_doctor_2026_10_17_fixture_reports_all_expected_findings_wi
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     proj_dir = tmp_path / "ricerca_auto_2026_10_17"
-    oe.create_2026_10_17_fixture(proj_dir)
+    create_2026_10_17_fixture(proj_dir)
 
     res = subprocess.run(
         [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
@@ -4277,7 +4352,7 @@ def test_19_2_project_doctor_updated_project_reports_zero_findings(
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     proj_dir = tmp_path / "ricerca_auto_updated"
-    oe.create_updated_project_fixture(proj_dir, home=fake_home)
+    create_updated_project_fixture(proj_dir, home=fake_home)
 
     # Verify versioned tasks/convention_version file exists on disk
     conv_file = proj_dir / "tasks" / "convention_version"
@@ -4311,7 +4386,7 @@ def test_19_2_project_doctor_json_stability_and_ack_unack(
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     proj_dir = tmp_path / "proj_json_stable"
-    oe.create_2026_10_17_fixture(proj_dir)
+    create_2026_10_17_fixture(proj_dir)
 
     r1 = subprocess.run(
         [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
@@ -4411,7 +4486,7 @@ def test_19_2_global_skill_drift_detected_with_two_fake_installed_versions(
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     proj_dir = tmp_path / "proj_clean"
-    oe.create_updated_project_fixture(proj_dir, home=fake_home)
+    create_updated_project_fixture(proj_dir, home=fake_home)
 
     # Install two fake skill versions in global scope (e.g. v0.9.0 in Claude and v1.0.0 in Kilo)
     claude_skill_dir = fake_home / ".claude" / "skills" / "task-pipeline"
@@ -4478,7 +4553,7 @@ def test_19_2_one_line_drift_warning_on_ai_orch_commands_and_disable_mechanisms(
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     drifted_proj = tmp_path / "drifted_proj"
-    oe.create_2026_10_17_fixture(drifted_proj)
+    create_2026_10_17_fixture(drifted_proj)
 
     env_base = os.environ.copy()
     env_base["AI_ORCH_HOME"] = str(fake_home)
@@ -4552,7 +4627,7 @@ def test_19_2_one_line_drift_warning_on_ai_orch_commands_and_disable_mechanisms(
 
     # 5. Updated project emits zero warning even with warnings enabled
     clean_proj = tmp_path / "clean_proj"
-    oe.create_updated_project_fixture(clean_proj, home=fake_home)
+    create_updated_project_fixture(clean_proj, home=fake_home)
     res_clean = subprocess.run(
         [sys.executable, str(AI_ORCH_BIN), "tasks", "list", "--tasks-dir", str(clean_proj / "tasks"), "--json"],
         cwd=str(clean_proj),
@@ -4581,7 +4656,7 @@ def test_19_3_project_upgrade_on_2026_10_17_fixture_preview_apply_doctor_validat
     fake_home = tmp_path / "home"
     fake_home.mkdir(parents=True)
     proj_dir = tmp_path / "ricerca_auto"
-    oe.create_2026_10_17_fixture(proj_dir)
+    create_2026_10_17_fixture(proj_dir)
 
     env = os.environ.copy()
     env["AI_ORCH_HOME"] = str(fake_home)
@@ -4856,7 +4931,7 @@ def test_19_3_agents_md_blocks_outside_markers_preserved_byte_for_byte(
     fake_home = tmp_path / "home"
     fake_home.mkdir(parents=True)
     proj_dir = tmp_path / "ricerca_auto"
-    oe.create_2026_10_17_fixture(proj_dir)
+    create_2026_10_17_fixture(proj_dir)
 
     expected_intro_bytes = (
         "# ricerca_auto — Project Architecture & Notes\n\n"
@@ -4902,7 +4977,7 @@ def test_19_3_project_upgrade_refuses_when_active_executor_worktree_exists(
     fake_home = tmp_path / "home"
     fake_home.mkdir(parents=True)
     proj_dir = tmp_path / "ricerca_auto"
-    oe.create_2026_10_17_fixture(proj_dir)
+    create_2026_10_17_fixture(proj_dir)
 
     # Case 1: Real git linked worktree
     subprocess.run(["git", "-C", str(proj_dir), "init", "-b", "main"], check=True, capture_output=True)
@@ -4984,7 +5059,7 @@ def test_19_3_project_upgrade_migrates_legacy_project_config(
     fake_home = tmp_path / "home"
     fake_home.mkdir(parents=True)
     proj_dir = tmp_path / "ricerca_auto"
-    oe.create_2026_10_17_fixture(proj_dir)
+    create_2026_10_17_fixture(proj_dir)
 
     legacy_cfg = proj_dir / "tasks" / "orchestration.toml"
     legacy_cfg.write_text(
@@ -5007,6 +5082,275 @@ def test_19_3_project_upgrade_migrates_legacy_project_config(
     doc = oe.inspect_project_doctor(proj_dir, home=fake_home)
     assert doc["drifted"] is False
     assert doc["findings"] == []
+
+
+# ===========================================================================
+# Task 19.2 Bounce 1 Regression Tests (B1..B6)
+# ===========================================================================
+
+
+def test_19_2_b1_ordinary_user_sections_not_treated_as_duplicated_orchestration_or_deleted_on_upgrade(
+    tmp_path: pathlib.Path,
+) -> None:
+    """B1: Ordinary user-authored `## Required Skills`, `## Core Operating Rules`, and
+    `## Orchestration Lifecycle` sections without canonical ai-orchestration signatures are
+    never flagged by `ai-orch doctor` and never deleted by `ai-orch upgrade`."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "user_sections_proj"
+    create_updated_project_fixture(proj_dir, home=fake_home)
+
+    user_header = (
+        "# Custom Application Guidelines\n\n"
+        "## Required Skills\n\n"
+        "- Familiarity with Rust, Tokio, and SQLite WAL internals.\n"
+        "- Knowledge of HTTP/2 framing.\n\n"
+        "## Core Operating Rules\n\n"
+        "### Rule 1: Zero Unsafe Blocks\n\n"
+        "All crate modules must compile with `#![forbid(unsafe_code)]`.\n\n"
+        "## Orchestration Lifecycle\n\n"
+        "Worker pods start via systemd socket activation and drain on SIGTERM.\n\n"
+    )
+    user_footer = (
+        "\n## Database Migrations\n\n"
+        "Run `sqlx migrate run` before integration tests.\n"
+    )
+
+    existing_agents = (proj_dir / "AGENTS.md").read_text(encoding="utf-8")
+    begin_idx = existing_agents.index("<!-- BEGIN ai-orchestration -->")
+    end_marker = "<!-- END ai-orchestration -->\n"
+    end_idx = existing_agents.index(end_marker) + len(end_marker)
+    managed_block = existing_agents[begin_idx:end_idx]
+
+    full_agents = user_header + managed_block + user_footer
+    (proj_dir / "AGENTS.md").write_text(full_agents, encoding="utf-8")
+
+    # 1. Doctor must report zero findings (not flagged as duplicated-agents-md)
+    doc = oe.inspect_project_doctor(proj_dir, home=fake_home)
+    assert doc["ok"] is True
+    assert doc["drifted"] is False
+    assert doc["findings"] == []
+    assert doc["checks"]["agents_md"]["duplicated_blocks"] is False
+    assert doc["checks"]["agents_md"]["duplicated_sections"] == []
+
+    # 2. Even if managed block is stale and upgrade runs, user sections remain byte-for-byte intact
+    stale_managed = (
+        "<!-- BEGIN ai-orchestration -->\n"
+        "# Agent Orchestration & Development Guidelines\n"
+        "Stale managed content.\n"
+        "<!-- END ai-orchestration -->\n"
+    )
+    (proj_dir / "AGENTS.md").write_text(user_header + stale_managed + user_footer, encoding="utf-8")
+
+    prev = oe.upgrade_project(proj_dir, home=fake_home)
+    assert prev["removed_duplicated_sections"] == []
+    app = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=prev["plan_hash"])
+    assert app["ok"] is True
+
+    after_bytes = (proj_dir / "AGENTS.md").read_bytes()
+    b_pos = after_bytes.index(b"<!-- BEGIN ai-orchestration -->\n")
+    e_pos = after_bytes.index(b"<!-- END ai-orchestration -->\n") + len(b"<!-- END ai-orchestration -->\n")
+    assert after_bytes[:b_pos] == user_header.encode("utf-8")
+    assert after_bytes[e_pos:] == user_footer.encode("utf-8")
+
+
+def test_19_2_b2_unrelated_third_party_versioned_global_skills_ignored(
+    tmp_path: pathlib.Path,
+) -> None:
+    """B2: Unrelated third-party global skills with a `version` field in frontmatter or VERSION file
+    are not treated as managed and do not produce false `global-skill-drift` findings."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "proj_clean"
+    create_updated_project_fixture(proj_dir, home=fake_home)
+
+    # Install unrelated versioned skills across Claude and Kilo global roots
+    third_party_claude = fake_home / ".claude" / "skills" / "acme-pdf-helper"
+    third_party_claude.mkdir(parents=True)
+    (third_party_claude / "SKILL.md").write_text(
+        "---\nname: acme-pdf-helper\ndescription: Third-party PDF skill\nversion: 3.4.1\n---\n# Acme PDF\n",
+        encoding="utf-8",
+    )
+    (third_party_claude / "VERSION").write_text("3.4.1\n", encoding="utf-8")
+
+    third_party_kilo = fake_home / ".kilo" / "skills" / "custom-rust-linter"
+    third_party_kilo.mkdir(parents=True)
+    (third_party_kilo / "SKILL.md").write_text(
+        "---\nname: custom-rust-linter\ndescription: Custom linter skill\nversion: 0.2.0\n---\n# Rust Linter\n",
+        encoding="utf-8",
+    )
+
+    # Also install the same third-party skill in both assistants with different versions
+    third_party_kilo_pdf = fake_home / ".kilo" / "skills" / "acme-pdf-helper"
+    third_party_kilo_pdf.mkdir(parents=True)
+    (third_party_kilo_pdf / "SKILL.md").write_text(
+        "---\nname: acme-pdf-helper\ndescription: Third-party PDF skill\nversion: 2.9.0\n---\n# Acme PDF older\n",
+        encoding="utf-8",
+    )
+
+    doc = oe.inspect_project_doctor(proj_dir, home=fake_home)
+    assert doc["ok"] is True
+    assert doc["drifted"] is False
+    assert doc["findings"] == []
+    assert doc["checks"]["global_skills"]["drifted"] is False
+    assert doc["checks"]["global_skills"]["drifted_names"] == []
+    assert doc["checks"]["global_skills"]["versions_found"] == []
+
+
+def test_19_2_b3_non_header_tasks_validate_errors_reported_separately_from_legacy_task_headers(
+    tmp_path: pathlib.Path,
+) -> None:
+    """B3: Non-header `tasks validate` errors (e.g. missing `## Verification` section or dependency cycle)
+    are reported under `tasks-validation-errors`, while `legacy-task-headers` is reserved for genuine
+    legacy-header diagnostics."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "proj_val_err"
+    create_updated_project_fixture(proj_dir, home=fake_home)
+
+    # Corrupt T001 body by removing required `## Verification` section while keeping valid current headers
+    t001_path = proj_dir / "tasks" / "scrapers" / "T001-autoscout-adapter.md"
+    t001_text = t001_path.read_text(encoding="utf-8")
+    t001_no_ver = t001_text.replace("## Verification\n\n- `pytest tests/test_autoscout.py` passes.\n\n", "")
+    t001_path.write_text(t001_no_ver, encoding="utf-8")
+
+    doc = oe.inspect_project_doctor(proj_dir, home=fake_home)
+    assert doc["ok"] is False
+    assert doc["drifted"] is True
+    kinds = {f["kind"] for f in doc["findings"]}
+    assert "tasks-validation-errors" in kinds
+    assert "legacy-task-headers" not in kinds
+
+    val_f = next(f for f in doc["findings"] if f["kind"] == "tasks-validation-errors")
+    assert val_f["severity"] == "error"
+    assert any("missing required Markdown section(s): ## Verification" in e for e in val_f["errors"])
+    assert doc["checks"]["task_headers"]["ok"] is True
+    assert doc["checks"]["tasks_validation"]["ok"] is False
+
+
+def test_19_2_b4_render_and_import_exceptions_emit_doctor_check_failed_and_never_mark_index_in_sync(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B4: Exceptions during index sync render, AGENTS.md render, or module import are never swallowed
+    as 'in sync' and instead emit a `doctor-check-failed` finding with `severity='error'`."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "proj_check_fail"
+    create_updated_project_fixture(proj_dir, home=fake_home)
+
+    te = oe._load_tasks_engine()
+    oc = oe._load_orchestration_config()
+
+    def _boom_index(*_args: object, **_kwargs: object) -> str:
+        raise RuntimeError("simulated index render failure")
+
+    def _boom_agents(*_args: object, **_kwargs: object) -> str:
+        raise RuntimeError("simulated agents render failure")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(te, "render_synced_index", _boom_index)
+        mp.setattr(oc, "render_agents_md_block", _boom_agents)
+        doc = oe.inspect_project_doctor(proj_dir, home=fake_home)
+
+    assert doc["ok"] is False
+    assert doc["drifted"] is True
+    assert doc["checks"]["index_markers"]["in_sync"] is False
+    assert doc["checks"]["index_markers"]["ok"] is False
+    assert doc["checks"]["agents_md"]["ok"] is False
+
+    failed_findings = [f for f in doc["findings"] if f["kind"] == "doctor-check-failed"]
+    failed_checks = {f["check"] for f in failed_findings}
+    assert "index-sync" in failed_checks
+    assert "agents-md" in failed_checks
+    for ff in failed_findings:
+        assert ff["severity"] == "error"
+
+
+def test_19_2_b5_drift_warning_command_matrix_and_documented_exclusions(
+    tmp_path: pathlib.Path,
+) -> None:
+    """B5: Verify the 1-line stderr drift warning across the command matrix (`tasks`, `config`, `env`,
+    `questions`, `use-cases`, `run`, `events`, `sessions`, `triggers`, `workspace`, `preflight`, `describe`)
+    and verify that documented exclusions (`doctor`, `upgrade`, `env doctor`, `--help`) do not emit it."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    drifted_proj = tmp_path / "drifted_matrix_proj"
+    create_2026_10_17_fixture(drifted_proj)
+
+    env_base = os.environ.copy()
+    env_base["AI_ORCH_HOME"] = str(fake_home)
+    env_base.pop("AI_ORCH_NO_DRIFT_WARNING", None)
+    env_base.pop("AI_ORCH_DRIFT_WARNING", None)
+
+    warn_commands = [
+        ["tasks", "list", "--tasks-dir", str(drifted_proj / "tasks"), "--json"],
+        ["config", "show", "--workspace", str(drifted_proj), "--json"],
+        ["env", "status", "--home", str(fake_home), "--workspace", str(drifted_proj), "--json"],
+        ["questions", "list", "--tasks-dir", str(drifted_proj / "tasks"), "--json"],
+        ["use-cases", "list", "--tasks-dir", str(drifted_proj / "tasks"), "--json"],
+        ["run", "list", "--workspace", str(drifted_proj), "--json"],
+        ["events", "tail", "--workspace", str(drifted_proj), "--json"],
+        ["sessions", "list", "--workspace", str(drifted_proj), "--json"],
+        ["triggers", "list", "--workspace", str(drifted_proj), "--json"],
+        ["workspace", "list", "--json"],
+        ["preflight", "--workspace", str(drifted_proj), "--json"],
+        ["describe", "--json"],
+    ]
+
+    for cmd_args in warn_commands:
+        res = subprocess.run(
+            [sys.executable, str(AI_ORCH_BIN), *cmd_args],
+            cwd=str(drifted_proj),
+            env=env_base,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        parsed = json.loads(res.stdout)
+        assert isinstance(parsed, (dict, list)), f"stdout not valid JSON for {cmd_args}"
+        assert "[ai-orch] warning: project 'drifted_matrix_proj' has convention drift" in res.stderr, (
+            f"missing drift warning on stderr for {cmd_args}: {res.stderr!r}"
+        )
+
+    excluded_commands = [
+        ["doctor", "--project", str(drifted_proj), "--home", str(fake_home), "--json"],
+        ["upgrade", "--project", str(drifted_proj), "--home", str(fake_home), "--json"],
+        ["env", "doctor", "--project", str(drifted_proj), "--home", str(fake_home), "--json"],
+        ["tasks", "--help"],
+    ]
+    for cmd_args in excluded_commands:
+        res = subprocess.run(
+            [sys.executable, str(AI_ORCH_BIN), *cmd_args],
+            cwd=str(drifted_proj),
+            env=env_base,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "[ai-orch] warning:" not in res.stderr, f"unexpected warning for excluded command {cmd_args}"
+
+
+def test_19_2_b6_no_fixture_builders_in_production_module_and_checked_in_fixtures_used() -> None:
+    """B6: Large fixture builders are moved out of `scripts/orchestration_env.py` into the tests
+    and backed by checked-in fixture files under `scripts/fixtures/`."""
+    import orchestration_env as oe
+
+    assert not hasattr(oe, "create_2026_10_17_fixture")
+    assert not hasattr(oe, "create_updated_project_fixture")
+    assert (FIXTURES_DIR / "project_2026_10_17" / "AGENTS.md").is_file()
+    assert (FIXTURES_DIR / "project_2026_10_17" / "tasks" / "00-INDEX.md").is_file()
+    assert (FIXTURES_DIR / "project_2026_10_17" / "tasks" / "scrapers" / "T001-autoscout-adapter.md").is_file()
+    assert (FIXTURES_DIR / "project_updated" / "AGENTS.md").is_file()
+    assert (FIXTURES_DIR / "project_updated" / "tasks" / "scrapers" / "T001-autoscout-adapter.md").is_file()
 
 
 
