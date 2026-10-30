@@ -174,6 +174,7 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T087 (describe run incompleto) | P3 | [ai-orch describe elenca solo una parte dei sottocomandi di run](micro/T087-describe-run-incompleto.md) | verified | kilo | - |
+| T089 (Test non isolati) | P1 | [I test scrivono nella config globale reale: serve isolamento automatico in conftest](micro/T089-test-non-isolati.md) | in progress | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
