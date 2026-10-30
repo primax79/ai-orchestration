@@ -2526,10 +2526,23 @@ def test_19_4_host_id_resolution_and_normalization(tmp_path: pathlib.Path, monke
     ws = tmp_path / "proj_host_lookup"
     (ws / ".ai-orchestration").mkdir(parents=True)
     (ws / ".ai-orchestration" / "orchestration.toml").write_text(
-        '[hosts.mac]\nssh_target = "mac.lan"\nrole = "client"\n',
+        '[host]\nid = "legacy_host"\n\n[hosts.mac]\nssh_target = "mac.lan"\nrole = "client"\n',
         encoding="utf-8",
     )
-    assert oc.get_declared_hosts(global_path=gpath, workspace=ws) == {"alf_ubuntu", "mac"}
+    assert oc.get_declared_hosts(global_path=gpath, workspace=ws) == {"alf_ubuntu", "legacy_host", "mac"}
+    assert oc.resolve_host_id(global_path=missing_cfg, workspace=ws, hostname="fallback.local") == "legacy_host"
+
+    # B1: When a higher-priority canonical project config exists, shadowed legacy project config
+    # must NOT leak its [host] id or [hosts.<id>] entries.
+    (ws / ".ai-orchestration.local.toml").write_text(
+        '[hosts.active_client]\nssh_target = "active.lan"\nrole = "client"\n',
+        encoding="utf-8",
+    )
+    assert oc.get_declared_hosts(global_path=gpath, workspace=ws) == {"alf_ubuntu", "active_client"}
+    assert "mac" not in oc.get_declared_hosts(global_path=gpath, workspace=ws)
+    assert "legacy_host" not in oc.get_declared_hosts(global_path=gpath, workspace=ws)
+    # Since active canonical config has no [host] id, resolve_host_id falls back to hostname (not shadowed legacy_host)
+    assert oc.resolve_host_id(global_path=missing_cfg, workspace=ws, hostname="fallback.local") == "fallback"
 
 
 def test_19_4_hosts_table_and_validation() -> None:

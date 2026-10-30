@@ -887,8 +887,9 @@ def resolve_host_id(
         cand_tomls.append(pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml")
 
     if proj_root is not None:
-        for cand in _inspect_project_config(proj_root, global_config).get("candidates", []):
-            cand_tomls.append(cand["path"])
+        proj_info = _inspect_project_config(proj_root, global_config)
+        if proj_info.get("exists") and isinstance(proj_info.get("path"), pathlib.Path):
+            cand_tomls.append(proj_info["path"])
 
     for cfg_file in cand_tomls:
         if cfg_file.is_file() and tomllib is not None:
@@ -955,10 +956,15 @@ def get_declared_hosts(
         else:
             cand_tomls.append(pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml")
 
-        for check_ws in ([proj_root, proj_root.parent] if proj_root.parent != proj_root else [proj_root]):
-            for cand in _inspect_project_config(check_ws, global_config).get("candidates", []):
-                if cand["path"] not in cand_tomls:
-                    cand_tomls.append(cand["path"])
+        proj_info = _inspect_project_config(proj_root, global_config)
+        if proj_info.get("exists") and isinstance(proj_info.get("path"), pathlib.Path):
+            if proj_info["path"] not in cand_tomls:
+                cand_tomls.append(proj_info["path"])
+        elif proj_root.parent != proj_root:
+            parent_info = _inspect_project_config(proj_root.parent, global_config)
+            if parent_info.get("exists") and isinstance(parent_info.get("path"), pathlib.Path):
+                if parent_info["path"] not in cand_tomls:
+                    cand_tomls.append(parent_info["path"])
 
         for cfg_file in cand_tomls:
             if cfg_file.is_file() and tomllib is not None:
@@ -4593,6 +4599,8 @@ def compute_operation_plan(operations: list[dict[str, Any]]) -> tuple[list[dict[
             "before_hash": op.get("before_hash", ""),
             "path": op["path"],
         }
+        if "after_hash" in op:
+            entry["after_hash"] = op["after_hash"]
         if "summary" in op:
             entry["summary"] = op["summary"]
         elif "diff_summary" in op:
@@ -4602,11 +4610,14 @@ def compute_operation_plan(operations: list[dict[str, Any]]) -> tuple[list[dict[
         if "summary_lines" in op:
             entry["summary_lines"] = op["summary_lines"]
         plan.append(entry)
-        canonical_items.append({
+        canon_entry = {
             "action": op.get("action", "modify"),
             "before_hash": op.get("before_hash", ""),
             "path": op["path"],
-        })
+        }
+        if "after_hash" in op:
+            canon_entry["after_hash"] = op["after_hash"]
+        canonical_items.append(canon_entry)
     plan_sorted = sorted(plan, key=lambda x: (x["path"], x["action"]))
     canonical_sorted = sorted(canonical_items, key=lambda x: (x["path"], x["action"]))
     canonical = json.dumps(canonical_sorted, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -21343,6 +21354,7 @@ def upgrade_tasks_tree(
                         "action": "modify",
                         "path": hrec["rel_path"],
                         "before_hash": hrec["before_hash"],
+                        "after_hash": hashlib.sha256(hrec["new_text"].encode("utf-8")).hexdigest(),
                         "summary": hrec["summary"],
                         "changes": hrec["changes"],
                     })
@@ -21353,12 +21365,14 @@ def upgrade_tasks_tree(
             existing_agents = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
             new_agents = render_upgraded_agents_md(existing_agents, tasks_dir=tasks_dir)
             if existing_agents != new_agents:
+                agents_after_hash = hashlib.sha256(new_agents.encode("utf-8")).hexdigest()
                 if not agents_md.is_file():
                     created.append(str(agents_md))
                     operations.append({
                         "action": "create",
                         "path": "AGENTS.md",
                         "before_hash": "",
+                        "after_hash": agents_after_hash,
                         "summary": f"+{len(new_agents.splitlines())} lines",
                     })
                 else:
@@ -21376,6 +21390,7 @@ def upgrade_tasks_tree(
                         "action": "modify",
                         "path": "AGENTS.md",
                         "before_hash": _file_sha256(agents_md),
+                        "after_hash": agents_after_hash,
                         "summary": summary,
                     })
                 pending_writes.append((agents_md, new_agents))
@@ -21384,61 +21399,68 @@ def upgrade_tasks_tree(
             # 2. Ensure tasks/.gitignore exists and contains .ai-orch.lock
             gitignore_path = tasks_dir / ".gitignore"
             if not gitignore_path.is_file():
+                new_gi_init = ".ai-orch.lock\n"
                 created.append(str(gitignore_path))
                 upgraded_files.append(str(gitignore_path))
                 operations.append({
                     "action": "create",
                     "path": ".gitignore",
                     "before_hash": "",
+                    "after_hash": hashlib.sha256(new_gi_init.encode("utf-8")).hexdigest(),
                     "summary": "+1 line",
                 })
-                pending_writes.append((gitignore_path, ".ai-orch.lock\n"))
+                pending_writes.append((gitignore_path, new_gi_init))
             else:
                 existing_gi = gitignore_path.read_text(encoding="utf-8")
                 gi_lines = [line.strip() for line in existing_gi.splitlines()]
                 if ".ai-orch.lock" not in gi_lines:
+                    new_gi = existing_gi + ("\n" if existing_gi and not existing_gi.endswith("\n") else "") + ".ai-orch.lock\n"
                     updated.append(str(gitignore_path))
                     upgraded_files.append(str(gitignore_path))
                     operations.append({
                         "action": "modify",
                         "path": ".gitignore",
                         "before_hash": _file_sha256(gitignore_path),
+                        "after_hash": hashlib.sha256(new_gi.encode("utf-8")).hexdigest(),
                         "summary": "+1 line",
                     })
-                    new_gi = existing_gi + ("\n" if existing_gi and not existing_gi.endswith("\n") else "") + ".ai-orch.lock\n"
                     pending_writes.append((gitignore_path, new_gi))
 
             # 2.5. Ensure tasks/.gitattributes exists and contains 00-INDEX.md merge=ai-orch-index
             gitattributes_path = tasks_dir / ".gitattributes"
             rule_line = "00-INDEX.md merge=ai-orch-index"
             if not gitattributes_path.is_file():
+                new_ga_init = f"{rule_line}\n"
                 created.append(str(gitattributes_path))
                 upgraded_files.append(str(gitattributes_path))
                 operations.append({
                     "action": "create",
                     "path": ".gitattributes",
                     "before_hash": "",
+                    "after_hash": hashlib.sha256(new_ga_init.encode("utf-8")).hexdigest(),
                     "summary": "+1 line",
                 })
-                pending_writes.append((gitattributes_path, f"{rule_line}\n"))
+                pending_writes.append((gitattributes_path, new_ga_init))
             else:
                 existing_ga = gitattributes_path.read_text(encoding="utf-8")
                 ga_lines = [line.strip() for line in existing_ga.splitlines()]
                 if not any(line == rule_line or line.startswith("00-INDEX.md merge=") for line in ga_lines):
+                    new_ga = existing_ga + ("\n" if existing_ga and not existing_ga.endswith("\n") else "") + f"{rule_line}\n"
                     updated.append(str(gitattributes_path))
                     upgraded_files.append(str(gitattributes_path))
                     operations.append({
                         "action": "modify",
                         "path": ".gitattributes",
                         "before_hash": _file_sha256(gitattributes_path),
+                        "after_hash": hashlib.sha256(new_ga.encode("utf-8")).hexdigest(),
                         "summary": "+1 line",
                     })
-                    new_ga = existing_ga + ("\n" if existing_ga and not existing_ga.endswith("\n") else "") + f"{rule_line}\n"
                     pending_writes.append((gitattributes_path, new_ga))
 
             # 2.55. Ensure tasks/convention_version records CONVENTION_VERSION
             conv_version_path = tasks_dir / CONVENTION_VERSION_FILENAME
             expected_conv_text = f"{CONVENTION_VERSION}\n"
+            expected_conv_hash = hashlib.sha256(expected_conv_text.encode("utf-8")).hexdigest()
             current_conv = read_convention_version(tasks_dir)
             if not conv_version_path.is_file():
                 created.append(str(conv_version_path))
@@ -21447,6 +21469,7 @@ def upgrade_tasks_tree(
                     "action": "create",
                     "path": CONVENTION_VERSION_FILENAME,
                     "before_hash": "",
+                    "after_hash": expected_conv_hash,
                     "summary": f"convention_version={CONVENTION_VERSION}",
                 })
                 pending_writes.append((conv_version_path, expected_conv_text))
@@ -21457,6 +21480,7 @@ def upgrade_tasks_tree(
                     "action": "modify",
                     "path": CONVENTION_VERSION_FILENAME,
                     "before_hash": _file_sha256(conv_version_path),
+                    "after_hash": expected_conv_hash,
                     "summary": f"convention_version={current_conv or 'none'}->{CONVENTION_VERSION}",
                 })
                 pending_writes.append((conv_version_path, expected_conv_text))
@@ -21469,6 +21493,7 @@ def upgrade_tasks_tree(
                 if existing_drv != driver_cmd or existing_name != driver_name:
                     pending_git_config = (driver_cmd, driver_name)
                     cfg_target = "git config merge.ai-orch-index"
+                    cfg_after_hash = hashlib.sha256(f"{driver_cmd}\n{driver_name}".encode("utf-8")).hexdigest()
                     if not existing_drv and not existing_name:
                         created.append(cfg_target)
                         cfg_action = "create"
@@ -21482,6 +21507,7 @@ def upgrade_tasks_tree(
                         "action": cfg_action,
                         "path": cfg_target,
                         "before_hash": cfg_before_hash,
+                        "after_hash": cfg_after_hash,
                         "summary": f'driver="{driver_cmd}"',
                         "summary_lines": [
                             f'git config merge.ai-orch-index.driver "{driver_cmd}"',
@@ -21537,6 +21563,7 @@ def upgrade_tasks_tree(
                                                     "action": "create",
                                                     "path": target_sub.relative_to(tasks_dir).as_posix(),
                                                     "before_hash": "",
+                                                    "after_hash": _file_sha256(subitem),
                                                     "summary": f"+{lines_cnt} lines",
                                                 })
                                                 pending_copies.append((subitem, target_sub))
@@ -21570,6 +21597,7 @@ def upgrade_tasks_tree(
                                             "action": "create",
                                             "path": dest_file.relative_to(tasks_dir).as_posix(),
                                             "before_hash": "",
+                                            "after_hash": _file_sha256(subfile),
                                             "summary": f"+{lines_cnt} lines",
                                         })
                                         pending_copies.append((subfile, dest_file))
@@ -21603,6 +21631,7 @@ def upgrade_tasks_tree(
                                         "action": "create",
                                         "path": dest_file.relative_to(tasks_dir).as_posix(),
                                         "before_hash": "",
+                                        "after_hash": _file_sha256(child),
                                         "summary": f"+{lines_cnt} lines",
                                     })
                                     pending_copies.append((child, dest_file))
@@ -21623,6 +21652,7 @@ def upgrade_tasks_tree(
                                         "action": "create",
                                         "path": dest_file.relative_to(tasks_dir).as_posix(),
                                         "before_hash": "",
+                                        "after_hash": _file_sha256(child),
                                         "summary": f"+{lines_cnt} lines",
                                     })
                                     pending_copies.append((child, dest_file))
@@ -21656,12 +21686,14 @@ def upgrade_tasks_tree(
             )
             idx_summary = summarize_index_changes(existing_idx, rendered_idx)
             if existing_idx.strip() != rendered_idx.strip():
+                idx_after_hash = hashlib.sha256(rendered_idx.encode("utf-8")).hexdigest()
                 if not idx_path.is_file():
                     created.append(str(idx_path))
                     operations.append({
                         "action": "create",
                         "path": "00-INDEX.md",
                         "before_hash": "",
+                        "after_hash": idx_after_hash,
                         "summary": f"+{len(rendered_idx.splitlines())} lines; {idx_summary['inline']}",
                         "sections": idx_summary["sections"],
                         "summary_lines": idx_summary["lines"],
@@ -21682,6 +21714,7 @@ def upgrade_tasks_tree(
                         "action": "modify",
                         "path": "00-INDEX.md",
                         "before_hash": _file_sha256(idx_path),
+                        "after_hash": idx_after_hash,
                         "summary": summary,
                         "sections": idx_summary["sections"],
                         "summary_lines": idx_summary["lines"],

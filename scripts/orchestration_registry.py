@@ -24,6 +24,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from typing import Any, Iterator
@@ -235,13 +236,34 @@ def get_lock_path(config_dir: pathlib.Path | str | None = None) -> pathlib.Path:
     return broker_dir / "registry.lock"
 
 
+_REGISTRY_LOCK_STATE = threading.local()
+
+
 @contextlib.contextmanager
 def registry_lock(
     config_dir: pathlib.Path | str | None = None,
     timeout: float = 10.0,
 ) -> Iterator[pathlib.Path]:
-    """Exclusive fcntl.flock with a deadline on <global config dir>/broker/registry.lock."""
-    lock_file = get_lock_path(config_dir)
+    """Exclusive fcntl.flock with a deadline on <global config dir>/broker/registry.lock.
+    Re-entrant for the current thread.
+    """
+    lock_file = get_lock_path(config_dir).resolve()
+    held = getattr(_REGISTRY_LOCK_STATE, "held_locks", None)
+    if held is None:
+        held = {}
+        _REGISTRY_LOCK_STATE.held_locks = held
+
+    lock_key = str(lock_file)
+    if lock_key in held and held[lock_key] > 0:
+        held[lock_key] += 1
+        try:
+            yield lock_file
+        finally:
+            held[lock_key] -= 1
+            if held[lock_key] == 0:
+                del held[lock_key]
+        return
+
     lock_file.parent.mkdir(parents=True, exist_ok=True)
 
     fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
@@ -263,13 +285,19 @@ def registry_lock(
         if not acquired:
             raise TimeoutError(f"Could not acquire registry lock on {lock_file} within {timeout}s")
 
+        held[lock_key] = 1
         yield lock_file
     finally:
-        if acquired and fcntl is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
+        if acquired:
+            if lock_key in held:
+                held[lock_key] -= 1
+                if held[lock_key] == 0:
+                    del held[lock_key]
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
         try:
             os.close(fd)
         except OSError:
