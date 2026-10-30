@@ -59,6 +59,8 @@ HOST_ALLOWED_KEYS = {
     "user",
     "agent_user",
     "agents_user",
+    "timeout",
+    "timeout_sec",
     "description",
 }
 HOST_ENTRY_ALLOWED_KEYS = {
@@ -73,6 +75,8 @@ HOST_ENTRY_ALLOWED_KEYS = {
     "port",
     "identity_file",
     "ssh_key",
+    "timeout",
+    "timeout_sec",
     "description",
     "enabled",
 }
@@ -1216,12 +1220,15 @@ def resolve_hosts_table(
         ssh_val = entry.get("ssh_target") or entry.get("ssh") or entry.get("target") or entry.get("hostname")
         user_val = entry.get("agent_user") or entry.get("user") or entry.get("agents_user")
         role_val = entry.get("role") or "client"
+        timeout_val = entry.get("timeout") if entry.get("timeout") is not None else entry.get("timeout_sec")
         entry["id"] = hid
         entry["ssh_target"] = ssh_val
         entry["ssh"] = ssh_val
         entry["agent_user"] = user_val
         entry["user"] = user_val
         entry["role"] = role_val
+        if timeout_val is not None:
+            entry["timeout"] = timeout_val
         out[hid] = entry
     return out
 
@@ -1646,6 +1653,13 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
                         errors.append(
                             f"[hosts.{hid}].port = {pval!r} must be an integer between 1 and 65535."
                         )
+                for tkey in ("timeout", "timeout_sec"):
+                    if tkey in hcfg:
+                        tval = hcfg[tkey]
+                        if isinstance(tval, bool) or not isinstance(tval, (int, float)) or tval <= 0:
+                            errors.append(
+                                f"[hosts.{hid}].{tkey} = {tval!r} must be a positive number."
+                            )
 
     proj_cfg = cfg.get("project")
     if isinstance(proj_cfg, dict):

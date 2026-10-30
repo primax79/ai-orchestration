@@ -10,6 +10,7 @@ Dispatches:
   - `ai-orch events <subcommand> [args...]` -> `orchestration_events.py`
   - `ai-orch sessions <subcommand> [args...]` -> `orchestration_sessions.py`
   - `ai-orch triggers <subcommand> [args...]` -> `orchestration_triggers.py`
+  - `ai-orch console status|attach [args...]` -> `orchestration_registry.py console`
   - `ai-orch doctor [--project <dir>] [--json]` -> `orchestration_env.py doctor`
   - `ai-orch upgrade [--project <dir>] [--apply --expect-hash <hash>] [--json]` -> `orchestration_env.py upgrade`
   - `ai-orch render-agents-md [args...]`    -> `orchestration_config.py render-agents-md`
@@ -789,12 +790,16 @@ CLI_DESCRIPTION: dict[str, Any] = {
         },
         "console": {
             "script": str(ORCH_REGISTRY_SCRIPT.relative_to(REPO_ROOT)),
-            "usage": "ai-orch console status [--all-hosts] [--json]",
-            "description": "Multi-host console status listing projects from the hub registry with local cache fallback.",
+            "usage": "ai-orch console <status|attach> [options] [--json]",
+            "description": "Multi-host CLI console: aggregate projects, tasks, runs, open questions, and deliveries across hosts, and attach to live screen sessions over SSH.",
             "subcommands": {
                 "status": {
-                    "usage": "ai-orch console status [--all-hosts] [--timeout <sec>] [--config-dir <dir>] [--json]",
-                    "description": "List projects and host status from the hub registry (falls back to local SQLite cache when hub is unreachable).",
+                    "usage": "ai-orch console status [--all-hosts] [--local] [--timeout <sec>] [--project <dir>] [--config-dir <dir>] [--json]",
+                    "description": "Aggregate projects, tasks by state and host, runs, open questions, and deliveries to verify across declared hosts over stateless SSH.",
+                },
+                "attach": {
+                    "usage": "ai-orch console attach <run|task> [--project <dir>] [--timeout <sec>] [--dry-run] [--config-dir <dir>] [--json]",
+                    "description": "Resolve host and screen session name from a run or task and open ssh -t <target> screen -x <session> (using agent_user on the hub).",
                 },
             },
         },

@@ -787,6 +787,14 @@ def sync_hub_entry_to_sqlite_conn(
         if existing is not None
         else (entry.get("registered_at") or now)
     )
+    eff_source = registry_source
+    if (
+        existing is not None
+        and "registry_source" in existing.keys()
+        and existing["registry_source"] == "local"
+        and entry.get("registry_source") != "hub"
+    ):
+        eff_source = "local"
     paths_json = json.dumps(paths, sort_keys=True)
 
     conn.execute(
@@ -825,7 +833,7 @@ def sync_hub_entry_to_sqlite_conn(
             mirror_repo,
             conv_ver,
             paths_json,
-            registry_source,
+            eff_source,
         ),
     )
 
@@ -991,9 +999,28 @@ def replace_hub_snapshot_cache(
             "mirror": item.get("mirror_repo") or item.get("mirror"),
             "convention_version": item.get("convention_version"),
             "subprojects": norm_subs,
+            "registry_source": "hub",
             "registered_at": item.get("registered_at") or now,
             "updated_at": item.get("updated_at") or now,
         })
+
+    # Preserve locally registered entries in hub_registry.json alongside the refreshed hub snapshot
+    hub_uuids = {e["uuid"] for e in norm_entries}
+    db_path = get_db_path(config_dir)
+    if db_path.is_file():
+        conn = get_connection(db_path)
+        try:
+            local_rows = conn.execute(
+                "SELECT uuid FROM workspaces WHERE registry_source = 'local'"
+            ).fetchall()
+            local_uuids = {str(r["uuid"]) for r in local_rows}
+        finally:
+            conn.close()
+        for prev_e in prev_doc.get("projects", []):
+            if isinstance(prev_e, dict) and str(prev_e.get("uuid") or "") in local_uuids and str(prev_e.get("uuid") or "") not in hub_uuids:
+                kept = copy.deepcopy(prev_e)
+                kept["registry_source"] = "local"
+                norm_entries.append(kept)
 
     new_doc = {
         "schema_version": 1,
@@ -3194,18 +3221,483 @@ def apply_import_migration_registry(
     }
 
 
+SAFE_ATTACH_TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+SAFE_HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+SAFE_SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*(@[A-Za-z0-9][A-Za-z0-9._:-]*)?$")
+SAFE_SCREEN_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SAFE_AGENT_USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,62}$")
+SAFE_RUN_DIR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _load_runs_module() -> Any:
+    if str(SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+    import orchestration_runs
+
+    return orchestration_runs
+
+
+def _load_tasks_engine_module() -> Any:
+    te_dir = REPO_ROOT / "plugins" / "architect-side" / "skills" / "task-pipeline" / "scripts"
+    if str(te_dir) not in sys.path:
+        sys.path.insert(0, str(te_dir))
+    import tasks_engine
+
+    return tasks_engine
+
+
+def _compute_iso_age_sec(ts_str: str | None) -> float | None:
+    if not ts_str or not isinstance(ts_str, str):
+        return None
+    try:
+        clean_ts = ts_str.strip().replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(clean_ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return max(0.0, round((now - dt).total_seconds(), 3))
+    except Exception:
+        return None
+
+
+def _extract_heartbeat_from_run(record: dict[str, Any]) -> str | None:
+    for k in ("last_heartbeat", "heartbeat_at", "heartbeat", "last_seen"):
+        val = record.get(k)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        if isinstance(val, dict):
+            sub = val.get("at") or val.get("timestamp") or val.get("last_heartbeat")
+            if isinstance(sub, str) and sub.strip():
+                return sub.strip()
+    sup = record.get("supervisor")
+    if isinstance(sup, dict):
+        for k in ("last_heartbeat", "heartbeat_at", "heartbeat"):
+            val = sup.get(k)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+            if isinstance(val, dict):
+                sub = val.get("at") or val.get("timestamp")
+                if isinstance(sub, str) and sub.strip():
+                    return sub.strip()
+    return None
+
+
+def _normalize_console_run_record(
+    record: dict[str, Any],
+    *,
+    default_host: str,
+    default_project: str | None = None,
+    default_workspace: str | None = None,
+) -> dict[str, Any]:
+    out = dict(record)
+    run_id = str(out.get("run_id") or "").strip()
+    raw_host = out.get("host")
+    run_host = str(raw_host).strip() if isinstance(raw_host, str) and raw_host.strip() else default_host
+    task_id = out.get("task_id") or out.get("task") or out.get("note_id")
+    status = out.get("status") or out.get("state") or "unknown"
+    state = out.get("state") or status
+    proj_slug = out.get("project") or default_project or ""
+    ws_str = out.get("workspace") or default_workspace or ""
+    if not proj_slug and ws_str:
+        proj_slug = sanitize_slug(pathlib.Path(ws_str).name)
+
+    scr_sess = (
+        out.get("screen_session")
+        or out.get("session_name")
+        or (out.get("screen") or {}).get("session_name")
+    )
+    if not scr_sess and out.get("backend") == "screen" and task_id:
+        try:
+            runs_mod = _load_runs_module()
+            scr_sess = runs_mod.build_screen_session_name(
+                str(out.get("mode") or "execute"),
+                proj_slug or "project",
+                str(task_id),
+            )
+        except Exception:
+            scr_sess = f"agent-{proj_slug or 'project'}-{task_id}"
+
+    started_at = out.get("started_at")
+    age_sec = out.get("age_sec") if isinstance(out.get("age_sec"), (int, float)) else _compute_iso_age_sec(started_at)
+    last_hb = _extract_heartbeat_from_run(out)
+    hb_age_sec = (
+        out.get("heartbeat_age_sec")
+        if isinstance(out.get("heartbeat_age_sec"), (int, float))
+        else _compute_iso_age_sec(last_hb)
+    )
+
+    out["run_id"] = run_id
+    out["host"] = run_host
+    out["task_id"] = task_id
+    out["task"] = task_id
+    out["status"] = status
+    out["state"] = state
+    out["project"] = proj_slug
+    if ws_str:
+        out["workspace"] = ws_str
+    out["screen_session"] = scr_sess
+    out["session_name"] = scr_sess
+    out["age_sec"] = age_sec
+    out["age"] = age_sec
+    out["last_heartbeat"] = last_hb
+    out["heartbeat_age_sec"] = hb_age_sec
+    out["heartbeat_age"] = hb_age_sec
+    return out
+
+
+def _collect_runs_for_dir(
+    proj_dir: pathlib.Path,
+    proj_slug: str,
+    cur_host: str,
+    *,
+    reconcile_local: bool = True,
+) -> list[dict[str, Any]]:
+    runs_dir = proj_dir / ".ai-orchestration" / "runs"
+    if not runs_dir.is_dir():
+        return []
+    runs_mod = None
+    try:
+        runs_mod = _load_runs_module()
+    except Exception:
+        runs_mod = None
+
+    results: list[dict[str, Any]] = []
+    for entry in runs_dir.iterdir():
+        if not entry.is_dir() or entry.name.startswith(".") or entry.name.startswith("-"):
+            continue
+        if not SAFE_RUN_DIR_RE.match(entry.name):
+            continue
+        run_file = entry / "run.json"
+        if not run_file.is_file():
+            continue
+        try:
+            data = json.loads(run_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                continue
+        except Exception:
+            continue
+
+        if not data.get("run_id"):
+            data["run_id"] = entry.name
+
+        if reconcile_local and runs_mod is not None:
+            try:
+                is_loc = runs_mod.is_local_run(data, workspace=proj_dir, current_host=cur_host)
+                has_pid_or_status = bool(
+                    (isinstance(data.get("supervisor"), dict) and data["supervisor"].get("pid") is not None)
+                    or (isinstance(data.get("screen"), dict) and data["screen"].get("pid") is not None)
+                    or (entry / "status.json").is_file()
+                )
+                if not is_loc or has_pid_or_status:
+                    data = runs_mod.reconcile(data, workspace=proj_dir, current_host=cur_host)
+            except Exception:
+                pass
+
+        results.append(
+            _normalize_console_run_record(
+                data,
+                default_host=cur_host,
+                default_project=proj_slug,
+                default_workspace=str(proj_dir),
+            )
+        )
+
+    results.sort(key=lambda r: str(r.get("run_id") or ""), reverse=True)
+    return results
+
+
+def _collect_tasks_questions_deliveries_for_dir(
+    proj_dir: pathlib.Path,
+    proj_slug: str,
+    cur_host: str,
+    runs_for_proj: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    tasks_dir = proj_dir / "tasks"
+    if not tasks_dir.is_dir():
+        return [], [], []
+    try:
+        te = _load_tasks_engine_module()
+    except Exception:
+        return [], [], []
+
+    run_by_task: dict[str, dict[str, Any]] = {}
+    for r in runs_for_proj:
+        tid = r.get("task_id")
+        if not tid:
+            continue
+        existing = run_by_task.get(str(tid))
+        if existing is None or (
+            r.get("status") in ("running", "starting")
+            and existing.get("status") not in ("running", "starting")
+        ):
+            run_by_task[str(tid)] = r
+
+    tasks_out: list[dict[str, Any]] = []
+    deliveries_out: list[dict[str, Any]] = []
+    questions_out: list[dict[str, Any]] = []
+
+    try:
+        tree = te.discover_task_tree(tasks_dir)
+        emergent = te.discover_emergent_tasks(tasks_dir)
+        initiatives = te.discover_initiatives(tasks_dir, tree)
+        tree_dicts = {nid: node.to_dict() for nid, node in tree.items()}
+        raw_tasks = te._build_tasks_list(tasks_dir, tree, emergent, initiatives, tree_dicts)
+
+        for t in raw_tasks:
+            if t.get("in_done"):
+                continue
+            if t.get("kind") == "initiative" and str(t.get("id", "")).startswith("INIT-"):
+                continue
+            tid = str(t.get("id") or "")
+            if not tid:
+                continue
+            node = tree.get(tid)
+            if node is not None and not node.is_leaf:
+                continue
+
+            cstate = (
+                t.get("canonical_state")
+                or (node.canonical_state if node is not None else None)
+                or te.normalize_state(str(t.get("state") or "open"))
+            )
+            raw_thost = (
+                t.get("host")
+                or (node.host if node is not None else None)
+                or (t.get("headers") or {}).get("host")
+                or (t.get("own_fields") or {}).get("host")
+            )
+            clean_thost = (
+                str(raw_thost).strip()
+                if isinstance(raw_thost, str) and raw_thost.strip() and raw_thost.strip() != "-"
+                else None
+            )
+            matched_r = run_by_task.get(tid)
+            eff_host = clean_thost or (matched_r.get("host") if matched_r else None) or cur_host
+            run_id_val = (
+                t.get("run_id")
+                or (t.get("headers") or {}).get("run-id")
+                or (node.own_fields.get("run-id") if node is not None else None)
+                or (matched_r.get("run_id") if matched_r else None)
+            )
+            if isinstance(run_id_val, str) and run_id_val.strip() == "-":
+                run_id_val = matched_r.get("run_id") if matched_r else None
+
+            qid = f"{proj_slug}/{tid}" if proj_slug else tid
+            t_entry = {
+                "id": tid,
+                "qualified_id": qid,
+                "project": proj_slug,
+                "workspace": str(proj_dir),
+                "title": t.get("title", ""),
+                "short_title": t.get("short_title") or t.get("title", ""),
+                "state": cstate,
+                "canonical_state": cstate,
+                "priority": t.get("priority", "P2"),
+                "executor": t.get("executor") or "-",
+                "host": eff_host,
+                "explicit_host": clean_thost,
+                "run_id": run_id_val,
+            }
+            tasks_out.append(t_entry)
+
+            if cstate == "delivered":
+                vb = (
+                    t.get("verify_by")
+                    or t.get("verify-by")
+                    or (t.get("headers") or {}).get("verify-by")
+                    or (node.own_fields.get("verify-by") if node is not None else None)
+                    or t.get("verifier")
+                    or "-"
+                )
+                deliveries_out.append({
+                    "id": tid,
+                    "qualified_id": qid,
+                    "project": proj_slug,
+                    "workspace": str(proj_dir),
+                    "title": t.get("title", ""),
+                    "short_title": t.get("short_title") or t.get("title", ""),
+                    "state": "delivered",
+                    "verify_by": vb,
+                    "executor": t.get("executor") or "-",
+                    "host": eff_host,
+                    "run_id": run_id_val,
+                })
+    except Exception:
+        pass
+
+    try:
+        _, q_res = te.list_questions(tasks_dir, status="open")
+        for q in q_res.get("questions", []):
+            qid_str = str(q.get("id") or "")
+            questions_out.append({
+                **q,
+                "id": qid_str,
+                "qualified_id": f"{proj_slug}/{qid_str}" if proj_slug else qid_str,
+                "project": proj_slug,
+                "workspace": str(proj_dir),
+                "host": cur_host,
+            })
+    except Exception:
+        pass
+
+    return tasks_out, questions_out, deliveries_out
+
+
+def _discover_local_project_dirs(
+    cur_host: str,
+    local_workspaces: list[dict[str, Any]],
+    workspace: pathlib.Path | str | None = None,
+) -> list[tuple[str, str | None, pathlib.Path]]:
+    seen_dirs: set[str] = set()
+    result: list[tuple[str, str | None, pathlib.Path]] = []
+
+    def _add_dir(slug: str, ws_uuid: str | None, p: pathlib.Path) -> None:
+        try:
+            rp = p.resolve()
+        except OSError:
+            return
+        if not rp.is_dir():
+            return
+        key = str(rp)
+        if key in seen_dirs:
+            return
+        seen_dirs.add(key)
+        result.append((slug, ws_uuid, rp))
+
+    if workspace is not None:
+        ws_p = pathlib.Path(workspace).expanduser()
+        _add_dir(sanitize_slug(ws_p.resolve().name if ws_p.exists() else ws_p.name), None, ws_p)
+
+    for w in local_workspaces:
+        w_slug = str(w.get("slug") or "")
+        w_uuid = w.get("uuid")
+        paths_map = w.get("paths") if isinstance(w.get("paths"), dict) else {}
+        cand_path_str = paths_map.get(cur_host) or w.get("canonical_path")
+        if cand_path_str:
+            cand_p = pathlib.Path(cand_path_str)
+            if cand_p.is_dir():
+                _add_dir(w_slug, w_uuid, cand_p)
+                for sp in w.get("projects", []) if isinstance(w.get("projects"), list) else []:
+                    rel_p = sp.get("rel_path") or sp.get("path")
+                    if rel_p and rel_p not in (".", ""):
+                        sp_dir = cand_p / rel_p
+                        if sp_dir.is_dir():
+                            _add_dir(str(sp.get("slug") or sp_dir.name), sp.get("uuid"), sp_dir)
+
+    if not result and workspace is None and not local_workspaces:
+        cwd_p = pathlib.Path.cwd().resolve()
+        if cwd_p != REPO_ROOT and ((cwd_p / "tasks").is_dir() or (cwd_p / ".ai-orchestration" / "runs").is_dir()):
+            _add_dir(sanitize_slug(cwd_p.name), None, cwd_p)
+
+    return result
+
+
+def _resolve_merged_hosts_table(
+    cdir: pathlib.Path,
+    gcfg: dict[str, Any],
+    gpath: pathlib.Path,
+    workspace: pathlib.Path | str | None = None,
+) -> dict[str, dict[str, Any]]:
+    hosts_table = resolve_hosts_table(gcfg, gpath)
+    cand_ws: list[pathlib.Path] = []
+    if workspace is not None:
+        cand_ws.append(pathlib.Path(workspace).expanduser().resolve())
+    else:
+        cwd_p = pathlib.Path.cwd().resolve()
+        if cwd_p != REPO_ROOT:
+            cand_ws.append(cwd_p)
+    for ws_p in cand_ws:
+        try:
+            pinfo = inspect_project_config(ws_p, gpath)
+            if pinfo.get("exists") and pinfo["path"].is_file():
+                pcfg = load_toml_file(pinfo["path"])
+                p_hosts = resolve_hosts_table(pcfg, gpath)
+                for hid, hcfg in p_hosts.items():
+                    if hid not in hosts_table:
+                        hosts_table[hid] = hcfg
+                    else:
+                        merged = dict(hosts_table[hid])
+                        merged.update({k: v for k, v in hcfg.items() if v is not None})
+                        hosts_table[hid] = merged
+        except Exception:
+            pass
+    return hosts_table
+
+
+def _resolve_effective_host_timeout(
+    hcfg: dict[str, Any],
+    default_timeout: float,
+    explicit_timeout: bool = False,
+) -> float:
+    if not explicit_timeout:
+        raw_t = hcfg.get("timeout") if hcfg.get("timeout") is not None else hcfg.get("timeout_sec")
+        if isinstance(raw_t, (int, float)) and not isinstance(raw_t, bool) and raw_t > 0:
+            return float(raw_t)
+    return max(0.1, float(default_timeout))
+
+
+def _query_remote_host_console_status(
+    hid: str,
+    hcfg: dict[str, Any],
+    timeout_sec: float,
+) -> tuple[bool, dict[str, Any] | None, str | None, bool]:
+    ssh_target = str(
+        hcfg.get("ssh_target")
+        or hcfg.get("ssh")
+        or hcfg.get("target")
+        or hcfg.get("hostname")
+        or hid
+    ).strip()
+    if not ssh_target or ssh_target.startswith("-") or not SAFE_SSH_TARGET_RE.match(ssh_target):
+        return False, None, f"Invalid ssh_target {ssh_target!r} for host {hid!r}", False
+
+    conn_timeout = max(1, int(round(timeout_sec)))
+    ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={conn_timeout}"]
+    if isinstance(hcfg.get("port"), int) and not isinstance(hcfg.get("port"), bool):
+        ssh_cmd.extend(["-p", str(hcfg["port"])])
+    id_file = hcfg.get("identity_file") or hcfg.get("ssh_key")
+    if isinstance(id_file, str) and id_file.strip() and not id_file.strip().startswith("-"):
+        ssh_cmd.extend(["-i", id_file.strip()])
+    ssh_cmd.extend([ssh_target, "ai-orch", "console", "status", "--local", "--json"])
+
+    try:
+        proc = subprocess.run(
+            ssh_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            data = json.loads(proc.stdout)
+            if isinstance(data, dict):
+                return True, data, None, False
+            return False, None, "Invalid JSON object from remote host", False
+        if proc.returncode == 0 and not proc.stdout.strip():
+            return True, {"ok": True, "host": hid, "items": [], "projects": [], "tasks": [], "runs": []}, None, False
+        err_msg = (proc.stderr or proc.stdout or f"ssh exited with code {proc.returncode}").strip()
+        return False, None, err_msg, False
+    except subprocess.TimeoutExpired:
+        return False, None, f"ssh timed out after {timeout_sec}s", True
+    except Exception as exc:
+        return False, None, str(exc), False
+
+
 def get_console_status_projects(
     config_dir: pathlib.Path | str | None = None,
     *,
     all_hosts: bool = False,
     ssh_timeout: float = 5.0,
+    workspace: pathlib.Path | str | None = None,
+    local_only: bool = False,
+    explicit_timeout: bool = False,
 ) -> dict[str, Any]:
-    """Return console status projects list from the hub registry, falling back to local SQLite cache if hub is unreachable."""
+    """Aggregate multi-host console status: projects, tasks by state and host, runs, open questions, and deliveries to verify."""
     cdir = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
     gpath = cdir / "orchestration.toml"
     gcfg = load_toml_file(gpath) if gpath.is_file() else {}
     cur_host = _resolve_current_host_id(cdir)
-    hosts_table = resolve_hosts_table(gcfg, gpath)
+    hosts_table = _resolve_merged_hosts_table(cdir, gcfg, gpath, workspace=workspace)
 
     hub_host_id: str | None = None
     hub_host_cfg: dict[str, Any] | None = None
@@ -3222,66 +3714,8 @@ def get_console_status_projects(
     registry_source = "hub"
     hub_error: str | None = None
     snapshot_version: int = 0
+    remote_payloads: dict[str, dict[str, Any]] = {}
 
-    # If a remote hub host is declared (different from current host), try querying it over ssh
-    if hub_host_id and hub_host_id != cur_host and hub_host_cfg is not None:
-        ssh_target = (
-            hub_host_cfg.get("ssh_target")
-            or hub_host_cfg.get("ssh")
-            or hub_host_cfg.get("target")
-            or hub_host_cfg.get("hostname")
-            or hub_host_id
-        )
-        ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={max(1, int(ssh_timeout))}"]
-        if isinstance(hub_host_cfg.get("port"), int):
-            ssh_cmd.extend(["-p", str(hub_host_cfg["port"])])
-        ssh_cmd.extend([str(ssh_target), "ai-orch", "workspace", "list", "--json"])
-        try:
-            proc = subprocess.run(
-                ssh_cmd,
-                capture_output=True,
-                text=True,
-                timeout=ssh_timeout,
-                check=False,
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                remote_data = json.loads(proc.stdout)
-                remote_items = (
-                    remote_data.get("items")
-                    if "items" in remote_data
-                    else remote_data.get("projects")
-                )
-                if isinstance(remote_items, list):
-                    remote_snap_ver = remote_data.get("snapshot_version")
-                    with registry_lock(cdir):
-                        snap_doc = replace_hub_snapshot_cache(
-                            cdir,
-                            remote_items,
-                            host_id=cur_host,
-                            snapshot_version=int(remote_snap_ver) if isinstance(remote_snap_ver, int) else None,
-                        )
-                        snapshot_version = int(snap_doc.get("snapshot_version", 1))
-                else:
-                    hub_reachable = False
-                    registry_source = "local_cache"
-                    hub_error = "Invalid hub workspace list JSON response"
-            else:
-                hub_reachable = False
-                registry_source = "local_cache"
-                hub_error = (proc.stderr or proc.stdout or f"ssh exited with code {proc.returncode}").strip()
-        except Exception as exc:
-            hub_reachable = False
-            registry_source = "local_cache"
-            hub_error = str(exc)
-
-    local_workspaces = list_workspaces(cdir)
-    hub_doc = load_hub_registry(cdir)
-    if not snapshot_version:
-        snapshot_version = int(hub_doc.get("snapshot_version", 0))
-    if not hub_doc.get("projects") and local_workspaces and registry_source == "hub" and not (hub_host_id and hub_host_id != cur_host):
-        registry_source = "local_cache"
-
-    # Query additional declared hosts if --all-hosts is requested
     hosts_status: dict[str, dict[str, Any]] = {
         cur_host: {
             "host": cur_host,
@@ -3290,61 +3724,331 @@ def get_console_status_projects(
             "role": "hub" if hub_host_id == cur_host else (hosts_table.get(cur_host, {}).get("role") or "client"),
         }
     }
-    if hub_host_id and hub_host_id != cur_host:
+
+    # 1. If not local_only and a remote hub host is declared, query it over ssh
+    if not local_only and hub_host_id and hub_host_id != cur_host and hub_host_cfg is not None:
+        hub_t = _resolve_effective_host_timeout(hub_host_cfg, ssh_timeout, explicit_timeout=explicit_timeout)
+        ok_hub, remote_data, err_hub, timed_out_hub = _query_remote_host_console_status(
+            hub_host_id,
+            hub_host_cfg,
+            hub_t,
+        )
+        if ok_hub and remote_data is not None:
+            remote_items = (
+                remote_data.get("items")
+                if "items" in remote_data
+                else remote_data.get("projects")
+            )
+            if isinstance(remote_items, list):
+                remote_snap_ver = remote_data.get("snapshot_version")
+                with registry_lock(cdir):
+                    snap_doc = replace_hub_snapshot_cache(
+                        cdir,
+                        remote_items,
+                        host_id=cur_host,
+                        snapshot_version=int(remote_snap_ver) if isinstance(remote_snap_ver, int) else None,
+                    )
+                    snapshot_version = int(snap_doc.get("snapshot_version", 1))
+                remote_payloads[hub_host_id] = remote_data
+            else:
+                hub_reachable = False
+                registry_source = "local_cache"
+                hub_error = "Invalid hub workspace list JSON response"
+        else:
+            hub_reachable = False
+            registry_source = "local_cache"
+            hub_error = err_hub
+
         hosts_status[hub_host_id] = {
             "host": hub_host_id,
             "reachable": hub_reachable,
             "local": False,
             "role": "hub",
+            "timeout_sec": hub_t,
+            "timed_out": timed_out_hub if not hub_reachable else False,
             "error": hub_error,
         }
 
-    if all_hosts:
+    # 2. Query all other declared remote hosts in [hosts.<id>] when not local_only
+    if not local_only:
         for hid, hcfg in hosts_table.items():
-            if hid in hosts_status:
+            if hid in hosts_status or hcfg.get("enabled", True) is False:
                 continue
-            ssh_target = (
-                hcfg.get("ssh_target")
-                or hcfg.get("ssh")
-                or hcfg.get("target")
-                or hcfg.get("hostname")
-                or hid
-            )
-            ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={max(1, int(ssh_timeout))}"]
-            if isinstance(hcfg.get("port"), int):
-                ssh_cmd.extend(["-p", str(hcfg["port"])])
-            ssh_cmd.extend([str(ssh_target), "ai-orch", "workspace", "list", "--json"])
-            try:
-                proc = subprocess.run(
-                    ssh_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=ssh_timeout,
-                    check=False,
-                )
-                if proc.returncode == 0:
-                    hosts_status[hid] = {
-                        "host": hid,
-                        "reachable": True,
-                        "local": False,
-                        "role": hcfg.get("role") or "client",
-                    }
-                else:
-                    hosts_status[hid] = {
-                        "host": hid,
-                        "reachable": False,
-                        "local": False,
-                        "role": hcfg.get("role") or "client",
-                        "error": (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip(),
-                    }
-            except Exception as exc:
+            host_t = _resolve_effective_host_timeout(hcfg, ssh_timeout, explicit_timeout=explicit_timeout)
+            ok_h, r_data, err_h, timed_out_h = _query_remote_host_console_status(hid, hcfg, host_t)
+            if ok_h and r_data is not None:
+                remote_payloads[hid] = r_data
+                hosts_status[hid] = {
+                    "host": hid,
+                    "reachable": True,
+                    "local": False,
+                    "role": hcfg.get("role") or "client",
+                    "timeout_sec": host_t,
+                }
+            else:
                 hosts_status[hid] = {
                     "host": hid,
                     "reachable": False,
                     "local": False,
                     "role": hcfg.get("role") or "client",
-                    "error": str(exc),
+                    "timeout_sec": host_t,
+                    "timed_out": timed_out_h,
+                    "error": err_h,
                 }
+
+    # 3. Load local workspaces and hub registry metadata
+    local_workspaces = list_workspaces(cdir)
+    hub_doc = load_hub_registry(cdir)
+    if not snapshot_version:
+        snapshot_version = int(hub_doc.get("snapshot_version", 0))
+    if (
+        not hub_doc.get("projects")
+        and local_workspaces
+        and registry_source == "hub"
+        and not (hub_host_id and hub_host_id != cur_host)
+    ):
+        registry_source = "local_cache"
+
+    projects_out: list[dict[str, Any]] = [copy.deepcopy(w) for w in local_workspaces]
+    proj_by_uuid: dict[str, dict[str, Any]] = {
+        str(p["uuid"]): p for p in projects_out if p.get("uuid")
+    }
+    proj_by_slug: dict[str, dict[str, Any]] = {
+        str(p["slug"]): p for p in projects_out if p.get("slug")
+    }
+
+    # Merge projects from non-hub remote payloads if any
+    for hid, r_data in remote_payloads.items():
+        if hid == hub_host_id:
+            continue
+        r_projs = r_data.get("projects") if isinstance(r_data.get("projects"), list) else r_data.get("items")
+        if not isinstance(r_projs, list):
+            continue
+        for rp in r_projs:
+            if not isinstance(rp, dict):
+                continue
+            r_uuid = str(rp.get("uuid") or "")
+            r_slug = str(rp.get("slug") or rp.get("id") or "")
+            existing_p = (proj_by_uuid.get(r_uuid) if r_uuid else None) or (proj_by_slug.get(r_slug) if r_slug else None)
+            if existing_p is not None:
+                if isinstance(rp.get("paths"), dict):
+                    existing_p.setdefault("paths", {}).update(rp["paths"])
+                elif rp.get("canonical_path"):
+                    existing_p.setdefault("paths", {})[hid] = rp["canonical_path"]
+            elif r_slug:
+                new_p = copy.deepcopy(rp)
+                new_p.setdefault("slug", r_slug)
+                if not isinstance(new_p.get("paths"), dict):
+                    new_p["paths"] = {hid: new_p["canonical_path"]} if new_p.get("canonical_path") else {}
+                projects_out.append(new_p)
+                if r_uuid:
+                    proj_by_uuid[r_uuid] = new_p
+                proj_by_slug[r_slug] = new_p
+
+    # 4. Collect local runs, tasks, open questions, and deliveries to verify
+    local_proj_dirs = _discover_local_project_dirs(cur_host, local_workspaces, workspace=workspace)
+    all_runs: list[dict[str, Any]] = []
+    seen_run_ids: dict[str, dict[str, Any]] = {}
+    all_tasks: list[dict[str, Any]] = []
+    seen_task_keys: dict[tuple[str, str], dict[str, Any]] = {}
+    all_open_questions: list[dict[str, Any]] = []
+    seen_question_keys: set[tuple[str, str]] = set()
+    all_deliveries: list[dict[str, Any]] = []
+    seen_delivery_keys: set[tuple[str, str]] = set()
+
+    for p_slug, _, p_dir in local_proj_dirs:
+        p_runs = _collect_runs_for_dir(p_dir, p_slug, cur_host, reconcile_local=True)
+        for r in p_runs:
+            rid = str(r.get("run_id") or "")
+            if rid and rid not in seen_run_ids:
+                seen_run_ids[rid] = r
+                all_runs.append(r)
+        p_tasks, p_questions, p_deliveries = _collect_tasks_questions_deliveries_for_dir(
+            p_dir, p_slug, cur_host, p_runs
+        )
+        for t in p_tasks:
+            tkey = (str(t.get("project") or ""), str(t.get("id") or ""))
+            if tkey not in seen_task_keys:
+                seen_task_keys[tkey] = t
+                all_tasks.append(t)
+        for q in p_questions:
+            qkey = (str(q.get("project") or ""), str(q.get("id") or ""))
+            if qkey not in seen_question_keys:
+                seen_question_keys.add(qkey)
+                all_open_questions.append(q)
+        for d in p_deliveries:
+            dkey = (str(d.get("project") or ""), str(d.get("id") or ""))
+            if dkey not in seen_delivery_keys:
+                seen_delivery_keys.add(dkey)
+                all_deliveries.append(d)
+
+    # 5. Merge runs, tasks, questions, and deliveries from reachable remote hosts
+    extra_state_counts: dict[str, int] = {}
+    extra_host_counts: dict[str, int] = {}
+
+    for hid, r_data in remote_payloads.items():
+        r_runs = r_data.get("runs")
+        if isinstance(r_runs, list):
+            for raw_r in r_runs:
+                if not isinstance(raw_r, dict):
+                    continue
+                norm_r = _normalize_console_run_record(raw_r, default_host=hid)
+                rid = str(norm_r.get("run_id") or "")
+                if not rid:
+                    continue
+                if rid not in seen_run_ids:
+                    seen_run_ids[rid] = norm_r
+                    all_runs.append(norm_r)
+                elif norm_r.get("host") == hid:
+                    # Authoritative live state comes from the host that owns the run
+                    idx = all_runs.index(seen_run_ids[rid])
+                    all_runs[idx] = norm_r
+                    seen_run_ids[rid] = norm_r
+
+        r_tasks = r_data.get("tasks") if isinstance(r_data.get("tasks"), list) else r_data.get("all_tasks")
+        if isinstance(r_tasks, list) and r_tasks:
+            for raw_t in r_tasks:
+                if not isinstance(raw_t, dict):
+                    continue
+                tid = str(raw_t.get("id") or "")
+                if not tid:
+                    continue
+                t_proj = str(raw_t.get("project") or "")
+                cstate = str(raw_t.get("canonical_state") or raw_t.get("state") or "open").strip().lower()
+                raw_thost = raw_t.get("host")
+                eff_thost = (
+                    str(raw_thost).strip()
+                    if isinstance(raw_thost, str) and raw_thost.strip() and raw_thost.strip() != "-"
+                    else hid
+                )
+                qid = raw_t.get("qualified_id") or (f"{t_proj}/{tid}" if t_proj else tid)
+                t_entry = {
+                    **raw_t,
+                    "id": tid,
+                    "qualified_id": qid,
+                    "project": t_proj,
+                    "state": cstate,
+                    "canonical_state": cstate,
+                    "host": eff_thost,
+                }
+                tkey = (t_proj, tid)
+                if tkey not in seen_task_keys:
+                    seen_task_keys[tkey] = t_entry
+                    all_tasks.append(t_entry)
+                elif hid == hub_host_id or (
+                    not seen_task_keys[tkey].get("explicit_host") and raw_thost not in (None, "", "-")
+                ):
+                    idx = all_tasks.index(seen_task_keys[tkey])
+                    all_tasks[idx] = t_entry
+                    seen_task_keys[tkey] = t_entry
+        else:
+            r_by_state = r_data.get("tasks_by_state")
+            if isinstance(r_by_state, dict):
+                for st_k, st_v in r_by_state.items():
+                    if isinstance(st_v, int):
+                        extra_state_counts[str(st_k)] = extra_state_counts.get(str(st_k), 0) + st_v
+                        extra_host_counts[hid] = extra_host_counts.get(hid, 0) + st_v
+
+        r_questions = (
+            r_data.get("open_questions")
+            if isinstance(r_data.get("open_questions"), list)
+            else r_data.get("questions")
+        )
+        if isinstance(r_questions, list):
+            for raw_q in r_questions:
+                if not isinstance(raw_q, dict):
+                    continue
+                if raw_q.get("status") and str(raw_q.get("status")).lower() != "open":
+                    continue
+                qid_str = str(raw_q.get("id") or "")
+                q_proj = str(raw_q.get("project") or "")
+                qkey = (q_proj, qid_str)
+                if qid_str and qkey not in seen_question_keys:
+                    seen_question_keys.add(qkey)
+                    all_open_questions.append({
+                        **raw_q,
+                        "id": qid_str,
+                        "qualified_id": raw_q.get("qualified_id") or (f"{q_proj}/{qid_str}" if q_proj else qid_str),
+                        "project": q_proj,
+                        "host": raw_q.get("host") or hid,
+                    })
+
+        r_deliv = (
+            r_data.get("deliveries_to_verify")
+            if "deliveries_to_verify" in r_data
+            else r_data.get("verification_queue")
+        )
+        if isinstance(r_deliv, dict) and isinstance(r_deliv.get("items"), list):
+            r_deliv = r_deliv["items"]
+        if isinstance(r_deliv, list):
+            for raw_d in r_deliv:
+                if not isinstance(raw_d, dict):
+                    continue
+                did_str = str(raw_d.get("id") or "")
+                d_proj = str(raw_d.get("project") or "")
+                dkey = (d_proj, did_str)
+                if did_str and dkey not in seen_delivery_keys:
+                    seen_delivery_keys.add(dkey)
+                    all_deliveries.append({
+                        **raw_d,
+                        "id": did_str,
+                        "qualified_id": raw_d.get("qualified_id") or (f"{d_proj}/{did_str}" if d_proj else did_str),
+                        "project": d_proj,
+                        "state": "delivered",
+                        "host": raw_d.get("host") or hid,
+                    })
+
+    # Ensure any task in all_tasks with state == 'delivered' is also present in all_deliveries,
+    # and propagate run host onto tasks that didn't have an explicit host
+    run_host_by_task: dict[str, str] = {}
+    for r in all_runs:
+        tid = str(r.get("task_id") or "")
+        rhost = str(r.get("host") or "")
+        if tid and rhost and (tid not in run_host_by_task or r.get("status") in ("running", "starting")):
+            run_host_by_task[tid] = rhost
+
+    for t in all_tasks:
+        tid = str(t.get("id") or "")
+        t_proj = str(t.get("project") or "")
+        if not t.get("explicit_host") and tid in run_host_by_task:
+            t["host"] = run_host_by_task[tid]
+        if t.get("state") == "delivered":
+            dkey = (t_proj, tid)
+            if dkey not in seen_delivery_keys:
+                seen_delivery_keys.add(dkey)
+                all_deliveries.append({
+                    "id": tid,
+                    "qualified_id": t.get("qualified_id") or (f"{t_proj}/{tid}" if t_proj else tid),
+                    "project": t_proj,
+                    "workspace": t.get("workspace", ""),
+                    "title": t.get("title", ""),
+                    "short_title": t.get("short_title") or t.get("title", ""),
+                    "state": "delivered",
+                    "verify_by": t.get("verify_by") or t.get("verifier") or "-",
+                    "executor": t.get("executor") or "-",
+                    "host": t.get("host") or cur_host,
+                    "run_id": t.get("run_id"),
+                })
+
+    tasks_by_state: dict[str, int] = dict(extra_state_counts)
+    tasks_by_host: dict[str, int] = dict(extra_host_counts)
+    tasks_by_state_and_host: dict[str, dict[str, int]] = {}
+
+    for t in all_tasks:
+        st = str(t.get("state") or "open")
+        th = str(t.get("host") or "unassigned")
+        tasks_by_state[st] = tasks_by_state.get(st, 0) + 1
+        tasks_by_host[th] = tasks_by_host.get(th, 0) + 1
+        st_map = tasks_by_state_and_host.setdefault(st, {})
+        st_map[th] = st_map.get(th, 0) + 1
+
+    all_runs.sort(key=lambda r: str(r.get("run_id") or ""), reverse=True)
+
+    for hid, hinfo in hosts_status.items():
+        h_runs = [r for r in all_runs if r.get("host") == hid]
+        hinfo["runs_count"] = len(h_runs)
+        hinfo["active_runs_count"] = sum(1 for r in h_runs if r.get("status") in ("running", "starting"))
+        hinfo["tasks_count"] = tasks_by_host.get(hid, 0)
 
     return {
         "ok": True,
@@ -3355,8 +4059,221 @@ def get_console_status_projects(
         "snapshot_version": snapshot_version,
         "hub_error": hub_error,
         "hosts": hosts_status,
-        "projects": local_workspaces,
-        "workspaces": local_workspaces,
+        "items": projects_out,
+        "projects": projects_out,
+        "workspaces": projects_out,
+        "tasks": all_tasks,
+        "tasks_by_state": tasks_by_state,
+        "tasks_by_host": tasks_by_host,
+        "tasks_by_state_and_host": tasks_by_state_and_host,
+        "tasks_summary": {
+            "total": sum(tasks_by_state.values()),
+            "by_state": tasks_by_state,
+            "by_host": tasks_by_host,
+            "by_state_and_host": tasks_by_state_and_host,
+        },
+        "runs": all_runs,
+        "open_questions": all_open_questions,
+        "questions": all_open_questions,
+        "deliveries_to_verify": all_deliveries,
+        "verification_queue": all_deliveries,
+    }
+
+
+get_console_status = get_console_status_projects
+
+
+def _find_matching_run_for_attach(
+    runs: list[dict[str, Any]],
+    target: str,
+) -> dict[str, Any] | None:
+    # 1. Exact run_id match
+    for r in runs:
+        if str(r.get("run_id") or "") == target:
+            return r
+    # 2. Task ID or qualified <project>/<task_id> match
+    candidates: list[dict[str, Any]] = []
+    for r in runs:
+        tid = str(r.get("task_id") or r.get("task") or r.get("note_id") or "")
+        proj = str(r.get("project") or "")
+        qid = f"{proj}/{tid}" if proj and tid else tid
+        if tid == target or qid == target:
+            candidates.append(r)
+        elif r.get("is_batch") and isinstance(r.get("batch_members"), list) and target in r["batch_members"]:
+            candidates.append(r)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda r: (
+            0 if r.get("status") in ("running", "starting") else 1,
+            str(r.get("run_id") or ""),
+        ),
+    )
+    # Sort active first, and among same activity level pick newest run_id
+    active_cands = [r for r in candidates if r.get("status") in ("running", "starting")]
+    if active_cands:
+        active_cands.sort(key=lambda r: str(r.get("run_id") or ""), reverse=True)
+        return active_cands[0]
+    candidates.sort(key=lambda r: str(r.get("run_id") or ""), reverse=True)
+    return candidates[0]
+
+
+def resolve_console_attach(
+    target: str,
+    config_dir: pathlib.Path | str | None = None,
+    *,
+    workspace: pathlib.Path | str | None = None,
+    ssh_timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Resolve host, agent user, and screen session name from a run or task ID without shell interpolation."""
+    if not isinstance(target, str):
+        raise ValueError("Attach target must be a string")
+    clean_target = target.strip()
+    if (
+        not clean_target
+        or clean_target.startswith("-")
+        or ".." in clean_target
+        or not SAFE_ATTACH_TARGET_RE.match(clean_target)
+    ):
+        raise ValueError(
+            f"Invalid run or task identifier {target!r}: must match ^[A-Za-z0-9][A-Za-z0-9._/-]{{0,127}}$"
+        )
+
+    cdir = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
+    gpath = cdir / "orchestration.toml"
+    gcfg = load_toml_file(gpath) if gpath.is_file() else {}
+    cur_host = _resolve_current_host_id(cdir)
+    hosts_table = _resolve_merged_hosts_table(cdir, gcfg, gpath, workspace=workspace)
+
+    hub_host_id: str | None = None
+    if isinstance(gcfg.get("host"), dict) and gcfg["host"].get("role") == "hub":
+        hub_host_id = cur_host
+    for hid, hcfg in hosts_table.items():
+        if isinstance(hcfg, dict) and hcfg.get("role") == "hub":
+            hub_host_id = hid
+            break
+
+    # 1. Search local runs first (read-only, without marking mock/cross-user screen runs lost)
+    local_workspaces = list_workspaces(cdir)
+    local_proj_dirs = _discover_local_project_dirs(cur_host, local_workspaces, workspace=workspace)
+    cwd_p = pathlib.Path.cwd().resolve()
+    if (cwd_p / ".ai-orchestration" / "runs").is_dir() and all(d != cwd_p for _, _, d in local_proj_dirs):
+        local_proj_dirs.insert(0, (sanitize_slug(cwd_p.name), None, cwd_p))
+
+    local_runs: list[dict[str, Any]] = []
+    for p_slug, _, p_dir in local_proj_dirs:
+        local_runs.extend(_collect_runs_for_dir(p_dir, p_slug, cur_host, reconcile_local=False))
+
+    matched_run = _find_matching_run_for_attach(local_runs, clean_target)
+
+    # 2. If not found locally (or local match is not active), query remote hosts via console status
+    if matched_run is None or matched_run.get("status") not in ("running", "starting"):
+        status_res = get_console_status_projects(
+            config_dir=cdir,
+            all_hosts=True,
+            ssh_timeout=ssh_timeout,
+            workspace=workspace,
+            local_only=False,
+        )
+        remote_match = _find_matching_run_for_attach(status_res.get("runs", []), clean_target)
+        if remote_match is not None and (
+            matched_run is None or remote_match.get("status") in ("running", "starting")
+        ):
+            matched_run = remote_match
+
+    if matched_run is None:
+        raise ValueError(f"No run found for {clean_target!r}")
+
+    # Merge hosts table from matched_run's workspace if local
+    run_ws = matched_run.get("workspace")
+    if isinstance(run_ws, str) and run_ws.strip():
+        run_ws_p = pathlib.Path(run_ws)
+        if run_ws_p.is_dir():
+            hosts_table = _resolve_merged_hosts_table(cdir, gcfg, gpath, workspace=run_ws_p)
+            for hid, hcfg in hosts_table.items():
+                if isinstance(hcfg, dict) and hcfg.get("role") == "hub":
+                    hub_host_id = hid
+                    break
+
+    run_host = str(matched_run.get("host") or cur_host).strip()
+    if not SAFE_HOST_ID_RE.match(run_host):
+        raise ValueError(f"Invalid host id {run_host!r} in run record")
+    if run_host != cur_host and run_host not in hosts_table:
+        raise ValueError(f"Run host {run_host!r} is not declared in [hosts] configuration")
+
+    hcfg = (
+        hosts_table.get(run_host)
+        or (gcfg.get("host") if isinstance(gcfg.get("host"), dict) and run_host == cur_host else {})
+        or {}
+    )
+    role = str(hcfg.get("role") or ("hub" if run_host == hub_host_id else "client"))
+    base_target = str(
+        hcfg.get("ssh_target")
+        or hcfg.get("ssh")
+        or hcfg.get("target")
+        or hcfg.get("hostname")
+        or run_host
+    ).strip()
+    if not base_target or base_target.startswith("-") or not SAFE_SSH_TARGET_RE.match(base_target):
+        raise ValueError(f"Invalid SSH target {base_target!r} for host {run_host!r}")
+
+    agent_user = hcfg.get("agent_user") or hcfg.get("user") or hcfg.get("agents_user")
+    if not agent_user and role == "hub":
+        agent_user = "kilo"
+    if agent_user is not None:
+        agent_user = str(agent_user).strip()
+        if not agent_user or agent_user.startswith("-") or not SAFE_AGENT_USER_RE.match(agent_user):
+            raise ValueError(f"Invalid agent_user {agent_user!r} for host {run_host!r}")
+
+    if agent_user and "@" not in base_target:
+        attach_target = f"{agent_user}@{base_target}"
+    else:
+        attach_target = base_target
+
+    if attach_target.startswith("-") or not SAFE_SSH_TARGET_RE.match(attach_target):
+        raise ValueError(f"Invalid resolved SSH attach target {attach_target!r}")
+
+    screen_session = (
+        matched_run.get("screen_session")
+        or matched_run.get("session_name")
+        or (matched_run.get("screen") or {}).get("session_name")
+    )
+    if not screen_session:
+        raise ValueError(
+            f"Run {matched_run.get('run_id')!r} does not have a screen session "
+            f"(backend={matched_run.get('backend', 'setsid')!r})"
+        )
+    screen_session = str(screen_session).strip()
+    if screen_session.startswith("-") or not SAFE_SCREEN_SESSION_RE.match(screen_session):
+        raise ValueError(f"Invalid screen session name {screen_session!r}")
+
+    ssh_cmd = ["ssh", "-t"]
+    if isinstance(hcfg.get("port"), int) and not isinstance(hcfg.get("port"), bool):
+        ssh_cmd.extend(["-p", str(hcfg["port"])])
+    id_file = hcfg.get("identity_file") or hcfg.get("ssh_key")
+    if isinstance(id_file, str) and id_file.strip():
+        clean_id = id_file.strip()
+        if clean_id.startswith("-"):
+            raise ValueError(f"Invalid identity_file {clean_id!r}")
+        ssh_cmd.extend(["-i", clean_id])
+    ssh_cmd.extend([attach_target, "screen", "-x", screen_session])
+
+    return {
+        "ok": True,
+        "target_query": clean_target,
+        "run_id": matched_run.get("run_id"),
+        "task_id": matched_run.get("task_id"),
+        "project": matched_run.get("project"),
+        "workspace": matched_run.get("workspace"),
+        "host": run_host,
+        "role": role,
+        "ssh_target": attach_target,
+        "target": attach_target,
+        "agent_user": agent_user,
+        "screen_session": screen_session,
+        "session_name": screen_session,
+        "command": ssh_cmd,
+        "actor": f"owner (via console@{cur_host})",
     }
 
 
@@ -3674,28 +4591,127 @@ def cli_workspace_import_migration(args: argparse.Namespace) -> int:
 
 def cli_console_status(args: argparse.Namespace) -> int:
     try:
+        raw_timeout = getattr(args, "timeout", None)
+        explicit_timeout = raw_timeout is not None
+        ssh_timeout = float(raw_timeout) if raw_timeout is not None else 5.0
         res = get_console_status_projects(
             config_dir=args.config_dir,
             all_hosts=bool(getattr(args, "all_hosts", False)),
-            ssh_timeout=float(getattr(args, "timeout", 5.0) or 5.0),
+            ssh_timeout=ssh_timeout,
+            workspace=getattr(args, "workspace", None),
+            local_only=bool(getattr(args, "local_only", False)),
+            explicit_timeout=explicit_timeout,
         )
         if args.json:
             print(json.dumps(res, indent=2))
         else:
             hub_str = "reachable" if res["hub_reachable"] else f"UNREACHABLE ({res['registry_source']})"
             print(f"Host: {res['host']} | Hub ({res['hub_host']}): {hub_str} | Source: {res['registry_source']}")
+            print("\nHosts:")
+            for hid, hinfo in res.get("hosts", {}).items():
+                st_lbl = "reachable" if hinfo.get("reachable") else f"UNREACHABLE ({hinfo.get('error') or 'down'})"
+                loc_lbl = " [local]" if hinfo.get("local") else ""
+                print(
+                    f"  - {hid:<16} role={hinfo.get('role', 'client'):<8} status={st_lbl}{loc_lbl} "
+                    f"(runs={hinfo.get('runs_count', 0)}, tasks={hinfo.get('tasks_count', 0)})"
+                )
+            print(f"\nProjects ({len(res.get('projects', []))}):")
             print(f"{'SLUG':<22} {'UUID':<38} {'PRIMARY':<12} {'CONV':<8} {'PATH'}")
             print("-" * 100)
             for p in res.get("projects", []):
                 conv = p.get("convention_version") or "-"
                 prim = p.get("primary_host") or "-"
-                print(f"{p['slug']:<22} {p['uuid']:<38} {prim:<12} {conv:<8} {p['canonical_path']}")
+                cpath = p.get("canonical_path") or "-"
+                print(f"{p['slug']:<22} {str(p.get('uuid') or '-'):<38} {prim:<12} {conv:<8} {cpath}")
+
+            by_st = res.get("tasks_by_state", {})
+            by_h = res.get("tasks_by_host", {})
+            st_summary = ", ".join(f"{k}: {v}" for k, v in sorted(by_st.items())) or "none"
+            h_summary = ", ".join(f"{k}: {v}" for k, v in sorted(by_h.items())) or "none"
+            print(f"\nTasks by state: {st_summary}")
+            print(f"Tasks by host : {h_summary}")
+
+            runs = res.get("runs", [])
+            print(f"\nRuns ({len(runs)}):")
+            if runs:
+                print(
+                    f"{'RUN ID':<36} {'HOST':<14} {'TASK':<10} {'STATE':<11} "
+                    f"{'SESSION':<26} {'AGE(s)':<9} {'LAST HEARTBEAT'}"
+                )
+                print("-" * 125)
+                for r in runs:
+                    age_s = f"{r['age_sec']:.1f}" if isinstance(r.get("age_sec"), (int, float)) else "-"
+                    hb_s = str(r.get("last_heartbeat") or "-")
+                    sess_s = str(r.get("screen_session") or "-")
+                    print(
+                        f"{str(r.get('run_id') or '-'):<36} {str(r.get('host') or '-'):<14} "
+                        f"{str(r.get('task_id') or '-'):<10} {str(r.get('status') or '-'):<11} "
+                        f"{sess_s:<26} {age_s:<9} {hb_s}"
+                    )
+
+            oqs = res.get("open_questions", [])
+            print(f"\nOpen Questions ({len(oqs)}):")
+            for q in oqs:
+                print(f"  - [{q.get('qualified_id') or q.get('id')}] {q.get('question') or q.get('title') or ''} (blocks: {q.get('blocks', '-')})")
+
+            delivs = res.get("deliveries_to_verify", [])
+            print(f"\nDeliveries to Verify ({len(delivs)}):")
+            for d in delivs:
+                print(
+                    f"  - [{d.get('qualified_id') or d.get('id')}] {d.get('title') or ''} "
+                    f"(host={d.get('host', '-')}, verify-by={d.get('verify_by', '-')})"
+                )
         return 0
     except Exception as e:
         if args.json:
             print(json.dumps({"ok": False, "error": str(e)}))
         else:
             print(f"[ERROR] {e}", file=sys.stderr)
+        return 2
+
+
+def cli_console_attach(args: argparse.Namespace) -> int:
+    try:
+        res = resolve_console_attach(
+            target=args.target,
+            config_dir=args.config_dir,
+            workspace=getattr(args, "workspace", None),
+            ssh_timeout=float(getattr(args, "timeout", 5.0) or 5.0),
+        )
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] {e}", file=sys.stderr)
+        return 2
+
+    if getattr(args, "dry_run", False):
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print(" ".join(res["command"]))
+        return 0
+
+    ssh_cmd = res["command"]
+    try:
+        if args.json:
+            proc = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
+            out_payload = {
+                **res,
+                "ok": proc.returncode == 0,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+            }
+            print(json.dumps(out_payload, indent=2))
+            return proc.returncode
+        proc = subprocess.run(ssh_cmd, check=False)
+        return proc.returncode
+    except Exception as e:
+        if args.json:
+            print(json.dumps({**res, "ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] Failed to execute ssh attach: {e}", file=sys.stderr)
         return 2
 
 
@@ -3778,11 +4794,22 @@ def main(argv: list[str] | None = None) -> int:
     p_imp.add_argument("--json", action="store_true", help="Output JSON")
 
     # console status
-    p_cstat = subparsers.add_parser("console-status", help="List projects and status from the hub registry (with local cache fallback)")
+    p_cstat = subparsers.add_parser("console-status", help="Aggregate multi-host projects, tasks, runs, open questions, and deliveries")
     p_cstat.add_argument("--all-hosts", dest="all_hosts", action="store_true", help="Query all declared hosts")
-    p_cstat.add_argument("--timeout", type=float, default=5.0, help="SSH timeout in seconds")
+    p_cstat.add_argument("--local", "--local-only", dest="local_only", action="store_true", help="Collect local host status only without SSH")
+    p_cstat.add_argument("--timeout", type=float, default=None, help="SSH timeout in seconds")
+    p_cstat.add_argument("--project", "--workspace", dest="workspace", default=None, help="Optional project/workspace path")
     p_cstat.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
     p_cstat.add_argument("--json", action="store_true", help="Output JSON")
+
+    # console attach
+    p_cattach = subparsers.add_parser("console-attach", help="Resolve host and screen session from run/task and open ssh -t <target> screen -x <session>")
+    p_cattach.add_argument("target", help="Run ID or Task ID to attach to")
+    p_cattach.add_argument("--project", "--workspace", dest="workspace", default=None, help="Optional project/workspace path")
+    p_cattach.add_argument("--timeout", type=float, default=5.0, help="SSH timeout in seconds for remote run lookup")
+    p_cattach.add_argument("--dry-run", dest="dry_run", action="store_true", help="Resolve and print attach command without running ssh")
+    p_cattach.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
+    p_cattach.add_argument("--json", action="store_true", help="Output JSON")
 
     # projects discover
     p_disc = subparsers.add_parser("discover", help="Discover projects in a workspace")
@@ -3805,6 +4832,8 @@ def main(argv: list[str] | None = None) -> int:
         raw_args[0] = "import-migration"
     elif is_console_group and (not raw_args or raw_args[0] == "status"):
         raw_args = ["console-status"] + (raw_args[1:] if raw_args else [])
+    elif is_console_group and raw_args and raw_args[0] == "attach":
+        raw_args = ["console-attach"] + raw_args[1:]
     elif raw_args and raw_args[0] == "import-migration-registry":
         raw_args[0] = "import-migration"
 
@@ -3812,7 +4841,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
 
-    args = parser.parse_args(raw_args)
+    try:
+        args = parser.parse_args(raw_args)
+    except SystemExit as e:
+        code = int(e.code) if isinstance(e.code, int) else 2
+        if "--json" in raw_args and code != 0:
+            print(json.dumps({"ok": False, "error": "Invalid or unrecognized CLI arguments"}))
+        return code
 
     if args.command == "register":
         return cli_workspace_register(args)
@@ -3828,6 +4863,8 @@ def main(argv: list[str] | None = None) -> int:
         return cli_workspace_import_migration(args)
     elif args.command == "console-status":
         return cli_console_status(args)
+    elif args.command == "console-attach":
+        return cli_console_attach(args)
     elif args.command == "discover":
         return cli_projects_discover(args)
     elif args.command == "projects-list":
