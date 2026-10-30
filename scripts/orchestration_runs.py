@@ -2926,13 +2926,94 @@ def validate_run_id(run_id: str) -> bool:
     return bool(VALID_RUN_ID_RE.match(run_id))
 
 
-def reconcile(record: dict[str, Any], workspace: pathlib.Path | None = None) -> dict[str, Any]:
-    """Reconciliation hook called on read (Spec §5.3, R2)."""
+def _extract_run_heartbeat(record: dict[str, Any]) -> str | None:
+    """Extract the most recent heartbeat timestamp from a run record or its supervisor."""
+    for k in ("last_heartbeat", "heartbeat_at", "heartbeat", "last_seen"):
+        val = record.get(k)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        if isinstance(val, dict):
+            sub = val.get("at") or val.get("timestamp") or val.get("last_heartbeat")
+            if isinstance(sub, str) and sub.strip():
+                return sub.strip()
+    sup = record.get("supervisor")
+    if isinstance(sup, dict):
+        for k in ("last_heartbeat", "heartbeat_at", "heartbeat"):
+            val = sup.get(k)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+            if isinstance(val, dict):
+                sub = val.get("at") or val.get("timestamp")
+                if isinstance(sub, str) and sub.strip():
+                    return sub.strip()
+    return None
+
+
+def _compute_timestamp_age(ts_str: str | None, now: datetime.datetime | None = None) -> float | None:
+    """Compute elapsed seconds since an ISO-8601 timestamp."""
+    if not ts_str:
+        return None
+    try:
+        clean_ts = ts_str.replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(clean_ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        cur_now = now or datetime.datetime.now(datetime.timezone.utc)
+        return max(0.0, (cur_now - dt).total_seconds())
+    except Exception:
+        return None
+
+
+def reconcile(
+    record: dict[str, Any],
+    workspace: pathlib.Path | None = None,
+    current_host: str | None = None,
+) -> dict[str, Any]:
+    """Reconciliation hook called on read (Spec §5.3, R2, Task 19.5).
+
+    Only acts on runs matching the current host: never marks lost, never kills
+    processes on runs belonging to other hosts; for those it exposes the last
+    heartbeat and its age. Legacy runs without 'host' are considered local.
+    """
+    ws = (
+        pathlib.Path(workspace)
+        if workspace is not None
+        else (pathlib.Path(record["workspace"]) if record.get("workspace") else None)
+    )
+
+    cur_host = current_host
+    if cur_host is None:
+        if resolve_host_id is not None:
+            cur_host = resolve_host_id(workspace=ws)
+        else:
+            cur_host = "localhost"
+    if isinstance(cur_host, str):
+        cur_host = cur_host.strip()
+
+    raw_run_host = record.get("host")
+    if isinstance(raw_run_host, str):
+        run_host = raw_run_host.strip()
+    else:
+        run_host = None
+
+    # Legacy runs without 'host' are considered local
+    is_local = (run_host is None or run_host == "") or (
+        run_host == cur_host or run_host.lower() == cur_host.lower()
+    )
+
+    if not is_local:
+        last_hb = _extract_run_heartbeat(record)
+        hb_age = _compute_timestamp_age(last_hb)
+        record["last_heartbeat"] = last_hb
+        record["heartbeat_age_sec"] = hb_age
+        record["heartbeat_age"] = hb_age
+        record["last_heartbeat_age_sec"] = hb_age
+        return record
+
     status = record.get("status")
     if status not in ACTIVE_STATES:
         return record
 
-    ws = workspace or (pathlib.Path(record["workspace"]) if record.get("workspace") else None)
     sup = record.get("supervisor", {})
     sup_pid = sup.get("pid")
     sup_start = sup.get("start_time")
@@ -2990,6 +3071,14 @@ def reconcile(record: dict[str, Any], workspace: pathlib.Path | None = None) -> 
                 )
             except Exception:
                 pass
+    else:
+        last_hb = _extract_run_heartbeat(record)
+        if last_hb is not None:
+            hb_age = _compute_timestamp_age(last_hb)
+            record["last_heartbeat"] = last_hb
+            record["heartbeat_age_sec"] = hb_age
+            record["heartbeat_age"] = hb_age
+            record["last_heartbeat_age_sec"] = hb_age
 
     return record
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import datetime
 import hashlib
 import argparse
 import json
@@ -6495,6 +6496,254 @@ def test_19_4_new_run_has_host_and_existing_runs_without_host_remain_valid(
     new_run_id = json.loads(res_start.stdout)["run_id"]
     term_rec = wait_for_terminal(sample_workspace, new_run_id)
     assert term_rec["host"] == "alf_ubuntu"
+
+
+def test_19_5_reconcile_other_host_never_marked_lost_and_no_kill_and_exposes_heartbeat(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Task 19.5 Verification:
+    - Test with a run.json from another host and non-existent pid:
+      stays in its original state, no kill, no run.lost event.
+    - Exposes last heartbeat and its age in seconds.
+    - CLI `run show` and `run list` preserve other host active runs.
+    """
+    import orchestration_runs as _runs
+    import orchestration_events
+    from unittest.mock import MagicMock
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    # Spy on kill_process_group
+    mock_kill = MagicMock()
+    monkeypatch.setattr(_runs, "kill_process_group", mock_kill)
+
+    # Create run record on another host ("macbook") with dead pid
+    other_run_id = "20261030-100000-T001-kilo-1111"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / other_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    hb_time = (now - datetime.timedelta(seconds=120)).isoformat()
+
+    rec_other = _runs.create_run_record(
+        run_id=other_run_id,
+        task_id="T001",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="inplace",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+        host="macbook",
+    )
+    rec_other["status"] = "running"
+    rec_other["supervisor"] = {"pid": 99999999, "start_time": "Sat Oct 17 00:00:00 2026"}
+    rec_other["agent"] = {"pid": 88888888, "pgid": 88888888, "start_time": "Sat Oct 17 00:00:00 2026"}
+    rec_other["last_heartbeat"] = hb_time
+    (run_dir / "run.json").write_text(json.dumps(rec_other, indent=2), encoding="utf-8")
+
+    # Load and reconcile
+    loaded = _runs.load_run_record(sample_workspace, other_run_id)
+    assert loaded is not None
+    assert loaded["host"] == "macbook"
+    assert loaded["status"] == "running"  # Stays in its original state!
+    assert loaded["last_heartbeat"] == hb_time
+    assert isinstance(loaded["heartbeat_age_sec"], float)
+    assert 100.0 <= loaded["heartbeat_age_sec"] <= 180.0
+    assert loaded["heartbeat_age"] == loaded["heartbeat_age_sec"]
+
+    # Verify no kill occurred
+    assert mock_kill.call_count == 0
+
+    # Verify no run.lost event was emitted
+    lost_events = orchestration_events.read_events(sample_workspace, types=["run.lost"])
+    assert len(lost_events) == 0
+
+    # Verify file on disk is untouched
+    disk_data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert disk_data["status"] == "running"
+
+    # Verify CLI `run show` outputs status running and heartbeat fields
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG=str(cfg_file))
+    cmd_show = [
+        str(BIN_AI_ORCH),
+        "run",
+        "show",
+        other_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_show = subprocess.run(cmd_show, capture_output=True, text=True, env=env, check=True)
+    show_data = json.loads(res_show.stdout)["run"]
+    assert show_data["status"] == "running"
+    assert show_data["host"] == "macbook"
+    assert show_data["last_heartbeat"] == hb_time
+    assert show_data["heartbeat_age_sec"] is not None
+
+    # Verify CLI `run list --active` includes this running run from macbook
+    cmd_list = [
+        str(BIN_AI_ORCH),
+        "run",
+        "list",
+        "--active",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_list = subprocess.run(cmd_list, capture_output=True, text=True, env=env, check=True)
+    list_runs = json.loads(res_list.stdout)["runs"]
+    matching = [r for r in list_runs if r["run_id"] == other_run_id]
+    assert len(matching) == 1
+    assert matching[0]["status"] == "running"
+    assert matching[0]["last_heartbeat"] == hb_time
+
+
+def test_19_5_reconcile_local_host_and_legacy_hostless_become_lost(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Task 19.5 Verification:
+    - Same case with local host -> status becomes `lost`, process group kill attempted, run.lost emitted;
+    - Legacy runs without `host` are treated as local -> become `lost`.
+    """
+    import orchestration_runs as _runs
+    import orchestration_events
+    from unittest.mock import MagicMock
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    mock_kill = MagicMock()
+    monkeypatch.setattr(_runs, "kill_process_group", mock_kill)
+
+    # 1. Local host run with dead pid
+    local_run_id = "20261030-100000-T002-kilo-2222"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / local_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    rec_local = _runs.create_run_record(
+        run_id=local_run_id,
+        task_id="T002",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="inplace",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+        host="alf_ubuntu",
+    )
+    rec_local["status"] = "running"
+    rec_local["supervisor"] = {"pid": 99999999, "start_time": "Sat Oct 17 00:00:00 2026"}
+    rec_local["agent"] = {"pid": 88888888, "pgid": 88888888, "start_time": "Sat Oct 17 00:00:00 2026"}
+    (run_dir / "run.json").write_text(json.dumps(rec_local, indent=2), encoding="utf-8")
+
+    loaded_local = _runs.load_run_record(sample_workspace, local_run_id)
+    assert loaded_local is not None
+    assert loaded_local["status"] == "lost"  # Local run with dead pid becomes lost!
+    assert mock_kill.call_count >= 1
+
+    lost_events = orchestration_events.read_events(sample_workspace, types=["run.lost"])
+    assert any(e["subject"] == local_run_id for e in lost_events)
+
+    disk_data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert disk_data["status"] == "lost"
+
+    # 2. Legacy run without 'host' key -> treated as local
+    mock_kill.reset_mock()
+    legacy_run_id = "20261030-100000-T003-kilo-3333"
+    legacy_dir = sample_workspace / ".ai-orchestration" / "runs" / legacy_run_id
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+
+    rec_legacy = dict(rec_local)
+    rec_legacy["run_id"] = legacy_run_id
+    rec_legacy["task_id"] = "T003"
+    rec_legacy["status"] = "running"
+    rec_legacy.pop("host", None)
+    (legacy_dir / "run.json").write_text(json.dumps(rec_legacy, indent=2), encoding="utf-8")
+
+    loaded_legacy = _runs.load_run_record(sample_workspace, legacy_run_id)
+    assert loaded_legacy is not None
+    assert loaded_legacy["status"] == "lost"  # Treated as local -> lost
+    assert mock_kill.call_count >= 1
+
+    lost_events_all = orchestration_events.read_events(sample_workspace, types=["run.lost"])
+    assert any(e["subject"] == legacy_run_id for e in lost_events_all)
+
+
+def test_19_5_reconcile_heartbeat_formats_and_explicit_current_host():
+    """Verify heartbeat extraction across diverse key schemas and current_host parameter."""
+    import orchestration_runs as _runs
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ts_60s_ago = (now - datetime.timedelta(seconds=60)).isoformat()
+
+    # Format 1: heartbeat_at
+    rec1 = {
+        "run_id": "20261030-100000-T004-kilo-4444",
+        "host": "remote_hub",
+        "status": "running",
+        "heartbeat_at": ts_60s_ago,
+    }
+    reconciled1 = _runs.reconcile(rec1, current_host="local_worker")
+    assert reconciled1["status"] == "running"
+    assert reconciled1["last_heartbeat"] == ts_60s_ago
+    assert 50.0 <= reconciled1["heartbeat_age_sec"] <= 80.0
+
+    # Format 2: heartbeat dict
+    rec2 = {
+        "run_id": "20261030-100000-T005-kilo-5555",
+        "host": "remote_hub",
+        "status": "running",
+        "heartbeat": {"at": ts_60s_ago},
+    }
+    reconciled2 = _runs.reconcile(rec2, current_host="local_worker")
+    assert reconciled2["status"] == "running"
+    assert reconciled2["last_heartbeat"] == ts_60s_ago
+    assert 50.0 <= reconciled2["heartbeat_age_sec"] <= 80.0
+
+    # Format 3: supervisor.last_heartbeat
+    rec3 = {
+        "run_id": "20261030-100000-T006-kilo-6666",
+        "host": "remote_hub",
+        "status": "running",
+        "supervisor": {"last_heartbeat": ts_60s_ago},
+    }
+    reconciled3 = _runs.reconcile(rec3, current_host="local_worker")
+    assert reconciled3["status"] == "running"
+    assert reconciled3["last_heartbeat"] == ts_60s_ago
+    assert 50.0 <= reconciled3["heartbeat_age_sec"] <= 80.0
+
+    # Format 4: No heartbeat at all
+    rec4 = {
+        "run_id": "20261030-100000-T007-kilo-7777",
+        "host": "remote_hub",
+        "status": "running",
+    }
+    reconciled4 = _runs.reconcile(rec4, current_host="local_worker")
+    assert reconciled4["status"] == "running"
+    assert reconciled4["last_heartbeat"] is None
+    assert reconciled4["heartbeat_age_sec"] is None
 
 
 def test_19_7_run_start_refuses_missing_preflight_binary_and_starts_when_ok(
