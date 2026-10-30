@@ -660,19 +660,35 @@ def _stdlib_parse_yaml_frontmatter(fm_raw: str) -> dict[str, Any]:
             raise ValueError("Tab indentation is not supported in YAML")
         indent = len(line) - len(line.lstrip(" "))
 
-        m_block = re.match(r"^([^:#]+?):\s*([>|])([+-]?)\s*(?:#.*)?$", stripped)
+        m_block = re.match(
+            r"^([^:#]+?):\s*([>|])([1-9][+-]?|[+-]?[1-9]?)(?:\s+#.*|\s*)$",
+            stripped,
+        )
         if m_block and not stripped.startswith("- "):
             key = m_block.group(1).strip()
             style = m_block.group(2)
-            chomp = m_block.group(3)
+            modifiers = m_block.group(3)
+            chomp = "+" if "+" in modifiers else ("-" if "-" in modifiers else "")
+            indent_digits = [ch for ch in modifiers if ch.isdigit()]
+            explicit_indent = int(indent_digits[0]) if indent_digits else None
             i += 1
-            block_raw: list[tuple[int, str]] = []
-            block_indent: int | None = None
+            block_lines_raw: list[str] = []
+            block_indent: int | None = (
+                indent + explicit_indent if explicit_indent is not None else None
+            )
+            max_leading_blank_spaces = 0
+            saw_content_line = False
             while i < n:
                 bline = raw_lines[i]
                 bstripped = bline.strip()
                 if bstripped == "":
-                    block_raw.append((0, ""))
+                    if "\t" in bline:
+                        raise ValueError("Tab indentation in block scalar")
+                    if block_indent is not None and len(bline) > block_indent:
+                        saw_content_line = True
+                    elif not saw_content_line:
+                        max_leading_blank_spaces = max(max_leading_blank_spaces, len(bline))
+                    block_lines_raw.append(bline)
                     i += 1
                     continue
                 if "\t" in bline[: len(bline) - len(bline.lstrip(" \t"))]:
@@ -681,16 +697,26 @@ def _stdlib_parse_yaml_frontmatter(fm_raw: str) -> dict[str, Any]:
                 if bindent <= indent:
                     break
                 if block_indent is None:
+                    if max_leading_blank_spaces > bindent:
+                        raise ValueError(
+                            "Leading empty line has more spaces than first content line in block scalar"
+                        )
                     block_indent = bindent
                 elif bindent < block_indent:
                     raise ValueError("Inconsistent indentation in block scalar")
-                block_raw.append((bindent, bline[block_indent:]))
+                saw_content_line = True
+                block_lines_raw.append(bline)
                 i += 1
 
-            if block_indent is None:
+            if not saw_content_line and not block_lines_raw:
                 scalar_val = ""
+            elif not saw_content_line:
+                content_lines = ["" for _ in block_lines_raw]
+                joined = "\n".join(content_lines) + "\n"
+                scalar_val = _apply_yaml_chomping(joined, chomp)
             else:
-                content_lines = [text for _, text in block_raw]
+                assert block_indent is not None
+                content_lines = [bline[block_indent:] for bline in block_lines_raw]
                 if style == "|":
                     joined = "\n".join(content_lines) + "\n"
                 else:
@@ -706,8 +732,8 @@ def _stdlib_parse_yaml_frontmatter(fm_raw: str) -> dict[str, Any]:
         val_s = val_raw.strip()
         if not val_s:
             return ""
-        if val_s[0] in ("&", "*", "!"):
-            raise ValueError(f"Unsupported YAML token: {val_s}")
+        if val_s[0] in ("&", "*", "!", "|", ">", "@", "`", "%"):
+            raise ValueError(f"Unsupported or invalid YAML token: {val_s}")
         if val_s[0] in ("[", "{"):
             raise ValueError(f"Unsupported YAML flow collection: {val_s}")
         if val_s[0] not in ('"', "'") and " #" in val_s:
@@ -794,15 +820,25 @@ def _stdlib_parse_yaml_frontmatter(fm_raw: str) -> dict[str, Any]:
                 else:
                     mapping[key] = ""
             else:
+                is_quoted = val_str.startswith(('"', "'"))
+                if is_quoted and (len(val_str) < 2 or val_str[-1] != val_str[0]):
+                    raise ValueError(f"Unclosed or multiline quoted scalar under {key}: {val_str}")
                 scalar_val = _parse_scalar_token(val_str)
                 cont_parts = [scalar_val]
                 while idx < len(tokens) and tokens[idx][0] > map_indent:
+                    if is_quoted:
+                        raise ValueError(f"Invalid continuation under quoted scalar key {key}")
                     c_indent, c_text, _ = tokens[idx]
-                    if c_text.startswith("__BLOCK__:") or c_text.startswith("- ") or c_text == "-":
+                    if (
+                        c_text.startswith("__BLOCK__:")
+                        or c_text.startswith("- ")
+                        or c_text == "-"
+                        or c_text.startswith(('"', "'"))
+                    ):
                         raise ValueError(f"Invalid continuation under scalar key {key}: {c_text}")
-                    if ":" in c_text and not v_raw.strip().startswith(('"', "'")):
+                    if ":" in c_text:
                         raise ValueError(f"Ambiguous colon in multiline plain scalar under {key}: {c_text}")
-                    cont_parts.append(_strip_yaml_scalar_quotes(c_text))
+                    cont_parts.append(_parse_scalar_token(c_text))
                     idx += 1
                 mapping[key] = " ".join(p for p in cont_parts if p != "")
         return mapping, idx
@@ -860,8 +896,8 @@ def normalize_frontmatter(fm: dict[str, Any] | None) -> dict[str, Any]:
 
     def _clean_val(key: str, val: Any) -> Any:
         if isinstance(val, str):
-            val_s = val.replace("\r\n", "\n").replace("\r", "\n").strip()
-            if key == "description" and "\n" not in val_s:
+            val_s = val.replace("\r\n", "\n").replace("\r", "\n").lstrip("\n").rstrip()
+            if key == "description" and "\n" not in val_s and not val_s.startswith((" ", "\t")):
                 val_s = re.sub(r"[ \t]+", " ", val_s)
             return val_s
         elif isinstance(val, (int, float, bool)):

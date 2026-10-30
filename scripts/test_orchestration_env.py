@@ -4359,6 +4359,132 @@ def test_parse_frontmatter_without_pyyaml_nested_lists_and_literal_vs_folded_neg
     assert "tags" in cmp_dirs["changed_fm_keys"]
 
 
+def test_parse_frontmatter_without_pyyaml_block_scalar_indentation_indicators_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T088 Bounce 2 (B1): Block scalars with indentation indicators (`|2`, `>1`, `|2-`, `|-2`, `>+3`, `>3+`)
+    are parsed as block scalars (never misparsed as plain multiline scalars joining the header token),
+    preserve explicit leading indentation, and fail closed on invalid/unsupported block-scalar headers.
+    """
+    import orchestration_env as oe
+
+    monkeypatch.setattr(oe, "yaml", None)
+
+    # 1. Exact Codex probe: `description: |2\n  alpha beta` vs `description: "|2 alpha beta"` must be False
+    probe_block = (
+        "---\n"
+        "name: probe-skill\n"
+        "description: |2\n"
+        "  alpha beta\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    probe_quoted_header = (
+        "---\n"
+        "name: probe-skill\n"
+        'description: "|2 alpha beta"\n'
+        "---\n\n"
+        "# Body\n"
+    )
+    fm_probe, _ = oe.parse_frontmatter_and_body(probe_block)
+    assert fm_probe is not None
+    assert fm_probe["description"] == "alpha beta\n"
+    assert oe.compare_skill_md(probe_block, probe_quoted_header) == (False, ["description"], False)
+
+    # 2. All valid indentation + chomping combinations (`>1`, `|2-`, `|-2`, `>+3`, `>3+`)
+    for header in ("|2", ">1", "|2-", "|-2", ">+3", ">3+"):
+        ind_digits = [int(ch) for ch in header if ch.isdigit()]
+        pad = " " * ind_digits[0]
+        doc_block = (
+            "---\n"
+            "name: hdr-skill\n"
+            f"description: {header}\n"
+            f"{pad}alpha beta\n"
+            "---\n\n"
+            "# Body\n"
+        )
+        doc_fake_plain = (
+            "---\n"
+            "name: hdr-skill\n"
+            f'description: "{header} alpha beta"\n'
+            "---\n\n"
+            "# Body\n"
+        )
+        fm_hdr, _ = oe.parse_frontmatter_and_body(doc_block)
+        assert fm_hdr is not None
+        assert fm_hdr["description"].strip() == "alpha beta"
+        assert oe.compare_skill_md(doc_block, doc_fake_plain) == (False, ["description"], False)
+
+    # 3. Literal vs folded with indentation indicators (`|2-` vs `>2-`) must not compare equal on multiline content
+    lit_ind = (
+        "---\n"
+        "name: ind-style\n"
+        "description: |2-\n"
+        "  first line\n"
+        "  second line\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    fold_ind = (
+        "---\n"
+        "name: ind-style\n"
+        "description: >2-\n"
+        "  first line\n"
+        "  second line\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    fm_lit_ind, _ = oe.parse_frontmatter_and_body(lit_ind)
+    fm_fold_ind, _ = oe.parse_frontmatter_and_body(fold_ind)
+    assert fm_lit_ind is not None and fm_fold_ind is not None
+    assert fm_lit_ind["description"] == "first line\nsecond line"
+    assert fm_fold_ind["description"] == "first line second line"
+    assert oe.compare_skill_md(lit_ind, fold_ind) == (False, ["description"], False)
+
+    # 4. Explicit indentation indicator preserving leading spaces on first content line (`|2` with 4 spaces vs `|4` with 4 spaces)
+    ind2_leading = (
+        "---\n"
+        "name: lead-space\n"
+        "description: |2\n"
+        "    indented line\n"
+        "  normal line\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    ind2_no_leading = (
+        "---\n"
+        "name: lead-space\n"
+        "description: |2\n"
+        "  indented line\n"
+        "  normal line\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    fm_lead, _ = oe.parse_frontmatter_and_body(ind2_leading)
+    assert fm_lead is not None
+    assert fm_lead["description"] == "  indented line\nnormal line\n"
+    assert oe.compare_skill_md(ind2_leading, ind2_no_leading) == (False, ["description"], False)
+
+    # 5. Negative fail-closed tests on invalid or unsupported block-scalar headers
+    invalid_headers = [
+        "description: |0\n  alpha\n",
+        "description: |10\n  alpha\n",
+        "description: |2-+\n  alpha\n",
+        "description: |2#comment-without-space\n  alpha\n",
+        "description: >foo\n  alpha\n",
+        "description: |2\n too_shallow\n",
+        "metadata:\n  notes: |3\n    too_shallow\n",
+        "metadata:\n  tags:\n    - |2\n      alpha\n",
+    ]
+    for bad_yaml in invalid_headers:
+        bad_doc = f"---\nname: bad-block\n{bad_yaml}---\n\n# Body\n"
+        other_doc = "---\nname: bad-block\ndescription: alpha\n---\n\n# Body\n"
+        fm_bad, _ = oe.parse_frontmatter_and_body(bad_doc)
+        assert fm_bad is None, f"Expected fail-closed None for {bad_yaml!r}, got {fm_bad!r}"
+        assert oe.compare_skill_md(bad_doc, bad_doc) == (False, ["<unparsed-frontmatter>"], False)
+        assert oe.compare_skill_md(bad_doc, other_doc) == (False, ["<unparsed-frontmatter>"], False)
+
+
 # ---------------------------------------------------------------------------
 # Task 19.2: Project Doctor (`ai-orch doctor`) & Convention Drift Detection
 # ---------------------------------------------------------------------------
