@@ -23,3 +23,9 @@
 - **B2 (medium):** fixed — Kept the authoritative `tasks/engine/T088-quattro-test-rossi-su-main-duplicati-skill-non-fix.md` from `integration/19` untouched.
 - **Tests added/updated:** `scripts/test_orchestration_env.py::test_parse_frontmatter_without_pyyaml_nested_lists_and_literal_vs_folded_negative` (alongside `test_parse_frontmatter_and_compare_without_pyyaml`, `test_duplicate_name_reserialized_frontmatter_resolves_to_trash`, and `test_duplicate_name_folded_description_and_whitespace_resolves_to_trash`).
 - **Suite summary:** `uvx --quiet pytest -q -p no:cacheprovider ./scripts ./plugins` → `659 passed in 382.97s (0:06:22)` (0 failed).
+
+## Bounce 2
+
+- **B1 (high, partial):** fixed — Extended `_stdlib_parse_yaml_frontmatter` and `normalize_frontmatter` in `scripts/orchestration_env.py` to support YAML block-scalar indentation indicators (`|2`, `>1`, `|2-`, `|-2`, `>+3`, `>3+`, etc., setting `block_indent = indent + explicit_indent` and preserving intentional leading spaces on the first content line), and to fail closed (`ValueError` → `parse_frontmatter_and_body` returns `(None, body)` and `compare_skill_md` returns `(False, ["<unparsed-frontmatter>"], body_differs)`) on every invalid or unsupported block-scalar header (`|0`, `|10`, `|2-+`, `|2#comment`, `>foo`, sequence item `- |2`, under-indented block lines) as well as unclosed/continued quoted scalars.
+- **Tests added/updated:** `scripts/test_orchestration_env.py::test_parse_frontmatter_without_pyyaml_block_scalar_indentation_indicators_and_fail_closed` (covering the exact `description: |2\n  alpha beta` vs `description: "|2 alpha beta"` probe, all valid indentation+chomping header forms, `|2-` vs `>2-` multiline style distinction, explicit leading-space preservation, and negative fail-closed headers).
+- **Suite summary:** `uvx --quiet pytest -q -p no:cacheprovider ./scripts ./plugins` → `680 passed in 438.52s (0:07:18)` (0 failed).
