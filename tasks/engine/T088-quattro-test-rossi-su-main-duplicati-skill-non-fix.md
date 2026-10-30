@@ -22,12 +22,15 @@ Riportare verde la suite completa. Baseline 2026-10-29 su alf_ubuntu (uvx pytest
 
 ## Steps
 
-- [x] Correggere il parser di fallback stdlib (`parse_frontmatter_and_body` in `scripts/orchestration_env.py`) per supportare `metadata:` annidati e block scalar YAML (`>-`, `|-`, ecc.) anche senza `PyYAML`.
-- [x] Correggere `is_process_alive`, `get_process_descendants` e `kill_process_group` in `scripts/orchestration_invoke.py` per gestire i processi zombie (`Z`) non ancora raccolti dal padre sia su Linux (`/proc/<pid>/stat` e `ps`) sia su macOS (`ps` con flag `-o` separati) e fare `poll()` del leader in `SupervisedInvocation.cancel`.
+- [ ] Riprodurre i quattro fallimenti singolarmente (Mac e Linux).
+- [ ] Per ciascuno trovare il commit che lo ha introdotto (git log/blame) e la causa.
+- [ ] Correggere il codice; correggere il test solo se è il test a essere sbagliato, motivandolo.
 
 ## Verification
 
-- `uvx --quiet pytest -q -p no:cacheprovider ./scripts ./plugins` verde (0 failed).
+- `uvx --quiet pytest -q -p no:cacheprovider ./scripts ./plugins` verde su alf_ubuntu (Linux).
+- I tre test non legati a Linux verdi anche sul Mac.
+- Nessun test saltato o rimosso.
 
 ## Log (newest first)
 
