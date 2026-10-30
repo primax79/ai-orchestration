@@ -47,7 +47,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.5 - `reconcile()` consapevole dell'host
 
-- **Status:** `in progress` (2026-10-30; Seconda verifica Codex NON OK: B3 supervisor senza guardia host; 2026-10-30; secondo rinvio su alf_ubuntu) · **Short:** Reconcile per host · **Size:** S · **Kind:** fix · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
+- **Status:** `verified` (2026-10-30; su integration/19, non ancora su main) · **Short:** Reconcile per host · **Size:** S · **Kind:** fix · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** `reconcile()` (`orchestration_runs.py:2879-2945`) agisce solo sui run con `host` uguale all'host corrente: mai `lost`, mai `kill_process_group` sui run di altri host; per quelli espone l'ultimo heartbeat e la sua età. I run vecchi senza `host` sono considerati locali.
 - **Verification:** test con un `run.json` di un altro host e pid inesistente: resta nel suo stato, nessun kill, nessun evento `run.lost`; stesso caso con host locale → `lost` come oggi.
 
