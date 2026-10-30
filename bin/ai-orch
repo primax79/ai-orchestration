@@ -743,16 +743,16 @@ CLI_DESCRIPTION: dict[str, Any] = {
             "description": "Manage workspace registration, move tracking, and registry queries.",
             "subcommands": {
                 "register": {
-                    "usage": "ai-orch workspace register [PATH] [--id <slug>] [--title <title>] [--apply] [--expect-hash <hash>] [--json]",
-                    "description": "Register a workspace (creates [workspace] in config if missing, detects moves, verifies paths).",
+                    "usage": "ai-orch workspace register [PATH] [--id <slug>] [--title <title>] [--host <id>] [--primary-host <id>] [--reference-repo <repo>] [--mirror-repo <repo>] [--convention-version <ver>] [--apply] [--expect-hash <hash>] [--json]",
+                    "description": "Register a workspace in the portable hub registry and local SQLite cache.",
                 },
                 "unregister": {
                     "usage": "ai-orch workspace unregister <id> [--apply] [--expect-hash <hash>] [--json]",
-                    "description": "Unregister a workspace from SQLite registry.",
+                    "description": "Unregister a workspace from hub and SQLite registry.",
                 },
                 "list": {
                     "usage": "ai-orch workspace list [--json]",
-                    "description": "List all registered workspaces with stale status.",
+                    "description": "List all registered workspaces with stale status and portable hub metadata.",
                 },
                 "show": {
                     "usage": "ai-orch workspace show <id> [--json]",
@@ -761,6 +761,10 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "next": {
                     "usage": "ai-orch workspace next [--root <dir>] [--limit <N>] [--json]",
                     "description": "Show ready queue / next actionable tasks across all projects in the workspace.",
+                },
+                "import-migration": {
+                    "usage": "ai-orch workspace import-migration [FILE] [--host <id>] [--apply] [--expect-hash <hash>] [--json]",
+                    "description": "Import MIGRATION_REGISTRY.json into the portable hub registry and local SQLite cache.",
                 },
             },
         },
@@ -776,6 +780,21 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "list": {
                     "usage": "ai-orch projects list [WORKSPACE] [--json]",
                     "description": "List registered projects and nested sub-workspaces in a workspace.",
+                },
+                "import-migration": {
+                    "usage": "ai-orch projects import-migration [FILE] [--host <id>] [--apply] [--expect-hash <hash>] [--json]",
+                    "description": "Import MIGRATION_REGISTRY.json into the portable hub registry and local SQLite cache.",
+                },
+            },
+        },
+        "console": {
+            "script": str(ORCH_REGISTRY_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch console status [--all-hosts] [--json]",
+            "description": "Multi-host console status listing projects from the hub registry with local cache fallback.",
+            "subcommands": {
+                "status": {
+                    "usage": "ai-orch console status [--all-hosts] [--timeout <sec>] [--config-dir <dir>] [--json]",
+                    "description": "List projects and host status from the hub registry (falls back to local SQLite cache when hub is unreachable).",
                 },
             },
         },
@@ -1050,6 +1069,10 @@ def main() -> int:
 
     if group in ("projects", "project"):
         proc = subprocess.run([sys.executable, str(ORCH_REGISTRY_SCRIPT), "projects", *rest], check=False)
+        return proc.returncode
+
+    if group == "console":
+        proc = subprocess.run([sys.executable, str(ORCH_REGISTRY_SCRIPT), "console", *rest], check=False)
         return proc.returncode
 
     if group == "render-agents-md":

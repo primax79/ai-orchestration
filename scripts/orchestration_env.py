@@ -10068,6 +10068,9 @@ def upgrade_project(
                 _snap_file(db_path)
                 _snap_file(pathlib.Path(str(db_path) + "-wal"))
                 _snap_file(pathlib.Path(str(db_path) + "-shm"))
+                if hasattr(reg, "get_hub_registry_path"):
+                    _snap_file(reg.get_hub_registry_path(cdir).resolve())
+                _snap_file((cdir / "broker" / "pending_uuids.json").resolve())
 
             existing_tasks_files: set[pathlib.Path] = set()
             existing_tasks_dirs: set[pathlib.Path] = set()
