@@ -31,4 +31,7 @@
 
 ## Log (newest first)
 
+- 2026-10-30, orchestrator: state `bounced` -> `in progress` — rinviato su alf_ubuntu (19.6 dopo 19.5, 19.8 dopo 19.16)
+- 2026-10-30, codex: state `delivered` -> `bounced` — Verifica Codex NON OK: vedi nota di verifica
+- 2026-10-30, kilo: state `in progress` -> `delivered` — commit su kilo/<slug>, unito in integration/19 dalla chain
 - 2026-10-30, orchestrator: state `open` -> `in progress` — kilo (gemini-3.8-flash) su alf_ubuntu, da integration/19

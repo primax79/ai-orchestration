@@ -53,7 +53,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.6 - Backend di run `screen`
 
-- **Status:** `in progress` (2026-10-30; kilo (gemini-4-argon) su alf_ubuntu via chain) · **Short:** Backend screen · **Size:** L · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; Verifica Codex NON OK: vedi nota di verifica; 2026-10-30; rinviato su alf_ubuntu (19.6 dopo 19.5, 19.8 dopo 19.16)) · **Short:** Backend screen · **Size:** L · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** backend selezionabile per progetto/tool accanto al supervisor attuale (che resta il default): sessione `agent-<project>-<task>` (verify: `verify-<project>-<task>`), log con `screen -L` in `.ai-orchestration/runs/<run_id>/session.log`, file di stato scritto in uscita (exit code, fine, puntatore al Final Report), liveness = sessione screen viva + file di stato. Il nome della sessione va in `run.json`. Correggere anche `run preview`, che riporta un percorso di worktree diverso da quello creato (`orchestration_runs.py:4133`, `:3542` vs `:4789`).
 - **Verification:** run reale con un tool finto (script che dorme e scrive un commit) in screen: `run list` lo vede vivo, `screen -ls` mostra il nome atteso, alla fine il run è `completed` con exit code; uccidendo la sessione il run diventa `lost`; `run cancel` chiude la sessione; supervisor setsid invariato (test esistenti verdi).
 
@@ -65,7 +65,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.8 - Console CLI multi-host: `status` e `attach`
 
-- **Status:** `open` · **Short:** Console CLI multi-host · **Size:** M · **Kind:** feature · **Depends on:** 19.4, 19.5, 19.6 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; rinviato su alf_ubuntu (19.6 dopo 19.5, 19.8 dopo 19.16)) · **Short:** Console CLI multi-host · **Size:** M · **Kind:** feature · **Depends on:** 19.4, 19.5, 19.6 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** `ai-orch console status [--all-hosts] [--json]`: per ogni host dichiarato esegue `ssh <host> ai-orch … --json` (nessun demone), aggrega progetti, task per stato e host, run, domande aperte, consegne da verificare; un host irraggiungibile è mostrato come tale e non blocca gli altri; timeout per host. `ai-orch console attach <run|task>`: risolve host e nome sessione dal run e apre `ssh -t <target> screen -x <nome>` (sull'hub con l'utente agenti). Host e nomi risolti dal codice, mai interpolati da input libero.
 - **Verification:** test con un `ssh` finto (script nel PATH) che simula due host, uno giù; prova manuale reale Mac → alf_ubuntu documentata in PROGRESS dell'iniziativa (output di `status` e un `attach` con detach che lascia il run vivo).
 
@@ -101,7 +101,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.16 - Registro dei progetti sull'hub
 
-- **Status:** `in progress` (2026-10-30; Verifica Codex NON OK: tasks/19-multi-machine-development/notes/19.16-verification-codex.md; 2026-10-30; rinviato su alf_ubuntu con merge e rilievi) · **Short:** Registro progetti hub · **Size:** M · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; rinviato su alf_ubuntu (19.6 dopo 19.5, 19.8 dopo 19.16)) · **Short:** Registro progetti hub · **Size:** M · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** N079. Il registro attuale (`orchestration_registry.py`, SQLite per macchina) identifica i workspace con `canonical_path`, `device`, `inode` e non si può condividere. Registro dei progetti sull'hub con identità portabile (uuid), percorsi per host, host primario, repository di riferimento e mirror, `convention_version`; il SQLite locale diventa una cache. Assorbire `~/works/MIGRATION_REGISTRY.json` (importazione una tantum, nessun secondo registro). Coordinarsi con la risposta Q026=A (scoperta dei workspace non registrati) e con T073.
 - **Verification:** importazione del file di migrazione su una copia; lo stesso progetto ha lo stesso uuid sul Mac e sull'hub; `console status` elenca i progetti dal registro dell'hub; il registro locale resta utilizzabile con l'hub irraggiungibile.
 
