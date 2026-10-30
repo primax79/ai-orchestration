@@ -8816,6 +8816,7 @@ def inspect_project_doctor(
     tasks_agents_path = tasks_dir / "AGENTS.md"
     agents_stale_rendered = False
     agents_dup_sections: list[str] = []
+    agents_manual_review_sections: list[str] = []
     tasks_agents_stale = False
     agents_check_failed = False
 
@@ -8828,6 +8829,10 @@ def inspect_project_doctor(
             else:
                 existing_agents_text = agents_md_path.read_text(encoding="utf-8", errors="replace")
                 agents_dup_sections = oc.find_duplicated_handwritten_agents_sections(existing_agents_text)
+                if hasattr(oc, "find_preserved_manual_review_agents_sections"):
+                    agents_manual_review_sections = oc.find_preserved_manual_review_agents_sections(
+                        existing_agents_text
+                    )
                 has_begin_end = (
                     oc.BEGIN_MARKER in existing_agents_text and oc.END_MARKER in existing_agents_text
                 )
@@ -8867,6 +8872,11 @@ def inspect_project_doctor(
                     f"{agents_md_path} has duplicated hand-written orchestration blocks outside markers "
                     f"({', '.join(agents_dup_sections)})"
                 )
+            if agents_manual_review_sections:
+                detail_parts.append(
+                    f"{agents_md_path} has section(s) preserved for manual review "
+                    f"({', '.join(agents_manual_review_sections)})"
+                )
         if tasks_agents_stale:
             detail_parts.append(f"{tasks_agents_path} managed task-pipeline block is missing or outdated")
 
@@ -8894,6 +8904,7 @@ def inspect_project_doctor(
                     "stale_rendered": agents_stale_rendered,
                     "duplicated_blocks": bool(agents_dup_sections),
                     "duplicated_sections": agents_dup_sections,
+                    "manual_review_sections": agents_manual_review_sections,
                     "tasks_agents_stale": tasks_agents_stale,
                     "subkinds": (
                         (["stale-agents-md"] if agents_stale_rendered else [])
@@ -9166,6 +9177,7 @@ def inspect_project_doctor(
                 "stale_rendered": agents_stale_rendered,
                 "duplicated_blocks": bool(agents_dup_sections),
                 "duplicated_sections": agents_dup_sections,
+                "manual_review_sections": agents_manual_review_sections,
                 "tasks_agents_stale": tasks_agents_stale,
             },
             "task_headers": {

@@ -3313,8 +3313,6 @@ CANONICAL_RULE_SUBHEADING_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^###\s+Rule\s+2:\s+Define Execution Tasks Before Delegating\b", re.IGNORECASE),
 )
 
-HISTORICAL_SECTION_MIN_SIMILARITY = 0.85
-
 # Real historical rendered blocks from the git history of `render_agents_md_block`:
 # - 2026-10-15 (commit 927244a: initial renderer & ricerca_auto configuration)
 # - 2026-10-17 (commit 0eef7a8: T011 topology-aware renderer, default & strict_main_session)
@@ -3797,19 +3795,14 @@ def _classify_legacy_orchestration_heading(heading: str) -> str | None:
 
 
 def _normalize_legacy_orchestration_section(section_text: str) -> str:
-    """Normalize a markdown section for whole-section comparison against historical renderings.
+    """Normalize a markdown section for exact comparison against historical renderings.
 
-    Strips standalone `---` horizontal rule dividers, normalizes optional numbering on the
-    section heading (`## 1. Required Skills` -> `## Required Skills`), and collapses whitespace.
+    Normalizes line endings (`\\r\\n` / `\\r` -> `\\n`), collapses runs of spaces and tabs,
+    and trims trailing whitespace on each line and at the section boundaries.
     """
-    without_hr = re.sub(r"(?m)^\s*---\s*$", "", section_text)
-    normalized_heading = re.sub(
-        r"^(#{1,2})\s+\d+\.\s+",
-        r"\1 ",
-        without_hr.strip(),
-        count=1,
-    )
-    return " ".join(normalized_heading.split()).lower()
+    text = section_text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", line).rstrip(" \t") for line in text.split("\n")]
+    return "\n".join(lines).strip()
 
 
 def _split_markdown_top_sections(segment: str) -> list[tuple[int, int, str]]:
@@ -3840,7 +3833,7 @@ def _split_markdown_top_sections(segment: str) -> list[tuple[int, int, str]]:
 
 
 def _get_historical_orchestration_sections() -> dict[str, list[str]]:
-    """Load and cache normalized whole-section texts from real historical renderings."""
+    """Load and cache whitespace-normalized whole-section texts from real historical renderings."""
     global _HISTORICAL_SECTIONS_CACHE
     if _HISTORICAL_SECTIONS_CACHE is not None:
         return _HISTORICAL_SECTIONS_CACHE
@@ -3879,9 +3872,12 @@ def _get_historical_orchestration_sections() -> dict[str, list[str]]:
             cat = _classify_legacy_orchestration_heading(heading_str)
             if cat is None:
                 continue
-            norm_sec = _normalize_legacy_orchestration_section(inner[start_pos:end_pos])
-            if norm_sec and norm_sec not in by_category[cat]:
-                by_category[cat].append(norm_sec)
+            raw_sec = inner[start_pos:end_pos]
+            base_sec = re.sub(r"\n+---\s*\Z", "", raw_sec.rstrip())
+            for cand_sec in (raw_sec, base_sec, base_sec + "\n\n---"):
+                norm_sec = _normalize_legacy_orchestration_section(cand_sec)
+                if norm_sec and norm_sec not in by_category[cat]:
+                    by_category[cat].append(norm_sec)
 
     _HISTORICAL_SECTIONS_CACHE = by_category
     return by_category
@@ -3890,9 +3886,10 @@ def _get_historical_orchestration_sections() -> dict[str, list[str]]:
 def _section_matches_legacy_orchestration(heading: str, section_text: str) -> tuple[bool, list[str]]:
     """Positively match a markdown section against known historical ai-orchestration renderings.
 
-    Compares the whitespace-normalized whole section against the real historical rendered
-    sections and requires an exact match or >= 0.85 whole-section similarity. Keyword
-    signatures are never used.
+    A section counts as a duplicate ONLY if it is an exact match to a known historical
+    rendering after whitespace normalization (collapse runs of spaces and tabs, normalize
+    line endings, trim trailing whitespace). Anything else, including a historical section
+    with user additions, returns `(False, [])` so it is preserved and reported for manual review.
     """
     h_stripped = heading.strip()
     category = _classify_legacy_orchestration_heading(h_stripped)
@@ -3904,17 +3901,7 @@ def _section_matches_legacy_orchestration(heading: str, section_text: str) -> tu
         return (False, [])
 
     ref_sections = _get_historical_orchestration_sections().get(category, [])
-    matched = False
-    for norm_ref in ref_sections:
-        if norm_cand == norm_ref:
-            matched = True
-            break
-        sim = difflib.SequenceMatcher(None, norm_cand, norm_ref, autojunk=False).ratio()
-        if sim >= HISTORICAL_SECTION_MIN_SIMILARITY:
-            matched = True
-            break
-
-    if not matched:
+    if norm_cand not in ref_sections:
         return (False, [])
 
     if category == "core_rules":
