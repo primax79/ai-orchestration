@@ -2684,3 +2684,185 @@ def test_19_1_no_tasks_orchestration_toml_in_docs_or_skill_templates() -> None:
 
     assert offending == [], f"Found forbidden tasks/orchestration.toml references:\n" + "\n".join(offending)
 
+
+def test_19_7_preflight_tools_versions_ports_services_disk(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.7: `[project.preflight]` validates tools with minimum version, free ports,
+    active services, and disk space, and is runnable via `ai-orch preflight`."""
+    import os
+    import socket
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_tool = fake_bin / "fake-bun"
+    fake_tool.write_text(
+        "#!/bin/sh\necho 'bun 1.5.2'\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    # 1. Missing binary -> fails naming the binary
+    cfg_missing = {
+        "project": {
+            "preflight": {
+                "tools": {
+                    "nonexistent-bin-t205": "1.0.0",
+                }
+            }
+        }
+    }
+    res_missing = oc.run_project_preflight(cfg_missing, workspace=ws)
+    assert res_missing["ok"] is False
+    assert any("nonexistent-bin-t205" in f for f in res_missing["failures"])
+
+    # 2. Version below minimum -> fails naming the binary and versions
+    cfg_old_ver = {
+        "project": {
+            "preflight": {
+                "tools": {
+                    "fake-bun": ">=2.0.0",
+                }
+            }
+        }
+    }
+    res_old = oc.run_project_preflight(cfg_old_ver, workspace=ws)
+    assert res_old["ok"] is False
+    assert any("fake-bun" in f and "1.5.2" in f and "2.0.0" in f for f in res_old["failures"])
+
+    # 3. Free port occupied vs free, and active service on TCP port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        busy_port = srv.getsockname()[1]
+
+        # Find an unused port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tmp_sock:
+            tmp_sock.bind(("127.0.0.1", 0))
+            free_port = tmp_sock.getsockname()[1]
+
+        # Busy port in free_ports -> fails
+        cfg_busy_port = {
+            "project": {
+                "preflight": {
+                    "free_ports": [busy_port],
+                }
+            }
+        }
+        res_busy = oc.run_project_preflight(cfg_busy_port, workspace=ws)
+        assert res_busy["ok"] is False
+        assert any(str(busy_port) in f for f in res_busy["failures"])
+
+        # Inactive service on free_port -> fails
+        cfg_dead_svc = {
+            "project": {
+                "preflight": {
+                    "services": {
+                        "test-db": {"port": free_port},
+                    }
+                }
+            }
+        }
+        res_dead_svc = oc.run_project_preflight(cfg_dead_svc, workspace=ws)
+        assert res_dead_svc["ok"] is False
+        assert any("test-db" in f for f in res_dead_svc["failures"])
+
+        # Impossible disk requirement -> fails
+        cfg_low_disk = {
+            "project": {
+                "preflight": {
+                    "min_disk_gb": 999999999,
+                }
+            }
+        }
+        res_low_disk = oc.run_project_preflight(cfg_low_disk, workspace=ws)
+        assert res_low_disk["ok"] is False
+        assert any("disk space" in f.lower() for f in res_low_disk["failures"])
+
+        # All checks passing (tool >= 1.2.0, free_port unused, service listening on busy_port, disk >= 1 MB)
+        cfg_all_ok = {
+            "project": {
+                "preflight": {
+                    "tools": {"fake-bun": ">=1.2.0"},
+                    "free_ports": [free_port],
+                    "services": {"active-srv": {"port": busy_port}},
+                    "min_disk_mb": 1,
+                }
+            }
+        }
+        res_ok = oc.run_project_preflight(cfg_all_ok, workspace=ws)
+        assert res_ok["ok"] is True, res_ok["failures"]
+        assert len(res_ok["checks"]) == 4
+
+
+def test_19_7_ai_orch_verify_checks_execution_and_timeouts(tmp_path: pathlib.Path) -> None:
+    """19.7: `[project.verification_checks]` is executable via `ai-orch verify-checks`
+    and respects per-project and per-check timeouts."""
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    ws = tmp_path / "verify_ws"
+    ws.mkdir()
+
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    proj_cfg.write_text(
+        '[project]\nname = "verify-demo"\ncommand_timeout_seconds = 45\n\n'
+        '[project.verification_checks.unit]\n'
+        'description = "Fast unit check"\n'
+        f'commands = ["{sys.executable} -c \\"print(\'UNIT_OK\')\\""]\n\n'
+        '[project.verification_checks.broken]\n'
+        'description = "Failing check"\n'
+        f'commands = ["{sys.executable} -c \\"import sys; sys.stderr.write(\'BROKEN_ERR\\\\n\'); sys.exit(3)\\""]\n\n'
+        '[project.verification_checks.slow]\n'
+        'description = "Slow check that exceeds timeout"\n'
+        'timeout_seconds = 0.3\n'
+        f'commands = ["{sys.executable} -c \\"import time; time.sleep(5)\\""]\n',
+        encoding="utf-8",
+    )
+
+    # 1. Run passing check only
+    res_pass = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "verify-checks", "unit", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_pass.returncode == 0, res_pass.stdout + res_pass.stderr
+    data_pass = json.loads(res_pass.stdout)
+    assert data_pass["ok"] is True
+    assert data_pass["passed_count"] == 1
+    assert data_pass["failed_count"] == 0
+    assert data_pass["timeout_seconds"] == 45.0
+    assert data_pass["checks"][0]["commands"][0]["stdout"] == "UNIT_OK"
+
+    # 2. Run failing check
+    res_fail = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "verify-checks", "--check", "broken", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_fail.returncode == 1
+    data_fail = json.loads(res_fail.stdout)
+    assert data_fail["ok"] is False
+    assert data_fail["failed_count"] == 1
+    assert data_fail["checks"][0]["commands"][0]["exit_code"] == 3
+    assert "BROKEN_ERR" in data_fail["checks"][0]["commands"][0]["stderr"]
+
+    # 3. Run slow check -> times out
+    res_slow = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "verify-checks", "slow", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_slow.returncode == 1
+    data_slow = json.loads(res_slow.stdout)
+    assert data_slow["ok"] is False
+    assert data_slow["checks"][0]["commands"][0]["timed_out"] is True
+
+

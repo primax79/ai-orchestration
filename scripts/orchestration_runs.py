@@ -135,12 +135,24 @@ try:
         find_project_config_path,
         default_global_config_path,
         load_toml_file,
+        run_project_preflight,
+        resolve_project_command_timeouts,
+        format_command_timeouts_prompt_block,
+        run_verification_checks,
+        cmd_preflight,
+        cmd_verify_checks,
     )
 except ImportError:
     resolve_config = None  # type: ignore
     find_project_config_path = None  # type: ignore
     default_global_config_path = None  # type: ignore
     load_toml_file = None  # type: ignore
+    run_project_preflight = None  # type: ignore
+    resolve_project_command_timeouts = None  # type: ignore
+    format_command_timeouts_prompt_block = None  # type: ignore
+    run_verification_checks = None  # type: ignore
+    cmd_preflight = None  # type: ignore
+    cmd_verify_checks = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -2452,6 +2464,8 @@ def build_triage_prompt(
     workspace: pathlib.Path,
     attachment_paths: list[str] | None = None,
     instructions: str | None = None,
+    config: dict[str, Any] | None = None,
+    timeouts: dict[str, Any] | int | float | None = None,
 ) -> str:
     """Prompt builder for triage mode (Spec §4, Task 09.4)."""
     note_id = note.get("id", "-")
@@ -2559,6 +2573,15 @@ def build_triage_prompt(
         "",
     ])
 
+    if format_command_timeouts_prompt_block is not None:
+        eff_cfg = config
+        if eff_cfg is None and timeouts is None and resolve_config is not None:
+            try:
+                eff_cfg, _ = resolve_config(None, workspace)
+            except Exception:
+                eff_cfg = None
+        blocks.extend(format_command_timeouts_prompt_block(cfg=eff_cfg, timeouts=timeouts))
+
     if instructions and instructions.strip():
         blocks.extend([
             "## Additional Instructions",
@@ -2607,6 +2630,8 @@ def build_batch_prompt(
     instructions: str | None = None,
     mode: str = "execute",
     target_commit: str | None = None,
+    config: dict[str, Any] | None = None,
+    timeouts: dict[str, Any] | int | float | None = None,
 ) -> str:
     """Deterministic prompt builder for batch runs (timeline-gantt §5)."""
     ids_str = ", ".join(t.get("id", "UNKNOWN") for t in tasks)
@@ -2675,6 +2700,9 @@ def build_batch_prompt(
             "",
         ])
 
+    if format_command_timeouts_prompt_block is not None:
+        blocks.extend(format_command_timeouts_prompt_block(cfg=config, timeouts=timeouts))
+
     if instructions and instructions.strip():
         blocks.extend([
             "## Additional Instructions",
@@ -2693,6 +2721,8 @@ def build_prompt(
     instructions: str | None = None,
     workspace: pathlib.Path | None = None,
     attachment_paths: list[str] | None = None,
+    config: dict[str, Any] | None = None,
+    timeouts: dict[str, Any] | int | float | None = None,
 ) -> str:
     """Deterministic prompt builder per mode (Spec §3, §4)."""
     if mode == "triage":
@@ -2702,6 +2732,8 @@ def build_prompt(
             workspace=ws,
             attachment_paths=attachment_paths,
             instructions=instructions,
+            config=config,
+            timeouts=timeouts,
         )
 
     task_id = task.get("id", "UNKNOWN")
@@ -2764,6 +2796,15 @@ def build_prompt(
             "  ```",
             "",
         ])
+
+    if format_command_timeouts_prompt_block is not None:
+        eff_cfg = config
+        if eff_cfg is None and timeouts is None and workspace is not None and resolve_config is not None:
+            try:
+                eff_cfg, _ = resolve_config(None, workspace)
+            except Exception:
+                eff_cfg = None
+        blocks.extend(format_command_timeouts_prompt_block(cfg=eff_cfg, timeouts=timeouts))
 
     if instructions and instructions.strip():
         blocks.extend([
@@ -3622,7 +3663,24 @@ def validate_run_request(
                     f"Kilo has no restricted agent for mode '{mode}' under [tools.kilo.headless]; launch will be refused."
                 )
 
-        prompt = build_batch_prompt(task_list, instructions=args.instructions, mode=mode, target_commit=target_commit)
+        preflight_res = (
+            run_project_preflight(merged_cfg, workspace=ws, target_repo=target_repo)
+            if run_project_preflight is not None
+            else {"ok": True, "configured": False, "checks": [], "failures": []}
+        )
+        if not preflight_res["ok"]:
+            pf_err = "; ".join(preflight_res["failures"])
+            if getattr(args, "cmd", None) == "start":
+                return False, ("preflight-failed", f"Preflight check failed: {pf_err}"), None
+            warnings.append(f"Preflight check failed: {pf_err}; launch will be refused.")
+
+        prompt = build_batch_prompt(
+            task_list,
+            instructions=args.instructions,
+            mode=mode,
+            target_commit=target_commit,
+            config=merged_cfg,
+        )
         prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
         raw_argv = build_adapter_argv(
@@ -3708,6 +3766,7 @@ def validate_run_request(
             "allowed_tools_source": allowed_tools_source,
             "verification_mode": None,
             "attachment_paths": [],
+            "preflight": preflight_res,
         }
         return True, None, data
 
@@ -3842,6 +3901,7 @@ def validate_run_request(
             instructions=args.instructions,
             workspace=ws,
             attachment_paths=attachment_paths,
+            config=merged_cfg,
         )
         prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
@@ -3862,6 +3922,17 @@ def validate_run_request(
                 warnings.append(
                     "Kilo has no restricted agent for mode 'triage' under [tools.kilo.headless]; launch will be refused."
                 )
+
+        preflight_res = (
+            run_project_preflight(merged_cfg, workspace=ws, target_repo=target_repo)
+            if run_project_preflight is not None
+            else {"ok": True, "configured": False, "checks": [], "failures": []}
+        )
+        if not preflight_res["ok"]:
+            pf_err = "; ".join(preflight_res["failures"])
+            if getattr(args, "cmd", None) == "start":
+                return False, ("preflight-failed", f"Preflight check failed: {pf_err}"), None
+            warnings.append(f"Preflight check failed: {pf_err}; launch will be refused.")
 
         try:
             raw_argv = build_adapter_argv(
@@ -3950,6 +4021,7 @@ def validate_run_request(
             "allowed_tools_source": allowed_tools_source,
             "verification_mode": None,
             "attachment_paths": attachment_paths,
+            "preflight": preflight_res,
         }
         return True, None, data
 
@@ -4196,7 +4268,25 @@ def validate_run_request(
         if sb in ("danger-full-access", "read-write-full"):
             warnings.append(f"Tool 'codex' has elevated sandbox mode '{sb}'.")
 
-    prompt = build_prompt(mode, task, target_commit=target_commit, instructions=args.instructions)
+    preflight_res = (
+        run_project_preflight(merged_cfg, workspace=ws, target_repo=target_repo)
+        if run_project_preflight is not None
+        else {"ok": True, "configured": False, "checks": [], "failures": []}
+    )
+    if not preflight_res["ok"]:
+        pf_err = "; ".join(preflight_res["failures"])
+        if getattr(args, "cmd", None) == "start":
+            return False, ("preflight-failed", f"Preflight check failed: {pf_err}"), None
+        warnings.append(f"Preflight check failed: {pf_err}; launch will be refused.")
+
+    prompt = build_prompt(
+        mode,
+        task,
+        target_commit=target_commit,
+        instructions=args.instructions,
+        workspace=ws,
+        config=merged_cfg,
+    )
     prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
     try:
@@ -4281,6 +4371,7 @@ def validate_run_request(
         "allowed_tools": allowed_tools,
         "allowed_tools_source": allowed_tools_source,
         "verification_mode": "independent-session" if (mode == "verify" and args.allow_same_tool and ((task.get("executor") and tool.lower() == task.get("executor", "").lower()) or (target_run_tool and tool.lower() == target_run_tool.lower()))) else (vmode if mode == "verify" else None),
+        "preflight": preflight_res,
     }
     return True, None, data
 
@@ -4445,6 +4536,30 @@ def cmd_start(args: argparse.Namespace) -> int:
 
             task_id = source_record["task_id"]
             tool = source_record["tool"]
+
+            gpath = getattr(args, "global_config", None)
+            merged_cfg, _ = resolve_config(gpath, ws)
+            if run_project_preflight is not None:
+                pf_res = run_project_preflight(merged_cfg, workspace=ws, target_repo=cwd_p)
+                if not pf_res["ok"]:
+                    pf_err = "; ".join(pf_res["failures"])
+                    print_error(args.json, "preflight-failed", f"Preflight check failed: {pf_err}")
+                    return 1
+
+            tool_cfg = merged_cfg.get("tools", {}).get(tool, {})
+            if tool == "claude":
+                headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
+                ok_at, at_err = check_claude_allowed_tools(headless_cfg, source_record["mode"])
+                if not ok_at:
+                    print_error(args.json, "missing-allowed-tools", at_err or "Missing allowed_tools for Claude")
+                    return 1
+            elif tool == "kilo":
+                headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
+                ok_k, k_err = check_kilo_agent(headless_cfg, source_record["mode"])
+                if not ok_k:
+                    print_error(args.json, "missing-restricted-agent", k_err or "Missing restricted agent for Kilo")
+                    return 1
+
             run_id = generate_run_id(task_id, tool)
             run_dir = ws / ".ai-orchestration" / "runs" / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -4460,22 +4575,6 @@ def cmd_start(args: argparse.Namespace) -> int:
                 os.chmod(prompt_path, 0o600)
             except OSError:
                 pass
-
-            gpath = getattr(args, "global_config", None)
-            merged_cfg, _ = resolve_config(gpath, ws)
-            tool_cfg = merged_cfg.get("tools", {}).get(tool, {})
-            if tool == "claude":
-                headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
-                ok_at, at_err = check_claude_allowed_tools(headless_cfg, source_record["mode"])
-                if not ok_at:
-                    print_error(args.json, "missing-allowed-tools", at_err or "Missing allowed_tools for Claude")
-                    return 1
-            elif tool == "kilo":
-                headless_cfg = tool_cfg.get("headless", {}) if isinstance(tool_cfg.get("headless"), dict) else {}
-                ok_k, k_err = check_kilo_agent(headless_cfg, source_record["mode"])
-                if not ok_k:
-                    print_error(args.json, "missing-restricted-agent", k_err or "Missing restricted agent for Kilo")
-                    return 1
 
             resume_raw_argv = build_adapter_argv(
                 tool=tool,
@@ -4578,6 +4677,12 @@ def cmd_start(args: argparse.Namespace) -> int:
     if not ok:
         reason, err_msg = err_info  # type: ignore
         print_error(args.json, reason, err_msg)
+        return 1
+
+    pf_data = data.get("preflight") if isinstance(data, dict) else None
+    if isinstance(pf_data, dict) and not pf_data.get("ok", True):
+        pf_err = "; ".join(pf_data.get("failures", []))
+        print_error(args.json, "preflight-failed", f"Preflight check failed: {pf_err}")
         return 1
 
     # Claude allowed_tools check (R11) and Kilo restricted agent check (T028)
@@ -6965,6 +7070,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_show.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
     p_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_show.set_defaults(func=cmd_show)
+
+    if cmd_preflight is not None:
+        p_pf = sub.add_parser("preflight", help="Run [project.preflight] checks on the current host")
+        p_pf.add_argument("--workspace", "--project", dest="workspace", default=".", help="Project workspace root")
+        p_pf.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+        p_pf.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        p_pf.set_defaults(func=cmd_preflight)
+
+    if cmd_verify_checks is not None:
+        p_vc = sub.add_parser("verify-checks", help="Execute [project.verification_checks] commands")
+        p_vc.add_argument("checks", nargs="*", default=[], help="Optional subsystem check name(s) to run")
+        p_vc.add_argument("--check", "--only", dest="check", action="append", default=[], help="Filter by subsystem check name")
+        p_vc.add_argument("--workspace", "--project", dest="workspace", default=".", help="Project workspace root")
+        p_vc.add_argument("--timeout", type=float, default=None, help="Override command timeout in seconds")
+        p_vc.add_argument("--fail-fast", action="store_true", default=False, help="Stop on first failing command")
+        p_vc.add_argument("--dry-run", action="store_true", default=False, help="List checks and commands without executing")
+        p_vc.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+        p_vc.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        p_vc.set_defaults(func=cmd_verify_checks)
 
     return ap
 

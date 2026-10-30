@@ -6373,3 +6373,95 @@ def test_kilo_agent_command_preview_and_apply(tmp_path: pathlib.Path):
     refused = subprocess.run([str(BIN_AI_ORCH), "run", "kilo-agent", "--apply", "--json"], capture_output=True, text=True, env=env)
     assert refused.returncode == 1
     assert (tmp_path / "aio-unattended.md").read_text(encoding="utf-8") == "changed"
+
+
+def test_19_7_run_start_refuses_missing_preflight_binary_and_starts_when_ok(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """19.7 Verification:
+    - Preflight requesting a non-existent binary -> `run start` refuses with the binary name;
+    - Preflight ok -> run starts;
+    - Per-project command timeout is present in the generated prompt.
+    """
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    stub_path_str = str(STUB_AGENT)
+
+    # 1. Configure preflight with a non-existent binary and a per-project command timeout
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{stub_path_str}", "--lines", "2", "--exit-code", "0"]\n'
+        + '\n[project.preflight.tools]\n"missing-bun-19-7" = ">=1.0.0"\n'
+        + '\n[project.timeouts]\ndefault = 600\ntest = 900\n',
+        encoding="utf-8",
+    )
+
+    # Preview includes the timeout in the generated prompt and warns about preflight failure
+    cmd_prev = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "none",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_prev = subprocess.run(cmd_prev, capture_output=True, text=True, check=True)
+    data_prev = json.loads(res_prev.stdout)
+    assert data_prev["ok"] is True
+    assert "## Command Timeouts" in data_prev["prompt"]
+    assert "600s" in data_prev["prompt"] and "600000ms" in data_prev["prompt"]
+    assert "900s" in data_prev["prompt"] and "900000ms" in data_prev["prompt"]
+    assert any("missing-bun-19-7" in w for w in data_prev["warnings"])
+
+    # `run start` refuses with reason `preflight-failed` and names the missing binary
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "none",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_refused = subprocess.run(cmd_start, capture_output=True, text=True, check=False)
+    assert res_refused.returncode != 0
+    data_refused = json.loads(res_refused.stdout)
+    assert data_refused["ok"] is False
+    assert data_refused["reason"] == "preflight-failed"
+    assert "missing-bun-19-7" in data_refused["error"]
+    assert list_run_records(sample_workspace, task_id="T007") == []
+
+    # 2. Install `missing-bun-19-7` in PATH with satisfying version -> preflight ok -> run starts
+    extra_bin = tmp_path / "extra-bin"
+    extra_bin.mkdir()
+    bun_exe = extra_bin / "missing-bun-19-7"
+    bun_exe.write_text("#!/bin/sh\necho '1.1.29'\nexit 0\n", encoding="utf-8")
+    bun_exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{extra_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    res_ok = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    data_ok = json.loads(res_ok.stdout)
+    assert data_ok["ok"] is True
+    run_id = data_ok["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+
+    # Verify prompt.md written for the run also contains the configured timeout
+    prompt_file = sample_workspace / ".ai-orchestration" / "runs" / run_id / "prompt.md"
+    prompt_text = prompt_file.read_text(encoding="utf-8")
+    assert "## Command Timeouts" in prompt_text
+    assert "600s" in prompt_text and "600000ms" in prompt_text
+
