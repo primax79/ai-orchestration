@@ -3210,7 +3210,7 @@ def write_screen_status_file(
         "status": "completed" if is_ok else ("failed" if rec_status == "failed" or exit_code != 0 else rec_status),
         "state": "completed" if is_ok else ("failed" if rec_status == "failed" or exit_code != 0 else rec_status),
         "outcome": "succeeded" if is_ok else ("failed" if rec_status == "failed" or exit_code != 0 else rec_status),
-        "completed": True,
+        "completed": is_ok,
         "exit_code": int(exit_code),
         "started_at": record.get("started_at"),
         "ended_at": ended_at,
@@ -3219,6 +3219,8 @@ def write_screen_status_file(
         "final_report_pointer": final_report_path,
         "final_commit": record.get("final_commit"),
     }
+    if record.get("signal") is not None:
+        payload["signal"] = int(record["signal"])
     status_path = run_dir / "status.json"
     fd, tmp_path = tempfile.mkstemp(dir=str(run_dir), prefix="status.json.tmp.", text=True)
     try:
@@ -3405,8 +3407,22 @@ def reconcile(
         run_dir = ws / ".ai-orchestration" / "runs" / record["run_id"] if ws else None
         status_data = read_screen_status_file(run_dir) if run_dir else None
         if status_data is not None and ws is not None and run_dir is not None:
+            sup = record.get("supervisor", {})
+            sup_pid = sup.get("pid") if isinstance(sup, dict) else None
+            if sup_pid and is_process_alive(sup_pid):
+                wait_deadline = time.monotonic() + 1.0
+                while time.monotonic() < wait_deadline and is_process_alive(sup_pid):
+                    try:
+                        latest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+                        if latest.get("status") in TERMINAL_STATES and latest.get("finalized_at"):
+                            return latest
+                    except Exception:
+                        pass
+                    time.sleep(0.02)
             exit_code = int(status_data.get("exit_code", 0))
             ended_at = status_data.get("ended_at")
+            if status_data.get("signal") is not None and record.get("signal") is None:
+                record["signal"] = status_data["signal"]
             if status_data.get("final_report") and not record.get("final_report"):
                 record["final_report"] = status_data["final_report"]
             if status_data.get("final_report_path") and not record.get("final_report_path"):
@@ -3435,6 +3451,8 @@ def reconcile(
             if status_data is not None and ws is not None:
                 exit_code = int(status_data.get("exit_code", 0))
                 ended_at = status_data.get("ended_at")
+                if status_data.get("signal") is not None and record.get("signal") is None:
+                    record["signal"] = status_data["signal"]
                 if status_data.get("final_report") and not record.get("final_report"):
                     record["final_report"] = status_data["final_report"]
                 if status_data.get("final_report_path") and not record.get("final_report_path"):
@@ -5127,7 +5145,7 @@ def _launch_run_backend(
 
     screenrc_path = run_dir / "screenrc"
     screenrc_path.write_text(
-        f"logfile {session_log_path}\nlogfile flush 1\ndeflog on\n",
+        "logfile flush 1\ndeflog on\n",
         encoding="utf-8",
     )
     try:
@@ -6418,8 +6436,13 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     if record.get("backend") == "screen":
         child_proc: subprocess.Popen[bytes] | None = None
         child_pgid: int | None = None
+        scr_name = record.get("screen_session") or record.get("session_name")
+        had_live_screen = bool(isinstance(record.get("screen"), dict) or is_screen_session_alive(scr_name))
+        screen_teardown_signalled = False
 
         def _on_screen_signal(signum: int, _frame: Any) -> None:
+            nonlocal screen_teardown_signalled
+            screen_teardown_signalled = True
             if child_proc is not None and child_proc.poll() is None:
                 try:
                     if child_pgid:
@@ -6450,6 +6473,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
                 stdout=None,
                 stderr=None,
                 close_fds=True,
+                process_group=0,
             )
         except Exception as e:
             if stdin_fh is not None:
@@ -6519,14 +6543,32 @@ def cmd_supervise(args: argparse.Namespace) -> int:
                 break
             time.sleep(0.05)
 
-        exit_code = int(rc)
-        if not timed_out:
-            if exit_code < 0 and (-exit_code) in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):
-                os._exit(128 - exit_code)
-            if exit_code in (128 + signal.SIGHUP, 128 + signal.SIGTERM, 128 + signal.SIGKILL):
-                time.sleep(0.05)
-                if not is_screen_session_alive(record.get("screen_session") or record.get("session_name")):
-                    os._exit(exit_code)
+        raw_rc = int(rc)
+        signalled_num: int | None = (-raw_rc) if raw_rc < 0 else None
+        exit_code = (128 + signalled_num) if signalled_num is not None else raw_rc
+
+        if not timed_out and (
+            signalled_num in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL)
+            or exit_code in (128 + signal.SIGHUP, 128 + signal.SIGTERM, 128 + signal.SIGKILL)
+        ):
+            time.sleep(0.05)
+            if screen_teardown_signalled or (had_live_screen and not is_screen_session_alive(scr_name)):
+                os._exit(exit_code)
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if signalled_num is not None:
+            record["signal"] = signalled_num
+            record["status"] = "failed"
+            record["state"] = "failed"
+            record["exit_code"] = exit_code
+            record["ended_at"] = now_iso
+            write_screen_status_file(
+                run_dir,
+                record,
+                exit_code=exit_code,
+                ended_at=now_iso,
+                final_report_path=None,
+            )
 
         try:
             sys.stdout.flush()
@@ -6544,6 +6586,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             record=record,
             run_dir=run_dir,
             exit_code=exit_code,
+            ended_at=now_iso,
             write_status_file=True,
         )
         return 0
