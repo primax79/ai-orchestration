@@ -47,13 +47,13 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.5 - `reconcile()` consapevole dell'host
 
-- **Status:** `in progress` (2026-10-30; Verifica Codex NON OK: tasks/19-multi-machine-development/notes/19.5-verification-codex.md; 2026-10-30; rinviato su alf_ubuntu) · **Short:** Reconcile per host · **Size:** S · **Kind:** fix · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; Seconda verifica Codex NON OK: B3 supervisor senza guardia host; 2026-10-30; secondo rinvio su alf_ubuntu) · **Short:** Reconcile per host · **Size:** S · **Kind:** fix · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** `reconcile()` (`orchestration_runs.py:2879-2945`) agisce solo sui run con `host` uguale all'host corrente: mai `lost`, mai `kill_process_group` sui run di altri host; per quelli espone l'ultimo heartbeat e la sua età. I run vecchi senza `host` sono considerati locali.
 - **Verification:** test con un `run.json` di un altro host e pid inesistente: resta nel suo stato, nessun kill, nessun evento `run.lost`; stesso caso con host locale → `lost` come oggi.
 
 ### 19.6 - Backend di run `screen`
 
-- **Status:** `open` · **Short:** Backend screen · **Size:** L · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; kilo (gemini-4-argon) su alf_ubuntu via chain) · **Short:** Backend screen · **Size:** L · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** backend selezionabile per progetto/tool accanto al supervisor attuale (che resta il default): sessione `agent-<project>-<task>` (verify: `verify-<project>-<task>`), log con `screen -L` in `.ai-orchestration/runs/<run_id>/session.log`, file di stato scritto in uscita (exit code, fine, puntatore al Final Report), liveness = sessione screen viva + file di stato. Il nome della sessione va in `run.json`. Correggere anche `run preview`, che riporta un percorso di worktree diverso da quello creato (`orchestration_runs.py:4133`, `:3542` vs `:4789`).
 - **Verification:** run reale con un tool finto (script che dorme e scrive un commit) in screen: `run list` lo vede vivo, `screen -ls` mostra il nome atteso, alla fine il run è `completed` con exit code; uccidendo la sessione il run diventa `lost`; `run cancel` chiude la sessione; supervisor setsid invariato (test esistenti verdi).
 
