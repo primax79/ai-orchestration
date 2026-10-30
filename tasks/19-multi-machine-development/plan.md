@@ -35,7 +35,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.3 - `ai-orch upgrade` di progetto
 
-- **Status:** `in progress` (2026-10-30; fix unito in integration/19; 2026-10-30; verifier codex; Verifica Codex NON OK (vedi nota); 2026-10-30; rinviato; 19.3 dopo 19.2) · **Short:** Upgrade di progetto · **Size:** M · **Kind:** feature · **Depends on:** 19.2 · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
+- **Status:** `verified` (2026-10-30; tasks/AGENTS.md gestito -> follow-up T090) · **Short:** Upgrade di progetto · **Size:** M · **Kind:** feature · **Depends on:** 19.2 · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
 - **Goal:** N078 punto 3. `ai-orch upgrade` (preview di default, plan hash, `--apply --expect-hash`) che compone i passi esistenti (`tasks upgrade`, adozione dei marker dell'indice, scrittura della config, registrazione del workspace, re-render di AGENTS.md rimuovendo i duplicati scritti a mano, migrazione dei campi header) e aggiorna `convention_version`. Rifiuta con motivo chiaro se ci sono worktree di executor attivi del progetto.
 - **Verification:** sulla fixture di 19.2: preview → apply → `ai-orch doctor` senza rilievi e `tasks validate` senza errori; secondo apply = nessuna modifica; con un worktree attivo il comando rifiuta; i blocchi di AGENTS.md fuori dai marker restano byte per byte.
 
