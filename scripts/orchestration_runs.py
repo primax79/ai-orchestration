@@ -6007,7 +6007,7 @@ def _finalize_run_completion(
     # Extract verdict if verify mode
     if record.get("mode") == "verify":
         record["verdict"] = extract_verdict_from_run(run_dir)
-        if record.get("keep_worktree") or not record.get("created_worktree"):
+        if record.get("keep_worktree") or not record.get("created_worktree") or not is_local_run(record, workspace=workspace):
             record["worktree_removed"] = False
         else:
             wt_path_str = record.get("worktree_path")
@@ -6316,6 +6316,15 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         return 1
 
     workspace = pathlib.Path(record["workspace"])
+    gpath = getattr(args, "global_config", None)
+    cur_host = getattr(args, "current_host", None)
+    if not is_local_run(record, workspace=workspace, current_host=cur_host, global_config=gpath):
+        print_error(
+            getattr(args, "json", False),
+            "remote-run",
+            f"Cannot supervise run '{record.get('run_id')}' belonging to remote host '{record.get('host')}'",
+        )
+        return 1
 
     # 1. Record supervisor identity FIRST (Instruction 2)
     my_pid = os.getpid()
