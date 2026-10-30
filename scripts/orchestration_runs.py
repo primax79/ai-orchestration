@@ -135,6 +135,7 @@ try:
         find_project_config_path,
         default_global_config_path,
         load_toml_file,
+        list_project_preflight_checks,
         run_project_preflight,
         resolve_project_command_timeouts,
         format_command_timeouts_prompt_block,
@@ -147,6 +148,7 @@ except ImportError:
     find_project_config_path = None  # type: ignore
     default_global_config_path = None  # type: ignore
     load_toml_file = None  # type: ignore
+    list_project_preflight_checks = None  # type: ignore
     run_project_preflight = None  # type: ignore
     resolve_project_command_timeouts = None  # type: ignore
     format_command_timeouts_prompt_block = None  # type: ignore
@@ -3664,15 +3666,10 @@ def validate_run_request(
                 )
 
         preflight_res = (
-            run_project_preflight(merged_cfg, workspace=ws, target_repo=target_repo)
-            if run_project_preflight is not None
-            else {"ok": True, "configured": False, "checks": [], "failures": []}
+            list_project_preflight_checks(merged_cfg)
+            if list_project_preflight_checks is not None
+            else {"configured": False, "executed": False, "checks": []}
         )
-        if not preflight_res["ok"]:
-            pf_err = "; ".join(preflight_res["failures"])
-            if getattr(args, "cmd", None) == "start":
-                return False, ("preflight-failed", f"Preflight check failed: {pf_err}"), None
-            warnings.append(f"Preflight check failed: {pf_err}; launch will be refused.")
 
         prompt = build_batch_prompt(
             task_list,
@@ -3924,15 +3921,10 @@ def validate_run_request(
                 )
 
         preflight_res = (
-            run_project_preflight(merged_cfg, workspace=ws, target_repo=target_repo)
-            if run_project_preflight is not None
-            else {"ok": True, "configured": False, "checks": [], "failures": []}
+            list_project_preflight_checks(merged_cfg)
+            if list_project_preflight_checks is not None
+            else {"configured": False, "executed": False, "checks": []}
         )
-        if not preflight_res["ok"]:
-            pf_err = "; ".join(preflight_res["failures"])
-            if getattr(args, "cmd", None) == "start":
-                return False, ("preflight-failed", f"Preflight check failed: {pf_err}"), None
-            warnings.append(f"Preflight check failed: {pf_err}; launch will be refused.")
 
         try:
             raw_argv = build_adapter_argv(
@@ -4269,15 +4261,10 @@ def validate_run_request(
             warnings.append(f"Tool 'codex' has elevated sandbox mode '{sb}'.")
 
     preflight_res = (
-        run_project_preflight(merged_cfg, workspace=ws, target_repo=target_repo)
-        if run_project_preflight is not None
-        else {"ok": True, "configured": False, "checks": [], "failures": []}
+        list_project_preflight_checks(merged_cfg)
+        if list_project_preflight_checks is not None
+        else {"configured": False, "executed": False, "checks": []}
     )
-    if not preflight_res["ok"]:
-        pf_err = "; ".join(preflight_res["failures"])
-        if getattr(args, "cmd", None) == "start":
-            return False, ("preflight-failed", f"Preflight check failed: {pf_err}"), None
-        warnings.append(f"Preflight check failed: {pf_err}; launch will be refused.")
 
     prompt = build_prompt(
         mode,
@@ -4399,6 +4386,8 @@ def cmd_preview(args: argparse.Namespace) -> int:
         "plan_hash": data["plan_hash"],  # type: ignore
         "allowed_tools": data.get("allowed_tools"),  # type: ignore
         "allowed_tools_source": data.get("allowed_tools_source"),  # type: ignore
+        "preflight": data.get("preflight"),  # type: ignore
+        "preflight_checks": (data.get("preflight") or {}).get("checks", []),  # type: ignore
     }
     if data.get("is_batch"):
         payload["is_batch"] = True
@@ -4419,6 +4408,11 @@ def cmd_preview(args: argparse.Namespace) -> int:
         if data.get("allowed_tools") is not None:  # type: ignore
             tools_str = ", ".join(data["allowed_tools"]) if data["allowed_tools"] else "none"  # type: ignore
             print(f"Allowed Tools   : {tools_str} (source: {data.get('allowed_tools_source')})")  # type: ignore
+        pf_info = data.get("preflight") or {}  # type: ignore
+        pf_checks = pf_info.get("checks") or []
+        if pf_checks:
+            checks_str = ", ".join(c.get("summary") or f"{c.get('kind')}:{c.get('name')}" for c in pf_checks)
+            print(f"Preflight Checks: {checks_str}")
         if data["warnings"]:  # type: ignore
             print("\nWarnings:")
             for w in data["warnings"]:  # type: ignore
@@ -4679,12 +4673,6 @@ def cmd_start(args: argparse.Namespace) -> int:
         print_error(args.json, reason, err_msg)
         return 1
 
-    pf_data = data.get("preflight") if isinstance(data, dict) else None
-    if isinstance(pf_data, dict) and not pf_data.get("ok", True):
-        pf_err = "; ".join(pf_data.get("failures", []))
-        print_error(args.json, "preflight-failed", f"Preflight check failed: {pf_err}")
-        return 1
-
     # Claude allowed_tools check (R11) and Kilo restricted agent check (T028)
     if data["tool"] == "claude":  # type: ignore
         tool_cfg = data["merged_cfg"].get("tools", {}).get("claude", {})  # type: ignore
@@ -4709,6 +4697,18 @@ def cmd_start(args: argparse.Namespace) -> int:
                 "plan-hash-mismatch",
                 f"Plan hash mismatch: expected {expect_hash}, computed {data['plan_hash']}",  # type: ignore
             )
+            return 1
+
+    if run_project_preflight is not None:
+        pf_data = run_project_preflight(
+            data["merged_cfg"],  # type: ignore
+            workspace=data["ws"],  # type: ignore
+            target_repo=data["target_repo"],  # type: ignore
+        )
+        data["preflight"] = pf_data  # type: ignore
+        if not pf_data.get("ok", True):
+            pf_err = "; ".join(pf_data.get("failures", []))
+            print_error(args.json, "preflight-failed", f"Preflight check failed: {pf_err}")
             return 1
 
     task_id = data["task_id"]  # type: ignore
