@@ -7162,6 +7162,109 @@ def test_19_5_bounce_b2_cleanup_refuses_remote_run_preserves_worktree_and_branch
     assert legacy_branch not in check_leg_b.stdout
 
 
+def test_19_5_bounce_b3_supervise_refuses_remote_run_preserves_worktree_and_record(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """B3 Finding:
+    cmd_supervise() must check is_local_run() immediately after loading record
+    before writing supervisor identity, and refuse to supervise remote verify runs
+    with created_worktree set (preserving both the record and the created worktree).
+    """
+    import orchestration_runs as _runs
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG=str(cfg_file))
+
+    # 1. Setup dummy worktree and file for verify run
+    wt_dir = sample_workspace / ".test_worktrees" / "remote_verify_wt_b3"
+    wt_dir.mkdir(parents=True, exist_ok=True)
+    dummy_file = wt_dir / "preserved_evidence.txt"
+    dummy_file.write_text("critical verification worktree content", encoding="utf-8")
+
+    # 2. Remote verify run record with created_worktree set
+    remote_run_id = "20261030-110000-T007-claude-b301"
+    r_ver_dir = sample_workspace / ".ai-orchestration" / "runs" / remote_run_id
+    r_ver_dir.mkdir(parents=True, exist_ok=True)
+    prompt_file = r_ver_dir / "prompt.md"
+    prompt_file.write_text("verify prompt", encoding="utf-8")
+
+    rec_remote_verify = _runs.create_run_record(
+        run_id=remote_run_id,
+        task_id="T007",
+        mode="verify",
+        tool="claude",
+        profile="deep-reasoning",
+        model="claude-opus",
+        variant=None,
+        effort=None,
+        requested_by="cli",
+        workspace=str(sample_workspace),
+        cwd=str(wt_dir),
+        isolation="worktree",
+        task_bundle_sha256="",
+        argv_display=["claude", "run"],
+        plan_hash="",
+        worktree_path=str(wt_dir),
+        branch=None,
+        target_run="20261030-100000-T007-kilo-prev",
+        target_commit="c" * 40,
+        verification_mode="cross-agent",
+        created_worktree=str(wt_dir),
+        host="macbook",
+    )
+    # Ensure supervisor and agent fields are absent so we can prove cmd_supervise never wrote them
+    rec_remote_verify.pop("supervisor", None)
+    rec_remote_verify.pop("agent", None)
+    (r_ver_dir / "run.json").write_text(json.dumps(rec_remote_verify, indent=2), encoding="utf-8")
+
+    # 3. Supervise via CLI subprocess: must be rejected with exit code != 0 and remote-run error
+    cmd_sup = [
+        str(BIN_AI_ORCH),
+        "run",
+        "_supervise",
+        str(r_ver_dir),
+    ]
+    res_sup = subprocess.run(cmd_sup, capture_output=True, text=True, env=env, check=False)
+    assert res_sup.returncode != 0
+    assert "remote-run" in res_sup.stderr
+    assert "remote host 'macbook'" in res_sup.stderr
+
+    # 4. Verify run record on disk was NOT mutated with supervisor identity
+    disk_data = json.loads((r_ver_dir / "run.json").read_text(encoding="utf-8"))
+    assert "supervisor" not in disk_data
+    assert "agent" not in disk_data
+    assert disk_data.get("status") == "starting"
+
+    # 5. Verify created_worktree was NOT removed or modified
+    assert wt_dir.is_dir(), "Created worktree directory must remain intact"
+    assert dummy_file.is_file(), "Worktree contents must remain intact"
+    assert dummy_file.read_text(encoding="utf-8") == "critical verification worktree content"
+
+    # 6. Direct invocation of cmd_supervise also returns 1 without mutating record
+    ns_args = argparse.Namespace(run_dir=str(r_ver_dir), global_config=cfg_file)
+    rc = _runs.cmd_supervise(ns_args)
+    assert rc == 1
+    disk_data2 = json.loads((r_ver_dir / "run.json").read_text(encoding="utf-8"))
+    assert "supervisor" not in disk_data2
+
+    # 7. Direct invocation of _finalize_run_completion on remote verify record does not remove worktree
+    rec_copy = dict(rec_remote_verify)
+    fin_res = _runs._finalize_run_completion(sample_workspace, rec_copy, r_ver_dir, exit_code=0)
+    assert fin_res.get("worktree_removed") is False
+    assert wt_dir.is_dir()
+    assert dummy_file.is_file()
+
+    # 8. Local run and legacy run (hostless) are recognized as local
+    assert _runs.is_local_run(dict(rec_remote_verify, host="alf_ubuntu"), workspace=sample_workspace, global_config=cfg_file) is True
+    rec_leg = dict(rec_remote_verify)
+    rec_leg.pop("host", None)
+    assert _runs.is_local_run(rec_leg, workspace=sample_workspace, global_config=cfg_file) is True
+
+
 def test_19_7_run_start_refuses_missing_preflight_binary_and_starts_when_ok(
     sample_workspace: pathlib.Path,
     tmp_path: pathlib.Path,
