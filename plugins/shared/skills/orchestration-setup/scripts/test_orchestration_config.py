@@ -239,9 +239,12 @@ def test_render_agents_md_use_case_1_single_framework_and_use_case_2_multi_frame
     ws1 = tmp_path / "uc1_kilo_native"
     ws1.mkdir()
     agents1 = ws1 / "AGENTS.md"
+    hist_stale_block = (
+        oc.BEGIN_MARKER + "\n" + oc.EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS[0].strip() + "\n" + oc.END_MARKER
+    )
     agents1.write_text(
         "# Custom Header\n\nProject-specific intro paragraph.\n\n"
-        "<!-- BEGIN ai-orchestration -->\nOLD STALE BLOCK\n<!-- END ai-orchestration -->\n\n"
+        f"{hist_stale_block}\n\n"
         "## Custom Footer\nKeep this footer intact.\n",
         encoding="utf-8",
     )
@@ -1128,11 +1131,12 @@ def test_render_agents_md_diff_scenarios(tmp_path: pathlib.Path) -> None:
     ws_outdated = tmp_path / "ws_outdated"
     ws_outdated.mkdir()
     agents_outdated = ws_outdated / "AGENTS.md"
+    hist_stale_block = (
+        oc.BEGIN_MARKER + "\n" + oc.EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS[0].strip() + "\n" + oc.END_MARKER
+    )
     initial_outdated = (
         "# Header\n\nIntro notes.\n\n"
-        "<!-- BEGIN ai-orchestration -->\n"
-        "OLD STALE ORCHESTRATION CONTENT\n"
-        "<!-- END ai-orchestration -->\n\n"
+        f"{hist_stale_block}\n\n"
         "## Footer\nKeep this footer.\n"
     )
     agents_outdated.write_text(initial_outdated, encoding="utf-8")
@@ -1154,8 +1158,8 @@ def test_render_agents_md_diff_scenarios(tmp_path: pathlib.Path) -> None:
     assert payload_outdated["path"] == str(agents_outdated)
     assert payload_outdated["hash"] == before_hash_outdated
     assert payload_outdated["changed"] is True
-    assert "-OLD STALE ORCHESTRATION CONTENT" in payload_outdated["diff"]
-    assert "+> **Managed by `ai-orchestration`" in payload_outdated["diff"]
+    assert "-### Rule 1: Keep the Main Session Free" in payload_outdated["diff"]
+    assert "+### Rule 1: Focus the Main Session on Architecture & Orchestration" in payload_outdated["diff"]
     assert agents_outdated.read_bytes() == before_bytes_outdated  # file untouched!
 
     # 4. AGENTS.md already up to date: returns current file hash, changed=False, diff="", file bytes unchanged
@@ -1211,11 +1215,12 @@ def test_render_agents_md_expect_hash_match_and_mismatch(tmp_path: pathlib.Path)
     ws = tmp_path / "ws_expect_hash"
     ws.mkdir()
     agents_md = ws / "AGENTS.md"
+    hist_stale_block = (
+        oc.BEGIN_MARKER + "\n" + oc.EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS[0].strip() + "\n" + oc.END_MARKER
+    )
     initial_content = (
         "# Header\n\n"
-        "<!-- BEGIN ai-orchestration -->\n"
-        "STALE BLOCK\n"
-        "<!-- END ai-orchestration -->\n\n"
+        f"{hist_stale_block}\n\n"
         "# Footer\n"
     )
     agents_md.write_text(initial_content, encoding="utf-8")
@@ -1348,9 +1353,7 @@ def test_render_agents_md_handwritten_content_byte_identical_after_apply(tmp_pat
         "Line 2 of footer.\n"
     )
     stale_block = (
-        "<!-- BEGIN ai-orchestration -->\n"
-        "OUTDATED MANAGED BLOCK THAT MUST BE REPLACED\n"
-        "<!-- END ai-orchestration -->"
+        oc.BEGIN_MARKER + "\n" + oc.EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS[0].strip() + "\n" + oc.END_MARKER
     )
     full_content = header_text + stale_block + footer_text
 
@@ -3358,6 +3361,68 @@ def test_19_2_b1_find_and_strip_duplicated_handwritten_agents_sections_positive_
     assert "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate" in removed_sub
     assert "### Team-specific interpretation" in cleaned_sub
     assert cleaned_sub == hist_req_with_user_sub + managed_block
+
+
+def test_19_3_bounce2_b3_managed_block_predicate_and_docstring() -> None:
+    """Bounce 2 B3:
+    1. `find_duplicated_handwritten_agents_sections` docstring states exact matching after whitespace
+       normalization (not signature/similarity matching).
+    2. A duplicate marked block is flagged/removed ONLY if its content matches what the renderer
+       produces now or a historical rendering (exact match after whitespace normalization).
+       Otherwise it is kept byte-for-byte and reported in `find_preserved_manual_review_agents_sections`.
+    3. `inject_or_replace_agents_block` replaces only the single canonical managed block (`count=1`)
+       and ONLY if its content matches the current or a historical rendering; if the canonical managed
+       block contains user edits, it raises `AgentsMdManagedBlockModifiedError`.
+    """
+    doc_str = oc.find_duplicated_handwritten_agents_sections.__doc__ or ""
+    assert "signature/similarity" not in doc_str.lower()
+    assert "whitespace normalization" in doc_str.lower()
+
+    hist_dir = REPO_ROOT / "scripts" / "fixtures" / "historical_agents_md"
+    hist_2026_10_15 = (hist_dir / "2026-10-15_927244a_default.md").read_text(encoding="utf-8")
+    hist_2026_10_17 = (hist_dir / "2026-10-17_0eef7a8_default.md").read_text(encoding="utf-8")
+    current_rendered = oc.render_agents_md_block(oc.DEFAULT_GLOBAL_CONFIG)
+
+    # 1. Duplicate marked block that matches a historical rendering is detected and removed
+    doc_two_valid = hist_2026_10_17 + "\n" + hist_2026_10_15
+    assert oc.find_duplicated_handwritten_agents_sections(doc_two_valid, current_block=current_rendered) == [
+        "duplicate <!-- BEGIN ai-orchestration --> block"
+    ]
+    assert oc.find_preserved_manual_review_agents_sections(doc_two_valid, current_block=current_rendered) == []
+    cleaned_valid, removed_valid = oc.strip_duplicated_handwritten_agents_sections(
+        doc_two_valid, current_block=current_rendered
+    )
+    assert removed_valid == ["duplicate <!-- BEGIN ai-orchestration --> block"]
+    assert cleaned_valid == hist_2026_10_17 + "\n"
+
+    # 2. Duplicate marked block with user edits inside it is NOT removed, is reported for manual review,
+    #    and `inject_or_replace_agents_block` replaces only the canonical block (leaving the edited duplicate intact).
+    dup_edited = hist_2026_10_15.replace(
+        "## 2. Core Operating Rules\n",
+        "## 2. Core Operating Rules\n\n### Team Custom Rule\n\nUser edit inside duplicate marked block.\n",
+    )
+    doc_dup_edited = hist_2026_10_17 + "\n" + dup_edited
+    assert oc.find_duplicated_handwritten_agents_sections(doc_dup_edited, current_block=current_rendered) == []
+    assert oc.find_preserved_manual_review_agents_sections(doc_dup_edited, current_block=current_rendered) == [
+        "duplicate <!-- BEGIN ai-orchestration --> block"
+    ]
+    cleaned_edited, removed_edited = oc.strip_duplicated_handwritten_agents_sections(
+        doc_dup_edited, current_block=current_rendered
+    )
+    assert removed_edited == []
+    assert cleaned_edited == doc_dup_edited
+
+    replaced_only_first = oc.inject_or_replace_agents_block(cleaned_edited, current_rendered)
+    assert replaced_only_first == current_rendered.rstrip() + "\n\n" + dup_edited
+
+    # 3. Canonical managed block with user edits inside it is refused by `inject_or_replace_agents_block`
+    canon_edited = hist_2026_10_17.replace(
+        "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate\n",
+        "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate\n\nUser note inside canonical managed block.\n",
+    )
+    with pytest.raises(oc.AgentsMdManagedBlockModifiedError):
+        oc.inject_or_replace_agents_block(canon_edited, current_rendered)
+
 
 
 
