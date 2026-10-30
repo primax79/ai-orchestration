@@ -65,7 +65,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.8 - Console CLI multi-host: `status` e `attach`
 
-- **Status:** `in progress` (2026-10-30; rinviato su alf_ubuntu (19.6 dopo 19.5, 19.8 dopo 19.16)) · **Short:** Console CLI multi-host · **Size:** M · **Kind:** feature · **Depends on:** 19.4, 19.5, 19.6 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
+- **Status:** `verified` (2026-10-30; prova manuale Mac -> hub resta aperta per il gate 19.9) · **Short:** Console CLI multi-host · **Size:** M · **Kind:** feature · **Depends on:** 19.4, 19.5, 19.6 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** `ai-orch console status [--all-hosts] [--json]`: per ogni host dichiarato esegue `ssh <host> ai-orch … --json` (nessun demone), aggrega progetti, task per stato e host, run, domande aperte, consegne da verificare; un host irraggiungibile è mostrato come tale e non blocca gli altri; timeout per host. `ai-orch console attach <run|task>`: risolve host e nome sessione dal run e apre `ssh -t <target> screen -x <nome>` (sull'hub con l'utente agenti). Host e nomi risolti dal codice, mai interpolati da input libero.
 - **Verification:** test con un `ssh` finto (script nel PATH) che simula due host, uno giù; prova manuale reale Mac → alf_ubuntu documentata in PROGRESS dell'iniziativa (output di `status` e un `attach` con detach che lascia il run vivo).
 
