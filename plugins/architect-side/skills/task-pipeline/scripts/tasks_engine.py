@@ -547,7 +547,7 @@ def resolve_project_languages(
                         elif current_sec == "use_cases":
                             raw_use_cases = (val_parsed, f"{agents_src_label} [use_cases].language")
 
-    # 2. Check project config files via unified project config lookup
+    # 2. Check project config files via unified project config lookup (active file only; lower-priority files are shadowed)
     legacy_lang: tuple[str, str, str] | None = None  # (val, file_name, key_name)
     if t_dir is not None:
         ws_root = t_dir.parent if t_dir.name == "tasks" else t_dir
@@ -556,7 +556,8 @@ def resolve_project_languages(
             if w not in warnings:
                 warnings.append(w)
         seen_paths: set[pathlib.Path] = set()
-        for cand_entry in cfg_info.get("candidates", []):
+        active_cands = [cfg_info["candidates"][0]] if cfg_info.get("candidates") else []
+        for cand_entry in active_cands:
             cfg_path = cand_entry["path"]
             cfg_label = cand_entry["label"]
             resolved_cfg = cfg_path.resolve()
@@ -747,11 +748,15 @@ def get_project_extension_fields(tasks_dir: pathlib.Path) -> tuple[str, ...]:
                     if k and re.match(r"^[a-z][a-z0-9_-]*$", k) and k not in CORE_HEADER_FIELDS and k not in found:
                         found.append(k)
 
-    # 1. Check TOML config files via unified project config lookup
+    # 1. Check TOML config files via unified project config lookup (active file only; lower-priority files are shadowed)
     proj_root = tasks_dir.parent if tasks_dir.name == "tasks" else tasks_dir
     proj_cfg_info = _inspect_project_config(proj_root)
-    cand_tomls: list[pathlib.Path] = [c["path"] for c in proj_cfg_info.get("candidates", [])]
-    if proj_root.parent != proj_root:
+    cand_tomls: list[pathlib.Path] = (
+        [proj_cfg_info["path"]]
+        if proj_cfg_info.get("exists") and isinstance(proj_cfg_info.get("path"), pathlib.Path)
+        else []
+    )
+    if not cand_tomls and proj_root.parent != proj_root:
         for rel in (
             ".ai-orchestration.local.toml",
             "orchestration.toml",
@@ -760,8 +765,9 @@ def get_project_extension_fields(tasks_dir: pathlib.Path) -> tuple[str, ...]:
             ".ai-orchestration.toml",
         ):
             p_cand = proj_root.parent / rel
-            if p_cand.is_file() and p_cand not in cand_tomls:
+            if p_cand.is_file():
                 cand_tomls.append(p_cand)
+                break
 
     for cfg_file in cand_tomls:
         if cfg_file.is_file() and tomllib is not None:
@@ -1150,11 +1156,11 @@ def resolve_project_tasks_dir(project_slug: str, context_tasks_dir: pathlib.Path
         except Exception:
             pass
 
-    # 2. Try looking for project config in workspace root or parents via unified lookup
+    # 2. Try looking for project config in workspace root or parents via unified lookup (active file only)
     curr: pathlib.Path | None = context_tasks_dir.parent
     while curr and curr != curr.parent:
         cands = (
-            [c["path"] for c in _inspect_project_config(curr).get("candidates", [])]
+            [c["path"] for c in _inspect_project_config(curr).get("candidates", [])[:1]]
             if curr == context_tasks_dir.parent
             else [
                 curr / rel
@@ -1165,7 +1171,8 @@ def resolve_project_tasks_dir(project_slug: str, context_tasks_dir: pathlib.Path
                     "tasks/orchestration.toml",
                     ".ai-orchestration.toml",
                 )
-            ]
+                if (curr / rel).is_file()
+            ][:1]
         )
         for cfg_file in cands:
             if cfg_file.is_file():
@@ -1207,11 +1214,11 @@ def is_workspace_task_tree(tasks_dir: pathlib.Path) -> tuple[bool, list[dict[str
         except Exception:
             pass
 
-    # 2. Check project config via unified lookup
+    # 2. Check project config via unified lookup (active file only)
     curr: pathlib.Path | None = tasks_dir.parent
     while curr and curr != curr.parent:
         cands = (
-            [c["path"] for c in _inspect_project_config(curr).get("candidates", [])]
+            [c["path"] for c in _inspect_project_config(curr).get("candidates", [])[:1]]
             if curr == tasks_dir.parent
             else [
                 curr / rel
@@ -1222,7 +1229,8 @@ def is_workspace_task_tree(tasks_dir: pathlib.Path) -> tuple[bool, list[dict[str
                     "tasks/orchestration.toml",
                     ".ai-orchestration.toml",
                 )
-            ]
+                if (curr / rel).is_file()
+            ][:1]
         )
         for cfg_file in cands:
             if cfg_file.is_file():
@@ -17600,8 +17608,9 @@ def resolve_workspace_and_projects(
         except Exception:
             pass
 
-    # 2. Check project config at ws_root via unified lookup
-    for cand in _inspect_project_config(ws_root).get("candidates", []):
+    # 2. Check project config at ws_root via unified lookup (active file only)
+    ws_cfg_info = _inspect_project_config(ws_root)
+    for cand in ([ws_cfg_info["candidates"][0]] if ws_cfg_info.get("candidates") else []):
         cfg_file = cand["path"]
         if cfg_file.is_file() and tomllib is not None:
             try:

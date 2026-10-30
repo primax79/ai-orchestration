@@ -2515,6 +2515,8 @@ def test_19_1_unified_config_lookup_across_all_subsystems_and_legacy_positions(
 
     import tasks_engine as te  # type: ignore
     import orchestration_triggers as ot  # type: ignore
+    import orchestration_env as oe  # type: ignore
+    import orchestration_registry as oreg  # type: ignore
 
     fake_home = tmp_path / "fake_home"
     fake_home.mkdir()
@@ -2531,6 +2533,9 @@ def test_19_1_unified_config_lookup_across_all_subsystems_and_legacy_positions(
         '[tasks]\n'
         'language = "it"\n'
         'extension_fields = ["area", "subsystem"]\n\n'
+        '[workspace.discovery]\n'
+        'include = ["packages/*"]\n'
+        'exclude = ["packages/ignored-mod"]\n\n'
         '[[triggers]]\n'
         'name = "legacy-pos-rule"\n'
         'on = "task.transitioned"\n'
@@ -2556,13 +2561,16 @@ def test_19_1_unified_config_lookup_across_all_subsystems_and_legacy_positions(
         cfg_file.parent.mkdir(parents=True, exist_ok=True)
         cfg_file.write_text(sample_toml, encoding="utf-8")
 
-        # 1. orchestration_config reads routing, tasks, triggers and reports expected path + legacy status
+        # 1. orchestration_config reads routing, tasks, triggers, discovery and reports expected path + legacy status
         merged, meta = oc.resolve_config(global_cfg_path, ws)
         assert pathlib.Path(meta["project_config_path"]).resolve() == cfg_file.resolve(), pos_name
         assert meta["project_config_exists"] is True, pos_name
         assert meta["project_config_legacy"] is expect_legacy, pos_name
         assert merged["routing"]["default_orchestrator"] == "codex", pos_name
+        assert merged["tasks"]["language"] == "it", pos_name
         assert merged["tasks"]["extension_fields"] == ["area", "subsystem"], pos_name
+        assert merged["triggers"][0]["name"] == "legacy-pos-rule", pos_name
+        assert merged["workspace"]["discovery"]["include"] == ["packages/*"], pos_name
         if expect_legacy:
             assert any("legacy project config path" in w and "read-only" in w for w in meta["warnings"]), pos_name
         else:
@@ -2585,7 +2593,19 @@ def test_19_1_unified_config_lookup_across_all_subsystems_and_legacy_positions(
         if expect_legacy:
             assert any("legacy project config path" in w and "read-only" in w for w in trig_meta["warnings"]), pos_name
 
-        # 4. Write target is always canonical (legacy file stays untouched / read-only)
+        # 4. orchestration_registry reads workspace.discovery from the exact same location
+        disc_filter = oreg.load_workspace_discovery_filter(ws, config_dir=global_cfg_dir)
+        assert disc_filter.include_patterns == ["packages/*"], pos_name
+        assert disc_filter.allows_project("packages/core", "core", "core") is True, pos_name
+        assert disc_filter.allows_project("packages/ignored-mod", "ignored-mod", "ignored-mod") is False, pos_name
+        assert disc_filter.allows_project("other/mod", "mod", "mod") is False, pos_name
+
+        # 5. orchestration_env reports the exact same project_config_path
+        env_info = oe._inspect_project_config_env(ws)
+        assert pathlib.Path(env_info["path"]).resolve() == cfg_file.resolve(), pos_name
+        assert env_info["is_legacy"] is expect_legacy, pos_name
+
+        # 6. Write target is always canonical (legacy file stays untouched / read-only)
         write_target = oc.find_project_config_path(ws, global_cfg_path, for_write=True)
         if expect_legacy:
             expected_canonical = global_cfg_dir / "projects" / ws.name / "orchestration.toml"
@@ -2606,6 +2626,253 @@ def test_19_1_unified_config_lookup_across_all_subsystems_and_legacy_positions(
             assert res_set.returncode == 0, res_set.stdout + res_set.stderr
             assert cfg_file.read_text(encoding="utf-8") == before_legacy, pos_name
             assert expected_canonical.is_file(), pos_name
+
+
+def test_19_1_custom_config_override_outside_home_matches_between_tasks_config_and_env_status(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1 (B1): When AI_ORCHESTRATION_CONFIG or AI_ORCH_CONFIG_DIR points to a custom directory
+    outside HOME, `ai-orch tasks config` and `ai-orch env status` both honour the override and
+    report the exact same `project_config_path`."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("AI_ORCH_HOME", str(fake_home))
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
+
+    # Also create a decoy config inside fake_home/.config/ai-orchestration/projects/sample_repo/orchestration.toml
+    # so that ignoring the override would pick the decoy inside fake_home.
+    decoy_home_cfg = fake_home / ".config" / "ai-orchestration" / "projects" / "sample_repo" / "orchestration.toml"
+    decoy_home_cfg.parent.mkdir(parents=True, exist_ok=True)
+    decoy_home_cfg.write_text('[routing]\ndefault_executor = "claude"\n', encoding="utf-8")
+
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    ws = tmp_path / "sample_repo"
+    (ws / "tasks").mkdir(parents=True)
+
+    # Case A: AI_ORCHESTRATION_CONFIG outside fake_home
+    outside_dir_a = tmp_path / "custom_cfg_outside_home_a"
+    outside_cfg_a = outside_dir_a / "orchestration.toml"
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(outside_cfg_a))
+    monkeypatch.delenv("AI_ORCH_CONFIG_DIR", raising=False)
+
+    expected_ext_a = outside_dir_a / "projects" / ws.name / "orchestration.toml"
+    res_tasks_a0 = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "config", "--tasks-dir", str(ws / "tasks"), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    res_env_a0 = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "env", "status", "--workspace", str(ws), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tdata_a0 = json.loads(res_tasks_a0.stdout)
+    edata_a0 = json.loads(res_env_a0.stdout)
+    assert tdata_a0["project_config_path"] == edata_a0["project_config_path"]
+    assert pathlib.Path(tdata_a0["project_config_path"]).resolve() == expected_ext_a.resolve()
+    assert tdata_a0["project_config_exists"] is False
+    assert edata_a0["project_config_exists"] is False
+
+    expected_ext_a.parent.mkdir(parents=True, exist_ok=True)
+    expected_ext_a.write_text('[routing]\ndefault_executor = "kilo"\n', encoding="utf-8")
+    res_tasks_a1 = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "config", "--tasks-dir", str(ws / "tasks"), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    res_env_a1 = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "env", "status", "--workspace", str(ws), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tdata_a1 = json.loads(res_tasks_a1.stdout)
+    edata_a1 = json.loads(res_env_a1.stdout)
+    assert tdata_a1["project_config_path"] == edata_a1["project_config_path"]
+    assert pathlib.Path(tdata_a1["project_config_path"]).resolve() == expected_ext_a.resolve()
+    assert tdata_a1["project_config_exists"] is True
+    assert edata_a1["project_config_exists"] is True
+
+    # Case B: AI_ORCH_CONFIG_DIR outside fake_home (with AI_ORCHESTRATION_CONFIG unset)
+    outside_dir_b = tmp_path / "custom_cfg_outside_home_b"
+    monkeypatch.delenv("AI_ORCHESTRATION_CONFIG", raising=False)
+    monkeypatch.setenv("AI_ORCH_CONFIG_DIR", str(outside_dir_b))
+
+    expected_ext_b = outside_dir_b / "projects" / ws.name / "orchestration.toml"
+    expected_ext_b.parent.mkdir(parents=True, exist_ok=True)
+    expected_ext_b.write_text('[routing]\ndefault_executor = "kilo"\n', encoding="utf-8")
+    res_tasks_b = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "config", "--tasks-dir", str(ws / "tasks"), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    res_env_b = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "env", "status", "--workspace", str(ws), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tdata_b = json.loads(res_tasks_b.stdout)
+    edata_b = json.loads(res_env_b.stdout)
+    assert tdata_b["project_config_path"] == edata_b["project_config_path"]
+    assert pathlib.Path(tdata_b["project_config_path"]).resolve() == expected_ext_b.resolve()
+    assert tdata_b["project_config_exists"] is True
+    assert edata_b["project_config_exists"] is True
+
+
+def test_19_1_workspace_discovery_filter_reads_every_canonical_and_legacy_location(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1 (B2): `orchestration_registry.load_workspace_discovery_filter` and `plan_projects_discover`
+    read `[workspace.discovery]` from every canonical and legacy project config location."""
+    root_scripts = REPO_ROOT / "scripts"
+    if str(root_scripts) not in sys.path:
+        sys.path.insert(0, str(root_scripts))
+    import orchestration_registry as oreg  # type: ignore
+
+    cfg_dir = tmp_path / "global_cfg"
+    cfg_dir.mkdir()
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_dir / "orchestration.toml"))
+
+    positions = [
+        ("local_dot", lambda ws: ws / ".ai-orchestration.local.toml"),
+        ("external_projects", lambda ws: cfg_dir / "projects" / ws.name / "orchestration.toml"),
+        ("legacy_root", lambda ws: ws / "orchestration.toml"),
+        ("legacy_dot_dir", lambda ws: ws / ".ai-orchestration" / "orchestration.toml"),
+        ("legacy_tasks_dir", lambda ws: ws / "tasks" / "orchestration.toml"),
+        ("legacy_dot_toml", lambda ws: ws / ".ai-orchestration.toml"),
+    ]
+
+    for pos_name, path_fn in positions:
+        ws = tmp_path / f"disc_{pos_name}"
+        (ws / "tasks").mkdir(parents=True)
+        (ws / "tasks" / "00-INDEX.md").write_text("# Root\n", encoding="utf-8")
+        for sub in ("packages/kept", "packages/skipped"):
+            (ws / sub / "tasks").mkdir(parents=True)
+            (ws / sub / "tasks" / "00-INDEX.md").write_text("# Sub\n", encoding="utf-8")
+
+        cfg_file = path_fn(ws)
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(
+            '[workspace.discovery]\n'
+            'include = ["packages/*"]\n'
+            'exclude = ["packages/skipped"]\n',
+            encoding="utf-8",
+        )
+
+        plan = oreg.plan_projects_discover(workspace_arg=str(ws), config_dir=cfg_dir)
+        proposed_paths = [p["path"] for p in plan["proposed_projects"]]
+        assert "." in proposed_paths, pos_name
+        assert "packages/kept" in proposed_paths, pos_name
+        assert "packages/skipped" not in proposed_paths, pos_name
+
+
+def test_19_1_shadowed_lower_priority_files_do_not_leak_settings_or_trigger_rules(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1 (B3): When a higher-priority project config file exists alongside lower-priority
+    legacy config files, lower-priority files are genuinely shadowed: their settings,
+    extension_fields, languages, discovery rules, and trigger rules are NOT merged/loaded,
+    while deprecation/shadowed warnings are still emitted."""
+    tasks_scripts = REPO_ROOT / "plugins" / "architect-side" / "skills" / "task-pipeline" / "scripts"
+    root_scripts = REPO_ROOT / "scripts"
+    for p in (tasks_scripts, root_scripts):
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+
+    import tasks_engine as te  # type: ignore
+    import orchestration_triggers as ot  # type: ignore
+    import orchestration_registry as oreg  # type: ignore
+
+    cfg_dir = tmp_path / "global_cfg"
+    cfg_dir.mkdir()
+    global_cfg_path = cfg_dir / "orchestration.toml"
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(global_cfg_path))
+
+    ws = tmp_path / "shadow_proj"
+    tasks_dir = ws / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # Stale legacy file in tasks/orchestration.toml with extra keys, extension_fields, discovery exclude, and trigger rule
+    stale_legacy = tasks_dir / "orchestration.toml"
+    stale_legacy.write_text(
+        '[routing]\n'
+        'default_orchestrator = "codex"\n'
+        'default_executor = "codex"\n'
+        'default_profile = "exploration"\n\n'
+        '[tasks]\n'
+        'language = "fr"\n'
+        'extension_fields = ["stale-legacy-field"]\n\n'
+        '[workspace.discovery]\n'
+        'exclude = ["packages/active-mod"]\n\n'
+        '[triggers]\n'
+        'enabled = false\n\n'
+        '[[triggers.rules]]\n'
+        'name = "stale-legacy-rule"\n'
+        'on = "task.transitioned"\n'
+        'when = { to = "delivered" }\n'
+        'action = "notify"\n',
+        encoding="utf-8",
+    )
+
+    # Active canonical file in .ai-orchestration.local.toml
+    active_local = ws / ".ai-orchestration.local.toml"
+    active_local.write_text(
+        '[routing]\n'
+        'default_orchestrator = "claude"\n\n'
+        '[tasks]\n'
+        'language = "it"\n'
+        'extension_fields = ["active-field"]\n\n'
+        '[workspace.discovery]\n'
+        'include = ["packages/*"]\n\n'
+        '[[triggers]]\n'
+        'name = "active-rule"\n'
+        'on = "task.transitioned"\n'
+        'when = { to = "delivered" }\n'
+        'action = "notify"\n',
+        encoding="utf-8",
+    )
+
+    # 1. orchestration_config: only active_local is loaded on top of global defaults; stale_legacy does not leak
+    merged, meta = oc.resolve_config(global_cfg_path, ws)
+    assert pathlib.Path(meta["project_config_path"]).resolve() == active_local.resolve()
+    assert merged["routing"]["default_orchestrator"] == "claude"
+    # default_executor and default_profile come from DEFAULT_GLOBAL_CONFIG ("kilo", "bulk-execution"), NOT stale_legacy ("codex", "exploration")
+    assert merged["routing"]["default_executor"] == "kilo"
+    assert merged["routing"]["default_profile"] == "bulk-execution"
+    assert merged["tasks"]["extension_fields"] == ["active-field"]
+    assert any("shadowed by" in w for w in meta["warnings"])
+
+    # 2. orchestration_triggers: only active_local's rule is loaded; stale_legacy's rule and enabled=false kill switch are ignored
+    trig_meta, rules, trig_errs = ot.load_triggers_config(ws)
+    assert not trig_errs
+    assert trig_meta["kill_switch_enabled"] is True
+    assert [r["name"] for r in rules] == ["active-rule"]
+    assert any("shadowed by" in w for w in trig_meta["warnings"])
+
+    # 3. tasks_engine: only active_local's extension_fields and language are read
+    assert te.get_project_extension_fields(tasks_dir) == ("active-field",)
+    lang_info = te.resolve_project_languages(tasks_dir)
+    assert lang_info["tasks"] == "it"
+    assert any("shadowed by" in w for w in lang_info["warnings"])
+
+    # 4. orchestration_registry: only active_local's discovery rules apply; stale_legacy's exclude is ignored
+    disc_filter = oreg.load_workspace_discovery_filter(ws, config_dir=cfg_dir)
+    assert disc_filter.allows_project("packages/active-mod", "active-mod", "active-mod") is True
 
 
 def test_19_1_precedence_order_and_tasks_config_matches_env_status(
