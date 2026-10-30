@@ -1987,6 +1987,185 @@ def _run_shell_command_with_timeout(
     }
 
 
+def list_project_preflight_checks(cfg: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the configured `[project.preflight]` checks without executing them (side-effect-free).
+
+    Used by `run preview` (single task, batch, and triage) so previewing a run never executes
+    commands or probes host state.
+    """
+    if not cfg or not isinstance(cfg, dict):
+        return {"configured": False, "executed": False, "checks": []}
+
+    proj = cfg.get("project", {}) if isinstance(cfg.get("project"), dict) else {}
+    pf_cfg = proj.get("preflight")
+    if pf_cfg is None:
+        pf_cfg = cfg.get("preflight")
+
+    if not pf_cfg or not isinstance(pf_cfg, dict) or pf_cfg.get("enabled") is False:
+        return {"configured": False, "executed": False, "checks": []}
+
+    checks: list[dict[str, Any]] = []
+
+    # 1. Tools / binaries
+    for t_entry in _normalize_preflight_tool_entries(pf_cfg):
+        t_name = t_entry["name"]
+        min_ver = t_entry.get("min_version")
+        t_path = t_entry.get("path")
+        checks.append(
+            {
+                "kind": "tool",
+                "name": t_name,
+                "min_version": min_ver,
+                "path": t_path,
+                "summary": f"tool '{t_name}' >= {min_ver}" if min_ver else f"tool '{t_name}'",
+            }
+        )
+
+    # 2. Free TCP ports
+    raw_ports: list[Any] = []
+    for pkey in ("free_ports", "ports"):
+        pval = pf_cfg.get(pkey)
+        if isinstance(pval, list):
+            raw_ports.extend(pval)
+        elif isinstance(pval, (int, str)) and not isinstance(pval, bool):
+            raw_ports.append(pval)
+
+    for p_item in raw_ports:
+        host = "127.0.0.1"
+        port_num: int | None = None
+        if isinstance(p_item, int) and not isinstance(p_item, bool):
+            port_num = p_item
+        elif isinstance(p_item, str):
+            s = p_item.strip()
+            if ":" in s:
+                h_part, p_part = s.rsplit(":", 1)
+                host = h_part.strip() or "127.0.0.1"
+                try:
+                    port_num = int(p_part.strip())
+                except ValueError:
+                    port_num = None
+            else:
+                try:
+                    port_num = int(s)
+                except ValueError:
+                    port_num = None
+        elif isinstance(p_item, dict):
+            host = str(p_item.get("host") or "127.0.0.1")
+            try:
+                port_num = int(p_item["port"])
+            except (KeyError, TypeError, ValueError):
+                port_num = None
+
+        if port_num is not None and (1 <= port_num <= 65535):
+            checks.append(
+                {
+                    "kind": "free_port",
+                    "name": f"{host}:{port_num}",
+                    "host": host,
+                    "port": port_num,
+                    "summary": f"free_port {host}:{port_num}",
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "kind": "free_port",
+                    "name": str(p_item),
+                    "host": host,
+                    "port": port_num,
+                    "summary": f"free_port {p_item}",
+                }
+            )
+
+    # 3. Active services
+    svc_items: list[tuple[str, Any]] = []
+    for skey in ("services", "active_services", "required_services"):
+        sval = pf_cfg.get(skey)
+        if isinstance(sval, dict):
+            for k, v in sval.items():
+                svc_items.append((str(k), v))
+        elif isinstance(sval, list):
+            for item in sval:
+                if isinstance(item, dict):
+                    sname = str(item.get("name") or item.get("service") or item.get("unit") or item.get("port") or "service")
+                    svc_items.append((sname, item))
+                elif isinstance(item, (str, int)) and not isinstance(item, bool):
+                    svc_items.append((str(item), item))
+
+    for svc_name, svc_spec in svc_items:
+        if isinstance(svc_spec, bool) and not svc_spec:
+            continue
+        if isinstance(svc_spec, dict) and (svc_spec.get("enabled") is False or svc_spec.get("required") is False):
+            continue
+        checks.append(
+            {
+                "kind": "service",
+                "name": svc_name,
+                "spec": svc_spec,
+                "summary": f"service '{svc_name}'",
+            }
+        )
+
+    # 4. Disk space
+    req_disk_bytes: int | None = None
+    for mb_key in ("min_disk_mb", "disk_free_mb", "min_free_mb", "disk_space_mb"):
+        val = pf_cfg.get(mb_key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+            req_disk_bytes = max(req_disk_bytes or 0, int(float(val) * 1024 * 1024))
+    for gb_key in ("min_disk_gb", "disk_free_gb", "min_free_gb", "disk_space_gb"):
+        val = pf_cfg.get(gb_key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+            req_disk_bytes = max(req_disk_bytes or 0, int(float(val) * (1024 ** 3)))
+
+    disk_sub = pf_cfg.get("disk")
+    if isinstance(disk_sub, (int, float)) and not isinstance(disk_sub, bool) and disk_sub > 0:
+        req_disk_bytes = max(req_disk_bytes or 0, int(float(disk_sub) * 1024 * 1024))
+    elif isinstance(disk_sub, dict):
+        for mb_key in ("min_mb", "min_disk_mb", "free_mb", "min_free_mb", "mb"):
+            val = disk_sub.get(mb_key)
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+                req_disk_bytes = max(req_disk_bytes or 0, int(float(val) * 1024 * 1024))
+        for gb_key in ("min_gb", "min_disk_gb", "free_gb", "min_free_gb", "gb"):
+            val = disk_sub.get(gb_key)
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+                req_disk_bytes = max(req_disk_bytes or 0, int(float(val) * (1024 ** 3)))
+
+    if req_disk_bytes is not None and req_disk_bytes > 0:
+        req_mb = req_disk_bytes / (1024 * 1024)
+        checks.append(
+            {
+                "kind": "disk",
+                "name": "disk_space",
+                "required_bytes": req_disk_bytes,
+                "summary": f"disk_space >= {req_mb:.1f} MB",
+            }
+        )
+
+    # 5. Custom preflight commands
+    raw_cmds = pf_cfg.get("commands")
+    if isinstance(raw_cmds, str):
+        raw_cmds = [raw_cmds]
+    if isinstance(raw_cmds, list):
+        for cmd_item in raw_cmds:
+            if not isinstance(cmd_item, str) or not cmd_item.strip():
+                continue
+            c_str = cmd_item.strip()
+            checks.append(
+                {
+                    "kind": "command",
+                    "name": c_str,
+                    "command": c_str,
+                    "summary": f"command: {c_str}",
+                }
+            )
+
+    return {
+        "configured": True,
+        "executed": False,
+        "checks": checks,
+    }
+
+
 def run_project_preflight(
     cfg: dict[str, Any] | None,
     workspace: pathlib.Path | str | None = None,
@@ -2008,7 +2187,7 @@ def run_project_preflight(
         base_dirs.append(ws)
 
     if not cfg or not isinstance(cfg, dict):
-        return {"ok": True, "configured": False, "checks": [], "failures": []}
+        return {"ok": True, "configured": False, "executed": True, "checks": [], "failures": []}
 
     proj = cfg.get("project", {}) if isinstance(cfg.get("project"), dict) else {}
     pf_cfg = proj.get("preflight")
@@ -2016,7 +2195,7 @@ def run_project_preflight(
         pf_cfg = cfg.get("preflight")
 
     if not pf_cfg or not isinstance(pf_cfg, dict) or pf_cfg.get("enabled") is False:
-        return {"ok": True, "configured": False, "checks": [], "failures": []}
+        return {"ok": True, "configured": False, "executed": True, "checks": [], "failures": []}
 
     checks: list[dict[str, Any]] = []
     failures: list[str] = []
@@ -2415,6 +2594,7 @@ def run_project_preflight(
     return {
         "ok": len(failures) == 0,
         "configured": True,
+        "executed": True,
         "checks": checks,
         "failures": failures,
     }
