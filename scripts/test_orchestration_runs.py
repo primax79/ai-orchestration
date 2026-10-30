@@ -6746,6 +6746,420 @@ def test_19_5_reconcile_heartbeat_formats_and_explicit_current_host():
     assert reconciled4["heartbeat_age_sec"] is None
 
 
+def test_19_5_is_local_run_predicate():
+    """Verify is_local_run shared predicate across legacy, matching, normalized, and remote hosts."""
+    import orchestration_runs as _runs
+
+    # 1. Legacy runs without host count as local
+    assert _runs.is_local_run({}, current_host="alf_ubuntu") is True
+    assert _runs.is_local_run({"host": None}, current_host="alf_ubuntu") is True
+    assert _runs.is_local_run({"host": ""}, current_host="alf_ubuntu") is True
+    assert _runs.is_local_run({"host": "   "}, current_host="alf_ubuntu") is True
+
+    # 2. Exact match
+    assert _runs.is_local_run({"host": "alf_ubuntu"}, current_host="alf_ubuntu") is True
+
+    # 3. Case insensitivity
+    assert _runs.is_local_run({"host": "ALF_UBUNTU"}, current_host="alf_ubuntu") is True
+    assert _runs.is_local_run({"host": "alf_ubuntu"}, current_host="ALF_UBUNTU") is True
+
+    # 4. Normalized hostname match
+    assert _runs.is_local_run({"host": "alf-ubuntu.local"}, current_host="alf-ubuntu") is True
+    assert _runs.is_local_run({"host": "MacBook-Pro.local"}, current_host="macbook-pro") is True
+
+    # 5. Remote host non-match
+    assert _runs.is_local_run({"host": "macbook"}, current_host="alf_ubuntu") is False
+    assert _runs.is_local_run({"host": "remote_hub"}, current_host="local_worker") is False
+
+
+def test_19_5_bounce_b1_cancel_refuses_remote_run_no_signal_no_mutation(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """B1 Finding:
+    cmd_cancel() must apply shared predicate and reject remote runs before mutation or signal.
+    - Remote run: cancelled command rejected with error 'remote-run', exit code 1;
+      no kill_process_group or os.kill performed;
+      run.json status remains 'running'; no run.cancelled event emitted.
+    - Local run: cancelled command succeeds, kills process group, emits run.cancelled.
+    - Legacy run (no host): cancelled command succeeds, treated as local.
+    """
+    import orchestration_runs as _runs
+    import orchestration_events
+    from unittest.mock import MagicMock
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    mock_kill_pg = MagicMock()
+    mock_os_kill = MagicMock()
+    monkeypatch.setattr(_runs, "kill_process_group", mock_kill_pg)
+    monkeypatch.setattr(_runs.os, "kill", mock_os_kill)
+
+    # 1. Remote run (host: "macbook")
+    remote_run_id = "20261030-100000-T001-kilo-ba01"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / remote_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    rec_remote = _runs.create_run_record(
+        run_id=remote_run_id,
+        task_id="T001",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="inplace",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+        host="macbook",
+    )
+    rec_remote["status"] = "running"
+    rec_remote["supervisor"] = {"pid": 99999991, "start_time": "Sat Oct 17 00:00:00 2026"}
+    rec_remote["agent"] = {"pid": 88888881, "pgid": 88888881, "start_time": "Sat Oct 17 00:00:00 2026"}
+    (run_dir / "run.json").write_text(json.dumps(rec_remote, indent=2), encoding="utf-8")
+
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG=str(cfg_file))
+    cmd_cancel_remote = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cancel",
+        remote_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_remote = subprocess.run(cmd_cancel_remote, capture_output=True, text=True, env=env, check=False)
+    assert res_remote.returncode != 0
+    err_data = json.loads(res_remote.stdout)
+    assert err_data["ok"] is False
+    assert err_data["reason"] == "remote-run"
+    assert "remote host 'macbook'" in err_data["error"]
+
+    # Verify no signal or kill occurred
+    assert mock_kill_pg.call_count == 0
+    assert mock_os_kill.call_count == 0
+
+    # Verify run.json status is still "running" and disk data untouched
+    disk_data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert disk_data["status"] == "running"
+    assert disk_data.get("ended_at") is None
+
+    # Verify no run.cancelled event emitted
+    canc_events = orchestration_events.read_events(sample_workspace, types=["run.cancelled"])
+    assert len(canc_events) == 0
+
+    # 2. Local run (host: "alf_ubuntu") can be cancelled
+    local_run_id = "20261030-100000-T002-kilo-ba02"
+    loc_dir = sample_workspace / ".ai-orchestration" / "runs" / local_run_id
+    loc_dir.mkdir(parents=True, exist_ok=True)
+    rec_local = dict(rec_remote)
+    rec_local["run_id"] = local_run_id
+    rec_local["host"] = "alf_ubuntu"
+    (loc_dir / "run.json").write_text(json.dumps(rec_local, indent=2), encoding="utf-8")
+
+    cmd_cancel_local = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cancel",
+        local_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_local = subprocess.run(cmd_cancel_local, capture_output=True, text=True, env=env, check=False)
+    assert res_local.returncode == 0
+    loc_res_data = json.loads(res_local.stdout)
+    assert loc_res_data["ok"] is True
+    assert loc_res_data["status"] == "cancelled"
+
+    loc_disk_data = json.loads((loc_dir / "run.json").read_text(encoding="utf-8"))
+    assert loc_disk_data["status"] == "cancelled"
+    assert "ended_at" in loc_disk_data
+
+    # 3. Legacy run without 'host' key can be cancelled (treated as local)
+    legacy_run_id = "20261030-100000-T003-kilo-ba03"
+    leg_dir = sample_workspace / ".ai-orchestration" / "runs" / legacy_run_id
+    leg_dir.mkdir(parents=True, exist_ok=True)
+    rec_legacy = dict(rec_remote)
+    rec_legacy["run_id"] = legacy_run_id
+    rec_legacy.pop("host", None)
+    (leg_dir / "run.json").write_text(json.dumps(rec_legacy, indent=2), encoding="utf-8")
+
+    cmd_cancel_leg = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cancel",
+        legacy_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_leg = subprocess.run(cmd_cancel_leg, capture_output=True, text=True, env=env, check=False)
+    assert res_leg.returncode == 0
+    leg_res_data = json.loads(res_leg.stdout)
+    assert leg_res_data["ok"] is True
+    assert leg_res_data["status"] == "cancelled"
+
+
+def test_19_5_bounce_b1_trigger_confirmed_cancel_refuses_remote_run(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """B1 Finding:
+    Trigger-confirmed command action calling `ai-orch run cancel` must reject remote runs,
+    recording non-zero exit code and error, and leaving the remote run unmutated and alive.
+    """
+    import hashlib
+    import orchestration_runs as _runs
+    import orchestration_triggers
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    # Create a remote run (host: "macbook")
+    remote_run_id = "20261030-100000-T001-kilo-bb01"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / remote_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    rec_remote = _runs.create_run_record(
+        run_id=remote_run_id,
+        task_id="T001",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="inplace",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+        host="macbook",
+    )
+    rec_remote["status"] = "running"
+    (run_dir / "run.json").write_text(json.dumps(rec_remote, indent=2), encoding="utf-8")
+
+    # Create proposed action for canceling this run
+    prop_dir = sample_workspace / ".ai-orchestration" / "proposed_actions"
+    prop_dir.mkdir(parents=True, exist_ok=True)
+
+    cancel_cmd = ["ai-orch", "run", "cancel", remote_run_id, "--workspace", str(sample_workspace), "--json"]
+    cmd_hash = hashlib.sha256(" ".join(cancel_cmd).encode("utf-8")).hexdigest()
+    act_id = "act-cancel-remote"
+    act_data = {
+        "action_id": act_id,
+        "action_hash": cmd_hash,
+        "type": "command",
+        "command": cancel_cmd,
+        "status": "pending_confirmation",
+        "created_at": "2026-10-30T10:00:00Z",
+    }
+    (prop_dir / f"{act_id}.json").write_text(json.dumps(act_data), encoding="utf-8")
+
+    # Confirm the proposal
+    conf_res = orchestration_triggers.confirm_action(sample_workspace, act_id, cmd_hash, actor="owner")
+    assert conf_res["status"] == "confirmed"
+    assert conf_res["ok"] is False  # Action is confirmed, but underlying command failed
+
+    # Command result must show failure because cancel rejected remote run
+    cmd_res = conf_res["result"]
+    assert cmd_res["exit_code"] != 0
+    assert "remote-run" in cmd_res["stdout"]
+
+    # Remote run must remain untouched in status running
+    disk_data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert disk_data["status"] == "running"
+    assert disk_data.get("ended_at") is None
+
+
+def test_19_5_bounce_b2_cleanup_refuses_remote_run_preserves_worktree_and_branch(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """B2 Finding:
+    cmd_cleanup() must refuse cleanup unless the run is local (legacy records count as local).
+    - Remote terminal run: cleanup refused with error 'remote-run', exit code 1;
+      worktree and branch are NOT removed, cleaned_at is NOT written, run.cleaned is NOT emitted;
+      --dry-run also refused.
+    - Local terminal run: cleanup succeeds, removes worktree and branch.
+    - Legacy terminal run: cleanup succeeds, treated as local.
+    """
+    import orchestration_runs as _runs
+    import orchestration_events
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    # Setup dummy branch and worktree directory in git repo
+    branch_name = "test/19-5-remote-branch"
+    subprocess.run(["git", "branch", branch_name], cwd=str(sample_workspace), check=True)
+
+    wt_dir = sample_workspace / ".test_worktrees" / "remote_wt"
+    wt_dir.mkdir(parents=True, exist_ok=True)
+    dummy_file = wt_dir / "file.txt"
+    dummy_file.write_text("content", encoding="utf-8")
+
+    # 1. Remote run (host: "macbook")
+    remote_run_id = "20261030-100000-T001-kilo-bc01"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / remote_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    rec_remote = _runs.create_run_record(
+        run_id=remote_run_id,
+        task_id="T001",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="worktree",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+        host="macbook",
+    )
+    rec_remote["status"] = "succeeded"
+    rec_remote["worktree_path"] = str(wt_dir)
+    rec_remote["branch"] = branch_name
+    (run_dir / "run.json").write_text(json.dumps(rec_remote, indent=2), encoding="utf-8")
+
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG=str(cfg_file))
+
+    # Dry run should refuse
+    cmd_dry = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cleanup",
+        remote_run_id,
+        "--dry-run",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_dry = subprocess.run(cmd_dry, capture_output=True, text=True, env=env, check=False)
+    assert res_dry.returncode != 0
+    err_dry = json.loads(res_dry.stdout)
+    assert err_dry["ok"] is False
+    assert err_dry["reason"] == "remote-run"
+
+    # Actual cleanup should refuse
+    cmd_clean = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cleanup",
+        remote_run_id,
+        "--discard",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_clean = subprocess.run(cmd_clean, capture_output=True, text=True, env=env, check=False)
+    assert res_clean.returncode != 0
+    err_clean = json.loads(res_clean.stdout)
+    assert err_clean["ok"] is False
+    assert err_clean["reason"] == "remote-run"
+    assert "remote host 'macbook'" in err_clean["error"]
+
+    # Verify worktree directory and branch still exist!
+    assert wt_dir.is_dir()
+    assert dummy_file.is_file()
+    check_b = subprocess.run(["git", "branch", "--list", branch_name], cwd=str(sample_workspace), capture_output=True, text=True, check=True)
+    assert branch_name in check_b.stdout
+
+    # Verify run.json was NOT updated with cleaned_at
+    disk_data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert "cleaned_at" not in disk_data
+
+    # Verify no run.cleaned event was emitted
+    clean_events = orchestration_events.read_events(sample_workspace, types=["run.cleaned"])
+    assert len(clean_events) == 0
+
+    # 2. Local run (host: "alf_ubuntu") cleanup succeeds
+    local_branch = "test/19-5-local-branch"
+    subprocess.run(["git", "branch", local_branch], cwd=str(sample_workspace), check=True)
+    local_wt = sample_workspace / ".test_worktrees" / "local_wt"
+    local_wt.mkdir(parents=True, exist_ok=True)
+
+    local_run_id = "20261030-100000-T002-kilo-bc02"
+    loc_dir = sample_workspace / ".ai-orchestration" / "runs" / local_run_id
+    loc_dir.mkdir(parents=True, exist_ok=True)
+    rec_local = dict(rec_remote)
+    rec_local["run_id"] = local_run_id
+    rec_local["host"] = "alf_ubuntu"
+    rec_local["branch"] = local_branch
+    rec_local["worktree_path"] = str(local_wt)
+    (loc_dir / "run.json").write_text(json.dumps(rec_local, indent=2), encoding="utf-8")
+
+    cmd_clean_loc = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cleanup",
+        local_run_id,
+        "--discard",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_loc = subprocess.run(cmd_clean_loc, capture_output=True, text=True, env=env, check=False)
+    assert res_loc.returncode == 0
+    assert json.loads(res_loc.stdout)["ok"] is True
+    assert not local_wt.exists()
+    check_loc_b = subprocess.run(["git", "branch", "--list", local_branch], cwd=str(sample_workspace), capture_output=True, text=True, check=True)
+    assert local_branch not in check_loc_b.stdout
+
+    # 3. Legacy run without 'host' cleanup succeeds (treated as local)
+    legacy_branch = "test/19-5-leg-branch"
+    subprocess.run(["git", "branch", legacy_branch], cwd=str(sample_workspace), check=True)
+    leg_wt = sample_workspace / ".test_worktrees" / "leg_wt"
+    leg_wt.mkdir(parents=True, exist_ok=True)
+
+    leg_run_id = "20261030-100000-T003-kilo-bc03"
+    leg_run_dir = sample_workspace / ".ai-orchestration" / "runs" / leg_run_id
+    leg_run_dir.mkdir(parents=True, exist_ok=True)
+    rec_leg = dict(rec_remote)
+    rec_leg["run_id"] = leg_run_id
+    rec_leg.pop("host", None)
+    rec_leg["branch"] = legacy_branch
+    rec_leg["worktree_path"] = str(leg_wt)
+    (leg_run_dir / "run.json").write_text(json.dumps(rec_leg, indent=2), encoding="utf-8")
+
+    cmd_clean_leg = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cleanup",
+        leg_run_id,
+        "--discard",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_leg = subprocess.run(cmd_clean_leg, capture_output=True, text=True, env=env, check=False)
+    assert res_leg.returncode == 0
+    assert json.loads(res_leg.stdout)["ok"] is True
+    assert not leg_wt.exists()
+    check_leg_b = subprocess.run(["git", "branch", "--list", legacy_branch], cwd=str(sample_workspace), capture_output=True, text=True, check=True)
+    assert legacy_branch not in check_leg_b.stdout
+
+
 def test_19_7_run_start_refuses_missing_preflight_binary_and_starts_when_ok(
     sample_workspace: pathlib.Path,
     tmp_path: pathlib.Path,
