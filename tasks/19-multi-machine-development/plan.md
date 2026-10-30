@@ -53,7 +53,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.6 - Backend di run `screen`
 
-- **Status:** `in progress` (2026-10-30; Verifica Codex NON OK: vedi nota di verifica; 2026-10-30; rinviato su alf_ubuntu (19.6 dopo 19.5, 19.8 dopo 19.16)) · **Short:** Backend screen · **Size:** L · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
+- **Status:** `verified` (2026-10-30; su integration/19, non ancora su main) · **Short:** Backend screen · **Size:** L · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** backend selezionabile per progetto/tool accanto al supervisor attuale (che resta il default): sessione `agent-<project>-<task>` (verify: `verify-<project>-<task>`), log con `screen -L` in `.ai-orchestration/runs/<run_id>/session.log`, file di stato scritto in uscita (exit code, fine, puntatore al Final Report), liveness = sessione screen viva + file di stato. Il nome della sessione va in `run.json`. Correggere anche `run preview`, che riporta un percorso di worktree diverso da quello creato (`orchestration_runs.py:4133`, `:3542` vs `:4789`).
 - **Verification:** run reale con un tool finto (script che dorme e scrive un commit) in screen: `run list` lo vede vivo, `screen -ls` mostra il nome atteso, alla fine il run è `completed` con exit code; uccidendo la sessione il run diventa `lost`; `run cancel` chiude la sessione; supervisor setsid invariato (test esistenti verdi).
 
