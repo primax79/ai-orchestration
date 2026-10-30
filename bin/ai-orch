@@ -11,6 +11,7 @@ Dispatches:
   - `ai-orch sessions <subcommand> [args...]` -> `orchestration_sessions.py`
   - `ai-orch triggers <subcommand> [args...]` -> `orchestration_triggers.py`
   - `ai-orch doctor [--project <dir>] [--json]` -> `orchestration_env.py doctor`
+  - `ai-orch upgrade [--project <dir>] [--apply --expect-hash <hash>] [--json]` -> `orchestration_env.py upgrade`
   - `ai-orch render-agents-md [args...]`    -> `orchestration_config.py render-agents-md`
   - `ai-orch describe [--json]`             -> machine-readable command & schema catalog
 """
@@ -153,6 +154,14 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "status": {
                     "usage": "ai-orch env status [--workspace <dir>] [--json]",
                     "description": "Verify status & drift of CLIs (kilo, claude, codex), installed skills, and MCP servers.",
+                },
+                "doctor": {
+                    "usage": "ai-orch env doctor [--project <dir>] [--workspace <dir>] [--check] [--json]",
+                    "description": "Inspect project and global convention drift with severity and fix commands.",
+                },
+                "upgrade": {
+                    "usage": "ai-orch env upgrade [--project <dir>] [--workspace <dir>] [--apply --expect-hash <hash>] [--json]",
+                    "description": "Preview or apply unified project upgrade (config, workspace registration, AGENTS.md, task headers, index markers, convention_version).",
                 },
                 "fetch-repos": {
                     "usage": "ai-orch env fetch-repos [--repos ai-orchestration kilo-mcp] [--json]",
@@ -799,6 +808,15 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
             },
         },
+        "upgrade": {
+            "script": str(ORCH_ENV_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch upgrade [--project <dir>] [--workspace <dir>] [--apply --expect-hash <hash>] [--migrate-plans] [--json]",
+            "description": (
+                "Preview or apply unified project upgrade (tasks upgrade, index marker adoption, "
+                "project config write/migration, workspace registration, AGENTS.md deduplication & re-render, "
+                "task/use-case header migration, and convention_version update; refuses if executor worktrees are active)."
+            ),
+        },
     },
 }
 
@@ -815,9 +833,9 @@ def _extract_flag_value(args: list[str], flags: tuple[str, ...]) -> str | None:
 
 def _maybe_warn_project_drift(group: str, rest: list[str], raw_argv: list[str]) -> None:
     """Emit a single-line stderr warning if the command runs in a project with convention drift."""
-    if group in ("doctor", "describe", "mcp", "broker", "install-launcher"):
+    if group in ("doctor", "upgrade", "describe", "mcp", "broker", "install-launcher"):
         return
-    if group == "env" and rest and rest[0] in ("doctor", "ack", "unack"):
+    if group == "env" and rest and rest[0] in ("doctor", "upgrade", "ack", "unack"):
         return
     if any(h in rest for h in ("-h", "--help", "help")):
         return
@@ -924,6 +942,10 @@ def main() -> int:
 
     if group == "doctor":
         proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), "doctor", *rest], check=False)
+        return proc.returncode
+
+    if group == "upgrade":
+        proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), "upgrade", *rest], check=False)
         return proc.returncode
 
     _maybe_warn_project_drift(group, rest, raw_argv)
