@@ -4485,6 +4485,300 @@ def test_parse_frontmatter_without_pyyaml_block_scalar_indentation_indicators_an
         assert oe.compare_skill_md(bad_doc, other_doc) == (False, ["<unparsed-frontmatter>"], False)
 
 
+@pytest.mark.parametrize(
+    ("case_id", "fm_a", "fm_b", "expect_a_unparsed", "expect_b_unparsed"),
+    [
+        # Codex Round 3 probe 1: double-quoted backslash escape vs single-quoted literal backslash
+        (
+            "codex-probe-dq-backslash-vs-sq-literal",
+            'name: s\ndescription: "alpha\\nbeta"\n',
+            "name: s\ndescription: 'alpha\\nbeta'\n",
+            True,
+            False,
+        ),
+        # Codex Round 3 probe 2: quoted key with colon vs split quoted key
+        (
+            "codex-probe-quoted-key-colon-split",
+            'name: s\n"a:b": x\n',
+            'name: s\n\'"a\': \'b": x\'\n',
+            True,
+            True,
+        ),
+        # Single-quoted '' escape vs unescaped/double-quoted/plain
+        (
+            "sq-escaped-quote-vs-dq-two-quotes",
+            "name: s\ndescription: 'it''s fine'\n",
+            'name: s\ndescription: "it\'\'s fine"\n',
+            False,
+            False,
+        ),
+        (
+            "sq-escaped-quote-vs-plain-two-quotes",
+            "name: s\ndescription: 'it''s fine'\n",
+            "name: s\ndescription: it''s fine\n",
+            False,
+            False,
+        ),
+        (
+            "sq-literal-backslash-vs-literal-block-newline",
+            "name: s\ndescription: 'alpha\\nbeta'\n",
+            "name: s\ndescription: |-\n  alpha\n  beta\n",
+            False,
+            False,
+        ),
+        (
+            "dq-internal-double-space-vs-single-space",
+            'name: s\ndescription: "alpha  beta"\n',
+            'name: s\ndescription: "alpha beta"\n',
+            False,
+            False,
+        ),
+        (
+            "dq-trailing-space-vs-no-trailing-space",
+            'name: s\ndescription: "alpha "\n',
+            'name: s\ndescription: "alpha"\n',
+            False,
+            False,
+        ),
+        (
+            "block-chomping-strip-vs-clip",
+            "name: s\ndescription: |-\n  alpha\n",
+            "name: s\ndescription: |\n  alpha\n",
+            False,
+            False,
+        ),
+        (
+            "block-chomping-clip-vs-keep",
+            "name: s\ndescription: |\n  alpha\n\n",
+            "name: s\ndescription: |+\n  alpha\n\n",
+            False,
+            False,
+        ),
+        # Rejected: quoted keys (single and double quotes)
+        (
+            "rejected-double-quoted-key",
+            'name: s\n"description": alpha\n',
+            "name: s\ndescription: alpha\n",
+            True,
+            False,
+        ),
+        (
+            "rejected-single-quoted-key",
+            "name: s\n'description': alpha\n",
+            "name: s\ndescription: alpha\n",
+            True,
+            False,
+        ),
+        # Rejected: double-quoted scalars containing '\'
+        (
+            "rejected-double-quoted-backslash-path",
+            'name: s\ndescription: "C:\\\\work\\\\skill"\n',
+            "name: s\ndescription: 'C:\\\\work\\\\skill'\n",
+            True,
+            False,
+        ),
+        (
+            "rejected-double-quoted-escaped-quote",
+            'name: s\ndescription: "say \\"hi\\""\n',
+            "name: s\ndescription: 'say \"hi\"'\n",
+            True,
+            False,
+        ),
+        # Rejected: flow collections {} / []
+        (
+            "rejected-flow-mapping",
+            "name: s\nmetadata: {author: alice}\n",
+            "name: s\nmetadata:\n  author: alice\n",
+            True,
+            False,
+        ),
+        (
+            "rejected-flow-sequence",
+            "name: s\nmetadata:\n  tags: [a, b]\n",
+            "name: s\nmetadata:\n  tags:\n    - a\n    - b\n",
+            True,
+            False,
+        ),
+        # Rejected: anchors, aliases and tags (&, *, !)
+        (
+            "rejected-anchor-and-alias",
+            "name: s\ndescription: &d alpha\nnotes: *d\n",
+            "name: s\ndescription: alpha\nnotes: alpha\n",
+            True,
+            False,
+        ),
+        (
+            "rejected-tag",
+            "name: s\ndescription: !custom alpha\n",
+            "name: s\ndescription: alpha\n",
+            True,
+            False,
+        ),
+        # Rejected: tabs used as indentation
+        (
+            "rejected-tab-indentation-mapping",
+            "name: s\nmetadata:\n\tauthor: alice\n",
+            "name: s\nmetadata:\n  author: alice\n",
+            True,
+            False,
+        ),
+        (
+            "rejected-tab-indentation-comment",
+            "name: s\n\t# tab indented comment\ndescription: alpha\n",
+            "name: s\ndescription: alpha\n",
+            True,
+            False,
+        ),
+        # Rejected: --- / ... inside the frontmatter
+        (
+            "rejected-doc-start-marker-inside-frontmatter",
+            "name: s\n---\ndescription: alpha\n",
+            "name: s\ndescription: alpha\n",
+            True,
+            False,
+        ),
+        (
+            "rejected-doc-end-marker-inside-frontmatter",
+            "name: s\n...\ndescription: alpha\n",
+            "name: s\ndescription: alpha\n",
+            True,
+            False,
+        ),
+        (
+            "rejected-doc-marker-inside-block-scalar",
+            "name: s\ndescription: |\n  alpha\n  ...\n  beta\n",
+            "name: s\ndescription: |\n  alpha\n  beta\n",
+            True,
+            False,
+        ),
+        # Rejected: complex keys ?
+        (
+            "rejected-complex-key",
+            "name: s\n? description\n: alpha\n",
+            "name: s\ndescription: alpha\n",
+            True,
+            False,
+        ),
+        # Rejected: inline # after a value (unless quoted)
+        (
+            "rejected-inline-comment-after-plain-scalar",
+            "name: s\ndescription: alpha # inline comment\n",
+            "name: s\ndescription: alpha\n",
+            True,
+            False,
+        ),
+        (
+            "rejected-inline-comment-after-quoted-scalar",
+            'name: s\ndescription: "alpha" # inline comment\n',
+            'name: s\ndescription: "alpha"\n',
+            True,
+            False,
+        ),
+        (
+            "rejected-inline-comment-after-block-header",
+            "name: s\ndescription: | # inline comment\n  alpha\n",
+            "name: s\ndescription: |\n  alpha\n",
+            True,
+            False,
+        ),
+        # Rejected: duplicate keys
+        (
+            "rejected-duplicate-top-level-key",
+            "name: s\ndescription: first\ndescription: second\n",
+            "name: s\ndescription: second\n",
+            True,
+            False,
+        ),
+        (
+            "rejected-duplicate-nested-key",
+            "name: s\nmetadata:\n  author: alice\n  author: bob\n",
+            "name: s\nmetadata:\n  author: bob\n",
+            True,
+            False,
+        ),
+        (
+            "rejected-duplicate-key-across-top-and-metadata",
+            "name: s\nauthor: alice\nmetadata:\n  author: bob\n",
+            "name: s\nauthor: alice\n",
+            True,
+            False,
+        ),
+    ],
+)
+def test_parse_frontmatter_explicit_subset_and_fail_closed_table(
+    monkeypatch: pytest.MonkeyPatch,
+    case_id: str,
+    fm_a: str,
+    fm_b: str,
+    expect_a_unparsed: bool,
+    expect_b_unparsed: bool,
+) -> None:
+    """T088 Bounce 3 (B1): Table-driven verification that semantically different pairs never compare
+    equal and every construct outside the documented YAML subset fails closed.
+    """
+    import orchestration_env as oe
+
+    monkeypatch.setattr(oe, "yaml", None)
+
+    doc_a = f"---\n{fm_a}---\n\n# Body\n"
+    doc_b = f"---\n{fm_b}---\n\n# Body\n"
+
+    parsed_a, _ = oe.parse_frontmatter_and_body(doc_a)
+    parsed_b, _ = oe.parse_frontmatter_and_body(doc_b)
+
+    if expect_a_unparsed:
+        assert parsed_a is None, f"[{case_id}] Expected doc_a to fail closed (None), got {parsed_a!r}"
+        assert oe.compare_skill_md(doc_a, doc_a) == (False, ["<unparsed-frontmatter>"], False)
+    else:
+        assert parsed_a is not None, f"[{case_id}] Expected doc_a to parse, got None"
+
+    if expect_b_unparsed:
+        assert parsed_b is None, f"[{case_id}] Expected doc_b to fail closed (None), got {parsed_b!r}"
+        assert oe.compare_skill_md(doc_b, doc_b) == (False, ["<unparsed-frontmatter>"], False)
+    else:
+        assert parsed_b is not None, f"[{case_id}] Expected doc_b to parse, got None"
+
+    is_eq, changed_keys, body_diff = oe.compare_skill_md(doc_a, doc_b)
+    assert is_eq is False, f"[{case_id}] Expected doc_a and doc_b not to compare equal"
+    assert len(changed_keys) > 0
+    assert body_diff is False
+
+
+def test_parse_frontmatter_allowed_subset_constructs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T088 Bounce 3: Verify allowed subset constructs (standalone '#' comments, '#' inside quotes,
+    single-quoted '' escaping, nested block mappings, block sequences of scalars).
+    """
+    import orchestration_env as oe
+
+    monkeypatch.setattr(oe, "yaml", None)
+
+    doc_allowed = (
+        "---\n"
+        "# Full-line comment at top\n"
+        "name: allowed-skill_1\n"
+        "description: 'Single-quoted with ''escaped'' quote and # hash'\n"
+        "summary: \"Double-quoted without backslash and with # hash\"\n"
+        "metadata:\n"
+        "  # Indented full-line comment\n"
+        "  author: Alfredo Oliviero\n"
+        "  tags:\n"
+        "    - 'tag''one'\n"
+        "    - \"tag-two\"\n"
+        "    - tag_three\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    fm, body = oe.parse_frontmatter_and_body(doc_allowed)
+    assert fm is not None
+    assert fm["name"] == "allowed-skill_1"
+    assert fm["description"] == "Single-quoted with 'escaped' quote and # hash"
+    assert fm["summary"] == "Double-quoted without backslash and with # hash"
+    assert fm["metadata"]["author"] == "Alfredo Oliviero"
+    assert fm["metadata"]["tags"] == ["tag'one", "tag-two", "tag_three"]
+    assert body.strip() == "# Body"
+
+
+
 # ---------------------------------------------------------------------------
 # Task 19.2: Project Doctor (`ai-orch doctor`) & Convention Drift Detection
 # ---------------------------------------------------------------------------

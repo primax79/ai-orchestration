@@ -2964,6 +2964,83 @@ def _compute_timestamp_age(ts_str: str | None, now: datetime.datetime | None = N
         return None
 
 
+def _normalize_host(raw: str | None) -> str:
+    """Normalize a raw host id/hostname into canonical form (matching Task 19.4)."""
+    if normalize_host_id is not None:
+        try:
+            return normalize_host_id(raw)
+        except Exception:
+            pass
+    s = str(raw or "").strip()
+    if "." in s:
+        s = s.split(".", 1)[0]
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9_-]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    s = re.sub(r"^[^a-z0-9]+", "", s)
+    s = s.rstrip("_-")
+    if len(s) > 63:
+        s = s[:63].rstrip("_-")
+    return s if s else "localhost"
+
+
+def is_local_run(
+    record: dict[str, Any],
+    workspace: pathlib.Path | None = None,
+    current_host: str | None = None,
+    global_config: pathlib.Path | None = None,
+) -> bool:
+    """Determine whether a run record belongs to the local host (Task 19.5, B1/B2).
+
+    Shared predicate:
+    - Legacy records without 'host' (or empty string/None) count as local.
+    - If 'host' is present, it is compared against the current/local host id
+      (either explicitly supplied via current_host, or resolved via resolve_host_id),
+      respecting case-insensitivity and hostname normalization as established in 19.4.
+    """
+    raw_run_host = record.get("host")
+    if raw_run_host is None:
+        return True
+    if not isinstance(raw_run_host, str):
+        return True
+    run_host = raw_run_host.strip()
+    if not run_host:
+        return True
+
+    ws = (
+        pathlib.Path(workspace)
+        if workspace is not None
+        else (pathlib.Path(record["workspace"]) if record.get("workspace") else None)
+    )
+
+    cur_host = current_host
+    if cur_host is None:
+        if resolve_host_id is not None:
+            try:
+                cur_host = resolve_host_id(global_path=global_config, workspace=ws)
+            except TypeError:
+                try:
+                    cur_host = resolve_host_id(workspace=ws)
+                except Exception:
+                    cur_host = None
+            except Exception:
+                cur_host = None
+        if not cur_host:
+            cur_host = "localhost"
+
+    if isinstance(cur_host, str):
+        cur_host = cur_host.strip()
+    else:
+        cur_host = "localhost"
+
+    if run_host == cur_host or run_host.lower() == cur_host.lower():
+        return True
+
+    norm_run = _normalize_host(run_host)
+    norm_cur = _normalize_host(cur_host)
+    return norm_run == norm_cur
+
+
 def reconcile(
     record: dict[str, Any],
     workspace: pathlib.Path | None = None,
@@ -2981,27 +3058,7 @@ def reconcile(
         else (pathlib.Path(record["workspace"]) if record.get("workspace") else None)
     )
 
-    cur_host = current_host
-    if cur_host is None:
-        if resolve_host_id is not None:
-            cur_host = resolve_host_id(workspace=ws)
-        else:
-            cur_host = "localhost"
-    if isinstance(cur_host, str):
-        cur_host = cur_host.strip()
-
-    raw_run_host = record.get("host")
-    if isinstance(raw_run_host, str):
-        run_host = raw_run_host.strip()
-    else:
-        run_host = None
-
-    # Legacy runs without 'host' are considered local
-    is_local = (run_host is None or run_host == "") or (
-        run_host == cur_host or run_host.lower() == cur_host.lower()
-    )
-
-    if not is_local:
+    if not is_local_run(record, workspace=ws, current_host=current_host):
         last_hb = _extract_run_heartbeat(record)
         hb_age = _compute_timestamp_age(last_hb)
         record["last_heartbeat"] = last_hb
@@ -5785,6 +5842,15 @@ def cmd_cancel(args: argparse.Namespace) -> int:
             print_error(args.json, "record-corrupt", f"Failed to load run record: {e}")
             return 1
 
+        gpath = getattr(args, "global_config", None)
+        if not is_local_run(record, workspace=ws, global_config=gpath):
+            print_error(
+                args.json,
+                "remote-run",
+                f"Cannot cancel run '{run_id}' belonging to remote host '{record.get('host')}'",
+            )
+            return 1
+
         status = record.get("status")
         if status in TERMINAL_STATES:
             if status == "cancelled":
@@ -6891,6 +6957,15 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     record = load_run_record(ws, run_id)
     if not record:
         print_error(args.json, "run-not-found", f"Run '{run_id}' not found")
+        return 1
+
+    gpath = getattr(args, "global_config", None)
+    if not is_local_run(record, workspace=ws, global_config=gpath):
+        print_error(
+            args.json,
+            "remote-run",
+            f"Cannot clean up run '{run_id}' belonging to remote host '{record.get('host')}'",
+        )
         return 1
 
     expect_hash = getattr(args, "expect_plan_hash", None)
