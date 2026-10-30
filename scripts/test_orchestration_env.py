@@ -4203,6 +4203,162 @@ def test_parse_frontmatter_and_compare_without_pyyaml(monkeypatch: pytest.Monkey
     assert body_diff2 is False
 
 
+def test_parse_frontmatter_without_pyyaml_nested_lists_and_literal_vs_folded_negative(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """T088 Bounce 1 (B1): Stdlib YAML fallback preserves nested lists/structures beyond one level,
+    distinguishes literal ('|', '|-') from folded ('>', '>-') block scalars, and fails closed on
+    unsupported YAML constructs so diverging skills never normalize equal or auto-trash.
+    """
+    import orchestration_env as oe
+
+    monkeypatch.setattr(oe, "yaml", None)
+
+    # 1. Negative test: nested list under metadata: (e.g. tags:) must not be dropped
+    skill_tags_a = (
+        "---\n"
+        "name: gcube-component-release\n"
+        "description: Release gcube components\n"
+        "metadata:\n"
+        "  author: Alfredo Oliviero\n"
+        "  tags:\n"
+        "    - release\n"
+        "    - maven\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    skill_tags_b = (
+        "---\n"
+        "name: gcube-component-release\n"
+        "description: Release gcube components\n"
+        "metadata:\n"
+        "  author: Alfredo Oliviero\n"
+        "  tags:\n"
+        "    - release\n"
+        "    - docker\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    skill_no_tags = (
+        "---\n"
+        "name: gcube-component-release\n"
+        "description: Release gcube components\n"
+        "metadata:\n"
+        "  author: Alfredo Oliviero\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    fm_a, _ = oe.parse_frontmatter_and_body(skill_tags_a)
+    assert fm_a is not None
+    assert fm_a["metadata"]["tags"] == ["release", "maven"]
+
+    eq_tags, changed_tags, _ = oe.compare_skill_md(skill_tags_a, skill_tags_b)
+    assert eq_tags is False
+    assert "tags" in changed_tags
+
+    eq_missing_tags, changed_missing_tags, _ = oe.compare_skill_md(skill_tags_a, skill_no_tags)
+    assert eq_missing_tags is False
+    assert "tags" in changed_missing_tags
+
+    # Deeply nested mapping + list beyond two levels must also be preserved
+    deep_a = (
+        "---\n"
+        "name: deep-skill\n"
+        "metadata:\n"
+        "  routing:\n"
+        "    profiles:\n"
+        "      - fast\n"
+        "      - safe\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    deep_b = (
+        "---\n"
+        "name: deep-skill\n"
+        "metadata:\n"
+        "  routing:\n"
+        "    profiles:\n"
+        "      - fast\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    eq_deep, changed_deep, _ = oe.compare_skill_md(deep_a, deep_b)
+    assert eq_deep is False
+    assert "routing" in changed_deep
+
+    # 2. Negative test: literal ('|' / '|-') vs folded ('>' / '>-') scalars must not normalize equal
+    literal_skill = (
+        "---\n"
+        "name: scalar-style-skill\n"
+        "description: |-\n"
+        "  First line of description\n"
+        "  Second line must stay on a new line\n"
+        "notes: |\n"
+        "  step 1\n"
+        "  step 2\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    folded_skill = (
+        "---\n"
+        "name: scalar-style-skill\n"
+        "description: >-\n"
+        "  First line of description\n"
+        "  Second line must stay on a new line\n"
+        "notes: >\n"
+        "  step 1\n"
+        "  step 2\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    fm_lit, _ = oe.parse_frontmatter_and_body(literal_skill)
+    fm_fold, _ = oe.parse_frontmatter_and_body(folded_skill)
+    assert fm_lit is not None and fm_fold is not None
+    assert "\n" in fm_lit["description"]
+    assert "\n" not in fm_fold["description"]
+    assert fm_lit["notes"] == "step 1\nstep 2\n"
+    assert fm_fold["notes"] == "step 1 step 2\n"
+
+    eq_style, changed_style, _ = oe.compare_skill_md(literal_skill, folded_skill)
+    assert eq_style is False
+    assert "description" in changed_style
+    assert "notes" in changed_style
+
+    # 3. Fail-closed test: unsupported YAML constructs (flow collections, anchors) return None and never compare equal
+    unsupported_a = (
+        "---\n"
+        "name: flow-skill\n"
+        "metadata: {tags: [a, b]}\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    unsupported_b = (
+        "---\n"
+        "name: flow-skill\n"
+        "metadata: {tags: [c, d]}\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    fm_unsup, _ = oe.parse_frontmatter_and_body(unsupported_a)
+    assert fm_unsup is None
+    eq_unsup, changed_unsup, _ = oe.compare_skill_md(unsupported_a, unsupported_b)
+    assert eq_unsup is False
+    assert changed_unsup == ["<unparsed-frontmatter>"]
+
+    # 4. End-to-end directory comparison: different nested tags must not be marked equivalent
+    dir_a = tmp_path / "plugin_skill"
+    dir_b = tmp_path / "standalone_skill"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    (dir_a / "SKILL.md").write_text(skill_tags_a, encoding="utf-8")
+    (dir_b / "SKILL.md").write_text(skill_tags_b, encoding="utf-8")
+    cmp_dirs = oe.compare_skill_dirs(dir_a, dir_b)
+    assert cmp_dirs["equivalent"] is False
+    assert "SKILL.md" in cmp_dirs["diff_files"]
+    assert "tags" in cmp_dirs["changed_fm_keys"]
+
+
 # ---------------------------------------------------------------------------
 # Task 19.2: Project Doctor (`ai-orch doctor`) & Convention Drift Detection
 # ---------------------------------------------------------------------------
