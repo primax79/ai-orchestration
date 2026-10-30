@@ -4,7 +4,7 @@
 - title: I test scrivono nella config globale reale: serve isolamento automatico in conftest
 - kind: bug
 - priority: P1
-- state: in progress
+- state: verified
 - executor: kilo
 - paths: conftest.py, scripts/test_*.py, plugins/*/skills/*/scripts/test_*.py
 - depends-on: -
@@ -31,6 +31,8 @@
 
 ## Log (newest first)
 
+- 2026-10-30, codex+orchestrator: state `delivered` -> `verified` — OK con caveat: B1 e B3 risolti; B2 accettato dall'orchestratore (esclusioni generiche per prestazioni), vedi tasks/micro/notes/T089-verification-codex.md
+- 2026-10-30, kilo: state `in progress` -> `delivered` — fix 9f99100, unito in integration/19
 - 2026-10-30, orchestrator: state `bounced` -> `in progress` — rinviato su alf_ubuntu (19.6 dopo 19.5, 19.8 dopo 19.16)
 - 2026-10-30, codex: state `delivered` -> `bounced` — Verifica Codex NON OK: vedi nota di verifica
 - 2026-10-30, kilo: state `in progress` -> `delivered` — commit su kilo/<slug>, unito in integration/19 dalla chain
