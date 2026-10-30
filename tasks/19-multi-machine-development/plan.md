@@ -29,7 +29,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.2 - `ai-orch doctor` di progetto: rilevare il drift
 
-- **Status:** `in progress` (2026-10-30; 19.3 dopo 19.2) · **Short:** Doctor di progetto · **Size:** M · **Kind:** feature · **Depends on:** 19.1 · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
+- **Status:** `verified` (2026-10-30; docstring da correggere (vedi nota)) · **Short:** Doctor di progetto · **Size:** M · **Kind:** feature · **Depends on:** 19.1 · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
 - **Goal:** N078 punti 1, 2, 4. Comando `ai-orch doctor [--project PATH] [--json]` costruito sul doctor di `env` esistente (`orchestration_env.py:410-500`, ack/unack) e sui controlli di `tasks upgrade`: config mancante, workspace non registrato, indice senza marker, AGENTS.md renderizzato vecchio o con blocchi scritti a mano duplicati, campi header di schemi vecchi, skill/config globali di versione diversa da quella del tool. Ogni rilievo ha severità e il comando che lo corregge. Registrare per progetto la versione di convenzione (`convention_version`, file versionato in `tasks/`). Avviso di una riga da ogni comando `ai-orch` lanciato in un progetto con drift (disattivabile).
 - **Verification:** fixture con un progetto "stile 2026-10-17" (ricostruito sullo stato descritto in N078) → tutti i rilievi attesi con severità; progetto aggiornato → nessun rilievo; `--json` stabile; il drift di skill globali è rilevato con due versioni installate finte.
 
