@@ -101,7 +101,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.16 - Registro dei progetti sull'hub
 
-- **Status:** `in progress` (2026-10-30; rinviato su alf_ubuntu (19.6 dopo 19.5, 19.8 dopo 19.16)) · **Short:** Registro progetti hub · **Size:** M · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
+- **Status:** `verified` (2026-10-30; su integration/19, non ancora su main) · **Short:** Registro progetti hub · **Size:** M · **Kind:** feature · **Depends on:** 19.4 · **Use cases:** UC039 · **Repo:** `ai-orchestration/`
 - **Goal:** N079. Il registro attuale (`orchestration_registry.py`, SQLite per macchina) identifica i workspace con `canonical_path`, `device`, `inode` e non si può condividere. Registro dei progetti sull'hub con identità portabile (uuid), percorsi per host, host primario, repository di riferimento e mirror, `convention_version`; il SQLite locale diventa una cache. Assorbire `~/works/MIGRATION_REGISTRY.json` (importazione una tantum, nessun secondo registro). Coordinarsi con la risposta Q026=A (scoperta dei workspace non registrati) e con T073.
 - **Verification:** importazione del file di migrazione su una copia; lo stesso progetto ha lo stesso uuid sul Mac e sull'hub; `console status` elenca i progetti dal registro dell'hub; il registro locale resta utilizzabile con l'hub irraggiungibile.
 
