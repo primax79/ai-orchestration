@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import datetime
 import hashlib
+import argparse
 import json
 import os
 import pathlib
@@ -69,6 +71,8 @@ from orchestration_runs import (
     check_kilo_agent,
     DEFAULT_KILO_AGENTS,
     resolve_task_by_id,
+    build_parser,
+    get_subcommands_description,
 )
 
 SCRIPT = pathlib.Path(__file__).resolve().parent / "orchestration_runs.py"
@@ -794,6 +798,54 @@ def test_bin_ai_orch_run_commands(sample_workspace: pathlib.Path):
     assert data_show["ok"] is False and data_show["reason"] == "not-found"
 
 
+def test_describe_run_subcommands_match_parser():
+    """T087: ai-orch describe lists every run subcommand dynamically from argument parser."""
+    # Test both `ai-orch describe` and `ai-orch describe --json`
+    for cmd in ([str(BIN_AI_ORCH), "describe"], [str(BIN_AI_ORCH), "describe", "--json"]):
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        catalog = json.loads(res.stdout)
+        assert "commands" in catalog and "run" in catalog["commands"]
+        run_entry = catalog["commands"]["run"]
+        assert "subcommands" in run_entry
+        describe_subcommands = run_entry["subcommands"]
+
+        parser = build_parser()
+        subparsers_actions = [
+            a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+        ]
+        assert len(subparsers_actions) == 1, "Expected exactly 1 subparsers action on build_parser()"
+        spa = subparsers_actions[0]
+        parser_subcommands = set(spa.choices.keys())
+
+        # Assert every run subcommand of the argument parser appears in describe output
+        for subcmd in parser_subcommands:
+            assert subcmd in describe_subcommands, f"Subcommand {subcmd} from parser missing in describe"
+        assert set(describe_subcommands.keys()) == parser_subcommands
+
+        # Assert specific missing subcommands cited in T087 are present
+        expected_missing = {
+            "start",
+            "cancel",
+            "logs",
+            "mark-delivered",
+            "apply-verdict",
+            "accept-triage",
+            "cleanup",
+            "kilo-agent",
+        }
+        assert expected_missing.issubset(set(describe_subcommands.keys()))
+
+        # Verify usage and description are non-empty and well-formed
+        for name, meta in describe_subcommands.items():
+            assert "usage" in meta, f"Missing usage for {name}"
+            assert meta["usage"].startswith(f"ai-orch run {name}"), f"Usage format invalid for {name}: {meta['usage']}"
+            assert "description" in meta, f"Missing description for {name}"
+            assert meta["description"], f"Description empty for {name}"
+
+        # Verify get_subcommands_description matches describe output
+        assert describe_subcommands == get_subcommands_description(parser=parser)
+
+
 def test_multi_repo_paths_refusal(tmp_path: pathlib.Path):
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -859,7 +911,9 @@ def test_preview_verify_and_orchestrate_modes(sample_workspace: pathlib.Path):
     res_ver = subprocess.run(cmd_ver, capture_output=True, text=True, check=True)
     data_ver = json.loads(res_ver.stdout)
     assert data_ver["ok"] is True
-    assert "verify-T007" in data_ver["cwd"]
+    expected_wt = str(sample_workspace.resolve().parent / ".worktrees" / sample_workspace.resolve().name / "<run_id>")
+    assert data_ver["cwd"] == expected_wt
+    assert data_ver["planned_worktree"] == expected_wt
     assert "Verification Guidelines" in data_ver["prompt"]
     assert "ai-orch-verdict" in data_ver["prompt"]
 
@@ -6373,3 +6427,2084 @@ def test_kilo_agent_command_preview_and_apply(tmp_path: pathlib.Path):
     refused = subprocess.run([str(BIN_AI_ORCH), "run", "kilo-agent", "--apply", "--json"], capture_output=True, text=True, env=env)
     assert refused.returncode == 1
     assert (tmp_path / "aio-unattended.md").read_text(encoding="utf-8") == "changed"
+
+
+def test_19_4_new_run_has_host_and_existing_runs_without_host_remain_valid(
+    sample_workspace: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Task 19.4: a new run has host in run.json and events; existing runs without host remain valid."""
+    import orchestration_runs as _runs
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    rec = _runs.create_run_record(
+        run_id="20261029-120000-T001-kilo-1234",
+        task_id="T001",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="inplace",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+    )
+    assert rec["host"] == "alf_ubuntu"
+
+    # Existing run.json without 'host' remains valid when loaded/listed/reconciled
+    legacy_run_id = "20261029-110000-T001-kilo-abcd"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / legacy_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    legacy_rec = dict(rec)
+    legacy_rec["run_id"] = legacy_run_id
+    legacy_rec["status"] = "succeeded"
+    legacy_rec["exit_code"] = 0
+    legacy_rec.pop("host", None)
+    (run_dir / "run.json").write_text(json.dumps(legacy_rec, indent=2), encoding="utf-8")
+
+    loaded = _runs.load_run_record(sample_workspace, legacy_run_id)
+    assert loaded is not None
+    assert loaded["run_id"] == legacy_run_id
+    assert "host" not in loaded
+    reconciled = _runs.reconcile(loaded, sample_workspace)
+    assert reconciled["status"] == "succeeded"
+    all_runs = _runs.list_run_records(sample_workspace)
+    assert any(r["run_id"] == legacy_run_id for r in all_runs)
+
+    # Also verify a real launched run via CLI writes 'host' in run.json
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG=str(cfg_file))
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "worktree",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_start = subprocess.run(cmd_start, capture_output=True, text=True, env=env, check=True)
+    new_run_id = json.loads(res_start.stdout)["run_id"]
+    term_rec = wait_for_terminal(sample_workspace, new_run_id)
+    assert term_rec["host"] == "alf_ubuntu"
+
+
+def test_19_5_reconcile_other_host_never_marked_lost_and_no_kill_and_exposes_heartbeat(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Task 19.5 Verification:
+    - Test with a run.json from another host and non-existent pid:
+      stays in its original state, no kill, no run.lost event.
+    - Exposes last heartbeat and its age in seconds.
+    - CLI `run show` and `run list` preserve other host active runs.
+    """
+    import orchestration_runs as _runs
+    import orchestration_events
+    from unittest.mock import MagicMock
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    # Spy on kill_process_group
+    mock_kill = MagicMock()
+    monkeypatch.setattr(_runs, "kill_process_group", mock_kill)
+
+    # Create run record on another host ("macbook") with dead pid
+    other_run_id = "20261030-100000-T001-kilo-1111"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / other_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    hb_time = (now - datetime.timedelta(seconds=120)).isoformat()
+
+    rec_other = _runs.create_run_record(
+        run_id=other_run_id,
+        task_id="T001",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="inplace",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+        host="macbook",
+    )
+    rec_other["status"] = "running"
+    rec_other["supervisor"] = {"pid": 99999999, "start_time": "Sat Oct 17 00:00:00 2026"}
+    rec_other["agent"] = {"pid": 88888888, "pgid": 88888888, "start_time": "Sat Oct 17 00:00:00 2026"}
+    rec_other["last_heartbeat"] = hb_time
+    (run_dir / "run.json").write_text(json.dumps(rec_other, indent=2), encoding="utf-8")
+
+    # Load and reconcile
+    loaded = _runs.load_run_record(sample_workspace, other_run_id)
+    assert loaded is not None
+    assert loaded["host"] == "macbook"
+    assert loaded["status"] == "running"  # Stays in its original state!
+    assert loaded["last_heartbeat"] == hb_time
+    assert isinstance(loaded["heartbeat_age_sec"], float)
+    assert 100.0 <= loaded["heartbeat_age_sec"] <= 180.0
+    assert loaded["heartbeat_age"] == loaded["heartbeat_age_sec"]
+
+    # Verify no kill occurred
+    assert mock_kill.call_count == 0
+
+    # Verify no run.lost event was emitted
+    lost_events = orchestration_events.read_events(sample_workspace, types=["run.lost"])
+    assert len(lost_events) == 0
+
+    # Verify file on disk is untouched
+    disk_data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert disk_data["status"] == "running"
+
+    # Verify CLI `run show` outputs status running and heartbeat fields
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG=str(cfg_file))
+    cmd_show = [
+        str(BIN_AI_ORCH),
+        "run",
+        "show",
+        other_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_show = subprocess.run(cmd_show, capture_output=True, text=True, env=env, check=True)
+    show_data = json.loads(res_show.stdout)["run"]
+    assert show_data["status"] == "running"
+    assert show_data["host"] == "macbook"
+    assert show_data["last_heartbeat"] == hb_time
+    assert show_data["heartbeat_age_sec"] is not None
+
+    # Verify CLI `run list --active` includes this running run from macbook
+    cmd_list = [
+        str(BIN_AI_ORCH),
+        "run",
+        "list",
+        "--active",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_list = subprocess.run(cmd_list, capture_output=True, text=True, env=env, check=True)
+    list_runs = json.loads(res_list.stdout)["runs"]
+    matching = [r for r in list_runs if r["run_id"] == other_run_id]
+    assert len(matching) == 1
+    assert matching[0]["status"] == "running"
+    assert matching[0]["last_heartbeat"] == hb_time
+
+
+def test_19_5_reconcile_local_host_and_legacy_hostless_become_lost(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Task 19.5 Verification:
+    - Same case with local host -> status becomes `lost`, process group kill attempted, run.lost emitted;
+    - Legacy runs without `host` are treated as local -> become `lost`.
+    """
+    import orchestration_runs as _runs
+    import orchestration_events
+    from unittest.mock import MagicMock
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    mock_kill = MagicMock()
+    monkeypatch.setattr(_runs, "kill_process_group", mock_kill)
+
+    # 1. Local host run with dead pid
+    local_run_id = "20261030-100000-T002-kilo-2222"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / local_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    rec_local = _runs.create_run_record(
+        run_id=local_run_id,
+        task_id="T002",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="inplace",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+        host="alf_ubuntu",
+    )
+    rec_local["status"] = "running"
+    rec_local["supervisor"] = {"pid": 99999999, "start_time": "Sat Oct 17 00:00:00 2026"}
+    rec_local["agent"] = {"pid": 88888888, "pgid": 88888888, "start_time": "Sat Oct 17 00:00:00 2026"}
+    (run_dir / "run.json").write_text(json.dumps(rec_local, indent=2), encoding="utf-8")
+
+    loaded_local = _runs.load_run_record(sample_workspace, local_run_id)
+    assert loaded_local is not None
+    assert loaded_local["status"] == "lost"  # Local run with dead pid becomes lost!
+    assert mock_kill.call_count >= 1
+
+    lost_events = orchestration_events.read_events(sample_workspace, types=["run.lost"])
+    assert any(e["subject"] == local_run_id for e in lost_events)
+
+    disk_data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert disk_data["status"] == "lost"
+
+    # 2. Legacy run without 'host' key -> treated as local
+    mock_kill.reset_mock()
+    legacy_run_id = "20261030-100000-T003-kilo-3333"
+    legacy_dir = sample_workspace / ".ai-orchestration" / "runs" / legacy_run_id
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+
+    rec_legacy = dict(rec_local)
+    rec_legacy["run_id"] = legacy_run_id
+    rec_legacy["task_id"] = "T003"
+    rec_legacy["status"] = "running"
+    rec_legacy.pop("host", None)
+    (legacy_dir / "run.json").write_text(json.dumps(rec_legacy, indent=2), encoding="utf-8")
+
+    loaded_legacy = _runs.load_run_record(sample_workspace, legacy_run_id)
+    assert loaded_legacy is not None
+    assert loaded_legacy["status"] == "lost"  # Treated as local -> lost
+    assert mock_kill.call_count >= 1
+
+    lost_events_all = orchestration_events.read_events(sample_workspace, types=["run.lost"])
+    assert any(e["subject"] == legacy_run_id for e in lost_events_all)
+
+
+def test_19_5_reconcile_heartbeat_formats_and_explicit_current_host():
+    """Verify heartbeat extraction across diverse key schemas and current_host parameter."""
+    import orchestration_runs as _runs
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ts_60s_ago = (now - datetime.timedelta(seconds=60)).isoformat()
+
+    # Format 1: heartbeat_at
+    rec1 = {
+        "run_id": "20261030-100000-T004-kilo-4444",
+        "host": "remote_hub",
+        "status": "running",
+        "heartbeat_at": ts_60s_ago,
+    }
+    reconciled1 = _runs.reconcile(rec1, current_host="local_worker")
+    assert reconciled1["status"] == "running"
+    assert reconciled1["last_heartbeat"] == ts_60s_ago
+    assert 50.0 <= reconciled1["heartbeat_age_sec"] <= 80.0
+
+    # Format 2: heartbeat dict
+    rec2 = {
+        "run_id": "20261030-100000-T005-kilo-5555",
+        "host": "remote_hub",
+        "status": "running",
+        "heartbeat": {"at": ts_60s_ago},
+    }
+    reconciled2 = _runs.reconcile(rec2, current_host="local_worker")
+    assert reconciled2["status"] == "running"
+    assert reconciled2["last_heartbeat"] == ts_60s_ago
+    assert 50.0 <= reconciled2["heartbeat_age_sec"] <= 80.0
+
+    # Format 3: supervisor.last_heartbeat
+    rec3 = {
+        "run_id": "20261030-100000-T006-kilo-6666",
+        "host": "remote_hub",
+        "status": "running",
+        "supervisor": {"last_heartbeat": ts_60s_ago},
+    }
+    reconciled3 = _runs.reconcile(rec3, current_host="local_worker")
+    assert reconciled3["status"] == "running"
+    assert reconciled3["last_heartbeat"] == ts_60s_ago
+    assert 50.0 <= reconciled3["heartbeat_age_sec"] <= 80.0
+
+    # Format 4: No heartbeat at all
+    rec4 = {
+        "run_id": "20261030-100000-T007-kilo-7777",
+        "host": "remote_hub",
+        "status": "running",
+    }
+    reconciled4 = _runs.reconcile(rec4, current_host="local_worker")
+    assert reconciled4["status"] == "running"
+    assert reconciled4["last_heartbeat"] is None
+    assert reconciled4["heartbeat_age_sec"] is None
+
+
+def test_19_5_is_local_run_predicate():
+    """Verify is_local_run shared predicate across legacy, matching, normalized, and remote hosts."""
+    import orchestration_runs as _runs
+
+    # 1. Legacy runs without host count as local
+    assert _runs.is_local_run({}, current_host="alf_ubuntu") is True
+    assert _runs.is_local_run({"host": None}, current_host="alf_ubuntu") is True
+    assert _runs.is_local_run({"host": ""}, current_host="alf_ubuntu") is True
+    assert _runs.is_local_run({"host": "   "}, current_host="alf_ubuntu") is True
+
+    # 2. Exact match
+    assert _runs.is_local_run({"host": "alf_ubuntu"}, current_host="alf_ubuntu") is True
+
+    # 3. Case insensitivity
+    assert _runs.is_local_run({"host": "ALF_UBUNTU"}, current_host="alf_ubuntu") is True
+    assert _runs.is_local_run({"host": "alf_ubuntu"}, current_host="ALF_UBUNTU") is True
+
+    # 4. Normalized hostname match
+    assert _runs.is_local_run({"host": "alf-ubuntu.local"}, current_host="alf-ubuntu") is True
+    assert _runs.is_local_run({"host": "MacBook-Pro.local"}, current_host="macbook-pro") is True
+
+    # 5. Remote host non-match
+    assert _runs.is_local_run({"host": "macbook"}, current_host="alf_ubuntu") is False
+    assert _runs.is_local_run({"host": "remote_hub"}, current_host="local_worker") is False
+
+
+def test_19_5_bounce_b1_cancel_refuses_remote_run_no_signal_no_mutation(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """B1 Finding:
+    cmd_cancel() must apply shared predicate and reject remote runs before mutation or signal.
+    - Remote run: cancelled command rejected with error 'remote-run', exit code 1;
+      no kill_process_group or os.kill performed;
+      run.json status remains 'running'; no run.cancelled event emitted.
+    - Local run: cancelled command succeeds, kills process group, emits run.cancelled.
+    - Legacy run (no host): cancelled command succeeds, treated as local.
+    """
+    import orchestration_runs as _runs
+    import orchestration_events
+    from unittest.mock import MagicMock
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    mock_kill_pg = MagicMock()
+    mock_os_kill = MagicMock()
+    monkeypatch.setattr(_runs, "kill_process_group", mock_kill_pg)
+    monkeypatch.setattr(_runs.os, "kill", mock_os_kill)
+
+    # 1. Remote run (host: "macbook")
+    remote_run_id = "20261030-100000-T001-kilo-ba01"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / remote_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    rec_remote = _runs.create_run_record(
+        run_id=remote_run_id,
+        task_id="T001",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="inplace",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+        host="macbook",
+    )
+    rec_remote["status"] = "running"
+    rec_remote["supervisor"] = {"pid": 99999991, "start_time": "Sat Oct 17 00:00:00 2026"}
+    rec_remote["agent"] = {"pid": 88888881, "pgid": 88888881, "start_time": "Sat Oct 17 00:00:00 2026"}
+    (run_dir / "run.json").write_text(json.dumps(rec_remote, indent=2), encoding="utf-8")
+
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG=str(cfg_file))
+    cmd_cancel_remote = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cancel",
+        remote_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_remote = subprocess.run(cmd_cancel_remote, capture_output=True, text=True, env=env, check=False)
+    assert res_remote.returncode != 0
+    err_data = json.loads(res_remote.stdout)
+    assert err_data["ok"] is False
+    assert err_data["reason"] == "remote-run"
+    assert "remote host 'macbook'" in err_data["error"]
+
+    # Verify no signal or kill occurred
+    assert mock_kill_pg.call_count == 0
+    assert mock_os_kill.call_count == 0
+
+    # Verify run.json status is still "running" and disk data untouched
+    disk_data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert disk_data["status"] == "running"
+    assert disk_data.get("ended_at") is None
+
+    # Verify no run.cancelled event emitted
+    canc_events = orchestration_events.read_events(sample_workspace, types=["run.cancelled"])
+    assert len(canc_events) == 0
+
+    # 2. Local run (host: "alf_ubuntu") can be cancelled
+    local_run_id = "20261030-100000-T002-kilo-ba02"
+    loc_dir = sample_workspace / ".ai-orchestration" / "runs" / local_run_id
+    loc_dir.mkdir(parents=True, exist_ok=True)
+    rec_local = dict(rec_remote)
+    rec_local["run_id"] = local_run_id
+    rec_local["host"] = "alf_ubuntu"
+    (loc_dir / "run.json").write_text(json.dumps(rec_local, indent=2), encoding="utf-8")
+
+    cmd_cancel_local = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cancel",
+        local_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_local = subprocess.run(cmd_cancel_local, capture_output=True, text=True, env=env, check=False)
+    assert res_local.returncode == 0
+    loc_res_data = json.loads(res_local.stdout)
+    assert loc_res_data["ok"] is True
+    assert loc_res_data["status"] == "cancelled"
+
+    loc_disk_data = json.loads((loc_dir / "run.json").read_text(encoding="utf-8"))
+    assert loc_disk_data["status"] == "cancelled"
+    assert "ended_at" in loc_disk_data
+
+    # 3. Legacy run without 'host' key can be cancelled (treated as local)
+    legacy_run_id = "20261030-100000-T003-kilo-ba03"
+    leg_dir = sample_workspace / ".ai-orchestration" / "runs" / legacy_run_id
+    leg_dir.mkdir(parents=True, exist_ok=True)
+    rec_legacy = dict(rec_remote)
+    rec_legacy["run_id"] = legacy_run_id
+    rec_legacy.pop("host", None)
+    (leg_dir / "run.json").write_text(json.dumps(rec_legacy, indent=2), encoding="utf-8")
+
+    cmd_cancel_leg = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cancel",
+        legacy_run_id,
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_leg = subprocess.run(cmd_cancel_leg, capture_output=True, text=True, env=env, check=False)
+    assert res_leg.returncode == 0
+    leg_res_data = json.loads(res_leg.stdout)
+    assert leg_res_data["ok"] is True
+    assert leg_res_data["status"] == "cancelled"
+
+
+def test_19_5_bounce_b1_trigger_confirmed_cancel_refuses_remote_run(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """B1 Finding:
+    Trigger-confirmed command action calling `ai-orch run cancel` must reject remote runs,
+    recording non-zero exit code and error, and leaving the remote run unmutated and alive.
+    """
+    import hashlib
+    import orchestration_runs as _runs
+    import orchestration_triggers
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    # Create a remote run (host: "macbook")
+    remote_run_id = "20261030-100000-T001-kilo-bb01"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / remote_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    rec_remote = _runs.create_run_record(
+        run_id=remote_run_id,
+        task_id="T001",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="inplace",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+        host="macbook",
+    )
+    rec_remote["status"] = "running"
+    (run_dir / "run.json").write_text(json.dumps(rec_remote, indent=2), encoding="utf-8")
+
+    # Create proposed action for canceling this run
+    prop_dir = sample_workspace / ".ai-orchestration" / "proposed_actions"
+    prop_dir.mkdir(parents=True, exist_ok=True)
+
+    cancel_cmd = ["ai-orch", "run", "cancel", remote_run_id, "--workspace", str(sample_workspace), "--json"]
+    cmd_hash = hashlib.sha256(" ".join(cancel_cmd).encode("utf-8")).hexdigest()
+    act_id = "act-cancel-remote"
+    act_data = {
+        "action_id": act_id,
+        "action_hash": cmd_hash,
+        "type": "command",
+        "command": cancel_cmd,
+        "status": "pending_confirmation",
+        "created_at": "2026-10-30T10:00:00Z",
+    }
+    (prop_dir / f"{act_id}.json").write_text(json.dumps(act_data), encoding="utf-8")
+
+    # Confirm the proposal
+    conf_res = orchestration_triggers.confirm_action(sample_workspace, act_id, cmd_hash, actor="owner")
+    assert conf_res["status"] == "confirmed"
+    assert conf_res["ok"] is False  # Action is confirmed, but underlying command failed
+
+    # Command result must show failure because cancel rejected remote run
+    cmd_res = conf_res["result"]
+    assert cmd_res["exit_code"] != 0
+    assert "remote-run" in cmd_res["stdout"]
+
+    # Remote run must remain untouched in status running
+    disk_data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert disk_data["status"] == "running"
+    assert disk_data.get("ended_at") is None
+
+
+def test_19_5_bounce_b2_cleanup_refuses_remote_run_preserves_worktree_and_branch(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """B2 Finding:
+    cmd_cleanup() must refuse cleanup unless the run is local (legacy records count as local).
+    - Remote terminal run: cleanup refused with error 'remote-run', exit code 1;
+      worktree and branch are NOT removed, cleaned_at is NOT written, run.cleaned is NOT emitted;
+      --dry-run also refused.
+    - Local terminal run: cleanup succeeds, removes worktree and branch.
+    - Legacy terminal run: cleanup succeeds, treated as local.
+    """
+    import orchestration_runs as _runs
+    import orchestration_events
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    # Setup dummy branch and worktree directory in git repo
+    branch_name = "test/19-5-remote-branch"
+    subprocess.run(["git", "branch", branch_name], cwd=str(sample_workspace), check=True)
+
+    wt_dir = sample_workspace / ".test_worktrees" / "remote_wt"
+    wt_dir.mkdir(parents=True, exist_ok=True)
+    dummy_file = wt_dir / "file.txt"
+    dummy_file.write_text("content", encoding="utf-8")
+
+    # 1. Remote run (host: "macbook")
+    remote_run_id = "20261030-100000-T001-kilo-bc01"
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / remote_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    rec_remote = _runs.create_run_record(
+        run_id=remote_run_id,
+        task_id="T001",
+        mode="execute",
+        tool="kilo",
+        profile="bulk-execution",
+        model="google/gemini-3-flash-preview",
+        variant=None,
+        effort=None,
+        requested_by="owner",
+        workspace=str(sample_workspace),
+        cwd=str(sample_workspace),
+        isolation="worktree",
+        task_bundle_sha256="a" * 64,
+        argv_display=["kilo", "run"],
+        plan_hash="b" * 64,
+        host="macbook",
+    )
+    rec_remote["status"] = "succeeded"
+    rec_remote["worktree_path"] = str(wt_dir)
+    rec_remote["branch"] = branch_name
+    (run_dir / "run.json").write_text(json.dumps(rec_remote, indent=2), encoding="utf-8")
+
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG=str(cfg_file))
+
+    # Dry run should refuse
+    cmd_dry = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cleanup",
+        remote_run_id,
+        "--dry-run",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_dry = subprocess.run(cmd_dry, capture_output=True, text=True, env=env, check=False)
+    assert res_dry.returncode != 0
+    err_dry = json.loads(res_dry.stdout)
+    assert err_dry["ok"] is False
+    assert err_dry["reason"] == "remote-run"
+
+    # Actual cleanup should refuse
+    cmd_clean = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cleanup",
+        remote_run_id,
+        "--discard",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_clean = subprocess.run(cmd_clean, capture_output=True, text=True, env=env, check=False)
+    assert res_clean.returncode != 0
+    err_clean = json.loads(res_clean.stdout)
+    assert err_clean["ok"] is False
+    assert err_clean["reason"] == "remote-run"
+    assert "remote host 'macbook'" in err_clean["error"]
+
+    # Verify worktree directory and branch still exist!
+    assert wt_dir.is_dir()
+    assert dummy_file.is_file()
+    check_b = subprocess.run(["git", "branch", "--list", branch_name], cwd=str(sample_workspace), capture_output=True, text=True, check=True)
+    assert branch_name in check_b.stdout
+
+    # Verify run.json was NOT updated with cleaned_at
+    disk_data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert "cleaned_at" not in disk_data
+
+    # Verify no run.cleaned event was emitted
+    clean_events = orchestration_events.read_events(sample_workspace, types=["run.cleaned"])
+    assert len(clean_events) == 0
+
+    # 2. Local run (host: "alf_ubuntu") cleanup succeeds
+    local_branch = "test/19-5-local-branch"
+    subprocess.run(["git", "branch", local_branch], cwd=str(sample_workspace), check=True)
+    local_wt = sample_workspace / ".test_worktrees" / "local_wt"
+    local_wt.mkdir(parents=True, exist_ok=True)
+
+    local_run_id = "20261030-100000-T002-kilo-bc02"
+    loc_dir = sample_workspace / ".ai-orchestration" / "runs" / local_run_id
+    loc_dir.mkdir(parents=True, exist_ok=True)
+    rec_local = dict(rec_remote)
+    rec_local["run_id"] = local_run_id
+    rec_local["host"] = "alf_ubuntu"
+    rec_local["branch"] = local_branch
+    rec_local["worktree_path"] = str(local_wt)
+    (loc_dir / "run.json").write_text(json.dumps(rec_local, indent=2), encoding="utf-8")
+
+    cmd_clean_loc = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cleanup",
+        local_run_id,
+        "--discard",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_loc = subprocess.run(cmd_clean_loc, capture_output=True, text=True, env=env, check=False)
+    assert res_loc.returncode == 0
+    assert json.loads(res_loc.stdout)["ok"] is True
+    assert not local_wt.exists()
+    check_loc_b = subprocess.run(["git", "branch", "--list", local_branch], cwd=str(sample_workspace), capture_output=True, text=True, check=True)
+    assert local_branch not in check_loc_b.stdout
+
+    # 3. Legacy run without 'host' cleanup succeeds (treated as local)
+    legacy_branch = "test/19-5-leg-branch"
+    subprocess.run(["git", "branch", legacy_branch], cwd=str(sample_workspace), check=True)
+    leg_wt = sample_workspace / ".test_worktrees" / "leg_wt"
+    leg_wt.mkdir(parents=True, exist_ok=True)
+
+    leg_run_id = "20261030-100000-T003-kilo-bc03"
+    leg_run_dir = sample_workspace / ".ai-orchestration" / "runs" / leg_run_id
+    leg_run_dir.mkdir(parents=True, exist_ok=True)
+    rec_leg = dict(rec_remote)
+    rec_leg["run_id"] = leg_run_id
+    rec_leg.pop("host", None)
+    rec_leg["branch"] = legacy_branch
+    rec_leg["worktree_path"] = str(leg_wt)
+    (leg_run_dir / "run.json").write_text(json.dumps(rec_leg, indent=2), encoding="utf-8")
+
+    cmd_clean_leg = [
+        str(BIN_AI_ORCH),
+        "run",
+        "cleanup",
+        leg_run_id,
+        "--discard",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_leg = subprocess.run(cmd_clean_leg, capture_output=True, text=True, env=env, check=False)
+    assert res_leg.returncode == 0
+    assert json.loads(res_leg.stdout)["ok"] is True
+    assert not leg_wt.exists()
+    check_leg_b = subprocess.run(["git", "branch", "--list", legacy_branch], cwd=str(sample_workspace), capture_output=True, text=True, check=True)
+    assert legacy_branch not in check_leg_b.stdout
+
+
+def test_19_5_bounce_b3_supervise_refuses_remote_run_preserves_worktree_and_record(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """B3 Finding:
+    cmd_supervise() must check is_local_run() immediately after loading record
+    before writing supervisor identity, and refuse to supervise remote verify runs
+    with created_worktree set (preserving both the record and the created worktree).
+    """
+    import orchestration_runs as _runs
+
+    cfg_file = tmp_path / "orchestration.toml"
+    cfg_file.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG=str(cfg_file))
+
+    # 1. Setup dummy worktree and file for verify run
+    wt_dir = sample_workspace / ".test_worktrees" / "remote_verify_wt_b3"
+    wt_dir.mkdir(parents=True, exist_ok=True)
+    dummy_file = wt_dir / "preserved_evidence.txt"
+    dummy_file.write_text("critical verification worktree content", encoding="utf-8")
+
+    # 2. Remote verify run record with created_worktree set
+    remote_run_id = "20261030-110000-T007-claude-b301"
+    r_ver_dir = sample_workspace / ".ai-orchestration" / "runs" / remote_run_id
+    r_ver_dir.mkdir(parents=True, exist_ok=True)
+    prompt_file = r_ver_dir / "prompt.md"
+    prompt_file.write_text("verify prompt", encoding="utf-8")
+
+    rec_remote_verify = _runs.create_run_record(
+        run_id=remote_run_id,
+        task_id="T007",
+        mode="verify",
+        tool="claude",
+        profile="deep-reasoning",
+        model="claude-opus",
+        variant=None,
+        effort=None,
+        requested_by="cli",
+        workspace=str(sample_workspace),
+        cwd=str(wt_dir),
+        isolation="worktree",
+        task_bundle_sha256="",
+        argv_display=["claude", "run"],
+        plan_hash="",
+        worktree_path=str(wt_dir),
+        branch=None,
+        target_run="20261030-100000-T007-kilo-prev",
+        target_commit="c" * 40,
+        verification_mode="cross-agent",
+        created_worktree=str(wt_dir),
+        host="macbook",
+    )
+    # Ensure supervisor and agent fields are absent so we can prove cmd_supervise never wrote them
+    rec_remote_verify.pop("supervisor", None)
+    rec_remote_verify.pop("agent", None)
+    (r_ver_dir / "run.json").write_text(json.dumps(rec_remote_verify, indent=2), encoding="utf-8")
+
+    # 3. Supervise via CLI subprocess: must be rejected with exit code != 0 and remote-run error
+    cmd_sup = [
+        str(BIN_AI_ORCH),
+        "run",
+        "_supervise",
+        str(r_ver_dir),
+    ]
+    res_sup = subprocess.run(cmd_sup, capture_output=True, text=True, env=env, check=False)
+    assert res_sup.returncode != 0
+    assert "remote-run" in res_sup.stderr
+    assert "remote host 'macbook'" in res_sup.stderr
+
+    # 4. Verify run record on disk was NOT mutated with supervisor identity
+    disk_data = json.loads((r_ver_dir / "run.json").read_text(encoding="utf-8"))
+    assert "supervisor" not in disk_data
+    assert "agent" not in disk_data
+    assert disk_data.get("status") == "starting"
+
+    # 5. Verify created_worktree was NOT removed or modified
+    assert wt_dir.is_dir(), "Created worktree directory must remain intact"
+    assert dummy_file.is_file(), "Worktree contents must remain intact"
+    assert dummy_file.read_text(encoding="utf-8") == "critical verification worktree content"
+
+    # 6. Direct invocation of cmd_supervise also returns 1 without mutating record
+    ns_args = argparse.Namespace(run_dir=str(r_ver_dir), global_config=cfg_file)
+    rc = _runs.cmd_supervise(ns_args)
+    assert rc == 1
+    disk_data2 = json.loads((r_ver_dir / "run.json").read_text(encoding="utf-8"))
+    assert "supervisor" not in disk_data2
+
+    # 7. Direct invocation of _finalize_run_completion on remote verify record does not remove worktree
+    rec_copy = dict(rec_remote_verify)
+    fin_res = _runs._finalize_run_completion(sample_workspace, rec_copy, r_ver_dir, exit_code=0)
+    assert fin_res.get("worktree_removed") is False
+    assert wt_dir.is_dir()
+    assert dummy_file.is_file()
+
+    # 8. Local run and legacy run (hostless) are recognized as local
+    assert _runs.is_local_run(dict(rec_remote_verify, host="alf_ubuntu"), workspace=sample_workspace, global_config=cfg_file) is True
+    rec_leg = dict(rec_remote_verify)
+    rec_leg.pop("host", None)
+    assert _runs.is_local_run(rec_leg, workspace=sample_workspace, global_config=cfg_file) is True
+
+
+def test_19_7_run_start_refuses_missing_preflight_binary_and_starts_when_ok(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """19.7 Verification:
+    - Preflight requesting a non-existent binary -> `run start` refuses with the binary name;
+    - Preflight ok -> run starts;
+    - Per-project command timeout is present in the generated prompt.
+    """
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    stub_path_str = str(STUB_AGENT)
+
+    # 1. Configure preflight with a non-existent binary and a per-project command timeout
+    proj_cfg.write_text(
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{stub_path_str}", "--lines", "2", "--exit-code", "0"]\n'
+        + '\n[project.preflight.tools]\n"missing-bun-19-7" = ">=1.0.0"\n'
+        + '\n[project.timeouts]\ndefault = 600\ntest = 900\n',
+        encoding="utf-8",
+    )
+
+    # Preview includes the timeout in the generated prompt and lists configured preflight checks without executing them
+    cmd_prev = [
+        str(BIN_AI_ORCH),
+        "run",
+        "preview",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "none",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_prev = subprocess.run(cmd_prev, capture_output=True, text=True, check=True)
+    data_prev = json.loads(res_prev.stdout)
+    assert data_prev["ok"] is True
+    assert "## Command Timeouts" in data_prev["prompt"]
+    assert "600s" in data_prev["prompt"] and "600000ms" in data_prev["prompt"]
+    assert "900s" in data_prev["prompt"] and "900000ms" in data_prev["prompt"]
+    assert data_prev["preflight"]["configured"] is True
+    assert data_prev["preflight"]["executed"] is False
+    assert any(
+        c["kind"] == "tool" and c["name"] == "missing-bun-19-7" and c["min_version"] == "1.0.0"
+        for c in data_prev["preflight_checks"]
+    )
+
+    # `run start` refuses with reason `preflight-failed` and names the missing binary
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "none",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+    res_refused = subprocess.run(cmd_start, capture_output=True, text=True, check=False)
+    assert res_refused.returncode != 0
+    data_refused = json.loads(res_refused.stdout)
+    assert data_refused["ok"] is False
+    assert data_refused["reason"] == "preflight-failed"
+    assert "missing-bun-19-7" in data_refused["error"]
+    assert list_run_records(sample_workspace, task_id="T007") == []
+
+    # 2. Install `missing-bun-19-7` in PATH with satisfying version -> preflight ok -> run starts
+    extra_bin = tmp_path / "extra-bin"
+    extra_bin.mkdir()
+    bun_exe = extra_bin / "missing-bun-19-7"
+    bun_exe.write_text("#!/bin/sh\necho '1.1.29'\nexit 0\n", encoding="utf-8")
+    bun_exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{extra_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    res_ok = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    data_ok = json.loads(res_ok.stdout)
+    assert data_ok["ok"] is True
+    run_id = data_ok["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["status"] == "succeeded"
+
+    # Verify prompt.md written for the run also contains the configured timeout
+    prompt_file = sample_workspace / ".ai-orchestration" / "runs" / run_id / "prompt.md"
+    prompt_text = prompt_file.read_text(encoding="utf-8")
+    assert "## Command Timeouts" in prompt_text
+    assert "600s" in prompt_text and "600000ms" in prompt_text
+
+
+def test_19_7_preview_batch_and_triage_do_not_execute_preflight_commands(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+):
+    """B1 regression test: `run preview` (single task, batch, and triage) must never
+    execute preflight checks (including `shell=True` commands); it only lists the
+    configured checks. Preflight is executed only on `run start` or explicit `ai-orch preflight`.
+    """
+    tasks_dir = sample_workspace / "tasks"
+    create_microtask(sample_workspace, "T021", "Batch microtask 21", state="open")
+    create_microtask(sample_workspace, "T022", "Batch microtask 22", state="open")
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "add batch microtasks"], cwd=str(sample_workspace), check=True)
+
+    res_note = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Preflight triage note",
+            "--kind",
+            "bug",
+            "--body",
+            "Verify triage preview has no preflight side effects.",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_note.stdout)["id"]
+
+    marker_file = tmp_path / "preflight_preview_side_effect.marker"
+    assert not marker_file.exists()
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    marker_cmd = (
+        f"{sys.executable} -c \"import pathlib; pathlib.Path(r'{marker_file}').write_text('executed', encoding='utf-8')\""
+    )
+    proj_cfg.write_text(
+        orig_cfg
+        + '\n[project.preflight]\n'
+        + 'free_ports = [54321]\n'
+        + 'min_disk_mb = 10\n'
+        + f'commands = [{json.dumps(marker_cmd)}]\n'
+        + '\n[project.preflight.tools]\n"missing-bun-19-7" = ">=1.0.0"\n'
+        + '\n[project.preflight.services]\n"dummy-svc" = 54322\n',
+        encoding="utf-8",
+    )
+
+    preview_invocations = [
+        # 1. Single task preview
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        # 2. Batch preview
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--batch",
+            "T021,T022",
+            "--allow-dirty-base",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        # 3. Triage preview
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--note",
+            note_id,
+            "--mode",
+            "triage",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+    ]
+
+    for cmd in preview_invocations:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        payload = json.loads(res.stdout)
+        assert payload["ok"] is True
+        assert not marker_file.exists(), f"Preflight command executed during preview: {cmd}"
+        assert payload["preflight"]["configured"] is True
+        assert payload["preflight"]["executed"] is False
+        kinds = {c["kind"] for c in payload["preflight_checks"]}
+        assert kinds == {"tool", "free_port", "service", "disk", "command"}
+
+    # Explicit `ai-orch preflight` command DOES execute the preflight checks (and creates the marker file)
+    res_pf = subprocess.run(
+        [str(BIN_AI_ORCH), "preflight", "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_pf.returncode == 1  # missing-bun-19-7 and dummy-svc fail, but command check runs
+    pf_payload = json.loads(res_pf.stdout)
+    assert pf_payload["executed"] is True
+    assert marker_file.exists()
+
+
+def test_19_7_run_start_integration_all_check_types_and_no_preflight(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """B2 integration test: verify through `ai-orch run start` all preflight check types
+    (tool/version, free_port, service, disk, command) as well as the no-preflight case.
+    """
+    import socket
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    stub_path_str = str(STUB_AGENT)
+    base_stub_cfg = (
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{stub_path_str}", "--lines", "2", "--exit-code", "0"]\n'
+    )
+
+    def _reset_t007_open() -> None:
+        t_path = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+        txt = t_path.read_text(encoding="utf-8")
+        t_path.write_text(txt.replace("- state: in progress", "- state: open"), encoding="utf-8")
+        runs_dir = sample_workspace / ".ai-orchestration" / "runs"
+        if runs_dir.exists():
+            shutil.rmtree(runs_dir)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "none",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+
+    # 1. No-preflight case: preview reports configured=False and `run start` succeeds
+    proj_cfg.write_text(base_stub_cfg, encoding="utf-8")
+    res_prev_none = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--isolation",
+            "none",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    prev_none = json.loads(res_prev_none.stdout)
+    assert prev_none["preflight"]["configured"] is False
+    assert prev_none["preflight_checks"] == []
+
+    res_start_none = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id_none = json.loads(res_start_none.stdout)["run_id"]
+    rec_none = wait_for_terminal(sample_workspace, run_id_none)
+    assert rec_none["status"] == "succeeded"
+    _reset_t007_open()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        busy_port = srv.getsockname()[1]
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tmp_sock:
+            tmp_sock.bind(("127.0.0.1", 0))
+            free_port = tmp_sock.getsockname()[1]
+
+        # 2. Free port check failure through `run start`
+        proj_cfg.write_text(
+            base_stub_cfg + f"\n[project.preflight]\nfree_ports = [{busy_port}]\n",
+            encoding="utf-8",
+        )
+        res_busy = subprocess.run(cmd_start, capture_output=True, text=True, check=False)
+        assert res_busy.returncode != 0
+        data_busy = json.loads(res_busy.stdout)
+        assert data_busy["reason"] == "preflight-failed"
+        assert str(busy_port) in data_busy["error"]
+
+        # 3. Active service check failure through `run start`
+        proj_cfg.write_text(
+            base_stub_cfg + f'\n[project.preflight.services]\n"dead-svc-19-7" = {{ port = {free_port} }}\n',
+            encoding="utf-8",
+        )
+        res_svc = subprocess.run(cmd_start, capture_output=True, text=True, check=False)
+        assert res_svc.returncode != 0
+        data_svc = json.loads(res_svc.stdout)
+        assert data_svc["reason"] == "preflight-failed"
+        assert "dead-svc-19-7" in data_svc["error"]
+
+        # 4. Disk space check failure through `run start`
+        proj_cfg.write_text(
+            base_stub_cfg + "\n[project.preflight]\nmin_disk_gb = 999999999\n",
+            encoding="utf-8",
+        )
+        res_disk = subprocess.run(cmd_start, capture_output=True, text=True, check=False)
+        assert res_disk.returncode != 0
+        data_disk = json.loads(res_disk.stdout)
+        assert data_disk["reason"] == "preflight-failed"
+        assert "disk space" in data_disk["error"].lower()
+
+        # 5. Custom command check failure through `run start`
+        fail_cmd = f"{sys.executable} -c \"import sys; sys.stderr.write('CUSTOM_PF_ERR\\n'); sys.exit(2)\""
+        proj_cfg.write_text(
+            base_stub_cfg + f"\n[project.preflight]\ncommands = [{json.dumps(fail_cmd)}]\n",
+            encoding="utf-8",
+        )
+        res_cmd_fail = subprocess.run(cmd_start, capture_output=True, text=True, check=False)
+        assert res_cmd_fail.returncode != 0
+        data_cmd_fail = json.loads(res_cmd_fail.stdout)
+        assert data_cmd_fail["reason"] == "preflight-failed"
+        assert "CUSTOM_PF_ERR" in data_cmd_fail["error"]
+
+        # 6. All check types (tool+version, free_port, service, disk, command) passing together through `run start`
+        extra_bin = tmp_path / "all-checks-bin"
+        extra_bin.mkdir()
+        tool_exe = extra_bin / "tool-all-19-7"
+        tool_exe.write_text("#!/bin/sh\necho '2.4.0'\nexit 0\n", encoding="utf-8")
+        tool_exe.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{extra_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+        start_marker = tmp_path / "start_executed.marker"
+        ok_cmd = (
+            f"{sys.executable} -c \"import pathlib; pathlib.Path(r'{start_marker}').write_text('ok', encoding='utf-8')\""
+        )
+        proj_cfg.write_text(
+            base_stub_cfg
+            + f"\n[project.preflight]\nfree_ports = [{free_port}]\nmin_disk_mb = 1\ncommands = [{json.dumps(ok_cmd)}]\n"
+            + '\n[project.preflight.tools]\n"tool-all-19-7" = ">=2.0.0"\n'
+            + f'\n[project.preflight.services]\n"live-svc-19-7" = {{ port = {busy_port} }}\n',
+            encoding="utf-8",
+        )
+        res_all_ok = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+        data_all_ok = json.loads(res_all_ok.stdout)
+        assert data_all_ok["ok"] is True
+        assert start_marker.exists()
+        rec_all = wait_for_terminal(sample_workspace, data_all_ok["run_id"])
+        assert rec_all["status"] == "succeeded"
+
+
+# ---------------------------------------------------------------------------
+# Task 19.6 — Screen Run Backend & Run Preview Worktree Path Fix
+# ---------------------------------------------------------------------------
+
+
+def test_preview_worktree_path_matches_created_worktree(sample_workspace: pathlib.Path):
+    """Task 19.6: `run preview` reports `<repo.parent>/.worktrees/<repo.name>/<run_id>`, matching `run start`."""
+    ws_resolved = sample_workspace.resolve()
+    expected_template = str(ws_resolved.parent / ".worktrees" / ws_resolved.name / "<run_id>")
+
+    # 1. Single-task execute preview
+    res_exec = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data_exec = json.loads(res_exec.stdout)
+    assert data_exec["ok"] is True
+    assert data_exec["planned_worktree"] == expected_template
+    assert data_exec["cwd"] == expected_template
+    assert "run-T007" not in data_exec["planned_worktree"]
+
+    # 2. Single-task verify preview (requires task in delivered state)
+    t007_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    orig_t007 = t007_file.read_text(encoding="utf-8")
+    t007_file.write_text(orig_t007.replace("- state: open", "- state: delivered"), encoding="utf-8")
+    res_ver = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "verify",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data_ver = json.loads(res_ver.stdout)
+    assert data_ver["ok"] is True
+    assert data_ver["planned_worktree"] == expected_template
+    assert data_ver["cwd"] == expected_template
+    assert "verify-T007" not in data_ver["planned_worktree"]
+    t007_file.write_text(orig_t007, encoding="utf-8")
+
+    # 3. Real start creates the exact worktree path predicted by preview template
+    res_exec2 = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data_exec2 = json.loads(res_exec2.stdout)
+    res_start = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "start",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--expect-plan-hash",
+            data_exec2["plan_hash"],
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_id = json.loads(res_start.stdout)["run_id"]
+    rec = wait_for_terminal(sample_workspace, run_id)
+    assert rec["worktree_path"] == expected_template.replace("<run_id>", run_id)
+
+
+def test_screen_backend_selection_and_session_naming(sample_workspace: pathlib.Path):
+    """Task 19.6: Backend selectable per project or per tool (setsid default); session named agent-<project>-<task> / verify-<project>-<task>."""
+    # 1. Default backend is setsid
+    res_def = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    d_def = json.loads(res_def.stdout)
+    assert d_def["backend"] == "setsid"
+    assert d_def["screen_session"] is None
+
+    # 2. Project-level run_backend = "screen"
+    cfg_path = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = cfg_path.read_text(encoding="utf-8")
+    cfg_path.write_text(
+        orig_cfg.replace('[project]\nname = "sample"', '[project]\nname = "sample"\nrun_backend = "screen"'),
+        encoding="utf-8",
+    )
+    res_proj = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    d_proj = json.loads(res_proj.stdout)
+    assert d_proj["backend"] == "screen"
+    assert d_proj["screen_session"] == "agent-sample-T007"
+    assert d_proj["session_name"] == "agent-sample-T007"
+
+    # Verify mode uses verify-<project>-<task>
+    t007_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    orig_t007 = t007_file.read_text(encoding="utf-8")
+    t007_file.write_text(orig_t007.replace("- state: open", "- state: delivered"), encoding="utf-8")
+    res_ver = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "verify",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    d_ver = json.loads(res_ver.stdout)
+    assert d_ver["backend"] == "screen"
+    assert d_ver["screen_session"] == "verify-sample-T007"
+    assert d_ver["session_name"] == "verify-sample-T007"
+    t007_file.write_text(orig_t007, encoding="utf-8")
+
+    # 3. Per-tool backend override ([tools.kilo.headless] backend = "screen" with project default setsid)
+    cfg_path.write_text(
+        orig_cfg + '\n[tools.kilo.headless]\nbackend = "screen"\n',
+        encoding="utf-8",
+    )
+    res_kilo = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--tool",
+            "kilo",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(res_kilo.stdout)["backend"] == "screen"
+
+    res_claude = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--tool",
+            "claude",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(res_claude.stdout)["backend"] == "setsid"
+
+    # 4. Invalid backend rejected
+    res_bad = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--backend",
+            "tmux-nonexistent",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_bad.returncode != 0
+    assert json.loads(res_bad.stdout)["reason"] == "invalid-run-backend"
+
+
+@pytest.mark.skipif(shutil.which("screen") is None, reason="GNU screen not installed")
+def test_screen_backend_real_run_lifecycle_and_status_file(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+):
+    """Task 19.6 Verification: real run in screen with fake tool that sleeps and writes a commit."""
+    from orchestration_runs import close_screen_session
+
+    fake_tool = tmp_path / "fake_screen_executor.py"
+    fake_tool.write_text(
+        f"""#!{sys.executable}
+import pathlib, subprocess, sys, time
+
+print("FAKE_SCREEN_TOOL_START", flush=True)
+time.sleep(1.2)
+wt = pathlib.Path.cwd()
+(wt / "feature_19_6.txt").write_text("implemented in screen\\n", encoding="utf-8")
+notes_dir = wt / "tasks" / "micro" / "notes"
+notes_dir.mkdir(parents=True, exist_ok=True)
+report_file = notes_dir / "T007-final-report.md"
+report_file.write_text("## Final Report\\n- **Outcome:** delivered\\n", encoding="utf-8")
+subprocess.run(["git", "add", "feature_19_6.txt", str(report_file)], check=True)
+subprocess.run(["git", "commit", "-m", "feat: screen backend test commit (T007)"], check=True)
+print("## Final Report\\n- **Outcome:** delivered\\n- **Files changed:** feature_19_6.txt", flush=True)
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+
+    proj_name = f"proj196ok{os.getpid()}"
+    expected_sess = f"agent-{proj_name}-T007"
+    close_screen_session(expected_sess)
+
+    cfg_path = sample_workspace / ".ai-orchestration.local.toml"
+    cfg_path.write_text(
+        f"""schema_version = 1
+
+[project]
+name = "{proj_name}"
+primary_orchestrator = "kilo"
+run_backend = "screen"
+
+[routing]
+default_orchestrator = "kilo"
+default_executor = "kilo"
+
+[tools.kilo]
+enabled = true
+binary = "{fake_tool}"
+
+[tools.kilo.headless]
+argv = ["{fake_tool}", "{{prompt_file}}"]
+prompt_via = "file"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        res_start = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "start",
+                "--task",
+                "T007",
+                "--mode",
+                "execute",
+                "--allow-dirty-base",
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        start_data = json.loads(res_start.stdout)
+        assert start_data["ok"] is True
+        assert start_data["backend"] == "screen"
+        assert start_data["screen_session"] == expected_sess
+        run_id = start_data["run_id"]
+
+        # While sleeping: `screen -ls` shows expected session name and `run list` sees it alive
+        ls_out = subprocess.run(["screen", "-ls"], capture_output=True, text=True, check=False)
+        combined_ls = (ls_out.stdout or "") + "\n" + (ls_out.stderr or "")
+        assert expected_sess in combined_ls
+
+        res_list = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "list",
+                "--active",
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        active_runs = json.loads(res_list.stdout)["runs"]
+        assert any(r["run_id"] == run_id and r["status"] in ("starting", "running") for r in active_runs)
+
+        # Wait for completion
+        rec = wait_for_terminal(sample_workspace, run_id, timeout=15.0)
+        assert rec["status"] == "succeeded"
+        assert rec["state"] == "completed"
+        assert rec["exit_code"] == 0
+        assert rec["backend"] == "screen"
+        assert rec["screen_session"] == expected_sess
+        assert rec["session_name"] == expected_sess
+        assert rec["final_commit"] is not None
+        assert rec["commits_after_base"] == 1
+
+        # Verify session.log written by `screen -L`
+        run_dir = sample_workspace / ".ai-orchestration" / "runs" / run_id
+        session_log = run_dir / "session.log"
+        assert session_log.is_file()
+        assert "FAKE_SCREEN_TOOL_START" in session_log.read_text(encoding="utf-8", errors="replace")
+
+        # Verify exit status file (`status.json`) written on exit
+        status_file = run_dir / "status.json"
+        assert status_file.is_file()
+        status_data = json.loads(status_file.read_text(encoding="utf-8"))
+        assert status_data["status"] == "completed"
+        assert status_data["outcome"] == "succeeded"
+        assert status_data["exit_code"] == 0
+        assert status_data["ended_at"]
+        assert status_data["final_report_path"]
+        assert status_data["final_report_pointer"] == status_data["final_report_path"]
+        assert pathlib.Path(status_data["final_report_path"]).is_file()
+    finally:
+        close_screen_session(expected_sess)
+
+
+@pytest.mark.skipif(shutil.which("screen") is None, reason="GNU screen not installed")
+def test_screen_backend_killed_session_becomes_lost(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+):
+    """Task 19.6 Verification: killing the screen session mid-run marks the run `lost`."""
+    from orchestration_runs import close_screen_session, is_screen_session_alive
+
+    fake_tool = tmp_path / "fake_screen_sleeper.py"
+    fake_tool.write_text(
+        f"""#!{sys.executable}
+import time
+print("SLEEPING_IN_SCREEN", flush=True)
+time.sleep(30)
+""",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+
+    proj_name = f"proj196kill{os.getpid()}"
+    expected_sess = f"agent-{proj_name}-T007"
+    close_screen_session(expected_sess)
+
+    cfg_path = sample_workspace / ".ai-orchestration.local.toml"
+    cfg_path.write_text(
+        f"""schema_version = 1
+
+[project]
+name = "{proj_name}"
+primary_orchestrator = "kilo"
+run_backend = "screen"
+
+[routing]
+default_orchestrator = "kilo"
+default_executor = "kilo"
+
+[tools.kilo]
+enabled = true
+binary = "{fake_tool}"
+
+[tools.kilo.headless]
+argv = ["{fake_tool}", "{{prompt_file}}"]
+prompt_via = "file"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        res_start = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "start",
+                "--task",
+                "T007",
+                "--mode",
+                "execute",
+                "--allow-dirty-base",
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        run_id = json.loads(res_start.stdout)["run_id"]
+        assert is_screen_session_alive(expected_sess)
+
+        # Kill the screen session directly
+        close_screen_session(expected_sess)
+        assert not is_screen_session_alive(expected_sess)
+
+        # Reconcile via `run show` / `run list` marks the run `lost`
+        res_show = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "show",
+                run_id,
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        rec = json.loads(res_show.stdout)["run"]
+        assert rec["status"] == "lost"
+        run_dir = sample_workspace / ".ai-orchestration" / "runs" / run_id
+        assert not (run_dir / "status.json").exists()
+    finally:
+        close_screen_session(expected_sess)
+
+
+@pytest.mark.skipif(shutil.which("screen") is None, reason="GNU screen not installed")
+def test_screen_backend_cancel_closes_session(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+):
+    """Task 19.6 Verification: `run cancel` closes the screen session and marks the run `cancelled`."""
+    from orchestration_runs import close_screen_session, is_screen_session_alive
+
+    fake_tool = tmp_path / "fake_screen_cancel.py"
+    fake_tool.write_text(
+        f"""#!{sys.executable}
+import time
+print("WAITING_FOR_CANCEL", flush=True)
+time.sleep(30)
+""",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+
+    proj_name = f"proj196cancel{os.getpid()}"
+    expected_sess = f"agent-{proj_name}-T007"
+    close_screen_session(expected_sess)
+
+    cfg_path = sample_workspace / ".ai-orchestration.local.toml"
+    cfg_path.write_text(
+        f"""schema_version = 1
+
+[project]
+name = "{proj_name}"
+primary_orchestrator = "kilo"
+run_backend = "screen"
+
+[routing]
+default_orchestrator = "kilo"
+default_executor = "kilo"
+
+[tools.kilo]
+enabled = true
+binary = "{fake_tool}"
+
+[tools.kilo.headless]
+argv = ["{fake_tool}", "{{prompt_file}}"]
+prompt_via = "file"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        res_start = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "start",
+                "--task",
+                "T007",
+                "--mode",
+                "execute",
+                "--allow-dirty-base",
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        run_id = json.loads(res_start.stdout)["run_id"]
+        assert is_screen_session_alive(expected_sess)
+
+        res_cancel = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "cancel",
+                run_id,
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        cancel_data = json.loads(res_cancel.stdout)
+        assert cancel_data["ok"] is True
+        assert cancel_data["status"] == "cancelled"
+        assert not is_screen_session_alive(expected_sess)
+
+        ls_out = subprocess.run(["screen", "-ls"], capture_output=True, text=True, check=False)
+        combined_ls = (ls_out.stdout or "") + "\n" + (ls_out.stderr or "")
+        assert expected_sess not in combined_ls
+    finally:
+        close_screen_session(expected_sess)
+
+
+@pytest.mark.skipif(shutil.which("screen") is None, reason="GNU screen not installed")
+@pytest.mark.parametrize(
+    ("sig", "expected_exit_code"),
+    [
+        (signal.SIGKILL, 128 + int(signal.SIGKILL)),
+        (signal.SIGTERM, 128 + int(signal.SIGTERM)),
+        (signal.SIGHUP, 128 + int(signal.SIGHUP)),
+    ],
+)
+def test_19_6_b1_screen_killed_agent_pid_records_failed_and_status_file(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    sig: signal.Signals,
+    expected_exit_code: int,
+):
+    """Task 19.6 Bounce B1: killing only the agent PID in a real screen run writes status.json atomically and marks the run failed (not lost) with the exit code derived from the signal."""
+    from orchestration_runs import close_screen_session
+
+    fake_tool = tmp_path / f"fake_screen_agent_sig_{int(sig)}.py"
+    fake_tool.write_text(
+        f"""#!{sys.executable}
+import signal, time
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+print("AGENT_READY_FOR_SIGNAL", flush=True)
+time.sleep(30)
+""",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+
+    proj_name = f"proj196b1s{int(sig)}p{os.getpid()}"
+    expected_sess = f"agent-{proj_name}-T007"
+    close_screen_session(expected_sess)
+
+    # Reset T007 to open so each parametrized run starts cleanly
+    t007_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    if t007_file.is_file():
+        t007_text = t007_file.read_text(encoding="utf-8")
+        t007_text = re.sub(r"^- state:.*$", "- state: open", t007_text, flags=re.MULTILINE)
+        t007_file.write_text(t007_text, encoding="utf-8")
+
+    cfg_path = sample_workspace / ".ai-orchestration.local.toml"
+    cfg_path.write_text(
+        f"""schema_version = 1
+
+[project]
+name = "{proj_name}"
+primary_orchestrator = "kilo"
+run_backend = "screen"
+
+[routing]
+default_orchestrator = "kilo"
+default_executor = "kilo"
+
+[tools.kilo]
+enabled = true
+binary = "{fake_tool}"
+
+[tools.kilo.headless]
+argv = ["{fake_tool}", "{{prompt_file}}"]
+prompt_via = "file"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        res_start = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "start",
+                "--task",
+                "T007",
+                "--mode",
+                "execute",
+                "--allow-dirty-base",
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        run_id = json.loads(res_start.stdout)["run_id"]
+        run_dir = sample_workspace / ".ai-orchestration" / "runs" / run_id
+
+        # Wait until the agent PID is recorded and running
+        deadline = time.monotonic() + 10.0
+        agent_pid: int | None = None
+        while time.monotonic() < deadline:
+            rec_live = load_run_record(sample_workspace, run_id)
+            if (
+                rec_live.get("status") == "running"
+                and isinstance(rec_live.get("agent"), dict)
+                and rec_live["agent"].get("pid")
+            ):
+                agent_pid = int(rec_live["agent"]["pid"])
+                break
+            time.sleep(0.03)
+
+        assert agent_pid is not None, "Expected agent PID to be recorded in run.json"
+        sup_pid = int(load_run_record(sample_workspace, run_id)["supervisor"]["pid"])
+        assert agent_pid != sup_pid
+
+        # Kill ONLY the agent PID with the signal
+        os.kill(agent_pid, sig)
+
+        # Wait for run completion
+        rec_final = wait_for_terminal(sample_workspace, run_id, timeout=15.0)
+        assert rec_final["status"] == "failed"
+        assert rec_final["state"] == "failed"
+        assert rec_final["exit_code"] == expected_exit_code
+        assert rec_final.get("signal") == int(sig)
+
+        # Verify status.json was written atomically with failed status and derived exit code
+        status_file = run_dir / "status.json"
+        assert status_file.is_file(), "status.json must be written when child dies from a signal"
+        status_data = json.loads(status_file.read_text(encoding="utf-8"))
+        assert status_data["status"] == "failed"
+        assert status_data["state"] == "failed"
+        assert status_data["outcome"] == "failed"
+        assert status_data["completed"] is False
+        assert status_data["exit_code"] == expected_exit_code
+        assert status_data["signal"] == int(sig)
+        assert status_data["ended_at"]
+
+        # Reconcile via `run show` must also report `failed` (never `lost`)
+        res_show = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "show",
+                run_id,
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        show_rec = json.loads(res_show.stdout)["run"]
+        assert show_rec["status"] == "failed"
+        assert show_rec["exit_code"] == expected_exit_code
+    finally:
+        close_screen_session(expected_sess)
+
+
+@pytest.mark.skipif(shutil.which("screen") is None, reason="GNU screen not installed")
+def test_19_6_b2_screenrc_constant_directives_adversarial_workspace_path(
+    tmp_path: pathlib.Path,
+):
+    """Task 19.6 Bounce B2: screenrc contains only constant directives (no interpolated logfile path), preventing directive injection from an adversarial workspace path containing newlines."""
+    from orchestration_runs import close_screen_session
+
+    injected_log = tmp_path / "injected_logfile.txt"
+    adv_ws = tmp_path / f"ws_19_6\nlogfile {injected_log}\nhardstatus alwayslastline"
+    adv_ws.mkdir(parents=True, exist_ok=True)
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(adv_ws), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(adv_ws), check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=str(adv_ws), check=True)
+
+    tasks_dir = adv_ws / "tasks" / "server"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "T007-adv.md").write_text(
+        "# T007 Adversarial Path Test\n\n"
+        "- id: T007\n"
+        "- title: Adversarial Path Test\n"
+        "- category: server\n"
+        "- priority: P1\n"
+        "- priority-reason: test\n"
+        "- next-up: yes\n"
+        "- state: open\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: -\n\n"
+        "## Goal\nTest adversarial path.\n\n"
+        "## Steps\n- [ ] Step 1\n\n"
+        "## Verification\n- [ ] Check\n",
+        encoding="utf-8",
+    )
+
+    fake_tool = tmp_path / "fake_adv_screen_tool.py"
+    fake_tool.write_text(
+        f"""#!{sys.executable}
+import sys
+print("ADV_WORKSPACE_LOG_OK", flush=True)
+print("## Final Report\\n- **Outcome:** delivered\\n", flush=True)
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+
+    proj_name = f"proj196b2adv{os.getpid()}"
+    expected_sess = f"agent-{proj_name}-T007"
+    close_screen_session(expected_sess)
+
+    (adv_ws / ".ai-orchestration.local.toml").write_text(
+        f"""schema_version = 1
+
+[project]
+name = "{proj_name}"
+primary_orchestrator = "kilo"
+run_backend = "screen"
+
+[routing]
+default_orchestrator = "kilo"
+default_executor = "kilo"
+
+[tools.kilo]
+enabled = true
+binary = "{fake_tool}"
+
+[tools.kilo.headless]
+argv = ["{fake_tool}", "{{prompt_file}}"]
+prompt_via = "file"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+""",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(adv_ws), check=True)
+    subprocess.run(["git", "commit", "-m", "init adv ws"], cwd=str(adv_ws), check=True, capture_output=True)
+
+    try:
+        res_start = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "start",
+                "--task",
+                "T007",
+                "--mode",
+                "execute",
+                "--isolation",
+                "none",
+                "--allow-dirty-base",
+                "--workspace",
+                str(adv_ws),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        run_id = json.loads(res_start.stdout)["run_id"]
+        run_dir = adv_ws / ".ai-orchestration" / "runs" / run_id
+
+        screenrc_file = run_dir / "screenrc"
+        assert screenrc_file.is_file()
+        screenrc_text = screenrc_file.read_text(encoding="utf-8")
+        assert screenrc_text == "logfile flush 1\ndeflog on\n"
+        assert str(adv_ws) not in screenrc_text
+        assert "injected_logfile" not in screenrc_text
+
+        rec = wait_for_terminal(adv_ws, run_id, timeout=15.0)
+        assert rec["status"] == "succeeded"
+        assert rec["exit_code"] == 0
+        assert not injected_log.exists(), "Injected logfile directive must never be executed"
+
+        session_log = run_dir / "session.log"
+        assert session_log.is_file()
+        assert "ADV_WORKSPACE_LOG_OK" in session_log.read_text(encoding="utf-8", errors="replace")
+    finally:
+        close_screen_session(expected_sess)
+
+
+

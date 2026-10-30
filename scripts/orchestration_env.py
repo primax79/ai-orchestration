@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -407,6 +408,56 @@ def get_config_dir(home: pathlib.Path | None = None) -> pathlib.Path:
     return h / ".config" / "ai-orchestration"
 
 
+def _get_global_config_path(home: pathlib.Path | None = None) -> pathlib.Path:
+    if home is not None:
+        return home / ".config" / "ai-orchestration" / "orchestration.toml"
+    env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
+    if env_cfg and env_cfg.strip():
+        p = pathlib.Path(env_cfg).expanduser().resolve()
+        if p.is_dir():
+            return p / "orchestration.toml"
+        if p.is_file() or p.suffix.lower() == ".toml" or p.name.endswith(".toml"):
+            return p
+        return p / "orchestration.toml"
+    env_dir = os.environ.get("AI_ORCH_CONFIG_DIR")
+    if env_dir and env_dir.strip():
+        return pathlib.Path(env_dir).expanduser().resolve() / "orchestration.toml"
+    h = get_home_dir()
+    return h / ".config" / "ai-orchestration" / "orchestration.toml"
+
+
+def _inspect_project_config_env(
+    workspace: pathlib.Path,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    gpath = global_config if global_config is not None else _get_global_config_path(home)
+    try:
+        setup_scripts = REPO_ROOT / "plugins" / "shared" / "skills" / "orchestration-setup" / "scripts"
+        if setup_scripts.is_dir() and str(setup_scripts) not in sys.path:
+            sys.path.insert(0, str(setup_scripts))
+        import orchestration_config  # type: ignore
+        return orchestration_config.inspect_project_config(
+            workspace,
+            gpath if (global_config is not None or home is not None) else None,
+        )
+    except Exception:
+        ws = pathlib.Path(workspace)
+        ext_path = gpath.parent / "projects" / ws.resolve().name / "orchestration.toml"
+        local_dot = ws / ".ai-orchestration.local.toml"
+        p = local_dot if local_dot.is_file() else ext_path
+        return {
+            "path": p,
+            "write_path": p,
+            "exists": p.is_file(),
+            "is_legacy": False,
+            "label": str(p),
+            "candidates": [{"path": p, "label": str(p), "is_legacy": False}] if p.is_file() else [],
+            "legacy_paths": [],
+            "warnings": [],
+        }
+
+
 def get_doctor_ack_path(home: pathlib.Path | None = None) -> pathlib.Path:
     return get_config_dir(home) / DOCTOR_ACK_FILENAME
 
@@ -536,43 +587,350 @@ def skill_has_precedence_section(skill_path: pathlib.Path | str) -> bool:
         return False
 
 
+_YAML_BLOCK_HEADER_RE = re.compile(
+    r"^([A-Za-z0-9_-]+):[ ]*([>|])([1-9][+-]?|[+-]?[1-9]?)[ ]*$"
+)
+_YAML_MAP_LINE_RE = re.compile(r"^([A-Za-z0-9_-]+):(?:[ ]+(.*))?$")
+_YAML_DOC_MARKER_RE = re.compile(r"^(?:---|\.\.\.)(?:\s|$)")
+
+
+def _parse_yaml_subset_scalar(val_raw: str) -> str:
+    """Parse a single-line scalar in the strict stdlib YAML frontmatter subset.
+
+    Allowed:
+      - plain scalars (unquoted, single-line);
+      - single-quoted scalars ('...'), where only '' is special;
+      - double-quoted scalars ("...") WITHOUT any backslash.
+    Rejected (raises ValueError to fail closed):
+      - double-quoted scalars containing '\\' or unescaped '"';
+      - single-quoted scalars with unescaped "'";
+      - flow collections '{}' / '[]';
+      - anchors, aliases, tags ('&', '*', '!');
+      - complex keys '?';
+      - inline '#' in unquoted scalars or after quoted scalars;
+      - mapping colons (': ' or trailing ':') in unquoted scalars;
+      - YAML document markers ('---', '...') or null literals ('~', 'null').
+    """
+    val_s = val_raw.strip()
+    if not val_s:
+        raise ValueError("Empty YAML scalar is not allowed")
+
+    if val_s[0] == '"':
+        if len(val_s) < 2 or not val_s.endswith('"'):
+            raise ValueError(f"Invalid double-quoted YAML scalar: {val_s}")
+        inner = val_s[1:-1]
+        if "\\" in inner:
+            raise ValueError(f"Backslash in double-quoted YAML scalar is not supported: {val_s}")
+        if '"' in inner:
+            raise ValueError(f"Unescaped double quote in double-quoted YAML scalar: {val_s}")
+        return inner
+
+    if val_s[0] == "'":
+        if len(val_s) < 2 or not val_s.endswith("'"):
+            raise ValueError(f"Invalid single-quoted YAML scalar: {val_s}")
+        inner = val_s[1:-1]
+        out_chars: list[str] = []
+        j = 0
+        while j < len(inner):
+            if inner[j] == "'":
+                if j + 1 < len(inner) and inner[j + 1] == "'":
+                    out_chars.append("'")
+                    j += 2
+                else:
+                    raise ValueError(f"Unescaped single quote in single-quoted YAML scalar: {val_s}")
+            else:
+                out_chars.append(inner[j])
+                j += 1
+        return "".join(out_chars)
+
+    if val_s[0] in ("&", "*", "!", "|", ">", "@", "`", "%", "?", "[", "{", "]", "}", ",", "#", ":"):
+        raise ValueError(f"Unsupported or invalid YAML token: {val_s}")
+    if val_s == "-" or val_s.startswith(("- ", "-\t", "? ", "?\t")):
+        raise ValueError(f"Unsupported sequence or complex key indicator in scalar: {val_s}")
+    if _YAML_DOC_MARKER_RE.match(val_s):
+        raise ValueError(f"Document marker in YAML scalar is not supported: {val_s}")
+    if "#" in val_s:
+        raise ValueError(f"Inline '#' in unquoted YAML scalar is not supported: {val_s}")
+    if any(ch in val_s for ch in ("{", "}", "[", "]")):
+        raise ValueError(f"Unsupported YAML flow collection: {val_s}")
+    if ": " in val_s or ":\t" in val_s or val_s.endswith(":"):
+        raise ValueError(f"Mapping colon in plain YAML scalar is not supported: {val_s}")
+    if val_s in ("~", "null", "Null", "NULL"):
+        raise ValueError(f"Null literal in plain YAML scalar is not supported: {val_s}")
+    return val_s
+
+
+def _apply_yaml_chomping(text: str, chomp: str) -> str:
+    """Apply YAML block scalar chomping indicator ('-' strip, '+' keep, '' clip)."""
+    if chomp == "-":
+        return text.rstrip("\n")
+    if chomp == "+":
+        return text
+    stripped = text.rstrip("\n")
+    if not stripped:
+        return ""
+    return stripped + ("\n" if text.endswith("\n") else "")
+
+
+def _fold_yaml_block_lines(lines: list[str]) -> str:
+    """Fold lines according to YAML '>' folded block scalar rules."""
+    if not lines:
+        return ""
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if line == "":
+            prev_more = (
+                i > 0
+                and lines[i - 1] != ""
+                and (lines[i - 1].startswith(" ") or lines[i - 1].startswith("\t"))
+            )
+            empty_count = 0
+            while i < n and lines[i] == "":
+                empty_count += 1
+                i += 1
+            next_more = (
+                i < n
+                and lines[i] != ""
+                and (lines[i].startswith(" ") or lines[i].startswith("\t"))
+            )
+            extra = 1 if (prev_more or next_more) and i > empty_count and i < n else 0
+            out.append("\n" * (empty_count + extra))
+            continue
+        is_more_indented = line.startswith(" ") or line.startswith("\t")
+        out.append(line)
+        i += 1
+        if i < n:
+            next_line = lines[i]
+            if next_line == "":
+                continue
+            next_more_indented = next_line.startswith(" ") or next_line.startswith("\t")
+            if is_more_indented or next_more_indented:
+                out.append("\n")
+            else:
+                out.append(" ")
+    return "".join(out)
+
+
+def _stdlib_parse_yaml_frontmatter(fm_raw: str) -> dict[str, Any]:
+    """Strict stdlib YAML subset parser for SKILL.md frontmatter.
+
+    Allowed subset:
+      - plain unquoted keys `[A-Za-z0-9_-]+`;
+      - plain single-line scalars;
+      - single-quoted scalars (where only `''` is special);
+      - double-quoted scalars WITHOUT any backslash;
+      - block scalars `|` / `>` with chomping and indentation indicators;
+      - nested block mappings;
+      - block sequences of scalars;
+      - `#` comments on their own line.
+
+    Rejected (raises ValueError to fail closed):
+      - quoted keys or complex keys (`?`);
+      - double-quoted scalars containing `\\`;
+      - flow collections `{}` / `[]`;
+      - anchors, aliases and tags (`&`, `*`, `!`);
+      - tabs used as indentation;
+      - `---` / `...` inside the frontmatter;
+      - inline `#` after a value (unless inside quotes);
+      - duplicate keys.
+    """
+    raw_lines = fm_raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    tokens: list[tuple[int, str, str, str]] = []
+    i = 0
+    n = len(raw_lines)
+
+    while i < n:
+        line = raw_lines[i]
+        if "\t" in line[: len(line) - len(line.lstrip(" \t"))]:
+            raise ValueError("Tab indentation is not supported in YAML")
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        if _YAML_DOC_MARKER_RE.match(stripped):
+            raise ValueError("Document marker ('---' or '...') inside frontmatter is not supported")
+        indent = len(line) - len(line.lstrip(" "))
+
+        m_block = _YAML_BLOCK_HEADER_RE.match(stripped)
+        if m_block:
+            key = m_block.group(1)
+            style = m_block.group(2)
+            modifiers = m_block.group(3)
+            chomp = "+" if "+" in modifiers else ("-" if "-" in modifiers else "")
+            indent_digits = [ch for ch in modifiers if ch.isdigit()]
+            explicit_indent = int(indent_digits[0]) if indent_digits else None
+            i += 1
+            block_lines_raw: list[str] = []
+            block_indent: int | None = (
+                indent + explicit_indent if explicit_indent is not None else None
+            )
+            max_leading_blank_spaces = 0
+            saw_content_line = False
+            while i < n:
+                bline = raw_lines[i]
+                bstripped = bline.strip()
+                if bstripped == "":
+                    if "\t" in bline:
+                        raise ValueError("Tab indentation in block scalar")
+                    if block_indent is not None and len(bline) > block_indent:
+                        saw_content_line = True
+                    elif not saw_content_line:
+                        max_leading_blank_spaces = max(max_leading_blank_spaces, len(bline))
+                    block_lines_raw.append(bline)
+                    i += 1
+                    continue
+                if "\t" in bline[: len(bline) - len(bline.lstrip(" \t"))]:
+                    raise ValueError("Tab indentation in block scalar")
+                if _YAML_DOC_MARKER_RE.match(bstripped):
+                    raise ValueError(
+                        "Document marker ('---' or '...') inside block scalar is not supported"
+                    )
+                bindent = len(bline) - len(bline.lstrip(" "))
+                if bindent <= indent:
+                    break
+                if block_indent is None:
+                    if max_leading_blank_spaces > bindent:
+                        raise ValueError(
+                            "Leading empty line has more spaces than first content line in block scalar"
+                        )
+                    block_indent = bindent
+                elif bindent < block_indent:
+                    raise ValueError("Inconsistent indentation in block scalar")
+                saw_content_line = True
+                block_lines_raw.append(bline)
+                i += 1
+
+            if not saw_content_line:
+                raise ValueError(f"Empty block scalar under key: {key}")
+            assert block_indent is not None
+            content_lines = [bline[block_indent:] for bline in block_lines_raw]
+            if style == "|":
+                joined = "\n".join(content_lines) + "\n"
+            else:
+                joined = _fold_yaml_block_lines(content_lines) + "\n"
+            scalar_val = _apply_yaml_chomping(joined, chomp)
+            tokens.append((indent, "block", key, scalar_val))
+            continue
+
+        tokens.append((indent, "line", stripped, ""))
+        i += 1
+
+    def _parse_node(idx: int, expected_indent: int) -> tuple[Any, int]:
+        if idx >= len(tokens):
+            raise ValueError("Unexpected end of YAML frontmatter")
+        first_indent, first_kind, first_text, _ = tokens[idx]
+        if first_indent < expected_indent:
+            raise ValueError("Under-indented YAML block")
+        if first_kind == "line" and (first_text.startswith("- ") or first_text == "-"):
+            return _parse_seq(idx, first_indent)
+        return _parse_map(idx, first_indent)
+
+    def _parse_seq(idx: int, seq_indent: int) -> tuple[list[Any], int]:
+        items: list[Any] = []
+        while idx < len(tokens):
+            indent, kind, text, _ = tokens[idx]
+            if indent < seq_indent:
+                break
+            if indent != seq_indent or kind != "line" or not text.startswith("- "):
+                raise ValueError(f"Unexpected token in sequence at indent {indent}: {text}")
+            item_rest = text[2:].strip()
+            if not item_rest:
+                raise ValueError("Empty sequence item is not supported")
+            idx += 1
+            if idx < len(tokens) and tokens[idx][0] > seq_indent:
+                raise ValueError(
+                    f"Nested block under sequence item is not supported: {item_rest}"
+                )
+            items.append(_parse_yaml_subset_scalar(item_rest))
+        if not items:
+            raise ValueError("Empty YAML sequence")
+        return items, idx
+
+    def _parse_map(idx: int, map_indent: int) -> tuple[dict[str, Any], int]:
+        mapping: dict[str, Any] = {}
+        while idx < len(tokens):
+            indent, kind, text, payload = tokens[idx]
+            if indent < map_indent:
+                break
+            if indent != map_indent:
+                raise ValueError(
+                    f"Inconsistent indentation in mapping: expected {map_indent}, got {indent}"
+                )
+            if kind == "block":
+                key = text
+                if key in mapping:
+                    raise ValueError(f"Duplicate key in YAML mapping: {key}")
+                mapping[key] = payload
+                idx += 1
+                continue
+            m_kv = _YAML_MAP_LINE_RE.match(text)
+            if not m_kv:
+                raise ValueError(f"Expected plain key:value at indent {indent}, got: {text}")
+            key = m_kv.group(1)
+            v_raw = m_kv.group(2)
+            if key in mapping:
+                raise ValueError(f"Duplicate key in YAML mapping: {key}")
+            idx += 1
+            if v_raw is None or v_raw.strip() == "":
+                if idx < len(tokens) and tokens[idx][0] > map_indent:
+                    child_val, idx = _parse_node(idx, tokens[idx][0])
+                    mapping[key] = child_val
+                else:
+                    raise ValueError(f"Empty mapping value without nested block under key: {key}")
+            else:
+                if idx < len(tokens) and tokens[idx][0] > map_indent:
+                    raise ValueError(f"Invalid continuation under scalar key {key}")
+                mapping[key] = _parse_yaml_subset_scalar(v_raw)
+        if not mapping:
+            raise ValueError("Empty YAML mapping")
+        return mapping, idx
+
+    if not tokens:
+        raise ValueError("Empty YAML frontmatter")
+    if tokens[0][0] != 0:
+        raise ValueError("Top-level frontmatter keys must not be indented")
+    result, next_idx = _parse_map(0, 0)
+    if next_idx != len(tokens):
+        raise ValueError("Unconsumed tokens in YAML frontmatter")
+    meta = result.get("metadata")
+    if isinstance(meta, dict):
+        for mk in meta:
+            if mk in result:
+                raise ValueError(f"Duplicate key across top-level and metadata: {mk}")
+    return result
+
+
 def parse_frontmatter_and_body(content: str) -> tuple[dict[str, Any] | None, str]:
     """Parse YAML-ish frontmatter and body from a Markdown document (e.g. SKILL.md)."""
     content = content.lstrip("\ufeff")
-    m = re.match(r"^\s*---\r?\n(.*?)\r?\n(?:---|\.\.\.)(?:\r?\n(.*))?$", content, re.DOTALL)
+    m = re.match(r"^\s*---\r?\n(.*?)\r?\n---(?:\r?\n(.*))?$", content, re.DOTALL)
     if not m:
         return None, content
     fm_raw = m.group(1)
     body = m.group(2) or ""
+    m_inner = re.match(
+        r"^(?:[^\r\n#]+\r?\n)*(?:---|\.\.\.)(?:\r?\n(.*))?$",
+        body,
+        re.DOTALL,
+    )
+    if m_inner:
+        return None, m_inner.group(1) or ""
     try:
-        if yaml is not None:
-            data = yaml.safe_load(fm_raw)
-            if isinstance(data, dict):
-                return data, body
-            return None, body
+        return _stdlib_parse_yaml_frontmatter(fm_raw), body
     except Exception:
-        pass
-    parsed: dict[str, Any] = {}
-    current_key: str | None = None
-    for line in fm_raw.splitlines():
-        line_s = line.strip()
-        if not line_s or line_s.startswith("#"):
-            continue
-        if ":" in line_s and not line.startswith(" ") and not line.startswith("\t"):
-            k, v = line_s.split(":", 1)
-            current_key = k.strip()
-            parsed[current_key] = v.strip().strip("\"'")
-        elif current_key and (line.startswith(" ") or line.startswith("\t")):
-            if isinstance(parsed[current_key], str):
-                parsed[current_key] += " " + line_s
-    return parsed, body
+        return None, body
 
 
 def normalize_frontmatter(fm: dict[str, Any] | None) -> dict[str, Any]:
     """Normalize frontmatter dictionary:
     - Merges flattened vs nested `metadata` maps
-    - Drops empty values (None, empty string, empty dict/list)
-    - Normalizes string whitespace (including multiline/folded description)
+    - Drops empty `metadata` placeholder (`metadata: ""` / `metadata: {}`)
+    - Normalizes string whitespace on `description` only when it contains no internal newlines
+      and no leading/trailing spaces (so folded `>-` and single-line quoted descriptions
+      normalize equal, while literal `|` multiline descriptions preserve their line breaks)
     - Normalizes scalar representations
     """
     if not isinstance(fm, dict):
@@ -582,45 +940,34 @@ def normalize_frontmatter(fm: dict[str, Any] | None) -> dict[str, Any]:
     meta = fm.get("metadata")
     meta_dict = meta if isinstance(meta, dict) else {}
 
-    def _is_empty(val: Any) -> bool:
-        return val is None or val == "" or val == {} or val == []
-
     def _clean_val(key: str, val: Any) -> Any:
         if isinstance(val, str):
-            val_s = val.strip()
-            if key == "description":
-                val_s = re.sub(r"\s+", " ", val_s)
-            return val_s
+            return val.replace("\r\n", "\n").replace("\r", "\n")
         elif isinstance(val, (int, float, bool)):
             return str(val)
         elif isinstance(val, dict):
-            res = {}
-            for sub_k, sub_v in val.items():
-                if not _is_empty(sub_v):
-                    res[sub_k] = _clean_val(sub_k, sub_v)
-            return res
+            return {sub_k: _clean_val(sub_k, sub_v) for sub_k, sub_v in val.items()}
         elif isinstance(val, list):
-            res = []
-            for item in val:
-                if not _is_empty(item):
-                    res.append(_clean_val(key, item))
-            return res
+            return [_clean_val(key, item) for item in val]
         return val
 
-    # 1. Process top-level keys (skipping metadata key itself)
+    # 1. Process top-level keys (skipping empty or dict metadata key itself)
     for k, v in fm.items():
-        if k == "metadata" or _is_empty(v):
+        if k == "metadata" and (isinstance(v, dict) or v is None or v == ""):
+            continue
+        if v is None:
             continue
         result[k] = _clean_val(k, v)
 
     # 2. Merge metadata subkeys into top-level
     for k, v in meta_dict.items():
-        if _is_empty(v):
+        if v is None:
             continue
-        if k not in result or _is_empty(result[k]):
-            result[k] = _clean_val(k, v)
+        cleaned = _clean_val(k, v)
+        if k not in result or result[k] == "":
+            result[k] = cleaned
 
-    return {k: v for k, v in result.items() if not _is_empty(v)}
+    return result
 
 
 def normalize_body(body: str) -> str:
@@ -630,12 +977,31 @@ def normalize_body(body: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _has_frontmatter_fence(text: str) -> bool:
+    """Return True if text starts with a YAML frontmatter fence ('---')."""
+    return bool(re.match(r"^\ufeff?\s*---\r?\n", text))
+
+
 def compare_skill_md(text_a: str, text_b: str) -> tuple[bool, list[str], bool]:
     """Compare two SKILL.md contents using normalized frontmatter and normalized body.
     Returns (is_equal, changed_fm_keys, body_differs).
+    Fails closed (is_equal=False) when either document has unparseable or unsupported YAML frontmatter.
     """
     fm_a_raw, body_a = parse_frontmatter_and_body(text_a)
     fm_b_raw, body_b = parse_frontmatter_and_body(text_b)
+
+    norm_body_a = normalize_body(body_a)
+    norm_body_b = normalize_body(body_b)
+    body_differs = (norm_body_a != norm_body_b)
+
+    if (fm_a_raw is None and _has_frontmatter_fence(text_a)) or (
+        fm_b_raw is None and _has_frontmatter_fence(text_b)
+    ):
+        return False, ["<unparsed-frontmatter>"], body_differs
+
+    if (fm_a_raw is None) != (fm_b_raw is None):
+        norm_only = normalize_frontmatter(fm_a_raw if fm_a_raw is not None else fm_b_raw)
+        return False, sorted(norm_only.keys()) or ["<frontmatter>"], body_differs
 
     norm_fm_a = normalize_frontmatter(fm_a_raw)
     norm_fm_b = normalize_frontmatter(fm_b_raw)
@@ -644,10 +1010,6 @@ def compare_skill_md(text_a: str, text_b: str) -> tuple[bool, list[str], bool]:
         k for k in (set(norm_fm_a.keys()) | set(norm_fm_b.keys()))
         if norm_fm_a.get(k) != norm_fm_b.get(k)
     )
-
-    norm_body_a = normalize_body(body_a)
-    norm_body_b = normalize_body(body_b)
-    body_differs = (norm_body_a != norm_body_b)
 
     is_equal = (len(changed_fm_keys) == 0 and not body_differs)
     return is_equal, changed_fm_keys, body_differs
@@ -976,50 +1338,57 @@ def find_configured_local_checkout(
     h = home or get_home_dir()
     cache_dir = get_repos_cache_dir(h)
 
-    cfg_dirs: list[pathlib.Path] = []
+    tfiles: list[pathlib.Path] = []
     if workspace:
-        cfg_dirs.extend([
-            workspace / ".config" / "ai-orchestration",
-            workspace,
-            workspace / "tasks",
-        ])
-    cfg_dirs.append(h / ".config" / "ai-orchestration")
+        pinfo_ws = _inspect_project_config_env(workspace, home)
+        cp_ws = pinfo_ws.get("path")
+        if pinfo_ws.get("exists") and isinstance(cp_ws, pathlib.Path) and cp_ws.is_file() and cp_ws not in tfiles:
+            tfiles.append(cp_ws)
+        for fname in ("orchestration.toml", ".ai-orchestration.local.toml"):
+            cp = workspace / ".config" / "ai-orchestration" / fname
+            if cp.is_file() and cp not in tfiles:
+                tfiles.append(cp)
+    for fname in ("orchestration.toml", ".ai-orchestration.local.toml"):
+        cp = h / ".config" / "ai-orchestration" / fname
+        if cp.is_file() and cp not in tfiles:
+            tfiles.append(cp)
+    gpath_cand = _get_global_config_path(home)
+    if gpath_cand.is_file() and gpath_cand not in tfiles:
+        tfiles.append(gpath_cand)
 
     cand_keys = [repo_name, repo_name.replace("-", "_")]
     if repo_name == "ai-orchestration":
         cand_keys.extend(["source_checkout", "source_repo", "ai_orchestration_root", "ai_orchestration", "ai-orchestration"])
 
-    for cdir in cfg_dirs:
-        for fname in ("orchestration.toml", ".ai-orchestration.local.toml"):
-            tfile = cdir / fname
-            if not tfile.is_file():
-                continue
-            try:
-                raw = tfile.read_text(encoding="utf-8", errors="replace")
-                data = None
-                if tomllib is not None:
-                    try:
-                        data = tomllib.loads(raw)
-                    except Exception:
-                        data = None
-                if isinstance(data, dict):
-                    for k in cand_keys:
-                        val = data.get(k)
-                        if isinstance(val, str) and val.strip():
-                            cand_p = pathlib.Path(val).expanduser().resolve()
-                            if cand_p.is_dir() and (cand_p / ".git").exists() and cand_p != (cache_dir / repo_name).resolve() and cache_dir not in cand_p.parents:
-                                return cand_p
-                    for sec in ("repos", "paths", "launcher"):
-                        sub = data.get(sec)
-                        if isinstance(sub, dict):
-                            for k in cand_keys:
-                                val = sub.get(k)
-                                if isinstance(val, str) and val.strip():
-                                    cand_p = pathlib.Path(val).expanduser().resolve()
-                                    if cand_p.is_dir() and (cand_p / ".git").exists() and cand_p != (cache_dir / repo_name).resolve() and cache_dir not in cand_p.parents:
-                                        return cand_p
-            except Exception:
-                pass
+    for tfile in tfiles:
+        if not tfile.is_file():
+            continue
+        try:
+            raw = tfile.read_text(encoding="utf-8", errors="replace")
+            data = None
+            if tomllib is not None:
+                try:
+                    data = tomllib.loads(raw)
+                except Exception:
+                    data = None
+            if isinstance(data, dict):
+                for k in cand_keys:
+                    val = data.get(k)
+                    if isinstance(val, str) and val.strip():
+                        cand_p = pathlib.Path(val).expanduser().resolve()
+                        if cand_p.is_dir() and (cand_p / ".git").exists() and cand_p != (cache_dir / repo_name).resolve() and cache_dir not in cand_p.parents:
+                            return cand_p
+                for sec in ("repos", "paths", "launcher"):
+                    sub = data.get(sec)
+                    if isinstance(sub, dict):
+                        for k in cand_keys:
+                            val = sub.get(k)
+                            if isinstance(val, str) and val.strip():
+                                cand_p = pathlib.Path(val).expanduser().resolve()
+                                if cand_p.is_dir() and (cand_p / ".git").exists() and cand_p != (cache_dir / repo_name).resolve() and cache_dir not in cand_p.parents:
+                                    return cand_p
+        except Exception:
+            pass
 
     real_h = get_home_dir()
     if home is None or home == real_h:
@@ -1125,6 +1494,10 @@ def check_source_repo_stale(
     }
 
 
+def _write_trash_manifest(manifest_file: pathlib.Path, manifest: list[dict[str, str]]) -> None:
+    manifest_file.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
 def trash_path(
     path: pathlib.Path,
     assistant: str | None = None,
@@ -1134,10 +1507,15 @@ def trash_path(
     workspace: pathlib.Path | None = None,
     home: pathlib.Path | None = None,
     timestamp: str | None = None,
+    before_move: Any = None,
 ) -> pathlib.Path:
     """Move a file, directory, or symlink into
     <home>/.config/ai-orchestration/trash/<assistant>/<scope-segment>/<UTC ts>/<kind>/<name>
     and write manifest.json in the <ts> dir.
+
+    Writes manifest.json before moving the source, invokes `before_move(path, dest)` before
+    any mutation so transactional callers can record the item ahead of time, and cleans up
+    if writing the manifest or moving the path fails.
     """
     if not (path.exists() or path.is_symlink()):
         return path
@@ -1177,14 +1555,16 @@ def trash_path(
         dest = kind_dir / f"{path.name}_{counter}"
         counter += 1
 
-    orig_str = str(path)
-    shutil.move(str(path), str(dest))
+    if callable(before_move):
+        before_move(path, dest)
 
+    orig_str = str(path)
     manifest_file = ts_dir / "manifest.json"
+    old_manifest_bytes = manifest_file.read_bytes() if manifest_file.is_file() else None
     manifest: list[dict[str, str]] = []
-    if manifest_file.is_file():
+    if old_manifest_bytes is not None:
         try:
-            loaded = json.loads(manifest_file.read_text(encoding="utf-8"))
+            loaded = json.loads(old_manifest_bytes.decode("utf-8"))
             if isinstance(loaded, list):
                 manifest = loaded
         except Exception:
@@ -1195,7 +1575,32 @@ def trash_path(
         "trashed_path": str(dest),
         "reason": reason,
     })
-    manifest_file.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    try:
+        _write_trash_manifest(manifest_file, manifest)
+        shutil.move(str(path), str(dest))
+    except Exception:
+        try:
+            if (dest.exists() or dest.is_symlink()) and not (path.exists() or path.is_symlink()):
+                shutil.move(str(dest), str(path))
+        except OSError:
+            pass
+        try:
+            if old_manifest_bytes is None:
+                if manifest_file.is_file() or manifest_file.is_symlink():
+                    manifest_file.unlink()
+            else:
+                manifest_file.write_bytes(old_manifest_bytes)
+        except OSError:
+            pass
+        try:
+            if kind_dir.is_dir() and not any(kind_dir.iterdir()):
+                kind_dir.rmdir()
+            if ts_dir.is_dir() and not any(ts_dir.iterdir()):
+                ts_dir.rmdir()
+        except OSError:
+            pass
+        raise
     return dest
 
 
@@ -1565,7 +1970,7 @@ def load_conflict_policy(
         "codex": "bound",
     }
     h = home or get_home_dir()
-    gpath = h / ".config" / "ai-orchestration" / "orchestration.toml"
+    gpath = _get_global_config_path(h)
 
     cfg: dict[str, Any] = {}
     try:
@@ -1574,7 +1979,7 @@ def load_conflict_policy(
             sys.path.insert(0, str(setup_scripts))
         import orchestration_config  # type: ignore
         merged, _ = orchestration_config.resolve_config(
-            global_path=gpath if gpath.exists() else None,
+            global_path=gpath,
             workspace=workspace,
         )
         cfg = merged
@@ -5470,6 +5875,11 @@ def inspect_environment(
     if "kilo" in environments:
         environments["kilo"]["kilo_effective"] = kilo_effective
 
+    cfg_ws = ws if ws is not None else pathlib.Path.cwd().resolve()
+    if cfg_ws.name == "tasks" and cfg_ws.parent != cfg_ws:
+        cfg_ws = cfg_ws.parent
+    proj_cfg_info = _inspect_project_config_env(cfg_ws, home)
+
     return {
         "clis": clis,
         "source_repos": repos_status,
@@ -5483,6 +5893,17 @@ def inspect_environment(
         "kilo_effective": kilo_effective,
         "launcher": broker_mcp_report["launcher"],
         "broker_mcp": broker_mcp_report,
+        "project_config_path": str(proj_cfg_info["path"]),
+        "project_config_exists": bool(proj_cfg_info["exists"]),
+        "project_config_write_path": str(proj_cfg_info["write_path"]),
+        "project_config_legacy": bool(proj_cfg_info["is_legacy"]),
+        "project_config": {
+            "path": str(proj_cfg_info["path"]),
+            "exists": bool(proj_cfg_info["exists"]),
+            "write_path": str(proj_cfg_info["write_path"]),
+            "legacy": bool(proj_cfg_info["is_legacy"]),
+            "warnings": list(proj_cfg_info["warnings"]),
+        },
     }
 
 
@@ -6005,6 +6426,7 @@ def install_skills(
                         "repo": op["repo"],
                         "plugin": op["plugin"],
                         "name": op["skill"],
+                        "version": "1.1.0",
                         "source_hash": hash_directory(op["src"]),
                         "installed_at": datetime.now(timezone.utc).isoformat(),
                         "mode": "copy",
@@ -6245,6 +6667,7 @@ def resolve_conflicts(
                     "repo": item["repo"],
                     "plugin": item["plugin"],
                     "name": item["skill"],
+                    "version": "1.1.0",
                     "source_hash": src_hash or compute_target_hash(target_dir),
                     "installed_at": datetime.now(timezone.utc).isoformat(),
                     "mode": "copy",
@@ -6283,6 +6706,7 @@ def resolve_conflicts(
                     "repo": item["repo"],
                     "plugin": item["plugin"],
                     "name": item["skill"],
+                    "version": "1.1.0",
                     "source_hash": hash_directory(src_dir),
                     "installed_at": datetime.now(timezone.utc).isoformat(),
                     "mode": "copy",
@@ -6998,6 +7422,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(json.dumps(report, indent=2))
         return 0
 
+    if report.get("project_config_path"):
+        print(f"Project config    : {report['project_config_path']} (exists={report.get('project_config_exists', False)})")
+        for w in report.get("project_config", {}).get("warnings", []):
+            print(f"  [WARN] {w}")
+
     print("=== CLI Binaries ===")
     for tool, info in report["clis"].items():
         status = f"OK ({info['version']}) at {info['path']}" if info["installed"] else "MISSING"
@@ -7324,7 +7753,17 @@ def acknowledge_finding(
     h = home or get_home_dir()
     ws = workspace.resolve() if workspace else None
     report = inspect_environment(ws, h)
-    groups = report.get("finding_groups", [])
+    groups = list(report.get("finding_groups", []))
+    if ws is not None or (pathlib.Path.cwd() / "tasks").is_dir():
+        try:
+            proj_doc = inspect_project_doctor(ws or pathlib.Path.cwd(), h)
+            seen_gkeys = {g.get("group_key") for g in groups}
+            for fg in proj_doc.get("findings", []):
+                if fg.get("group_key") not in seen_gkeys:
+                    groups.append(fg)
+                    seen_gkeys.add(fg.get("group_key"))
+        except Exception:
+            pass
 
     matched_group = None
     exact_matches = [g for g in groups if g["group_key"] == finding_key]
@@ -7536,6 +7975,2473 @@ def cmd_unack(args: argparse.Namespace) -> int:
     return 0 if res.get("ok") else 1
 
 
+# ---------------------------------------------------------------------------
+# Project Doctor & Convention Drift Detection (Task 19.2 / N078)
+# ---------------------------------------------------------------------------
+
+TOOL_VERSION = "1.1.0"
+CONVENTION_VERSION = "1.1.0"
+SEVERITY_RANK: dict[str, int] = {"error": 0, "warning": 1, "info": 2, "neutral": 3}
+
+_CACHED_TASKS_ENGINE: Any = None
+_CACHED_ORCH_REGISTRY: Any = None
+_CACHED_ORCH_CONFIG: Any = None
+
+
+def _load_orchestration_config() -> Any:
+    """Import orchestration_config.py from the orchestration-setup skill."""
+    global _CACHED_ORCH_CONFIG
+    if _CACHED_ORCH_CONFIG is not None:
+        return _CACHED_ORCH_CONFIG
+    oc_path = (
+        REPO_ROOT
+        / "plugins"
+        / "shared"
+        / "skills"
+        / "orchestration-setup"
+        / "scripts"
+        / "orchestration_config.py"
+    )
+    if not oc_path.is_file():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_orch_config_mod", oc_path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_orch_config_mod"] = mod
+    spec.loader.exec_module(mod)
+    _CACHED_ORCH_CONFIG = mod
+    return mod
+
+
+def _load_tasks_engine() -> Any:
+    """Import tasks_engine.py from the task-pipeline skill."""
+    global _CACHED_TASKS_ENGINE
+    if _CACHED_TASKS_ENGINE is not None:
+        return _CACHED_TASKS_ENGINE
+    te_path = (
+        REPO_ROOT
+        / "plugins"
+        / "architect-side"
+        / "skills"
+        / "task-pipeline"
+        / "scripts"
+        / "tasks_engine.py"
+    )
+    if not te_path.is_file():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_orch_tasks_engine_mod", te_path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_orch_tasks_engine_mod"] = mod
+    spec.loader.exec_module(mod)
+    _CACHED_TASKS_ENGINE = mod
+    return mod
+
+
+def _load_orchestration_registry() -> Any:
+    """Import orchestration_registry.py from scripts/."""
+    global _CACHED_ORCH_REGISTRY
+    if _CACHED_ORCH_REGISTRY is not None:
+        return _CACHED_ORCH_REGISTRY
+    reg_path = REPO_ROOT / "scripts" / "orchestration_registry.py"
+    if not reg_path.is_file():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_orch_registry_mod", reg_path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_orch_registry_mod"] = mod
+    spec.loader.exec_module(mod)
+    _CACHED_ORCH_REGISTRY = mod
+    return mod
+
+
+def _extract_installed_skill_version(skill_dir: pathlib.Path) -> str | None:
+    """Extract an explicit version string from an installed skill directory if present."""
+    if not skill_dir.is_dir():
+        return None
+
+    # 1. Check .ai-orch-source.json receipt
+    marker = skill_dir / ".ai-orch-source.json"
+    if marker.is_file():
+        try:
+            mdata = json.loads(marker.read_text(encoding="utf-8"))
+            if isinstance(mdata, dict):
+                for key in ("version", "convention_version", "plugin_version"):
+                    val = mdata.get(key)
+                    if isinstance(val, (str, int, float)) and str(val).strip():
+                        return str(val).strip()
+        except Exception:
+            pass
+
+    # 2. Check VERSION / .version file
+    for vfile in ("VERSION", ".version", "version.txt"):
+        vp = skill_dir / vfile
+        if vp.is_file():
+            try:
+                raw = vp.read_text(encoding="utf-8").strip()
+                if raw:
+                    return raw.splitlines()[0].strip()
+            except Exception:
+                pass
+
+    # 3. Check SKILL.md frontmatter or version comment
+    skill_md = skill_dir / "SKILL.md"
+    if skill_md.is_file():
+        try:
+            text = skill_md.read_text(encoding="utf-8", errors="replace")
+            fm, _ = parse_frontmatter_and_body(text)
+            if isinstance(fm, dict):
+                for key in ("version", "convention_version", "plugin_version"):
+                    val = fm.get(key)
+                    if isinstance(val, (str, int, float)) and str(val).strip():
+                        return str(val).strip()
+                meta = fm.get("metadata")
+                if isinstance(meta, dict):
+                    for key in ("version", "convention_version", "plugin_version"):
+                        val = meta.get(key)
+                        if isinstance(val, (str, int, float)) and str(val).strip():
+                            return str(val).strip()
+            m_ver = re.search(
+                r"(?:<!--\s*version:\s*([^\s>]+)\s*-->|^version:\s*['\"]?([0-9A-Za-z._-]+)['\"]?\s*$)",
+                text,
+                re.MULTILINE | re.IGNORECASE,
+            )
+            if m_ver:
+                return (m_ver.group(1) or m_ver.group(2)).strip()
+        except Exception:
+            pass
+
+    # 4. Check parent plugin .claude-plugin/plugin.json (only for known orchestration plugins)
+    if skill_dir.parent.name == "skills":
+        pjson = skill_dir.parent.parent / ".claude-plugin" / "plugin.json"
+        if pjson.is_file():
+            try:
+                pdata = json.loads(pjson.read_text(encoding="utf-8"))
+                if isinstance(pdata, dict) and pdata.get("version"):
+                    pname = str(pdata.get("name") or "").strip()
+                    if pname in ("architect-side", "executor-side", "shared", "ai-orchestration", "kilo-mcp", "claude-mcp"):
+                        return str(pdata["version"]).strip()
+            except Exception:
+                pass
+
+    return None
+
+
+KNOWN_MANAGED_SKILL_SOURCES: frozenset[str] = frozenset({"ai-orchestration", "kilo-mcp", "claude-mcp"})
+KNOWN_MANAGED_PLUGIN_NAMES: frozenset[str] = frozenset({"architect-side", "executor-side", "shared"})
+
+
+def _has_managed_skill_receipt(skill_dir: pathlib.Path, catalog_by_name: dict[str, list[dict[str, Any]]]) -> bool:
+    """Return True if `skill_dir` carries a valid `.ai-orch-source.json` receipt from a managed source."""
+    marker = skill_dir / ".ai-orch-source.json"
+    if not marker.is_file():
+        return False
+    try:
+        mdata = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(mdata, dict):
+            return False
+        repo = str(mdata.get("repo") or "").strip()
+        name = str(mdata.get("name") or skill_dir.name).strip()
+        plugin = str(mdata.get("plugin") or "").strip()
+        return bool(
+            repo in KNOWN_MANAGED_SKILL_SOURCES
+            or plugin in KNOWN_MANAGED_PLUGIN_NAMES
+            or name in catalog_by_name
+        )
+    except Exception:
+        return False
+
+
+def inspect_global_skills_and_config_drift(
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+    catalog: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Inspect global skills and global config for version/content drift against the tool.
+
+    Strictly restricted to catalog skills, skills with an ai-orch receipt, obsolete renamed skills,
+    or known orchestration plugin sources (`ai-orchestration`, `kilo-mcp`, `claude-mcp`).
+    Third-party/unrelated versioned skills are never compared against the ai-orch version.
+    """
+    h = (home or get_home_dir()).resolve()
+    cat = catalog if catalog is not None else discover_available_skills(h)
+    catalog_by_name: dict[str, list[dict[str, Any]]] = {}
+    for entry in cat.values():
+        catalog_by_name.setdefault(entry["name"], []).append(entry)
+
+    # Scan global skill installations across all assistants
+    installations: list[dict[str, Any]] = []
+    by_skill: dict[str, list[dict[str, Any]]] = {}
+
+    for assistant in ASSISTANTS:
+        roots = [h / ".kilo" / "skills", h / ".config" / "kilo" / "skills"] if assistant == "kilo" else [assistant_skills_dir(assistant, "global", None, h)]
+        seen_names: set[str] = set()
+        for sdir in roots:
+            if not sdir.is_dir():
+                continue
+            for child in sorted(sdir.iterdir()):
+                if child.name.startswith("."):
+                    continue
+                if not (child.is_dir() or child.is_symlink()):
+                    continue
+                if child.name in seen_names:
+                    continue
+                seen_names.add(child.name)
+                sname = child.name
+                s_state, s_repo, s_hash = detect_skill_state(child, cat, h)
+                inst_hash = (
+                    hash_directory(child)
+                    if (child.is_dir() and not child.is_symlink())
+                    or (child.is_symlink() and child.resolve().is_dir())
+                    else ""
+                )
+                inst_ver = _extract_installed_skill_version(child)
+                has_receipt = _has_managed_skill_receipt(child, catalog_by_name)
+                is_managed = bool(
+                    sname in catalog_by_name
+                    or has_receipt
+                    or sname in OBSOLETE_SKILL_RENAMES
+                    or (s_repo in KNOWN_MANAGED_SKILL_SOURCES)
+                )
+                rec = {
+                    "assistant": assistant,
+                    "scope": "global",
+                    "name": sname,
+                    "path": str(child),
+                    "state": s_state,
+                    "installed_version": inst_ver,
+                    "installed_hash": inst_hash,
+                    "expected_version": TOOL_VERSION if is_managed else None,
+                    "expected_hash": s_hash,
+                    "source_repo": s_repo,
+                    "has_receipt": has_receipt,
+                    "is_managed": is_managed,
+                }
+                installations.append(rec)
+                by_skill.setdefault(sname, []).append(rec)
+
+    # Also inspect Claude plugin skills and stale plugins from known managed plugin sources
+    stale_plugins = discover_stale_claude_plugins(h)
+    for sp in discover_claude_plugin_skills(h):
+        sname = str(sp.get("skill_name") or sp.get("name") or "").strip()
+        if not sname:
+            continue
+        plugin_id = str(sp.get("plugin_id") or "")
+        plugin_short = plugin_id.split("@", 1)[0] if "@" in plugin_id else plugin_id
+        marketplace = plugin_id.split("@", 1)[1] if "@" in plugin_id else str(sp.get("source_repo") or "")
+        is_managed_plugin = bool(
+            sname in catalog_by_name
+            or marketplace in KNOWN_MANAGED_SKILL_SOURCES
+            or plugin_short in KNOWN_MANAGED_PLUGIN_NAMES
+        )
+        sp_path = pathlib.Path(sp["path"])
+        inst_ver = _extract_installed_skill_version(sp_path) or sp.get("version")
+        rec = {
+            "assistant": "claude",
+            "scope": "global",
+            "name": sname,
+            "path": sp["path"],
+            "state": sp.get("state", "up-to-date"),
+            "installed_version": inst_ver,
+            "installed_hash": sp.get("installed_hash", ""),
+            "expected_version": TOOL_VERSION if is_managed_plugin else None,
+            "expected_hash": sp.get("source_hash"),
+            "source_repo": marketplace or sp.get("source_repo"),
+            "has_receipt": False,
+            "is_managed": is_managed_plugin,
+        }
+        installations.append(rec)
+        by_skill.setdefault(sname, []).append(rec)
+
+    drifted_skills: list[dict[str, Any]] = []
+    drifted_names: set[str] = set()
+    versions_found: set[str] = set()
+    reasons: list[str] = []
+
+    # 1. Check each managed installed skill against tool version & catalog hash
+    for rec in installations:
+        if not rec["is_managed"]:
+            continue
+        sname = rec["name"]
+        inst_ver = rec["installed_version"]
+        if inst_ver:
+            versions_found.add(inst_ver)
+
+        s_state = rec["state"]
+        ver_mismatch = bool(inst_ver and inst_ver != TOOL_VERSION)
+        state_drifted = (
+            s_state in ("outdated", "outdated-legacy", "modified-or-outdated", "foreign")
+            or s_state.startswith("obsolete-")
+        )
+        if ver_mismatch or state_drifted:
+            drifted_names.add(sname)
+            reason_parts = []
+            if ver_mismatch:
+                reason_parts.append(f"installed version {inst_ver!r} != tool version {TOOL_VERSION!r}")
+            if state_drifted:
+                reason_parts.append(f"state={s_state}")
+            reason_str = f"{rec['assistant']}:{sname} ({', '.join(reason_parts)})"
+            reasons.append(reason_str)
+            drifted_skills.append({
+                **rec,
+                "drift_reason": ", ".join(reason_parts),
+            })
+
+    # 2. Check cross-installation version/content divergence for the same managed skill name
+    #    (e.g. two fake installed versions across assistants or roots)
+    for sname, recs in sorted(by_skill.items()):
+        managed_recs = [r for r in recs if r["is_managed"]]
+        if len(managed_recs) < 2:
+            continue
+        distinct_vers = sorted({r["installed_version"] for r in managed_recs if r["installed_version"]})
+        if len(distinct_vers) > 1:
+            drifted_names.add(sname)
+            reasons.append(f"{sname}: multiple installed versions {distinct_vers}")
+            for r in managed_recs:
+                if r not in drifted_skills:
+                    drifted_skills.append({**r, "drift_reason": f"version mismatch across installs {distinct_vers}"})
+            continue
+        # Content divergence across global installs of the same managed skill
+        first_path = pathlib.Path(managed_recs[0]["path"])
+        diverged = False
+        for other in managed_recs[1:]:
+            other_path = pathlib.Path(other["path"])
+            if managed_recs[0]["installed_hash"] != other["installed_hash"] and not skill_equivalent(first_path, other_path):
+                diverged = True
+                break
+        if diverged:
+            drifted_names.add(sname)
+            reasons.append(f"{sname}: content/version differs across global installations ({[r['assistant'] for r in managed_recs]})")
+            for r in managed_recs:
+                if r not in drifted_skills:
+                    drifted_skills.append({**r, "drift_reason": "content differs across global installations"})
+
+    # 3. Check if multiple explicit versions exist across installed managed skills
+    if len(versions_found) > 1:
+        for rec in installations:
+            if rec["is_managed"] and rec["installed_version"]:
+                drifted_names.add(rec["name"])
+                if rec not in drifted_skills:
+                    drifted_skills.append({
+                        **rec,
+                        "drift_reason": f"inconsistent installed versions across global skills: {sorted(versions_found)}",
+                    })
+        reasons.append(f"multiple skill versions installed globally: {sorted(versions_found)}")
+
+    # 4. Stale Claude plugins (only from known managed plugin sources)
+    for sp in stale_plugins:
+        pname = str(sp.get("plugin") or "")
+        pshort = pname.split("@", 1)[0] if "@" in pname else pname
+        marketplace = str(sp.get("marketplace") or (pname.split("@", 1)[1] if "@" in pname else ""))
+        if marketplace not in KNOWN_MANAGED_SKILL_SOURCES and pshort not in KNOWN_MANAGED_PLUGIN_NAMES:
+            continue
+        drifted_names.add(pname)
+        reasons.append(
+            f"Claude plugin {pname}: cached {sp.get('cached_version')} vs source {sp.get('source_version')}"
+        )
+        drifted_skills.append({
+            "assistant": "claude",
+            "scope": "global",
+            "name": pname,
+            "path": sp["install_path"],
+            "state": "stale-plugin-copy",
+            "installed_version": sp.get("cached_version"),
+            "installed_hash": sp.get("cached_commit") or "",
+            "expected_version": sp.get("source_version") or TOOL_VERSION,
+            "expected_hash": sp.get("source_commit"),
+            "source_repo": sp.get("marketplace"),
+            "drift_reason": "stale Claude plugin cache",
+        })
+
+    # Global config inspection
+    try:
+        oc = _load_orchestration_config()
+    except Exception:
+        oc = None
+    gpath = (
+        pathlib.Path(global_config).resolve()
+        if global_config is not None
+        else _get_global_config_path(home)
+    )
+    global_cfg_drifted = False
+    global_cfg_reasons: list[str] = []
+    global_cfg_version: Any = None
+    if gpath.is_file() and oc is not None:
+        try:
+            raw_gcfg = oc.load_toml_file(gpath)
+            schema_ver = raw_gcfg.get("schema_version", 1)
+            global_cfg_version = raw_gcfg.get("convention_version") or raw_gcfg.get("version") or schema_ver
+            if schema_ver != 1:
+                global_cfg_drifted = True
+                global_cfg_reasons.append(f"schema_version={schema_ver!r} (expected 1)")
+            explicit_ver = raw_gcfg.get("convention_version") or raw_gcfg.get("version") or raw_gcfg.get("tool_version")
+            if explicit_ver is not None and str(explicit_ver).strip() != TOOL_VERSION:
+                global_cfg_drifted = True
+                global_cfg_reasons.append(
+                    f"global config version {explicit_ver!r} != tool version {TOOL_VERSION!r}"
+                )
+            merged_gcfg = oc.deep_merge(oc.DEFAULT_GLOBAL_CONFIG, raw_gcfg)
+            g_errors, _ = oc.validate_config(merged_gcfg)
+            if g_errors:
+                global_cfg_drifted = True
+                global_cfg_reasons.extend(g_errors)
+        except Exception as exc:
+            global_cfg_drifted = True
+            global_cfg_reasons.append(f"invalid TOML in {gpath}: {exc}")
+
+    return {
+        "tool_version": TOOL_VERSION,
+        "skills": {
+            "drifted": len(drifted_names) > 0,
+            "drifted_names": sorted(drifted_names),
+            "versions_found": sorted(versions_found),
+            "reasons": reasons,
+            "drifted_skills": drifted_skills,
+            "installed_count": len(installations),
+        },
+        "global_config": {
+            "path": str(gpath),
+            "exists": gpath.is_file(),
+            "version": global_cfg_version,
+            "expected_version": TOOL_VERSION,
+            "drifted": global_cfg_drifted,
+            "reasons": global_cfg_reasons,
+        },
+    }
+
+
+def _make_doctor_finding(
+    *,
+    group_key: str,
+    kind: str,
+    title: str,
+    severity: str,
+    message: str,
+    fix_command: str,
+    path: str,
+    names: list[str],
+    entries: list[dict[str, Any]],
+    acks: dict[str, dict[str, Any]],
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Construct a standardized doctor finding dict with ack/unack support."""
+    acked, ack_info = is_finding_acknowledged(kind, names, entries, acks, group_key=group_key)
+    eff_severity = "info" if acked else severity
+    finding: dict[str, Any] = {
+        "id": group_key,
+        "group_key": group_key,
+        "group": f"project:{kind}",
+        "title": title,
+        "kind": kind,
+        "names": names,
+        "path": path,
+        "severity": eff_severity,
+        "acknowledged": acked,
+        "message": message,
+        "fix": fix_command,
+        "fix_command": fix_command,
+        "locations": [{"scope": "project", "path": path}],
+        "entries": entries,
+        "fixable": True,
+        "actionable": True,
+        "actions": [{"action": "fix", "command": fix_command, "path": path}],
+        "advice": [message],
+        "count": 1,
+    }
+    if ack_info:
+        finding["ack_info"] = ack_info
+    if extra:
+        finding.update(extra)
+    return finding
+
+
+LEGACY_HEADER_DIAGNOSTIC_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bmissing (?:mandatory|required) (?:microtask )?header field", re.IGNORECASE),
+    re.compile(r"\bmissing required '(?:id|kind)' header field\b", re.IGNORECASE),
+    re.compile(r"\bunknown (?:microtask |use-case )?header field", re.IGNORECASE),
+    re.compile(r"\b(?:core |optional |microtask |use-case )?header fields out of order\b", re.IGNORECASE),
+    re.compile(r"\boptional field '[^']+' must appear after 'handoff'", re.IGNORECASE),
+    re.compile(r"\bheader field '[^']+' cannot be empty\b", re.IGNORECASE),
+    re.compile(r"\bis missing 'approval' header field\b", re.IGNORECASE),
+    re.compile(r"\bnon-canonical state spelling\b", re.IGNORECASE),
+    re.compile(r"\blegacy free-text decider\b", re.IGNORECASE),
+    re.compile(r"\bresidual 'verification pending:' line\b", re.IGNORECASE),
+)
+
+
+def _is_legacy_header_diagnostic(msg: str) -> bool:
+    """Return True if a `validate_tasks_tree` diagnostic represents a legacy header schema issue."""
+    return any(pat.search(msg) for pat in LEGACY_HEADER_DIAGNOSTIC_PATTERNS)
+
+
+def inspect_project_doctor(
+    workspace: pathlib.Path | str | None = None,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    """Run project & global convention drift checks (Task 19.2 / N078).
+
+    Detects:
+      1. Missing or legacy project configuration (`missing-project-config` / `legacy-project-config`)
+      2. Unregistered or stale workspace in the registry (`unregistered-workspace`)
+      3. `tasks/00-INDEX.md` missing generated-region markers or out of sync (`index-missing-markers` / `index-out-of-sync` / `missing-index`)
+      4. Stale rendered `AGENTS.md` or duplicated hand-written orchestration blocks (`stale-agents-md` / `duplicated-agents-md`)
+      5. Task header fields from older schemas (`legacy-task-headers`) and non-header `tasks validate` errors (`tasks-validation-errors`)
+      6. Missing or outdated `tasks/convention_version` (`convention-version-drift`)
+      7. Global skills or global config of a different version from the tool (`global-skill-drift` / `global-config-drift`)
+      8. Any internal render, import, or check execution failure (`doctor-check-failed`)
+    """
+    h = (home or get_home_dir()).resolve()
+    ws = pathlib.Path(workspace or ".").resolve()
+    tasks_dir = ws / "tasks"
+    gpath = (
+        pathlib.Path(global_config).resolve()
+        if global_config is not None
+        else _get_global_config_path(home)
+    )
+
+    acks = load_doctor_acks(h)
+    findings: list[dict[str, Any]] = []
+
+    def _emit_check_failed(check_name: str, target_path: pathlib.Path, exc: Any, fix_cmd: str) -> None:
+        err_str = f"Doctor check '{check_name}' failed for {target_path}: {exc}. Fix: {fix_cmd}"
+        findings.append(
+            _make_doctor_finding(
+                group_key=f"project-drift:doctor-check-failed:{check_name}",
+                kind="doctor-check-failed",
+                title=f"Doctor check failed ({check_name})",
+                severity="error",
+                message=err_str,
+                fix_command=fix_cmd,
+                path=str(target_path),
+                names=[target_path.name or check_name],
+                entries=[{
+                    "name": target_path.name or check_name,
+                    "path": str(target_path),
+                    "scope": "project",
+                    "state": "check-failed",
+                    "installed_hash": hashlib.sha256(str(exc).encode("utf-8")).hexdigest(),
+                }],
+                acks=acks,
+                extra={"check": check_name, "error": str(exc)},
+            )
+        )
+
+    try:
+        te = _load_tasks_engine()
+        if te is None:
+            _emit_check_failed(
+                "import-tasks-engine",
+                ws,
+                "tasks_engine.py could not be loaded",
+                "ai-orch env status",
+            )
+    except Exception as exc:
+        te = None
+        _emit_check_failed("import-tasks-engine", ws, exc, "ai-orch env status")
+
+    try:
+        oc = _load_orchestration_config()
+        if oc is None:
+            _emit_check_failed(
+                "import-orchestration-config",
+                ws,
+                "orchestration_config.py could not be loaded",
+                "ai-orch env status",
+            )
+    except Exception as exc:
+        oc = None
+        _emit_check_failed("import-orchestration-config", ws, exc, "ai-orch env status")
+
+    try:
+        reg = _load_orchestration_registry()
+        if reg is None:
+            _emit_check_failed(
+                "import-orchestration-registry",
+                ws,
+                "orchestration_registry.py could not be loaded",
+                "ai-orch env status",
+            )
+    except Exception as exc:
+        reg = None
+        _emit_check_failed("import-orchestration-registry", ws, exc, "ai-orch env status")
+
+    # ------------------------------------------------------------------
+    # 1. Convention version check (`tasks/convention_version`)
+    # ------------------------------------------------------------------
+    conv_file = tasks_dir / "convention_version"
+    recorded_conv: str | None = None
+    if te is not None and tasks_dir.is_dir():
+        try:
+            recorded_conv = te.read_convention_version(tasks_dir)
+        except Exception as exc:
+            _emit_check_failed("convention-version", conv_file, exc, f"ai-orch upgrade --project {ws}")
+            recorded_conv = None
+    elif conv_file.is_file():
+        try:
+            recorded_conv = conv_file.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+        except Exception as exc:
+            _emit_check_failed("convention-version", conv_file, exc, f"ai-orch upgrade --project {ws}")
+            recorded_conv = None
+
+    conv_up_to_date = (recorded_conv == CONVENTION_VERSION)
+    if not conv_up_to_date:
+        conv_msg = (
+            f"Project convention_version is not recorded in {conv_file} "
+            f"(tool convention_version is {CONVENTION_VERSION}). "
+            f"Fix: ai-orch upgrade --project {ws}"
+            if recorded_conv is None
+            else f"Project convention_version is {recorded_conv!r}, "
+            f"expected tool convention_version {CONVENTION_VERSION!r}. "
+            f"Fix: ai-orch upgrade --project {ws}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:convention-version",
+                kind="convention-version-drift",
+                title="Project convention_version missing or outdated",
+                severity="warning",
+                message=conv_msg,
+                fix_command=f"ai-orch upgrade --project {ws}",
+                path=str(conv_file),
+                names=["convention_version"],
+                entries=[{
+                    "name": "convention_version",
+                    "path": str(conv_file),
+                    "scope": "project",
+                    "state": "missing" if recorded_conv is None else "outdated",
+                    "installed_hash": recorded_conv or "missing",
+                }],
+                acks=acks,
+                extra={
+                    "current_version": recorded_conv,
+                    "expected_version": CONVENTION_VERSION,
+                },
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 2. Project config check (`missing-project-config` / `legacy-project-config`)
+    # ------------------------------------------------------------------
+    proj_cfg_info = _inspect_project_config_env(ws, home, gpath)
+    if not proj_cfg_info.get("exists"):
+        cfg_fix = f"ai-orch config init-project --workspace {ws}"
+        cfg_msg = (
+            f"Missing project orchestration configuration for {ws.name} "
+            f"(expected at {proj_cfg_info.get('write_path')}). Fix: {cfg_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:missing-project-config",
+                kind="missing-project-config",
+                title="Missing project orchestration configuration",
+                severity="warning",
+                message=cfg_msg,
+                fix_command=cfg_fix,
+                path=str(proj_cfg_info.get("write_path") or (ws / ".ai-orchestration.local.toml")),
+                names=["orchestration.toml"],
+                entries=[{
+                    "name": "orchestration.toml",
+                    "path": str(proj_cfg_info.get("write_path") or (ws / ".ai-orchestration.local.toml")),
+                    "scope": "project",
+                    "state": "missing",
+                    "installed_hash": "missing",
+                }],
+                acks=acks,
+            )
+        )
+    elif proj_cfg_info.get("is_legacy") or proj_cfg_info.get("legacy_paths"):
+        legacy_p = proj_cfg_info.get("path") if proj_cfg_info.get("is_legacy") else proj_cfg_info["legacy_paths"][0]
+        cfg_fix = f"ai-orch upgrade --project {ws}"
+        cfg_msg = (
+            f"Project configuration is at legacy location {legacy_p} "
+            f"(canonical location: {proj_cfg_info.get('write_path')}). Fix: {cfg_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:legacy-project-config",
+                kind="legacy-project-config",
+                title="Project configuration in legacy location",
+                severity="warning",
+                message=cfg_msg,
+                fix_command=cfg_fix,
+                path=str(legacy_p),
+                names=["orchestration.toml"],
+                entries=[{
+                    "name": "orchestration.toml",
+                    "path": str(legacy_p),
+                    "scope": "project",
+                    "state": "legacy",
+                }],
+                acks=acks,
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 3. Workspace registration check (`unregistered-workspace`)
+    # ------------------------------------------------------------------
+    ws_registered = False
+    ws_stale = False
+    ws_check_failed = False
+    ws_stale_reasons: list[str] = []
+    ws_record: dict[str, Any] | None = None
+    if reg is not None:
+        try:
+            cdir = get_config_dir(h)
+            nearest_ws, proj_row = reg.resolve_workspace_for_path(ws, config_dir=cdir)
+            if nearest_ws is not None:
+                n_path = pathlib.Path(nearest_ws["canonical_path"]).resolve()
+                if n_path == ws:
+                    ws_registered = True
+                    ws_record = nearest_ws
+                elif proj_row is not None:
+                    p_path = (n_path / proj_row["rel_path"]).resolve()
+                    if p_path == ws:
+                        ws_registered = True
+                        ws_record = nearest_ws
+                if ws_registered:
+                    try:
+                        st = ws.stat()
+                        if nearest_ws.get("device") != st.st_dev or nearest_ws.get("inode") != st.st_ino:
+                            ws_stale = True
+                            ws_stale_reasons.append("device/inode mismatch")
+                    except OSError:
+                        ws_stale = True
+                        ws_stale_reasons.append("workspace directory inaccessible")
+        except Exception as exc:
+            ws_registered = False
+            ws_check_failed = True
+            _emit_check_failed("workspace-registry", ws, exc, f"ai-orch workspace register {ws} --apply")
+
+    if (not ws_registered or ws_stale) and not ws_check_failed and reg is not None:
+        reg_fix = f"ai-orch workspace register {ws} --apply"
+        reg_msg = (
+            f"Workspace {ws} is not registered in the workspace registry. Fix: {reg_fix}"
+            if not ws_registered
+            else f"Workspace registration for {ws} is stale ({', '.join(ws_stale_reasons)}). Fix: {reg_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:unregistered-workspace",
+                kind="unregistered-workspace",
+                title="Workspace not registered in registry" if not ws_registered else "Stale workspace registration",
+                severity="warning",
+                message=reg_msg,
+                fix_command=reg_fix,
+                path=str(ws),
+                names=[ws.name],
+                entries=[{
+                    "name": ws.name,
+                    "path": str(ws),
+                    "scope": "project",
+                    "state": "unregistered" if not ws_registered else "stale",
+                    "installed_hash": "unregistered" if not ws_registered else "stale",
+                }],
+                acks=acks,
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 4. `tasks/00-INDEX.md` markers & sync check (`index-missing-markers`)
+    # ------------------------------------------------------------------
+    idx_path = tasks_dir / "00-INDEX.md"
+    idx_has_markers = False
+    idx_in_sync = False
+    idx_check_failed = False
+    if tasks_dir.is_dir() and te is not None:
+        if not idx_path.is_file():
+            idx_fix = f"ai-orch tasks upgrade --tasks-dir {tasks_dir}"
+            idx_msg = f"Missing task index {idx_path}. Fix: {idx_fix}"
+            findings.append(
+                _make_doctor_finding(
+                    group_key="project-drift:index-missing-markers",
+                    kind="index-missing-markers",
+                    title="Task index 00-INDEX.md is missing",
+                    severity="error",
+                    message=idx_msg,
+                    fix_command=idx_fix,
+                    path=str(idx_path),
+                    names=["00-INDEX.md"],
+                    entries=[{
+                        "name": "00-INDEX.md",
+                        "path": str(idx_path),
+                        "scope": "project",
+                        "state": "missing",
+                        "installed_hash": "missing",
+                    }],
+                    acks=acks,
+                )
+            )
+        else:
+            idx_text = idx_path.read_text(encoding="utf-8", errors="replace")
+            try:
+                idx_has_markers = bool(te.has_generated_markers(idx_text))
+            except Exception as exc:
+                idx_has_markers = False
+                idx_check_failed = True
+                _emit_check_failed("index-markers", idx_path, exc, f"ai-orch tasks validate --tasks-dir {tasks_dir}")
+            if not idx_has_markers and not idx_check_failed:
+                idx_fix = f"ai-orch tasks sync-index --tasks-dir {tasks_dir} --adopt --apply"
+                idx_msg = (
+                    f"{idx_path} has no generated-region markers (<!-- ai-orch:generated ... -->). "
+                    f"Fix: {idx_fix}"
+                )
+                findings.append(
+                    _make_doctor_finding(
+                        group_key="project-drift:index-missing-markers",
+                        kind="index-missing-markers",
+                        title="00-INDEX.md has no generated-region markers",
+                        severity="error",
+                        message=idx_msg,
+                        fix_command=idx_fix,
+                        path=str(idx_path),
+                        names=["00-INDEX.md"],
+                        entries=[{
+                            "name": "00-INDEX.md",
+                            "path": str(idx_path),
+                            "scope": "project",
+                            "state": "missing-markers",
+                        }],
+                        acks=acks,
+                    )
+                )
+            elif idx_has_markers:
+                try:
+                    rendered_idx = te.render_synced_index(tasks_dir, idx_text, adopt=False)
+                    idx_in_sync = (rendered_idx.strip() == idx_text.strip())
+                except Exception as exc:
+                    idx_in_sync = False
+                    idx_check_failed = True
+                    _emit_check_failed("index-sync", idx_path, exc, f"ai-orch tasks validate --tasks-dir {tasks_dir}")
+                if not idx_in_sync and not idx_check_failed:
+                    idx_fix = f"ai-orch tasks sync-index --tasks-dir {tasks_dir} --apply"
+                    idx_msg = f"{idx_path} is out of sync with task files on disk. Fix: {idx_fix}"
+                    findings.append(
+                        _make_doctor_finding(
+                            group_key="project-drift:index-out-of-sync",
+                            kind="index-out-of-sync",
+                            title="00-INDEX.md is out of sync with disk",
+                            severity="warning",
+                            message=idx_msg,
+                            fix_command=idx_fix,
+                            path=str(idx_path),
+                            names=["00-INDEX.md"],
+                            entries=[{
+                                "name": "00-INDEX.md",
+                                "path": str(idx_path),
+                                "scope": "project",
+                                "state": "out-of-sync",
+                            }],
+                            acks=acks,
+                        )
+                    )
+
+    # ------------------------------------------------------------------
+    # 5. `AGENTS.md` check (stale rendered block or duplicated hand-written blocks)
+    # ------------------------------------------------------------------
+    agents_md_path = ws / "AGENTS.md"
+    tasks_agents_path = tasks_dir / "AGENTS.md"
+    agents_stale_rendered = False
+    agents_dup_sections: list[str] = []
+    agents_manual_review_sections: list[str] = []
+    tasks_agents_stale = False
+    agents_check_failed = False
+
+    if oc is not None:
+        try:
+            cfg, _ = oc.resolve_config(gpath, ws)
+            expected_block = oc.render_agents_md_block(cfg, ws, gpath)
+            if not agents_md_path.is_file():
+                agents_stale_rendered = True
+            else:
+                existing_agents_text = agents_md_path.read_text(encoding="utf-8", errors="replace")
+                agents_dup_sections = oc.find_duplicated_handwritten_agents_sections(
+                    existing_agents_text,
+                    current_block=expected_block,
+                )
+                if hasattr(oc, "find_preserved_manual_review_agents_sections"):
+                    agents_manual_review_sections = oc.find_preserved_manual_review_agents_sections(
+                        existing_agents_text,
+                        current_block=expected_block,
+                    )
+                has_begin_end = (
+                    oc.BEGIN_MARKER in existing_agents_text and oc.END_MARKER in existing_agents_text
+                )
+                if not has_begin_end:
+                    agents_stale_rendered = True
+                else:
+                    try:
+                        replaced = oc.inject_or_replace_agents_block(existing_agents_text, expected_block)
+                        if replaced != existing_agents_text:
+                            agents_stale_rendered = True
+                    except getattr(oc, "AgentsMdManagedBlockModifiedError", ValueError):
+                        agents_stale_rendered = True
+                        canon_label = "canonical <!-- BEGIN ai-orchestration --> block"
+                        if canon_label not in agents_manual_review_sections:
+                            agents_manual_review_sections.insert(0, canon_label)
+        except Exception as exc:
+            agents_check_failed = True
+            _emit_check_failed("agents-md", agents_md_path, exc, f"ai-orch config validate --workspace {ws}")
+
+    if te is not None and tasks_dir.is_dir() and tasks_agents_path.is_file():
+        try:
+            t_agents_text = tasks_agents_path.read_text(encoding="utf-8", errors="replace")
+            if te.render_upgraded_agents_md(t_agents_text, tasks_dir=tasks_dir) != t_agents_text:
+                tasks_agents_stale = True
+        except Exception as exc:
+            agents_check_failed = True
+            _emit_check_failed("tasks-agents-md", tasks_agents_path, exc, f"ai-orch tasks upgrade --tasks-dir {tasks_dir}")
+
+    if agents_stale_rendered or agents_dup_sections or tasks_agents_stale:
+        agents_fix = (
+            f"ai-orch upgrade --project {ws}"
+            if agents_dup_sections or tasks_agents_stale
+            else f"ai-orch config render-agents-md --workspace {ws} --apply"
+        )
+        detail_parts: list[str] = []
+        if not agents_md_path.is_file():
+            detail_parts.append(f"{agents_md_path} is missing")
+        else:
+            if agents_stale_rendered:
+                detail_parts.append(f"{agents_md_path} rendered block is missing or stale")
+            if agents_dup_sections:
+                detail_parts.append(
+                    f"{agents_md_path} has duplicated hand-written orchestration blocks outside markers "
+                    f"({', '.join(agents_dup_sections)})"
+                )
+            if agents_manual_review_sections:
+                detail_parts.append(
+                    f"{agents_md_path} has section(s) preserved for manual review "
+                    f"({', '.join(agents_manual_review_sections)})"
+                )
+        if tasks_agents_stale:
+            detail_parts.append(f"{tasks_agents_path} managed task-pipeline block is missing or outdated")
+
+        agents_kind = "duplicated-agents-md" if (agents_dup_sections and not agents_stale_rendered) else "stale-agents-md"
+        agents_msg = "; ".join(detail_parts) + f". Fix: {agents_fix}"
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:stale-agents-md",
+                kind=agents_kind,
+                title="Stale or duplicated rendered AGENTS.md",
+                severity="warning",
+                message=agents_msg,
+                fix_command=agents_fix,
+                path=str(agents_md_path),
+                names=["AGENTS.md"],
+                entries=[{
+                    "name": "AGENTS.md",
+                    "path": str(agents_md_path),
+                    "scope": "project",
+                    "state": "duplicated" if agents_dup_sections else "stale",
+                    "installed_hash": compute_target_hash(agents_md_path) or "missing",
+                }],
+                acks=acks,
+                extra={
+                    "stale_rendered": agents_stale_rendered,
+                    "duplicated_blocks": bool(agents_dup_sections),
+                    "duplicated_sections": agents_dup_sections,
+                    "manual_review_sections": agents_manual_review_sections,
+                    "tasks_agents_stale": tasks_agents_stale,
+                    "subkinds": (
+                        (["stale-agents-md"] if agents_stale_rendered else [])
+                        + (["duplicated-agents-md"] if agents_dup_sections else [])
+                        + (["stale-tasks-agents-md"] if tasks_agents_stale else [])
+                    ),
+                },
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 6. Task header fields from older schemas (`legacy-task-headers`)
+    #    and separate general task validation errors (`tasks-validation-errors`)
+    # ------------------------------------------------------------------
+    val_errors: list[str] = []
+    val_warnings: list[str] = []
+    header_errors: list[str] = []
+    header_issues: list[str] = []
+    other_val_errors: list[str] = []
+    other_val_warnings: list[str] = []
+    tasks_val_check_failed = False
+
+    if te is not None and tasks_dir.is_dir():
+        try:
+            val_errors, val_warnings, emergent, _ = te.validate_tasks_tree(tasks_dir)
+            for err in val_errors:
+                if _is_legacy_header_diagnostic(err):
+                    header_errors.append(err)
+                    header_issues.append(err)
+                else:
+                    other_val_errors.append(err)
+            for warn in val_warnings:
+                if _is_legacy_header_diagnostic(warn):
+                    header_issues.append(warn)
+                else:
+                    other_val_warnings.append(warn)
+            for em in emergent:
+                vp = em.get("verification_pending")
+                st_raw = (em.get("headers", {}).get("state") or "").strip().lower()
+                if vp and st_raw not in ("delivered", ""):
+                    header_issues.append(
+                        f"{em.get('rel_path')}: residual 'verification pending:' line on task in state {st_raw!r}"
+                    )
+        except Exception as exc:
+            tasks_val_check_failed = True
+            _emit_check_failed("tasks-validate", tasks_dir, exc, f"ai-orch tasks validate --tasks-dir {tasks_dir}")
+
+    if header_issues:
+        hdr_severity = "error" if header_errors else "warning"
+        hdr_fix = f"ai-orch upgrade --project {ws}"
+        sample = "; ".join(header_issues[:3])
+        more = f" (+{len(header_issues) - 3} more)" if len(header_issues) > 3 else ""
+        hdr_msg = (
+            f"Found {len(header_issues)} legacy task header / schema issue(s) "
+            f"({len(header_errors)} error(s)): {sample}{more}. Fix: {hdr_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:legacy-task-headers",
+                kind="legacy-task-headers",
+                title="Task header fields from older schemas",
+                severity=hdr_severity,
+                message=hdr_msg,
+                fix_command=hdr_fix,
+                path=str(tasks_dir),
+                names=["tasks"],
+                entries=[{
+                    "name": "tasks",
+                    "path": str(tasks_dir),
+                    "scope": "project",
+                    "state": "invalid-headers",
+                    "installed_hash": hashlib.sha256("\n".join(sorted(header_issues)).encode("utf-8")).hexdigest(),
+                }],
+                acks=acks,
+                extra={
+                    "error_count": len(header_errors),
+                    "issue_count": len(header_issues),
+                    "errors": header_errors,
+                    "issues": header_issues,
+                },
+            )
+        )
+
+    if other_val_errors:
+        val_fix = f"ai-orch tasks validate --tasks-dir {tasks_dir}"
+        sample_val = "; ".join(other_val_errors[:3])
+        more_val = f" (+{len(other_val_errors) - 3} more)" if len(other_val_errors) > 3 else ""
+        val_msg = (
+            f"Found {len(other_val_errors)} task validation error(s): {sample_val}{more_val}. Fix: {val_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:tasks-validation-errors",
+                kind="tasks-validation-errors",
+                title="Task validation errors",
+                severity="error",
+                message=val_msg,
+                fix_command=val_fix,
+                path=str(tasks_dir),
+                names=["tasks"],
+                entries=[{
+                    "name": "tasks",
+                    "path": str(tasks_dir),
+                    "scope": "project",
+                    "state": "validation-errors",
+                    "installed_hash": hashlib.sha256("\n".join(sorted(other_val_errors)).encode("utf-8")).hexdigest(),
+                }],
+                acks=acks,
+                extra={
+                    "error_count": len(other_val_errors),
+                    "warning_count": len(other_val_warnings),
+                    "errors": other_val_errors,
+                    "warnings": other_val_warnings,
+                },
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 7. Global skills & global config version drift (`global-skill-drift` / `global-config-drift`)
+    # ------------------------------------------------------------------
+    global_drift = inspect_global_skills_and_config_drift(h, gpath)
+    g_skills = global_drift["skills"]
+    if g_skills["drifted"]:
+        sk_fix = "ai-orch env install-skills --scope global --overwrite"
+        sk_reasons = "; ".join(g_skills["reasons"][:4])
+        sk_msg = (
+            f"Global skill version/content drift detected across {len(g_skills['drifted_names'])} skill(s) "
+            f"(tool version {TOOL_VERSION}): {sk_reasons}. Fix: {sk_fix}"
+        )
+        sk_entries = [
+            {
+                "name": item["name"],
+                "path": item["path"],
+                "assistant": item.get("assistant", "global"),
+                "scope": "global",
+                "state": item.get("state", "drifted"),
+                "installed_hash": f"{item.get('installed_version') or ''}:{item.get('installed_hash') or ''}",
+            }
+            for item in g_skills["drifted_skills"]
+        ]
+        findings.append(
+            _make_doctor_finding(
+                group_key="global-drift:skills",
+                kind="global-skill-drift",
+                title="Global skills version or content drift",
+                severity="warning",
+                message=sk_msg,
+                fix_command=sk_fix,
+                path=str(h),
+                names=g_skills["drifted_names"],
+                entries=sk_entries,
+                acks=acks,
+                extra={
+                    "tool_version": TOOL_VERSION,
+                    "versions_found": g_skills["versions_found"],
+                    "drifted_skills": g_skills["drifted_skills"],
+                },
+            )
+        )
+
+    g_cfg = global_drift["global_config"]
+    if g_cfg["drifted"]:
+        gcfg_fix = f"ai-orch config init-global --global-config {g_cfg['path']} --force"
+        gcfg_msg = (
+            f"Global configuration at {g_cfg['path']} has version/schema drift "
+            f"({'; '.join(g_cfg['reasons'])}). Fix: {gcfg_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="global-drift:config",
+                kind="global-config-drift",
+                title="Global configuration version or schema drift",
+                severity="warning",
+                message=gcfg_msg,
+                fix_command=gcfg_fix,
+                path=g_cfg["path"],
+                names=["global:orchestration.toml"],
+                entries=[{
+                    "name": "global:orchestration.toml",
+                    "path": g_cfg["path"],
+                    "scope": "global",
+                    "state": "drifted",
+                }],
+                acks=acks,
+                extra={
+                    "current_version": g_cfg["version"],
+                    "expected_version": TOOL_VERSION,
+                    "reasons": g_cfg["reasons"],
+                },
+            )
+        )
+
+    # Sort findings deterministically by (severity_rank, group_key)
+    findings.sort(key=lambda item: (SEVERITY_RANK.get(item.get("severity", "info"), 99), item.get("group_key", "")))
+
+    summary_counts: dict[str, int] = {
+        "error": 0,
+        "warning": 0,
+        "info": 0,
+        "neutral": 0,
+        "acknowledged": 0,
+        "total": len(findings),
+        "total_groups": len(findings),
+    }
+    for f in findings:
+        sev = f.get("severity", "info")
+        if sev in summary_counts:
+            summary_counts[sev] += 1
+        if f.get("acknowledged"):
+            summary_counts["acknowledged"] += 1
+
+    drifted = (summary_counts["error"] + summary_counts["warning"]) > 0
+
+    return {
+        "ok": not drifted,
+        "drifted": drifted,
+        "project": str(ws),
+        "project_path": str(ws),
+        "workspace": str(ws),
+        "tasks_dir": str(tasks_dir),
+        "convention_version": recorded_conv,
+        "tool_convention_version": CONVENTION_VERSION,
+        "convention_version_info": {
+            "current": recorded_conv,
+            "recorded": recorded_conv,
+            "expected": CONVENTION_VERSION,
+            "tool": CONVENTION_VERSION,
+            "path": str(conv_file),
+            "exists": conv_file.is_file(),
+            "up_to_date": conv_up_to_date,
+        },
+        "findings": findings,
+        "finding_groups": findings,
+        "groups": findings,
+        "summary": summary_counts,
+        "severity_counts": dict(summary_counts),
+        "checks": {
+            "convention_version": {
+                "ok": conv_up_to_date,
+                "current": recorded_conv,
+                "expected": CONVENTION_VERSION,
+                "path": str(conv_file),
+            },
+            "project_config": {
+                "ok": bool(proj_cfg_info.get("exists")) and not bool(proj_cfg_info.get("is_legacy")) and not bool(proj_cfg_info.get("legacy_paths")),
+                "path": str(proj_cfg_info["path"]) if proj_cfg_info.get("path") else None,
+                "write_path": str(proj_cfg_info["write_path"]) if proj_cfg_info.get("write_path") else None,
+                "exists": bool(proj_cfg_info.get("exists")),
+                "is_legacy": bool(proj_cfg_info.get("is_legacy")),
+                "label": proj_cfg_info.get("label"),
+                "legacy_paths": [str(p) for p in proj_cfg_info.get("legacy_paths", [])],
+            },
+            "workspace_registry": {
+                "ok": ws_registered and not ws_stale and not ws_check_failed and reg is not None,
+                "registered": ws_registered,
+                "stale": ws_stale,
+                "reasons": ws_stale_reasons,
+            },
+            "index_markers": {
+                "ok": idx_path.is_file() and idx_has_markers and idx_in_sync and not idx_check_failed and te is not None,
+                "exists": idx_path.is_file(),
+                "has_markers": idx_has_markers,
+                "in_sync": idx_in_sync,
+                "path": str(idx_path),
+            },
+            "agents_md": {
+                "ok": not agents_stale_rendered and not agents_dup_sections and not tasks_agents_stale and not agents_check_failed and oc is not None,
+                "path": str(agents_md_path),
+                "exists": agents_md_path.is_file(),
+                "stale_rendered": agents_stale_rendered,
+                "duplicated_blocks": bool(agents_dup_sections),
+                "duplicated_sections": agents_dup_sections,
+                "manual_review_sections": agents_manual_review_sections,
+                "tasks_agents_stale": tasks_agents_stale,
+            },
+            "task_headers": {
+                "ok": len(header_issues) == 0 and not tasks_val_check_failed and te is not None,
+                "error_count": len(header_errors),
+                "issue_count": len(header_issues),
+                "errors": header_errors,
+                "issues": header_issues,
+            },
+            "tasks_validation": {
+                "ok": len(other_val_errors) == 0 and not tasks_val_check_failed and te is not None,
+                "error_count": len(other_val_errors),
+                "warning_count": len(other_val_warnings),
+                "errors": other_val_errors,
+                "warnings": other_val_warnings,
+            },
+            "global_skills": g_skills,
+            "global_config": g_cfg,
+        },
+    }
+
+
+def is_drift_warning_disabled(
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+    argv: list[str] | None = None,
+) -> bool:
+    """Check if the one-line project drift warning is disabled via CLI flag, env var, or config."""
+    if argv:
+        if "--no-drift-warning" in argv or "--quiet-drift" in argv:
+            return True
+
+    env_no = os.environ.get("AI_ORCH_NO_DRIFT_WARNING", "").strip().lower()
+    if env_no in ("1", "true", "yes", "on"):
+        return True
+    env_dw = os.environ.get("AI_ORCH_DRIFT_WARNING", "").strip().lower()
+    if env_dw in ("0", "false", "no", "off", "disabled"):
+        return True
+
+    oc = _load_orchestration_config()
+    if oc is not None:
+        h = (home or get_home_dir()).resolve()
+        ws = pathlib.Path(workspace).resolve() if workspace else None
+        gpath = (
+            pathlib.Path(global_config).resolve()
+            if global_config is not None
+            else _get_global_config_path(home)
+        )
+        candidates: list[pathlib.Path] = []
+        if gpath.is_file():
+            candidates.append(gpath)
+        if ws is not None:
+            try:
+                pinfo = oc.inspect_project_config(ws, gpath)
+                if pinfo.get("exists") and pinfo.get("path"):
+                    candidates.append(pathlib.Path(pinfo["path"]))
+            except Exception:
+                pass
+        for cpath in candidates:
+            try:
+                data = oc.load_toml_file(cpath)
+                for sec_name in ("doctor", "project"):
+                    sec = data.get(sec_name)
+                    if isinstance(sec, dict):
+                        for k in ("drift_warning", "warn_on_drift", "enabled"):
+                            if k in sec and sec[k] is False:
+                                return True
+                for k in ("drift_warning", "warn_on_drift"):
+                    if k in data and data[k] is False:
+                        return True
+            except Exception:
+                pass
+    return False
+
+
+def quick_check_project_drift(
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    """Fast drift check for emitting a single-line warning from any ai-orch command."""
+    ws = pathlib.Path(workspace or ".").resolve()
+    # Walk up to nearest parent with tasks/ if ws itself has no tasks/
+    cur = ws
+    target_ws: pathlib.Path | None = None
+    while True:
+        if (cur / "tasks").is_dir():
+            target_ws = cur
+            break
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+
+    if target_ws is None:
+        return {"has_tasks": False, "drifted": False, "reasons": [], "project": str(ws)}
+
+    # Skip warning inside the ai-orchestration tool repo itself unless convention_version is explicitly set and mismatched
+    if (target_ws / "bin" / "ai-orch").is_file() and (target_ws / "scripts" / "orchestration_env.py").is_file():
+        conv_file = target_ws / "tasks" / "convention_version"
+        if not conv_file.is_file():
+            return {"has_tasks": True, "drifted": False, "reasons": [], "project": str(target_ws)}
+
+    h = (home or get_home_dir()).resolve()
+    tasks_dir = target_ws / "tasks"
+    gpath = (
+        pathlib.Path(global_config).resolve()
+        if global_config is not None
+        else _get_global_config_path(home)
+    )
+
+    reasons: list[str] = []
+    conv_file = tasks_dir / "convention_version"
+    recorded_conv: str | None = None
+    if conv_file.is_file():
+        try:
+            raw = conv_file.read_text(encoding="utf-8").strip()
+            if raw:
+                recorded_conv = raw.splitlines()[0].strip()
+        except Exception:
+            pass
+    if recorded_conv != CONVENTION_VERSION:
+        reasons.append(f"convention_version={recorded_conv or 'unrecorded'} vs tool {CONVENTION_VERSION}")
+
+    proj_cfg_info = _inspect_project_config_env(target_ws, home, gpath)
+    if not proj_cfg_info.get("exists"):
+        reasons.append("missing project config")
+    elif proj_cfg_info.get("is_legacy"):
+        reasons.append("legacy project config location")
+
+    idx_path = tasks_dir / "00-INDEX.md"
+    if not idx_path.is_file():
+        reasons.append("missing 00-INDEX.md")
+    else:
+        try:
+            idx_text = idx_path.read_text(encoding="utf-8", errors="replace")
+            if "<!-- ai-orch:generated" not in idx_text:
+                reasons.append("00-INDEX.md missing markers")
+        except Exception:
+            pass
+
+    agents_md_path = target_ws / "AGENTS.md"
+    if not agents_md_path.is_file():
+        reasons.append("missing AGENTS.md")
+    else:
+        try:
+            ag_text = agents_md_path.read_text(encoding="utf-8", errors="replace")
+            if "<!-- BEGIN ai-orchestration -->" not in ag_text:
+                reasons.append("AGENTS.md missing managed block")
+            else:
+                oc = _load_orchestration_config()
+                if oc is not None and oc.find_duplicated_handwritten_agents_sections(ag_text):
+                    reasons.append("AGENTS.md has duplicated hand-written blocks")
+        except Exception:
+            pass
+
+    return {
+        "has_tasks": True,
+        "drifted": len(reasons) > 0,
+        "reasons": reasons,
+        "project": str(target_ws),
+        "project_name": target_ws.name,
+        "convention_version": recorded_conv,
+        "tool_convention_version": CONVENTION_VERSION,
+    }
+
+
+def format_project_drift_warning(drift_info: dict[str, Any]) -> str | None:
+    """Format a single-line stderr drift warning when a project has convention drift."""
+    if not drift_info.get("drifted"):
+        return None
+    proj_name = drift_info.get("project_name") or pathlib.Path(drift_info.get("project", ".")).name
+    reasons = drift_info.get("reasons", [])
+    summary = ", ".join(reasons[:3])
+    if len(reasons) > 3:
+        summary += f", +{len(reasons) - 3} more"
+    return (
+        f"[ai-orch] warning: project '{proj_name}' has convention drift ({summary}) — "
+        f"run 'ai-orch doctor' or 'ai-orch upgrade' "
+        f"(disable with AI_ORCH_NO_DRIFT_WARNING=1 or [doctor] drift_warning = false)."
+    )
+
+
+def maybe_emit_drift_warning(
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+    argv: list[str] | None = None,
+    stream: Any = None,
+) -> str | None:
+    """Check if the active project has convention drift and print a 1-line warning to stderr unless disabled."""
+    if is_drift_warning_disabled(workspace=workspace, home=home, global_config=global_config, argv=argv):
+        return None
+    info = quick_check_project_drift(workspace=workspace, home=home, global_config=global_config)
+    line = format_project_drift_warning(info)
+    if line:
+        out = stream if stream is not None else sys.stderr
+        print(line, file=out)
+    return line
+
+
+def detect_active_executor_worktrees(workspace: pathlib.Path | str) -> list[dict[str, Any]]:
+    """Detect active executor worktrees belonging to `workspace`.
+
+    Checks:
+      1. Linked git worktrees of `workspace` (when `workspace` is the top-level of a git repo).
+      2. Standard sibling worktree directory `<workspace.parent>/.worktrees/<workspace.name>/*`
+         and in-workspace `.kilo/worktrees/*`, `.claude/worktrees/*`, `.ai-orchestration/worktrees/*`.
+      3. Active run manifests in `<workspace>/.ai-orchestration/runs/*/run.json` (`status` in `starting`/`running`).
+      4. Active tasks (`state: in progress`) in `<workspace>/tasks` whose `worktree:` header points to an existing dir.
+    """
+    ws = pathlib.Path(workspace).resolve()
+    active: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+
+    def _add_wt(path_str: str, source: str, branch: str = "", task_id: str = "", run_id: str = "") -> None:
+        try:
+            norm = str(pathlib.Path(path_str).resolve())
+        except Exception:
+            norm = str(path_str)
+        if norm == str(ws) or norm in seen_paths:
+            return
+        seen_paths.add(norm)
+        active.append({
+            "path": norm,
+            "source": source,
+            "branch": branch,
+            "task_id": task_id,
+            "run_id": run_id,
+        })
+
+    # 1. Linked git worktrees if `ws` is a git repo root
+    if (ws / ".git").exists():
+        try:
+            top = subprocess.run(
+                ["git", "-C", str(ws), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if top.returncode == 0 and pathlib.Path(top.stdout.strip()).resolve() == ws:
+                wt_out = subprocess.run(
+                    ["git", "-C", str(ws), "worktree", "list", "--porcelain"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if wt_out.returncode == 0:
+                    cur_entry: dict[str, Any] = {}
+                    for raw_line in wt_out.stdout.splitlines() + [""]:
+                        line = raw_line.strip()
+                        if not line:
+                            wt_p = cur_entry.get("worktree")
+                            if (
+                                wt_p
+                                and not cur_entry.get("bare")
+                                and not cur_entry.get("prunable")
+                                and pathlib.Path(wt_p).is_dir()
+                            ):
+                                _add_wt(
+                                    wt_p,
+                                    source="git-worktree",
+                                    branch=str(cur_entry.get("branch", "")),
+                                )
+                            cur_entry = {}
+                            continue
+                        if line.startswith("worktree "):
+                            cur_entry["worktree"] = line[len("worktree "):].strip()
+                        elif line.startswith("branch "):
+                            cur_entry["branch"] = line[len("branch "):].strip()
+                        elif line == "bare":
+                            cur_entry["bare"] = True
+                        elif line.startswith("prunable"):
+                            cur_entry["prunable"] = True
+        except Exception:
+            pass
+
+    # 2. Sibling and in-repo worktree directories
+    wt_dirs = [
+        (ws.parent / ".worktrees" / ws.name, "sibling-worktrees"),
+        (ws / ".kilo" / "worktrees", "kilo-worktrees"),
+        (ws / ".claude" / "worktrees", "claude-worktrees"),
+        (ws / ".ai-orchestration" / "worktrees", "ai-orchestration-worktrees"),
+    ]
+    for wt_root, src_label in wt_dirs:
+        if wt_root.is_dir():
+            try:
+                for child in sorted(wt_root.iterdir()):
+                    if not child.name.startswith(".") and child.is_dir():
+                        _add_wt(str(child), source=src_label)
+            except OSError:
+                pass
+
+    # 3. Active runs in .ai-orchestration/runs/*/run.json
+    runs_root = ws / ".ai-orchestration" / "runs"
+    if runs_root.is_dir():
+        try:
+            for rjson in sorted(runs_root.glob("*/run.json")):
+                try:
+                    rdata = json.loads(rjson.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(rdata, dict):
+                    continue
+                st = str(rdata.get("status", "")).strip().lower()
+                if st in ("starting", "running"):
+                    wt_p = rdata.get("worktree_path") or str(rjson.parent)
+                    _add_wt(
+                        str(wt_p),
+                        source="active-run",
+                        branch=str(rdata.get("branch", "")),
+                        task_id=str(rdata.get("task_id", "")),
+                        run_id=str(rdata.get("run_id") or rjson.parent.name),
+                    )
+        except OSError:
+            pass
+
+    # 4. Emergent tasks in state 'in progress' with an existing worktree path
+    tasks_dir = ws / "tasks"
+    te = _load_tasks_engine()
+    if te is not None and tasks_dir.is_dir():
+        try:
+            for em in te.discover_emergent_tasks(tasks_dir):
+                if em.get("canonical_state") == "in progress":
+                    wt_raw = (em.get("headers", {}).get("worktree") or "").strip()
+                    if wt_raw and wt_raw != "-":
+                        wt_cand = pathlib.Path(wt_raw) if pathlib.Path(wt_raw).is_absolute() else (ws / wt_raw)
+                        if wt_cand.is_dir():
+                            _add_wt(
+                                str(wt_cand),
+                                source="task-header",
+                                branch=str(em.get("headers", {}).get("branch", "")),
+                                task_id=str(em.get("id", "")),
+                            )
+        except Exception:
+            pass
+
+    return active
+
+
+def upgrade_project(
+    workspace: pathlib.Path | str | None = None,
+    *,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+    dry_run: bool = False,
+    apply: bool = False,
+    expect_hash: str | None = None,
+    expect_plan_hash: str | None = None,
+    migrate_plans: bool = False,
+) -> dict[str, Any]:
+    """Compose all project upgrade steps (N078 point 3 / Task 19.3):
+      1. Active executor worktrees guard (refuses with clear reason if any active executor worktrees exist; never bypassable).
+      2. Project configuration & legacy config migration (`orchestration.toml`).
+      3. Workspace registration in SQLite registry (`orchestration_registry.py`).
+      4. Root `AGENTS.md` re-render + removal of positively matched legacy orchestration sections outside markers
+         (preserving custom/unmatched blocks outside markers byte-for-byte and reporting candidate sections for manual review).
+      5. `tasks/` tree upgrade: task & use-case header migration, `tasks/AGENTS.md` managed block,
+         `.gitignore`, `.gitattributes`, `00-INDEX.md` marker adoption & sync, and `convention_version`.
+
+    Previews by default (`dry_run=True` unless `apply=True` without `dry_run=True`); requires
+    `--apply --expect-hash <hash>` (or `--expect-plan-hash <hash>`) to write changes.
+    """
+    ws = pathlib.Path(workspace or ".").resolve()
+    h = (home or get_home_dir()).resolve()
+    cdir = get_config_dir(h)
+    gpath = (
+        pathlib.Path(global_config).resolve()
+        if global_config is not None
+        else _get_global_config_path(h)
+    )
+    tasks_dir = ws / "tasks"
+    is_apply = bool(apply) and not bool(dry_run)
+    expected_hash = expect_plan_hash or expect_hash
+
+    def _refuse_active_worktrees(active_wts: list[dict[str, Any]]) -> dict[str, Any]:
+        wt_paths = ", ".join(w["path"] for w in active_wts)
+        msg = (
+            f"Refusing to upgrade project {ws}: {len(active_wts)} active executor worktree(s) detected "
+            f"({wt_paths}). Finish, merge, or remove active executor worktrees before running 'ai-orch upgrade'."
+        )
+        return {
+            "ok": False,
+            "applied": False,
+            "changed": False,
+            "dry_run": not is_apply,
+            "project": str(ws),
+            "project_name": ws.name,
+            "error": msg,
+            "error_code": "active-executor-worktrees",
+            "reason": msg,
+            "message": msg,
+            "active_worktrees": active_wts,
+            "plan": [],
+            "plan_hash": "",
+            "hash": "",
+            "upgraded_files": [],
+            "created": [],
+            "updated": [],
+            "steps": [],
+            "removed_duplicated_sections": [],
+            "manual_review_sections": [],
+            "convention_version": CONVENTION_VERSION,
+            "errors": [msg],
+            "warnings": [],
+        }
+
+    # 1. Active executor worktrees guard (checked immediately and re-checked under locks on apply)
+    active_worktrees = detect_active_executor_worktrees(ws)
+    if active_worktrees:
+        return _refuse_active_worktrees(active_worktrees)
+
+    oc = _load_orchestration_config()
+    reg = _load_orchestration_registry()
+    te = _load_tasks_engine()
+
+    prev_ai_orch_home = os.environ.get("AI_ORCH_HOME")
+    if home is not None:
+        os.environ["AI_ORCH_HOME"] = str(h)
+
+    tasks_lock_file = tasks_dir / ".ai-orch.lock"
+    tasks_lock_existed = tasks_lock_file.exists()
+    applied_ok = False
+
+    try:
+        with contextlib.ExitStack() as lock_stack:
+            if is_apply and expected_hash:
+                if reg is not None:
+                    lock_stack.enter_context(reg.registry_lock(cdir))
+                if te is not None and tasks_dir.is_dir():
+                    lock_stack.enter_context(te.task_write_lock(tasks_dir))
+                # Re-verify active worktrees once locks are held
+                active_worktrees_locked = detect_active_executor_worktrees(ws)
+                if active_worktrees_locked:
+                    return _refuse_active_worktrees(active_worktrees_locked)
+
+            operations: list[dict[str, Any]] = []
+            steps_summary: list[dict[str, Any]] = []
+            created_files: list[str] = []
+            updated_files: list[str] = []
+            upgraded_files: list[str] = []
+            warnings: list[str] = []
+
+            def _prevalidation_error(
+                err_msg: str,
+                err_code: str,
+                manual_review: list[str] | None = None,
+            ) -> dict[str, Any]:
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "changed": False,
+                    "dry_run": not is_apply,
+                    "project": str(ws),
+                    "project_name": ws.name,
+                    "error": err_msg,
+                    "error_code": err_code,
+                    "reason": err_msg,
+                    "message": err_msg,
+                    "plan": operations,
+                    "plan_hash": compute_plan_hash(operations) if operations else "",
+                    "hash": compute_plan_hash(operations) if operations else "",
+                    "upgraded_files": [],
+                    "created": [],
+                    "updated": [],
+                    "steps": steps_summary,
+                    "removed_duplicated_sections": [],
+                    "manual_review_sections": list(manual_review or []),
+                    "convention_version": CONVENTION_VERSION,
+                    "errors": [err_msg],
+                    "warnings": warnings,
+                }
+
+            # ------------------------------------------------------------------
+            # Step A: Project config & workspace registration
+            # ------------------------------------------------------------------
+            proj_cfg_info = _inspect_project_config_env(ws, h, gpath)
+            write_path = pathlib.Path(
+                proj_cfg_info.get("write_path")
+                or (cdir / "projects" / ws.name / "orchestration.toml")
+            ).resolve()
+            legacy_paths = [pathlib.Path(p).resolve() for p in proj_cfg_info.get("legacy_paths", [])]
+
+            ws_reg_plan: dict[str, Any] | None = None
+            ws_uuid = ""
+            ws_slug = ws.name
+            ws_title = ws.name
+            needs_ws_register = False
+            ws_registered = False
+            ws_before_hash = ""
+
+            if reg is not None:
+                try:
+                    reg.check_symlinked_components(ws)
+                    reg.check_device_inode(ws)
+                    ws_reg_plan = reg.plan_workspace_register(ws, title=ws.name, config_dir=cdir)
+                    ws_uuid = ws_reg_plan["workspace"]["uuid"]
+                    ws_slug = ws_reg_plan["workspace"]["slug"]
+                    ws_title = ws_reg_plan["workspace"].get("title") or ws.name
+
+                    nearest_ws, proj_row = reg.resolve_workspace_for_path(ws, config_dir=cdir)
+                    ws_stale = False
+                    if nearest_ws is not None:
+                        n_path = pathlib.Path(nearest_ws["canonical_path"]).resolve()
+                        if n_path == ws:
+                            ws_registered = True
+                        elif proj_row is not None and (n_path / proj_row["rel_path"]).resolve() == ws:
+                            ws_registered = True
+                        if ws_registered:
+                            ws_snap = {
+                                k: nearest_ws.get(k)
+                                for k in ("uuid", "slug", "title", "canonical_path", "device", "inode")
+                            }
+                            ws_before_hash = hashlib.sha256(
+                                json.dumps(ws_snap, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                            ).hexdigest()
+                            try:
+                                st = ws.stat()
+                                if (
+                                    nearest_ws.get("device") != st.st_dev
+                                    or nearest_ws.get("inode") != st.st_ino
+                                    or nearest_ws.get("uuid") != ws_uuid
+                                ):
+                                    ws_stale = True
+                            except OSError:
+                                ws_stale = True
+                    needs_ws_register = (not ws_registered) or ws_stale
+                except Exception as exc:
+                    return _prevalidation_error(
+                        f"Workspace registration prevalidation failed for {ws}: {exc}",
+                        "workspace-register-failed",
+                    )
+
+            target_pdata: dict[str, Any] = {}
+            new_cfg_text = ""
+            needs_cfg_write = False
+            raw_gcfg: dict[str, Any] = {}
+            gcfg_merged: dict[str, Any] = {}
+
+            if oc is not None:
+                try:
+                    raw_gcfg = oc.load_toml_file(gpath) if gpath.is_file() else {}
+                    gcfg_merged = oc.deep_merge(oc.DEFAULT_GLOBAL_CONFIG, raw_gcfg)
+                    def_orch = str(gcfg_merged.get("routing", {}).get("default_orchestrator") or "claude")
+                    def_exec = str(gcfg_merged.get("routing", {}).get("default_executor") or "kilo")
+                    def_vmode = str(gcfg_merged.get("verification", {}).get("default_mode") or "cross-agent")
+                    base_pdata: dict[str, Any] = {
+                        "workspace": {
+                            "uuid": ws_uuid,
+                            "id": ws_slug,
+                            "title": ws_title,
+                        },
+                        "project": {
+                            "name": ws.name,
+                            "primary_orchestrator": def_orch,
+                        },
+                        "routing": {
+                            "default_executor": def_exec,
+                        },
+                        "verification": {
+                            "default_mode": def_vmode,
+                        },
+                    }
+                    merged_pdata = copy.deepcopy(base_pdata)
+                    for leg_p in reversed(legacy_paths):
+                        if leg_p.is_file():
+                            merged_pdata = oc.deep_merge(merged_pdata, oc.load_toml_file(leg_p))
+                    existing_write_pdata = oc.load_toml_file(write_path) if write_path.is_file() else {}
+                    if existing_write_pdata:
+                        merged_pdata = oc.deep_merge(merged_pdata, existing_write_pdata)
+                    if ws_uuid:
+                        merged_pdata.setdefault("workspace", {})["uuid"] = ws_uuid
+                        merged_pdata["workspace"]["id"] = ws_slug
+                        merged_pdata["workspace"].setdefault("title", ws_title)
+                    target_pdata = merged_pdata
+                    new_cfg_text = oc.dump_toml(target_pdata)
+                    existing_write_text = write_path.read_text(encoding="utf-8") if write_path.is_file() else ""
+                    needs_cfg_write = (
+                        (not write_path.is_file())
+                        or (existing_write_pdata != target_pdata)
+                        or (existing_write_text != new_cfg_text and not write_path.is_file())
+                        or bool(legacy_paths)
+                    )
+                except Exception as exc:
+                    return _prevalidation_error(
+                        f"Project configuration prevalidation failed for {ws}: {exc}",
+                        "config-error",
+                    )
+
+                if needs_cfg_write:
+                    cfg_action = "create" if not write_path.is_file() else "modify"
+                    if cfg_action == "create":
+                        created_files.append(str(write_path))
+                    else:
+                        updated_files.append(str(write_path))
+                    upgraded_files.append(str(write_path))
+                    cfg_summary = (
+                        f"migrate legacy config and write {write_path}"
+                        if legacy_paths
+                        else f"write project config {write_path}"
+                    )
+                    cfg_after_hash = hashlib.sha256(new_cfg_text.encode("utf-8")).hexdigest()
+                    operations.append({
+                        "step": "project-config",
+                        "action": cfg_action,
+                        "path": str(write_path),
+                        "target": str(write_path),
+                        "before_hash": compute_target_hash(write_path) or "",
+                        "after_hash": cfg_after_hash,
+                        "summary": cfg_summary,
+                    })
+                    steps_summary.append({"step": "project-config", "action": cfg_action, "path": str(write_path)})
+
+                for leg_p in legacy_paths:
+                    if leg_p.is_file() and leg_p != write_path:
+                        updated_files.append(str(leg_p))
+                        upgraded_files.append(str(leg_p))
+                        operations.append({
+                            "step": "legacy-project-config",
+                            "action": "remove",
+                            "path": str(leg_p),
+                            "target": str(leg_p),
+                            "before_hash": compute_target_hash(leg_p) or "",
+                            "after_hash": "",
+                            "summary": f"archive migrated legacy project config {leg_p}",
+                        })
+                        steps_summary.append({"step": "legacy-project-config", "action": "remove", "path": str(leg_p)})
+
+            if needs_ws_register and ws_reg_plan is not None:
+                reg_action = "register" if not ws_registered else "update"
+                operations.append({
+                    "step": "workspace-register",
+                    "action": reg_action,
+                    "path": f"workspace:{ws_slug}",
+                    "target": str(ws),
+                    "before_hash": ws_before_hash,
+                    "after_hash": ws_reg_plan.get("plan_hash", ""),
+                    "summary": f"register workspace '{ws_slug}' ({ws_uuid}) in registry",
+                })
+                steps_summary.append({"step": "workspace-register", "action": reg_action, "path": str(ws)})
+
+            # ------------------------------------------------------------------
+            # Step B: Root AGENTS.md deduplication & re-rendering
+            # ------------------------------------------------------------------
+            agents_md_path = ws / "AGENTS.md"
+            existing_agents_text = agents_md_path.read_text(encoding="utf-8") if agents_md_path.is_file() else ""
+            new_agents_text = existing_agents_text
+            removed_dup_sections: list[str] = []
+            manual_review_sections: list[str] = []
+            needs_agents_write = False
+
+            if oc is not None:
+                try:
+                    raw_gcfg = oc.load_toml_file(gpath) if gpath.is_file() else {}
+                    effective_cfg = oc.deep_merge(oc.DEFAULT_GLOBAL_CONFIG, raw_gcfg)
+                    effective_cfg = oc.deep_merge(effective_cfg, target_pdata)
+                    expected_block = oc.render_agents_md_block(effective_cfg, ws, gpath)
+                    cleaned_agents, removed_dup_sections = oc.strip_duplicated_handwritten_agents_sections(
+                        existing_agents_text,
+                        current_block=expected_block,
+                    )
+                    if hasattr(oc, "find_preserved_manual_review_agents_sections"):
+                        manual_review_sections = oc.find_preserved_manual_review_agents_sections(
+                            existing_agents_text,
+                            current_block=expected_block,
+                        )
+                    if manual_review_sections:
+                        warnings.append(
+                            f"AGENTS.md: preserved {len(manual_review_sections)} section(s) not positively matched "
+                            f"to a known legacy orchestration rendering for manual review "
+                            f"({', '.join(manual_review_sections)})"
+                        )
+                    new_agents_text = oc.inject_or_replace_agents_block(cleaned_agents, expected_block)
+                    needs_agents_write = (new_agents_text != existing_agents_text) or (not agents_md_path.is_file())
+                except getattr(oc, "AgentsMdManagedBlockModifiedError", ValueError) as exc:
+                    canon_label = "canonical <!-- BEGIN ai-orchestration --> block"
+                    if canon_label not in manual_review_sections:
+                        manual_review_sections.insert(0, canon_label)
+                    warnings.append(
+                        f"AGENTS.md: {exc} ({', '.join(manual_review_sections)})"
+                    )
+                    return _prevalidation_error(
+                        f"AGENTS.md managed block modification detected in {ws}: {exc}",
+                        "agents-md-managed-block-modified",
+                        manual_review=manual_review_sections,
+                    )
+                except Exception as exc:
+                    return _prevalidation_error(
+                        f"AGENTS.md rendering prevalidation failed for {ws}: {exc}",
+                        "agents-md-failed",
+                        manual_review=manual_review_sections,
+                    )
+
+                if needs_agents_write:
+                    ag_action = "create" if not agents_md_path.is_file() else "modify"
+                    if ag_action == "create":
+                        created_files.append(str(agents_md_path))
+                    else:
+                        updated_files.append(str(agents_md_path))
+                    upgraded_files.append(str(agents_md_path))
+                    ag_parts = ["render managed block"]
+                    if removed_dup_sections:
+                        ag_parts.append(f"remove {len(removed_dup_sections)} duplicated hand-written section(s)")
+                    if manual_review_sections:
+                        ag_parts.append(f"preserve {len(manual_review_sections)} section(s) for manual review")
+                    ag_after_hash = hashlib.sha256(new_agents_text.encode("utf-8")).hexdigest()
+                    operations.append({
+                        "step": "agents-md",
+                        "action": ag_action,
+                        "path": str(agents_md_path),
+                        "target": str(agents_md_path),
+                        "before_hash": compute_target_hash(agents_md_path) or "",
+                        "after_hash": ag_after_hash,
+                        "summary": "; ".join(ag_parts),
+                        "removed_duplicated_sections": removed_dup_sections,
+                        "manual_review_sections": manual_review_sections,
+                    })
+                    steps_summary.append({
+                        "step": "agents-md",
+                        "action": ag_action,
+                        "path": str(agents_md_path),
+                        "removed_duplicated_sections": removed_dup_sections,
+                        "manual_review_sections": manual_review_sections,
+                    })
+
+            # ------------------------------------------------------------------
+            # Step C: tasks/ tree upgrade (headers, use-cases, tasks/AGENTS.md,
+            #         .gitignore, .gitattributes, convention_version, 00-INDEX.md)
+            # ------------------------------------------------------------------
+            tasks_upg_preview: dict[str, Any] | None = None
+            skip_git_cfg = not (ws / ".git").exists()
+            if te is not None and tasks_dir.is_dir():
+                try:
+                    tasks_upg_preview = te.upgrade_tasks_tree(
+                        tasks_dir,
+                        dry_run=True,
+                        migrate_plans=migrate_plans,
+                        skip_git_config=skip_git_cfg,
+                        migrate_headers=True,
+                    )
+                except Exception as exc:
+                    return _prevalidation_error(
+                        f"Tasks tree upgrade prevalidation failed for {tasks_dir}: {exc}",
+                        "tasks-upgrade-failed",
+                    )
+                if not tasks_upg_preview.get("ok", True):
+                    return _prevalidation_error(
+                        str(tasks_upg_preview.get("error") or "tasks upgrade prevalidation failed"),
+                        "tasks-upgrade-failed",
+                    )
+                for t_op in tasks_upg_preview.get("plan", []):
+                    op_rel = t_op.get("path", "")
+                    full_target = (
+                        op_rel
+                        if op_rel.startswith("git config")
+                        else str((tasks_dir / op_rel).resolve())
+                    )
+                    step_kind = "tasks-upgrade"
+                    if op_rel == "00-INDEX.md":
+                        step_kind = "index-adopt-sync"
+                    elif op_rel == "convention_version":
+                        step_kind = "convention-version"
+                    elif op_rel == "AGENTS.md":
+                        step_kind = "tasks-agents-md"
+                    elif op_rel.endswith(".md"):
+                        step_kind = "task-headers"
+
+                    operations.append({
+                        "step": step_kind,
+                        "action": t_op.get("action", "modify"),
+                        "path": f"tasks/{op_rel}" if not op_rel.startswith("git config") else op_rel,
+                        "target": full_target,
+                        "before_hash": t_op.get("before_hash", ""),
+                        "after_hash": t_op.get("after_hash", ""),
+                        "summary": t_op.get("summary", ""),
+                    })
+                    steps_summary.append({
+                        "step": step_kind,
+                        "action": t_op.get("action", "modify"),
+                        "path": full_target,
+                    })
+                for cf in tasks_upg_preview.get("created", []):
+                    if cf not in created_files:
+                        created_files.append(cf)
+                    if cf not in upgraded_files:
+                        upgraded_files.append(cf)
+                for uf in tasks_upg_preview.get("updated", []):
+                    if uf not in updated_files:
+                        updated_files.append(uf)
+                    if uf not in upgraded_files:
+                        upgraded_files.append(uf)
+
+            plan_hash = compute_plan_hash(operations)
+
+            # Check if this is a second apply on an already-upgraded project
+            acks_doc = load_doctor_acks(h)
+            last_hashes = acks_doc.get("_last_upgrade_hashes", {}) if isinstance(acks_doc, dict) else {}
+            last_ws_hash = last_hashes.get(str(ws)) if isinstance(last_hashes, dict) else None
+
+            if not is_apply:
+                return {
+                    "ok": True,
+                    "applied": False,
+                    "changed": len(operations) > 0,
+                    "dry_run": True,
+                    "project": str(ws),
+                    "project_name": ws.name,
+                    "plan": operations,
+                    "plan_hash": plan_hash,
+                    "hash": plan_hash,
+                    "upgraded_files": upgraded_files,
+                    "created": created_files,
+                    "updated": updated_files,
+                    "steps": steps_summary,
+                    "removed_duplicated_sections": removed_dup_sections,
+                    "manual_review_sections": manual_review_sections,
+                    "convention_version": CONVENTION_VERSION,
+                    "errors": [],
+                    "warnings": warnings,
+                }
+
+            if not expected_hash:
+                err_msg = (
+                    "Applying project upgrade requires --expect-hash <hash> (or --expect-plan-hash <hash>). "
+                    "Run 'ai-orch upgrade' without --apply first to preview the plan and obtain its hash."
+                )
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "changed": False,
+                    "dry_run": True,
+                    "project": str(ws),
+                    "project_name": ws.name,
+                    "error": err_msg,
+                    "error_code": "missing-expect-hash",
+                    "message": err_msg,
+                    "plan": operations,
+                    "plan_hash": plan_hash,
+                    "hash": plan_hash,
+                    "upgraded_files": [],
+                    "created": [],
+                    "updated": [],
+                    "steps": steps_summary,
+                    "removed_duplicated_sections": removed_dup_sections,
+                    "manual_review_sections": manual_review_sections,
+                    "convention_version": CONVENTION_VERSION,
+                    "errors": [err_msg],
+                    "warnings": warnings,
+                }
+
+            exp_clean = expected_hash.strip().lower()
+            hash_matches = (exp_clean == plan_hash.lower()) or (
+                len(operations) == 0 and last_ws_hash is not None and exp_clean == str(last_ws_hash).strip().lower()
+            )
+            if not hash_matches:
+                err_msg = f"Upgrade plan hash mismatch: expected {expected_hash}, got {plan_hash}"
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "changed": False,
+                    "dry_run": False,
+                    "project": str(ws),
+                    "project_name": ws.name,
+                    "error": err_msg,
+                    "error_code": "plan-hash-mismatch",
+                    "message": err_msg,
+                    "plan": operations,
+                    "plan_hash": plan_hash,
+                    "hash": plan_hash,
+                    "upgraded_files": [],
+                    "created": [],
+                    "updated": [],
+                    "steps": steps_summary,
+                    "removed_duplicated_sections": removed_dup_sections,
+                    "manual_review_sections": manual_review_sections,
+                    "convention_version": CONVENTION_VERSION,
+                    "errors": [err_msg],
+                    "warnings": warnings,
+                }
+
+            # If there are no operations to apply (second apply / already up to date), touch nothing on disk
+            if not operations:
+                applied_ok = True
+                return {
+                    "ok": True,
+                    "applied": True,
+                    "changed": False,
+                    "dry_run": False,
+                    "project": str(ws),
+                    "project_name": ws.name,
+                    "plan": [],
+                    "plan_hash": plan_hash,
+                    "hash": plan_hash,
+                    "upgraded_files": [],
+                    "created": [],
+                    "updated": [],
+                    "steps": [],
+                    "removed_duplicated_sections": [],
+                    "manual_review_sections": manual_review_sections,
+                    "convention_version": CONVENTION_VERSION,
+                    "errors": [],
+                    "warnings": warnings,
+                }
+
+            # ------------------------------------------------------------------
+            # Transactional Apply: capture rollback snapshot before any mutation
+            # ------------------------------------------------------------------
+            file_snapshots: dict[pathlib.Path, bytes | None] = {}
+
+            def _snap_file(fpath: pathlib.Path) -> None:
+                rp = fpath.resolve()
+                if rp not in file_snapshots:
+                    file_snapshots[rp] = rp.read_bytes() if rp.is_file() else None
+
+            _snap_file(write_path)
+            for leg_p in legacy_paths:
+                _snap_file(leg_p)
+            _snap_file(agents_md_path)
+            git_cfg_file = ws / ".git" / "config"
+            if git_cfg_file.is_file():
+                _snap_file(git_cfg_file)
+            if reg is not None:
+                db_path = reg.get_db_path(cdir).resolve()
+                _snap_file(db_path)
+                _snap_file(pathlib.Path(str(db_path) + "-wal"))
+                _snap_file(pathlib.Path(str(db_path) + "-shm"))
+                if hasattr(reg, "get_hub_registry_path"):
+                    _snap_file(reg.get_hub_registry_path(cdir).resolve())
+                _snap_file((cdir / "broker" / "pending_uuids.json").resolve())
+
+            existing_tasks_files: set[pathlib.Path] = set()
+            existing_tasks_dirs: set[pathlib.Path] = set()
+            if tasks_dir.is_dir():
+                for item in tasks_dir.rglob("*"):
+                    ritem = item.resolve()
+                    if ritem.name == ".ai-orch.lock":
+                        continue
+                    if ritem.is_file():
+                        existing_tasks_files.add(ritem)
+                        _snap_file(ritem)
+                    elif ritem.is_dir():
+                        existing_tasks_dirs.add(ritem)
+
+            trashed_items: list[tuple[pathlib.Path, pathlib.Path]] = []
+
+            def _rollback() -> None:
+                for orig_p, trashed_dest in reversed(trashed_items):
+                    try:
+                        if trashed_dest.exists() or trashed_dest.is_symlink():
+                            if not (orig_p.exists() or orig_p.is_symlink()):
+                                orig_p.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.move(str(trashed_dest), str(orig_p))
+                            else:
+                                trashed_dest.unlink()
+                        ts_dir = trashed_dest.parent.parent
+                        manifest_f = ts_dir / "manifest.json"
+                        if manifest_f.is_file():
+                            manifest_f.unlink()
+                        if trashed_dest.parent.is_dir() and not any(trashed_dest.parent.iterdir()):
+                            trashed_dest.parent.rmdir()
+                        if ts_dir.is_dir() and not any(ts_dir.iterdir()):
+                            ts_dir.rmdir()
+                    except OSError:
+                        pass
+
+                if tasks_dir.is_dir():
+                    for item in sorted(tasks_dir.rglob("*"), reverse=True):
+                        ritem = item.resolve()
+                        if ritem.name == ".ai-orch.lock":
+                            continue
+                        if ritem.is_file() and ritem not in existing_tasks_files:
+                            try:
+                                ritem.unlink()
+                            except OSError:
+                                pass
+                        elif ritem.is_dir() and ritem not in existing_tasks_dirs:
+                            try:
+                                if not any(ritem.iterdir()):
+                                    ritem.rmdir()
+                            except OSError:
+                                pass
+
+                for fpath, old_bytes in file_snapshots.items():
+                    try:
+                        if old_bytes is None:
+                            if fpath.exists() or fpath.is_symlink():
+                                fpath.unlink()
+                        else:
+                            fpath.parent.mkdir(parents=True, exist_ok=True)
+                            fpath.write_bytes(old_bytes)
+                    except OSError:
+                        pass
+
+            try:
+                if oc is not None and needs_cfg_write:
+                    oc.write_file_atomic(write_path, new_cfg_text)
+
+                if reg is not None and needs_ws_register and ws_reg_plan is not None:
+                    reg.apply_workspace_register(
+                        ws_reg_plan,
+                        expect_hash=ws_reg_plan["plan_hash"],
+                        config_dir=cdir,
+                    )
+                    if oc is not None and new_cfg_text:
+                        oc.write_file_atomic(write_path, new_cfg_text)
+
+                if oc is not None and needs_agents_write:
+                    oc.write_file_atomic(agents_md_path, new_agents_text)
+
+                if te is not None and tasks_dir.is_dir() and tasks_upg_preview is not None and tasks_upg_preview.get("plan"):
+                    t_res = te.upgrade_tasks_tree(
+                        tasks_dir,
+                        dry_run=False,
+                        apply=True,
+                        expect_plan_hash=tasks_upg_preview["plan_hash"],
+                        migrate_plans=migrate_plans,
+                        skip_git_config=skip_git_cfg,
+                        migrate_headers=True,
+                    )
+                    if not t_res.get("ok"):
+                        raise RuntimeError(str(t_res.get("error") or "tasks upgrade failed"))
+
+                if oc is not None:
+                    for leg_p in legacy_paths:
+                        if leg_p.is_file() and leg_p != write_path:
+                            trash_path(
+                                leg_p,
+                                scope="project",
+                                kind="config",
+                                reason=f"migrated legacy project config to {write_path}",
+                                workspace=ws,
+                                home=h,
+                                before_move=lambda src, dst: trashed_items.append((src, dst)),
+                            )
+            except Exception as exc:
+                _rollback()
+                err_msg = str(exc) or "upgrade apply failed"
+                return {
+                    "ok": False,
+                    "applied": False,
+                    "changed": False,
+                    "dry_run": False,
+                    "project": str(ws),
+                    "project_name": ws.name,
+                    "error": err_msg,
+                    "error_code": "upgrade-apply-failed",
+                    "message": err_msg,
+                    "plan": operations,
+                    "plan_hash": plan_hash,
+                    "hash": plan_hash,
+                    "upgraded_files": [],
+                    "created": [],
+                    "updated": [],
+                    "steps": steps_summary,
+                    "removed_duplicated_sections": [],
+                    "manual_review_sections": manual_review_sections,
+                    "convention_version": CONVENTION_VERSION,
+                    "errors": [err_msg],
+                    "warnings": warnings,
+                }
+
+            # Record applied plan_hash for idempotent second apply verification
+            try:
+                acks_doc = load_doctor_acks(h)
+                if not isinstance(acks_doc, dict):
+                    acks_doc = {}
+                if not isinstance(acks_doc.get("_last_upgrade_hashes"), dict):
+                    acks_doc["_last_upgrade_hashes"] = {}
+                acks_doc["_last_upgrade_hashes"][str(ws)] = plan_hash
+                save_doctor_acks(acks_doc, h)
+            except Exception:
+                pass
+
+            applied_ok = True
+            return {
+                "ok": True,
+                "applied": True,
+                "changed": True,
+                "dry_run": False,
+                "project": str(ws),
+                "project_name": ws.name,
+                "plan": operations,
+                "plan_hash": plan_hash,
+                "hash": plan_hash,
+                "upgraded_files": upgraded_files,
+                "created": created_files,
+                "updated": updated_files,
+                "steps": steps_summary,
+                "removed_duplicated_sections": removed_dup_sections,
+                "manual_review_sections": manual_review_sections,
+                "convention_version": CONVENTION_VERSION,
+                "errors": [],
+                "warnings": warnings,
+            }
+    finally:
+        if not applied_ok and not tasks_lock_existed and tasks_lock_file.exists():
+            try:
+                tasks_lock_file.unlink()
+            except OSError:
+                pass
+        if home is not None:
+            if prev_ai_orch_home is None:
+                os.environ.pop("AI_ORCH_HOME", None)
+            else:
+                os.environ["AI_ORCH_HOME"] = prev_ai_orch_home
+
+
+def cmd_upgrade(args: argparse.Namespace) -> int:
+    """CLI handler for `ai-orch upgrade` / `ai-orch env upgrade`."""
+    target = getattr(args, "target", None)
+    proj_arg = getattr(args, "project", None) or getattr(args, "workspace", None) or target or "."
+    ws = pathlib.Path(proj_arg).resolve()
+    gcfg = getattr(args, "global_config", None)
+    is_preview = bool(getattr(args, "dry_run", False) or getattr(args, "preview", False))
+    is_apply = bool(getattr(args, "apply", False)) and not is_preview
+    exp_hash = getattr(args, "expect_plan_hash", None) or getattr(args, "expect_hash", None)
+
+    res = upgrade_project(
+        workspace=ws,
+        home=args.home,
+        global_config=pathlib.Path(gcfg).resolve() if gcfg else None,
+        dry_run=not is_apply,
+        apply=is_apply,
+        expect_hash=exp_hash,
+        expect_plan_hash=exp_hash,
+        migrate_plans=bool(getattr(args, "migrate_plans", False)),
+    )
+
+    if args.json:
+        print(json.dumps(res, indent=2))
+        if not res.get("ok"):
+            print(f"[error] {res.get('error', 'Upgrade failed')}", file=sys.stderr)
+            return 1
+        return 0
+
+    if not res.get("ok"):
+        err_msg = res.get("error", "Upgrade failed")
+        print(f"[error] {err_msg}", file=sys.stderr)
+        print(f"[error] {err_msg}")
+        return 1
+
+    plan = res.get("plan", [])
+    plan_hash = res.get("plan_hash", "")
+    for w_msg in res.get("warnings", []):
+        print(f"[warning] {w_msg}")
+    if not res.get("applied"):
+        if not plan:
+            print(f"[ok] Project {ws} is already up to date (convention_version={CONVENTION_VERSION}).")
+            print(f"Plan hash: {plan_hash}")
+        else:
+            print(f"[preview] Upgrade plan for {ws} ({len(plan)} operation(s)):")
+            for op in plan:
+                print(f"  - [{op['action']}] {op['path']} ({op['summary']})")
+            print(f"Plan hash: {plan_hash}")
+            print(f"To apply: ai-orch upgrade --project {ws} --apply --expect-hash {plan_hash}")
+        return 0
+
+    if not res.get("changed"):
+        print(f"[ok] Project {ws} is already up to date; no files modified.")
+    else:
+        print(f"[ok] Upgraded project {ws} ({len(plan)} operation(s) applied, convention_version={CONVENTION_VERSION}):")
+        for op in plan:
+            print(f"  - [{op['action']}] {op['path']} ({op['summary']})")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """CLI handler for `ai-orch doctor [--project PATH] [--json]` and `ai-orch env doctor`."""
+    target = getattr(args, "target", None)
+    if target in ("ack", "unack"):
+        f_key = getattr(args, "finding_key", None)
+        if not f_key:
+            print(f"[error] 'doctor {target}' requires a finding_key argument", file=sys.stderr)
+            return 2
+        ws_arg = getattr(args, "project", None) or getattr(args, "workspace", None)
+        args.workspace = ws_arg
+        if target == "ack":
+            return cmd_ack(args)
+        return cmd_unack(args)
+
+    proj_arg = getattr(args, "project", None) or getattr(args, "workspace", None) or target or "."
+    ws = pathlib.Path(proj_arg).resolve()
+    gcfg = getattr(args, "global_config", None)
+    res = inspect_project_doctor(
+        workspace=ws,
+        home=args.home,
+        global_config=pathlib.Path(gcfg).resolve() if gcfg else None,
+    )
+
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        conv_cur = res.get("convention_version") or "unrecorded"
+        conv_tool = res.get("tool_convention_version", CONVENTION_VERSION)
+        print(f"=== Project Doctor: {ws} ===")
+        print(f"Convention version: project={conv_cur} | tool={conv_tool}")
+        sm = res["summary"]
+        print(
+            f"Summary: {sm['total']} finding(s) "
+            f"(error={sm['error']}, warning={sm['warning']}, info={sm['info']}, acknowledged={sm['acknowledged']})"
+        )
+        if not res["findings"]:
+            print("  [ok] No convention or environment drift detected.")
+        else:
+            for fg in res["findings"]:
+                sev_tag = fg["severity"].upper()
+                ack_tag = " [ACKNOWLEDGED]" if fg.get("acknowledged") else ""
+                print(f"  [{sev_tag}]{ack_tag} ({fg['kind']}) {fg['group_key']}: {fg['message']}")
+                if fg.get("fix_command"):
+                    print(f"    Fix: {fg['fix_command']}")
+
+    if getattr(args, "check", False) and res.get("drifted"):
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--home", type=pathlib.Path, default=None, help="Override home directory (for testing/sandboxing)")
@@ -7548,8 +10454,38 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_st = sub.add_parser("status", help="Verify status & drift of CLIs, skills, and MCP servers across Kilo, Claude, and Codex")
     p_st.add_argument("--workspace", default=None, help="Optional project workspace to inspect project-scope installs")
+    p_st.add_argument("--home", dest="sub_home", type=pathlib.Path, default=None, help="Override home directory")
     p_st.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
     p_st.set_defaults(func=cmd_status)
+
+    p_doc = sub.add_parser("doctor", help="Inspect project and global convention drift with severity and fix commands")
+    p_doc.add_argument("target", nargs="?", default=None, help="Optional project path or 'ack'/'unack'")
+    p_doc.add_argument("finding_key", nargs="?", default=None, help="Finding key when target is 'ack' or 'unack'")
+    p_doc.add_argument("--project", default=None, help="Project path to inspect (defaults to current working directory)")
+    p_doc.add_argument("--workspace", default=None, help="Alias for --project")
+    p_doc.add_argument("--home", dest="sub_home", type=pathlib.Path, default=None, help="Override home directory")
+    p_doc.add_argument("--global-config", default=None, help="Optional global orchestration.toml path")
+    p_doc.add_argument("--note", default="", help="Optional note when acknowledging a finding")
+    p_doc.add_argument("--check", action="store_true", default=False, help="Exit with code 1 if unacknowledged drift is found")
+    p_doc.add_argument("--dry-run", action="store_true", default=False, help="Dry-run for ack/unack")
+    p_doc.add_argument("--expect-plan-hash", default=None, help="Expected plan hash for ack/unack")
+    p_doc.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
+    p_doc.set_defaults(func=cmd_doctor)
+
+    p_upg = sub.add_parser("upgrade", help="Preview or apply unified project upgrade (config, workspace registration, AGENTS.md, task headers, index markers, convention_version)")
+    p_upg.add_argument("target", nargs="?", default=None, help="Optional project path to upgrade")
+    p_upg.add_argument("--project", default=None, help="Project path to upgrade (defaults to current working directory)")
+    p_upg.add_argument("--workspace", default=None, help="Alias for --project")
+    p_upg.add_argument("--home", dest="sub_home", type=pathlib.Path, default=None, help="Override home directory")
+    p_upg.add_argument("--global-config", default=None, help="Optional global orchestration.toml path")
+    p_upg.add_argument("--dry-run", action="store_true", default=False, help="Preview upgrade plan without modifying disk (default when --apply is omitted)")
+    p_upg.add_argument("--preview", action="store_true", default=False, help="Alias for --dry-run")
+    p_upg.add_argument("--apply", action="store_true", default=False, help="Apply upgrade plan to disk (requires --expect-hash)")
+    p_upg.add_argument("--expect-hash", default=None, help="Expected plan hash from preview")
+    p_upg.add_argument("--expect-plan-hash", default=None, help="Alias for --expect-hash")
+    p_upg.add_argument("--migrate-plans", action="store_true", default=False, help="Also migrate legacy plans/ files")
+    p_upg.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
+    p_upg.set_defaults(func=cmd_upgrade)
 
     p_il = sub.add_parser("install-launcher", help="Preview or install the version-free ~/.local/bin/ai-orch launcher")
     p_il.add_argument("--path", default=None, help="Custom launcher destination path (default: <home>/.local/bin/ai-orch)")
@@ -7636,6 +10572,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ack.add_argument("finding_key", help="Finding key or group key to acknowledge")
     p_ack.add_argument("--note", default="", help="Optional note explaining why the finding is acknowledged")
     p_ack.add_argument("--workspace", default=None)
+    p_ack.add_argument("--project", dest="workspace", default=None, help="Alias for --workspace")
+    p_ack.add_argument("--home", dest="sub_home", type=pathlib.Path, default=None, help="Override home directory")
     p_ack.add_argument("--dry-run", action="store_true", default=False, help="Compute and display acknowledge plan without executing")
     p_ack.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
     p_ack.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
@@ -7644,6 +10582,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_unack = sub.add_parser("unack", help="Remove persistent acknowledgment for a doctor finding")
     p_unack.add_argument("finding_key", help="Finding key or group key to un-acknowledge")
     p_unack.add_argument("--workspace", default=None)
+    p_unack.add_argument("--project", dest="workspace", default=None, help="Alias for --workspace")
+    p_unack.add_argument("--home", dest="sub_home", type=pathlib.Path, default=None, help="Override home directory")
     p_unack.add_argument("--dry-run", action="store_true", default=False, help="Compute and display unacknowledge plan without executing")
     p_unack.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
     p_unack.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
@@ -7655,6 +10595,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     ap = build_parser()
     args = ap.parse_args()
+    if getattr(args, "sub_home", None) is not None and getattr(args, "home", None) is None:
+        args.home = args.sub_home
     args.json = bool(getattr(args, "parent_json", False) or getattr(args, "sub_json", False))
     args.dry_run = bool(getattr(args, "parent_dry_run", False) or getattr(args, "dry_run", False))
     if not getattr(args, "expect_plan_hash", None) and getattr(args, "parent_expect_plan_hash", None):

@@ -65,7 +65,7 @@ starts when the operator explicitly invokes it.
 `orchestration_config.py` manages a two-tier configuration hierarchy:
 
 1. **Global Config:** `~/.config/ai-orchestration/orchestration.toml` (override via `$AI_ORCHESTRATION_CONFIG`), with automatic backward-compatible fallback to `~/.config/ai-architect-executor/roles.toml`.
-2. **Project Config:** `<workspace>/tasks/orchestration.toml` (or `<workspace>/.ai-orchestration.toml`), deep-merged on top of the Global Config.
+2. **Project Config:** `<workspace>/.ai-orchestration.local.toml` (if already present locally, gitignored) or `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` (outside the repository), deep-merged on top of the Global Config. Legacy in-repo `orchestration.toml` locations (at the repo root, under `.ai-orchestration/`, or under `tasks/`) are read-only fallbacks that emit a deprecation warning.
 
 ### Supporting Both Single-Framework Native and Multi-Framework MCP Setups
 
@@ -135,7 +135,7 @@ ai-orch orchestrator reassign --tool claude [--model <model>] --bind-current --e
 # 4. Initialize global config (~/.config/ai-orchestration/orchestration.toml)
 ai-orch config init-global [--force] [--global-config <file>] [--json]
 
-# 5. Initialize project config (<workspace>/tasks/orchestration.toml or .ai-orchestration.local.toml)
+# 5. Initialize project config (~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml or <workspace>/.ai-orchestration.local.toml)
 ai-orch config init-project \
   --workspace <dir> [--name <project-name>] \
   --orchestrator <tool> --executor <tool> \

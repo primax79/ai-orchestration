@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-10-29T21:40:00Z",
+  "primary_host": "alf_ubuntu",
+  "hosts": {
+    "mac": {
+      "root": "{{MAC_ROOT}}"
+    },
+    "alf_ubuntu": {
+      "root": "{{HUB_ROOT}}",
+      "reference_repos_root": "{{REPOS_ROOT}}"
+    }
+  },
+  "projects": [
+    {
+      "id": "ricerca-auto",
+      "title": "Ricerca Auto",
+      "primary_host": "alf_ubuntu",
+      "paths": {
+        "mac": "{{MAC_ROOT}}/ricerca_auto",
+        "alf_ubuntu": "{{HUB_ROOT}}/ricerca_auto"
+      },
+      "reference_repo": "alf_ubuntu:{{REPOS_ROOT}}/ricerca_auto.git",
+      "mirror": "ssh://git@gitea.local/alfredo/ricerca_auto.git",
+      "convention_version": "1.1.0"
+    },
+    {
+      "id": "ai-coding-tools",
+      "uuid": "52c62ed7-47c6-45e0-8136-6aa92350e4de",
+      "title": "AI Coding Tools",
+      "primary_host": "alf_ubuntu",
+      "mac_path": "{{MAC_ROOT}}/ai-coding-tools",
+      "hub_path": "{{HUB_ROOT}}/ai-coding-tools",
+      "reference_repo": "alf_ubuntu:{{REPOS_ROOT}}/ai-coding-tools.git",
+      "mirror_repo": "ssh://git@gitea.local/alfredo/ai-coding-tools.git",
+      "convention_version": "1.1.0",
+      "subprojects": [
+        {
+          "id": "_workspace",
+          "path": "."
+        },
+        {
+          "id": "ai-orchestration",
+          "path": "ai-orchestration",
+          "convention_version": "1.1.0"
+        },
+        {
+          "id": "kilo-mcp",
+          "path": "kilo-mcp"
+        }
+      ]
+    },
+    {
+      "slug": "d4science-kb",
+      "title": "D4Science Knowledge Base",
+      "primary": "mac",
+      "paths": {
+        "mac": "{{MAC_ROOT}}/d4science_kb",
+        "alf_ubuntu": "{{HUB_ROOT}}/d4science_kb"
+      },
+      "bare_repo": "alf_ubuntu:{{REPOS_ROOT}}/d4science_kb.git",
+      "gitea_mirror": "ssh://git@gitea.local/alfredo/d4science_kb.git",
+      "convention_version": "1.1.0"
+    }
+  ]
+}

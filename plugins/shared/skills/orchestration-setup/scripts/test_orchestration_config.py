@@ -239,9 +239,12 @@ def test_render_agents_md_use_case_1_single_framework_and_use_case_2_multi_frame
     ws1 = tmp_path / "uc1_kilo_native"
     ws1.mkdir()
     agents1 = ws1 / "AGENTS.md"
+    hist_stale_block = (
+        oc.BEGIN_MARKER + "\n" + oc.EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS[0].strip() + "\n" + oc.END_MARKER
+    )
     agents1.write_text(
         "# Custom Header\n\nProject-specific intro paragraph.\n\n"
-        "<!-- BEGIN ai-orchestration -->\nOLD STALE BLOCK\n<!-- END ai-orchestration -->\n\n"
+        f"{hist_stale_block}\n\n"
         "## Custom Footer\nKeep this footer intact.\n",
         encoding="utf-8",
     )
@@ -1128,11 +1131,12 @@ def test_render_agents_md_diff_scenarios(tmp_path: pathlib.Path) -> None:
     ws_outdated = tmp_path / "ws_outdated"
     ws_outdated.mkdir()
     agents_outdated = ws_outdated / "AGENTS.md"
+    hist_stale_block = (
+        oc.BEGIN_MARKER + "\n" + oc.EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS[0].strip() + "\n" + oc.END_MARKER
+    )
     initial_outdated = (
         "# Header\n\nIntro notes.\n\n"
-        "<!-- BEGIN ai-orchestration -->\n"
-        "OLD STALE ORCHESTRATION CONTENT\n"
-        "<!-- END ai-orchestration -->\n\n"
+        f"{hist_stale_block}\n\n"
         "## Footer\nKeep this footer.\n"
     )
     agents_outdated.write_text(initial_outdated, encoding="utf-8")
@@ -1154,8 +1158,8 @@ def test_render_agents_md_diff_scenarios(tmp_path: pathlib.Path) -> None:
     assert payload_outdated["path"] == str(agents_outdated)
     assert payload_outdated["hash"] == before_hash_outdated
     assert payload_outdated["changed"] is True
-    assert "-OLD STALE ORCHESTRATION CONTENT" in payload_outdated["diff"]
-    assert "+> **Managed by `ai-orchestration`" in payload_outdated["diff"]
+    assert "-### Rule 1: Keep the Main Session Free" in payload_outdated["diff"]
+    assert "+### Rule 1: Focus the Main Session on Architecture & Orchestration" in payload_outdated["diff"]
     assert agents_outdated.read_bytes() == before_bytes_outdated  # file untouched!
 
     # 4. AGENTS.md already up to date: returns current file hash, changed=False, diff="", file bytes unchanged
@@ -1211,11 +1215,12 @@ def test_render_agents_md_expect_hash_match_and_mismatch(tmp_path: pathlib.Path)
     ws = tmp_path / "ws_expect_hash"
     ws.mkdir()
     agents_md = ws / "AGENTS.md"
+    hist_stale_block = (
+        oc.BEGIN_MARKER + "\n" + oc.EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS[0].strip() + "\n" + oc.END_MARKER
+    )
     initial_content = (
         "# Header\n\n"
-        "<!-- BEGIN ai-orchestration -->\n"
-        "STALE BLOCK\n"
-        "<!-- END ai-orchestration -->\n\n"
+        f"{hist_stale_block}\n\n"
         "# Footer\n"
     )
     agents_md.write_text(initial_content, encoding="utf-8")
@@ -1348,9 +1353,7 @@ def test_render_agents_md_handwritten_content_byte_identical_after_apply(tmp_pat
         "Line 2 of footer.\n"
     )
     stale_block = (
-        "<!-- BEGIN ai-orchestration -->\n"
-        "OUTDATED MANAGED BLOCK THAT MUST BE REPLACED\n"
-        "<!-- END ai-orchestration -->"
+        oc.BEGIN_MARKER + "\n" + oc.EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS[0].strip() + "\n" + oc.END_MARKER
     )
     full_content = header_text + stale_block + footer_text
 
@@ -2498,3 +2501,930 @@ def test_config_show_defaults_to_cwd(tmp_path: pathlib.Path, monkeypatch: pytest
     data_other = json.loads(res_other.stdout)
     assert "other_project" in data_other["meta"]["project_config_path"]
     assert data_other["meta"]["project_config_exists"] is False
+
+
+def test_19_4_host_id_resolution_and_normalization(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Task 19.4: canonical host id from [host] id in global config with fallback to normalized hostname."""
+    monkeypatch.delenv("AI_ORCH_HOST_ID", raising=False)
+    assert oc.normalize_host_id("Alf-MacBook-Pro.local") == "alf-macbook-pro"
+    assert oc.normalize_host_id("alf_ubuntu") == "alf_ubuntu"
+    assert oc.normalize_host_id("  My Host!  ") == "my-host"
+    assert oc.normalize_host_id("") == "localhost"
+    assert oc.is_valid_host_id("alf_ubuntu") is True
+    assert oc.is_valid_host_id("mac-pro-1") is True
+    assert oc.is_valid_host_id("Invalid Host") is False
+    assert oc.is_valid_host_id("-bad") is False
+
+    # Fallback to normalized hostname when [host] id is absent
+    missing_cfg = tmp_path / "nonexistent.toml"
+    assert oc.resolve_host_id(global_path=missing_cfg, hostname="MacBook-Pro.local") == "macbook-pro"
+
+    # Global config [host] id wins over hostname
+    gpath = tmp_path / "orchestration.toml"
+    gpath.write_text('[host]\nid = "alf_ubuntu"\n', encoding="utf-8")
+    assert oc.resolve_host_id(global_path=gpath, hostname="MacBook-Pro.local") == "alf_ubuntu"
+    assert oc.get_host_id({"host": {"id": "mac"}}, global_path=gpath) == "mac"
+
+    # Host config in project config goes through 19.1's unified lookup (canonical and legacy positions)
+    ws = tmp_path / "proj_host_lookup"
+    (ws / ".ai-orchestration").mkdir(parents=True)
+    (ws / ".ai-orchestration" / "orchestration.toml").write_text(
+        '[host]\nid = "legacy_host"\n\n[hosts.mac]\nssh_target = "mac.lan"\nrole = "client"\n',
+        encoding="utf-8",
+    )
+    assert oc.get_declared_hosts(global_path=gpath, workspace=ws) == {"alf_ubuntu", "legacy_host", "mac"}
+    assert oc.resolve_host_id(global_path=missing_cfg, workspace=ws, hostname="fallback.local") == "legacy_host"
+
+    # B1: When a higher-priority canonical project config exists, shadowed legacy project config
+    # must NOT leak its [host] id or [hosts.<id>] entries.
+    (ws / ".ai-orchestration.local.toml").write_text(
+        '[hosts.active_client]\nssh_target = "active.lan"\nrole = "client"\n',
+        encoding="utf-8",
+    )
+    assert oc.get_declared_hosts(global_path=gpath, workspace=ws) == {"alf_ubuntu", "active_client"}
+    assert "mac" not in oc.get_declared_hosts(global_path=gpath, workspace=ws)
+    assert "legacy_host" not in oc.get_declared_hosts(global_path=gpath, workspace=ws)
+    # Since active canonical config has no [host] id, resolve_host_id falls back to hostname (not shadowed legacy_host)
+    assert oc.resolve_host_id(global_path=missing_cfg, workspace=ws, hostname="fallback.local") == "fallback"
+
+
+def test_19_4_hosts_table_and_validation() -> None:
+    """Task 19.4: [host] and [hosts.<id>] table (ssh target, agent user, role hub/client) validation."""
+    cfg = copy.deepcopy(oc.DEFAULT_GLOBAL_CONFIG)
+    cfg["host"] = {"id": "alf_ubuntu", "role": "hub"}
+    cfg["hosts"] = {
+        "alf_ubuntu": {
+            "ssh_target": "alf_ubuntu",
+            "agent_user": "kilo",
+            "role": "hub",
+        },
+        "mac": {
+            "ssh": "mac.lan",
+            "user": "alfredo",
+            "role": "client",
+        },
+    }
+    errors, _ = oc.validate_config(cfg)
+    assert errors == []
+
+    table = oc.resolve_hosts_table(cfg)
+    assert table["alf_ubuntu"]["ssh_target"] == "alf_ubuntu"
+    assert table["alf_ubuntu"]["agent_user"] == "kilo"
+    assert table["alf_ubuntu"]["role"] == "hub"
+    assert table["mac"]["ssh_target"] == "mac.lan"
+    assert table["mac"]["agent_user"] == "alfredo"
+    assert table["mac"]["role"] == "client"
+    assert oc.get_declared_hosts(cfg) == {"alf_ubuntu", "mac"}
+
+    # Invalid host id, role, ssh_target, and unknown key
+    bad_cfg = copy.deepcopy(oc.DEFAULT_GLOBAL_CONFIG)
+    bad_cfg["host"] = {"id": "BAD HOST!", "role": "worker"}
+    bad_cfg["hosts"] = {
+        "Invalid Id": {"role": "hub"},
+        "mac": {"role": "invalid_role", "ssh_target": "-oProxyCommand=evil", "unknown_field": 123},
+    }
+    bad_errors, _ = oc.validate_config(bad_cfg)
+    assert any("[host].id" in e for e in bad_errors)
+    assert any("[host].role" in e for e in bad_errors)
+    assert any("[hosts.Invalid Id]" in e for e in bad_errors)
+    assert any("[hosts.mac].role" in e for e in bad_errors)
+    assert any("[hosts.mac].ssh_target" in e for e in bad_errors)
+    assert any("unknown key 'unknown_field'" in e for e in bad_errors)
+
+
+def test_19_1_unified_config_lookup_across_all_subsystems_and_legacy_positions(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1: Every canonical and legacy project config location is read identically by
+    orchestration_config, tasks_engine, and orchestration_triggers; legacy locations
+    emit a read-only deprecation warning and are never written to."""
+    tasks_scripts = REPO_ROOT / "plugins" / "architect-side" / "skills" / "task-pipeline" / "scripts"
+    root_scripts = REPO_ROOT / "scripts"
+    for p in (tasks_scripts, root_scripts):
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+
+    import tasks_engine as te  # type: ignore
+    import orchestration_triggers as ot  # type: ignore
+    import orchestration_env as oe  # type: ignore
+    import orchestration_registry as oreg  # type: ignore
+
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    global_cfg_dir = fake_home / ".config" / "ai-orchestration"
+    global_cfg_path = global_cfg_dir / "orchestration.toml"
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(global_cfg_path))
+    monkeypatch.setenv("AI_ORCH_HOME", str(fake_home))
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
+
+    sample_toml = (
+        '[routing]\n'
+        'default_orchestrator = "codex"\n'
+        'default_executor = "kilo"\n\n'
+        '[tasks]\n'
+        'language = "it"\n'
+        'extension_fields = ["area", "subsystem"]\n\n'
+        '[workspace.discovery]\n'
+        'include = ["packages/*"]\n'
+        'exclude = ["packages/ignored-mod"]\n\n'
+        '[[triggers]]\n'
+        'name = "legacy-pos-rule"\n'
+        'on = "task.transitioned"\n'
+        'when = { to = "delivered" }\n'
+        'action = "notify"\n'
+    )
+
+    positions = [
+        ("local_dot", lambda ws: ws / ".ai-orchestration.local.toml", False),
+        ("external_projects", lambda ws: global_cfg_dir / "projects" / ws.name / "orchestration.toml", False),
+        ("legacy_root", lambda ws: ws / "orchestration.toml", True),
+        ("legacy_dot_dir", lambda ws: ws / ".ai-orchestration" / "orchestration.toml", True),
+        ("legacy_tasks_dir", lambda ws: ws / "tasks" / "orchestration.toml", True),
+        ("legacy_dot_toml", lambda ws: ws / ".ai-orchestration.toml", True),
+    ]
+
+    for pos_name, path_fn, expect_legacy in positions:
+        ws = tmp_path / f"proj_{pos_name}"
+        tasks_dir = ws / "tasks"
+        tasks_dir.mkdir(parents=True)
+
+        cfg_file = path_fn(ws)
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(sample_toml, encoding="utf-8")
+
+        # 1. orchestration_config reads routing, tasks, triggers, discovery and reports expected path + legacy status
+        merged, meta = oc.resolve_config(global_cfg_path, ws)
+        assert pathlib.Path(meta["project_config_path"]).resolve() == cfg_file.resolve(), pos_name
+        assert meta["project_config_exists"] is True, pos_name
+        assert meta["project_config_legacy"] is expect_legacy, pos_name
+        assert merged["routing"]["default_orchestrator"] == "codex", pos_name
+        assert merged["tasks"]["language"] == "it", pos_name
+        assert merged["tasks"]["extension_fields"] == ["area", "subsystem"], pos_name
+        assert merged["triggers"][0]["name"] == "legacy-pos-rule", pos_name
+        assert merged["workspace"]["discovery"]["include"] == ["packages/*"], pos_name
+        if expect_legacy:
+            assert any("legacy project config path" in w and "read-only" in w for w in meta["warnings"]), pos_name
+        else:
+            assert meta["warnings"] == [], pos_name
+
+        # 2. tasks_engine reads extension_fields and languages from the exact same location
+        ext_fields = te.get_project_extension_fields(tasks_dir)
+        assert ext_fields == ("area", "subsystem"), pos_name
+        lang_info = te.resolve_project_languages(tasks_dir)
+        assert lang_info["tasks"] == "it", pos_name
+        if expect_legacy:
+            assert any("legacy project config path" in w and "read-only" in w for w in lang_info["warnings"]), pos_name
+
+        # 3. orchestration_triggers reads trigger rule from the exact same location
+        trig_meta, rules, trig_errs = ot.load_triggers_config(ws)
+        assert not trig_errs, f"{pos_name}: {trig_errs}"
+        assert len(rules) == 1 and rules[0]["name"] == "legacy-pos-rule", pos_name
+        assert pathlib.Path(trig_meta["project_config_path"]).resolve() == cfg_file.resolve(), pos_name
+        assert trig_meta["project_config_legacy"] is expect_legacy, pos_name
+        if expect_legacy:
+            assert any("legacy project config path" in w and "read-only" in w for w in trig_meta["warnings"]), pos_name
+
+        # 4. orchestration_registry reads workspace.discovery from the exact same location
+        disc_filter = oreg.load_workspace_discovery_filter(ws, config_dir=global_cfg_dir)
+        assert disc_filter.include_patterns == ["packages/*"], pos_name
+        assert disc_filter.allows_project("packages/core", "core", "core") is True, pos_name
+        assert disc_filter.allows_project("packages/ignored-mod", "ignored-mod", "ignored-mod") is False, pos_name
+        assert disc_filter.allows_project("other/mod", "mod", "mod") is False, pos_name
+
+        # 5. orchestration_env reports the exact same project_config_path
+        env_info = oe._inspect_project_config_env(ws)
+        assert pathlib.Path(env_info["path"]).resolve() == cfg_file.resolve(), pos_name
+        assert env_info["is_legacy"] is expect_legacy, pos_name
+
+        # 6. Write target is always canonical (legacy file stays untouched / read-only)
+        write_target = oc.find_project_config_path(ws, global_cfg_path, for_write=True)
+        if expect_legacy:
+            expected_canonical = global_cfg_dir / "projects" / ws.name / "orchestration.toml"
+            assert write_target.resolve() == expected_canonical.resolve(), pos_name
+            before_legacy = cfg_file.read_text(encoding="utf-8")
+            res_set = run_cli(
+                "--global-config",
+                str(global_cfg_path),
+                "set-routing",
+                "--scope",
+                "project",
+                "--workspace",
+                str(ws),
+                "--orchestrator",
+                "claude",
+                "--json",
+            )
+            assert res_set.returncode == 0, res_set.stdout + res_set.stderr
+            assert cfg_file.read_text(encoding="utf-8") == before_legacy, pos_name
+            assert expected_canonical.is_file(), pos_name
+
+
+def test_19_1_custom_config_override_outside_home_matches_between_tasks_config_and_env_status(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1 (B1): When AI_ORCHESTRATION_CONFIG or AI_ORCH_CONFIG_DIR points to a custom directory
+    outside HOME, `ai-orch tasks config` and `ai-orch env status` both honour the override and
+    report the exact same `project_config_path`."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("AI_ORCH_HOME", str(fake_home))
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
+
+    # Also create a decoy config inside fake_home/.config/ai-orchestration/projects/sample_repo/orchestration.toml
+    # so that ignoring the override would pick the decoy inside fake_home.
+    decoy_home_cfg = fake_home / ".config" / "ai-orchestration" / "projects" / "sample_repo" / "orchestration.toml"
+    decoy_home_cfg.parent.mkdir(parents=True, exist_ok=True)
+    decoy_home_cfg.write_text('[routing]\ndefault_executor = "claude"\n', encoding="utf-8")
+
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    ws = tmp_path / "sample_repo"
+    (ws / "tasks").mkdir(parents=True)
+
+    # Case A: AI_ORCHESTRATION_CONFIG outside fake_home
+    outside_dir_a = tmp_path / "custom_cfg_outside_home_a"
+    outside_cfg_a = outside_dir_a / "orchestration.toml"
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(outside_cfg_a))
+    monkeypatch.delenv("AI_ORCH_CONFIG_DIR", raising=False)
+
+    expected_ext_a = outside_dir_a / "projects" / ws.name / "orchestration.toml"
+    res_tasks_a0 = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "config", "--tasks-dir", str(ws / "tasks"), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    res_env_a0 = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "env", "status", "--workspace", str(ws), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tdata_a0 = json.loads(res_tasks_a0.stdout)
+    edata_a0 = json.loads(res_env_a0.stdout)
+    assert tdata_a0["project_config_path"] == edata_a0["project_config_path"]
+    assert pathlib.Path(tdata_a0["project_config_path"]).resolve() == expected_ext_a.resolve()
+    assert tdata_a0["project_config_exists"] is False
+    assert edata_a0["project_config_exists"] is False
+
+    expected_ext_a.parent.mkdir(parents=True, exist_ok=True)
+    expected_ext_a.write_text('[routing]\ndefault_executor = "kilo"\n', encoding="utf-8")
+    res_tasks_a1 = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "config", "--tasks-dir", str(ws / "tasks"), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    res_env_a1 = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "env", "status", "--workspace", str(ws), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tdata_a1 = json.loads(res_tasks_a1.stdout)
+    edata_a1 = json.loads(res_env_a1.stdout)
+    assert tdata_a1["project_config_path"] == edata_a1["project_config_path"]
+    assert pathlib.Path(tdata_a1["project_config_path"]).resolve() == expected_ext_a.resolve()
+    assert tdata_a1["project_config_exists"] is True
+    assert edata_a1["project_config_exists"] is True
+
+    # Case B: AI_ORCH_CONFIG_DIR outside fake_home (with AI_ORCHESTRATION_CONFIG unset)
+    outside_dir_b = tmp_path / "custom_cfg_outside_home_b"
+    monkeypatch.delenv("AI_ORCHESTRATION_CONFIG", raising=False)
+    monkeypatch.setenv("AI_ORCH_CONFIG_DIR", str(outside_dir_b))
+
+    expected_ext_b = outside_dir_b / "projects" / ws.name / "orchestration.toml"
+    expected_ext_b.parent.mkdir(parents=True, exist_ok=True)
+    expected_ext_b.write_text('[routing]\ndefault_executor = "kilo"\n', encoding="utf-8")
+    res_tasks_b = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "tasks", "config", "--tasks-dir", str(ws / "tasks"), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    res_env_b = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "env", "status", "--workspace", str(ws), "--json"],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tdata_b = json.loads(res_tasks_b.stdout)
+    edata_b = json.loads(res_env_b.stdout)
+    assert tdata_b["project_config_path"] == edata_b["project_config_path"]
+    assert pathlib.Path(tdata_b["project_config_path"]).resolve() == expected_ext_b.resolve()
+    assert tdata_b["project_config_exists"] is True
+    assert edata_b["project_config_exists"] is True
+
+
+def test_19_1_workspace_discovery_filter_reads_every_canonical_and_legacy_location(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1 (B2): `orchestration_registry.load_workspace_discovery_filter` and `plan_projects_discover`
+    read `[workspace.discovery]` from every canonical and legacy project config location."""
+    root_scripts = REPO_ROOT / "scripts"
+    if str(root_scripts) not in sys.path:
+        sys.path.insert(0, str(root_scripts))
+    import orchestration_registry as oreg  # type: ignore
+
+    cfg_dir = tmp_path / "global_cfg"
+    cfg_dir.mkdir()
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_dir / "orchestration.toml"))
+
+    positions = [
+        ("local_dot", lambda ws: ws / ".ai-orchestration.local.toml"),
+        ("external_projects", lambda ws: cfg_dir / "projects" / ws.name / "orchestration.toml"),
+        ("legacy_root", lambda ws: ws / "orchestration.toml"),
+        ("legacy_dot_dir", lambda ws: ws / ".ai-orchestration" / "orchestration.toml"),
+        ("legacy_tasks_dir", lambda ws: ws / "tasks" / "orchestration.toml"),
+        ("legacy_dot_toml", lambda ws: ws / ".ai-orchestration.toml"),
+    ]
+
+    for pos_name, path_fn in positions:
+        ws = tmp_path / f"disc_{pos_name}"
+        (ws / "tasks").mkdir(parents=True)
+        (ws / "tasks" / "00-INDEX.md").write_text("# Root\n", encoding="utf-8")
+        for sub in ("packages/kept", "packages/skipped"):
+            (ws / sub / "tasks").mkdir(parents=True)
+            (ws / sub / "tasks" / "00-INDEX.md").write_text("# Sub\n", encoding="utf-8")
+
+        cfg_file = path_fn(ws)
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(
+            '[workspace.discovery]\n'
+            'include = ["packages/*"]\n'
+            'exclude = ["packages/skipped"]\n',
+            encoding="utf-8",
+        )
+
+        plan = oreg.plan_projects_discover(workspace_arg=str(ws), config_dir=cfg_dir)
+        proposed_paths = [p["path"] for p in plan["proposed_projects"]]
+        assert "." in proposed_paths, pos_name
+        assert "packages/kept" in proposed_paths, pos_name
+        assert "packages/skipped" not in proposed_paths, pos_name
+
+
+def test_19_1_shadowed_lower_priority_files_do_not_leak_settings_or_trigger_rules(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1 (B3): When a higher-priority project config file exists alongside lower-priority
+    legacy config files, lower-priority files are genuinely shadowed: their settings,
+    extension_fields, languages, discovery rules, and trigger rules are NOT merged/loaded,
+    while deprecation/shadowed warnings are still emitted."""
+    tasks_scripts = REPO_ROOT / "plugins" / "architect-side" / "skills" / "task-pipeline" / "scripts"
+    root_scripts = REPO_ROOT / "scripts"
+    for p in (tasks_scripts, root_scripts):
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+
+    import tasks_engine as te  # type: ignore
+    import orchestration_triggers as ot  # type: ignore
+    import orchestration_registry as oreg  # type: ignore
+
+    cfg_dir = tmp_path / "global_cfg"
+    cfg_dir.mkdir()
+    global_cfg_path = cfg_dir / "orchestration.toml"
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(global_cfg_path))
+
+    ws = tmp_path / "shadow_proj"
+    tasks_dir = ws / "tasks"
+    tasks_dir.mkdir(parents=True)
+
+    # Stale legacy file in tasks/orchestration.toml with extra keys, extension_fields, discovery exclude, and trigger rule
+    stale_legacy = tasks_dir / "orchestration.toml"
+    stale_legacy.write_text(
+        '[routing]\n'
+        'default_orchestrator = "codex"\n'
+        'default_executor = "codex"\n'
+        'default_profile = "exploration"\n\n'
+        '[tasks]\n'
+        'language = "fr"\n'
+        'extension_fields = ["stale-legacy-field"]\n\n'
+        '[workspace.discovery]\n'
+        'exclude = ["packages/active-mod"]\n\n'
+        '[triggers]\n'
+        'enabled = false\n\n'
+        '[[triggers.rules]]\n'
+        'name = "stale-legacy-rule"\n'
+        'on = "task.transitioned"\n'
+        'when = { to = "delivered" }\n'
+        'action = "notify"\n',
+        encoding="utf-8",
+    )
+
+    # Active canonical file in .ai-orchestration.local.toml
+    active_local = ws / ".ai-orchestration.local.toml"
+    active_local.write_text(
+        '[routing]\n'
+        'default_orchestrator = "claude"\n\n'
+        '[tasks]\n'
+        'language = "it"\n'
+        'extension_fields = ["active-field"]\n\n'
+        '[workspace.discovery]\n'
+        'include = ["packages/*"]\n\n'
+        '[[triggers]]\n'
+        'name = "active-rule"\n'
+        'on = "task.transitioned"\n'
+        'when = { to = "delivered" }\n'
+        'action = "notify"\n',
+        encoding="utf-8",
+    )
+
+    # 1. orchestration_config: only active_local is loaded on top of global defaults; stale_legacy does not leak
+    merged, meta = oc.resolve_config(global_cfg_path, ws)
+    assert pathlib.Path(meta["project_config_path"]).resolve() == active_local.resolve()
+    assert merged["routing"]["default_orchestrator"] == "claude"
+    # default_executor and default_profile come from DEFAULT_GLOBAL_CONFIG ("kilo", "bulk-execution"), NOT stale_legacy ("codex", "exploration")
+    assert merged["routing"]["default_executor"] == "kilo"
+    assert merged["routing"]["default_profile"] == "bulk-execution"
+    assert merged["tasks"]["extension_fields"] == ["active-field"]
+    assert any("shadowed by" in w for w in meta["warnings"])
+
+    # 2. orchestration_triggers: only active_local's rule is loaded; stale_legacy's rule and enabled=false kill switch are ignored
+    trig_meta, rules, trig_errs = ot.load_triggers_config(ws)
+    assert not trig_errs
+    assert trig_meta["kill_switch_enabled"] is True
+    assert [r["name"] for r in rules] == ["active-rule"]
+    assert any("shadowed by" in w for w in trig_meta["warnings"])
+
+    # 3. tasks_engine: only active_local's extension_fields and language are read
+    assert te.get_project_extension_fields(tasks_dir) == ("active-field",)
+    lang_info = te.resolve_project_languages(tasks_dir)
+    assert lang_info["tasks"] == "it"
+    assert any("shadowed by" in w for w in lang_info["warnings"])
+
+    # 4. orchestration_registry: only active_local's discovery rules apply; stale_legacy's exclude is ignored
+    disc_filter = oreg.load_workspace_discovery_filter(ws, config_dir=cfg_dir)
+    assert disc_filter.allows_project("packages/active-mod", "active-mod", "active-mod") is True
+
+
+def test_19_1_precedence_order_and_tasks_config_matches_env_status(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1: Precedence order is enforced, and `ai-orch tasks config` and `ai-orch env status`
+    report the exact same `project_config_path`."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    global_cfg_dir = fake_home / ".config" / "ai-orchestration"
+    global_cfg_path = global_cfg_dir / "orchestration.toml"
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(global_cfg_path))
+    monkeypatch.setenv("AI_ORCH_HOME", str(fake_home))
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
+
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    ws = tmp_path / "sample_repo"
+    (ws / "tasks").mkdir(parents=True)
+
+    def _assert_same_path(expected: pathlib.Path, expect_exists: bool) -> None:
+        res_tasks = subprocess.run(
+            [sys.executable, str(bin_ai_orch), "tasks", "config", "--tasks-dir", str(ws / "tasks"), "--json"],
+            cwd=str(ws),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        res_env = subprocess.run(
+            [sys.executable, str(bin_ai_orch), "env", "status", "--workspace", str(ws), "--json"],
+            cwd=str(ws),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        tasks_data = json.loads(res_tasks.stdout)
+        env_data = json.loads(res_env.stdout)
+        assert tasks_data["project_config_path"] == env_data["project_config_path"]
+        assert pathlib.Path(tasks_data["project_config_path"]).resolve() == expected.resolve()
+        assert tasks_data["project_config_exists"] is expect_exists
+        assert env_data["project_config_exists"] is expect_exists
+
+    # 0. Unconfigured -> both report external canonical path with exists=False
+    ext_cfg = global_cfg_dir / "projects" / ws.name / "orchestration.toml"
+    _assert_same_path(ext_cfg, expect_exists=False)
+
+    # Walk from lowest precedence to highest precedence, verifying each newly added file wins
+    ordered_files = [
+        ws / ".ai-orchestration.toml",
+        ws / "tasks" / "orchestration.toml",
+        ws / ".ai-orchestration" / "orchestration.toml",
+        ws / "orchestration.toml",
+        ext_cfg,
+        ws / ".ai-orchestration.local.toml",
+    ]
+    for fpath in ordered_files:
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        fpath.write_text('[routing]\ndefault_executor = "kilo"\n', encoding="utf-8")
+        _assert_same_path(fpath, expect_exists=True)
+
+
+def test_19_1_no_tasks_orchestration_toml_in_docs_or_skill_templates() -> None:
+    """19.1: `grep -rn "tasks/orchestration.toml" docs plugins/*/skills/*/SKILL.template.md`
+    finds no instructions to write to tasks/orchestration.toml."""
+    search_targets: list[pathlib.Path] = list((REPO_ROOT / "docs").rglob("*.md"))
+    search_targets.extend((REPO_ROOT / "plugins").glob("*/skills/*/SKILL.template.md"))
+    search_targets.append(REPO_ROOT / "plugins" / "shared" / "skills" / "orchestration-setup" / "SKILL.md")
+
+    offending: list[str] = []
+    for path in search_targets:
+        if not path.is_file():
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if "tasks/orchestration.toml" in line:
+                offending.append(f"{path.relative_to(REPO_ROOT)}:{lineno}: {line}")
+
+    assert offending == [], f"Found forbidden tasks/orchestration.toml references:\n" + "\n".join(offending)
+
+
+def test_19_7_preflight_tools_versions_ports_services_disk(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.7: `[project.preflight]` validates tools with minimum version, free ports,
+    active services, and disk space, and is runnable via `ai-orch preflight`."""
+    import os
+    import socket
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_tool = fake_bin / "fake-bun"
+    fake_tool.write_text(
+        "#!/bin/sh\necho 'bun 1.5.2'\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    # 1. Missing binary -> fails naming the binary
+    cfg_missing = {
+        "project": {
+            "preflight": {
+                "tools": {
+                    "nonexistent-bin-t205": "1.0.0",
+                }
+            }
+        }
+    }
+    res_missing = oc.run_project_preflight(cfg_missing, workspace=ws)
+    assert res_missing["ok"] is False
+    assert any("nonexistent-bin-t205" in f for f in res_missing["failures"])
+
+    # 2. Version below minimum -> fails naming the binary and versions
+    cfg_old_ver = {
+        "project": {
+            "preflight": {
+                "tools": {
+                    "fake-bun": ">=2.0.0",
+                }
+            }
+        }
+    }
+    res_old = oc.run_project_preflight(cfg_old_ver, workspace=ws)
+    assert res_old["ok"] is False
+    assert any("fake-bun" in f and "1.5.2" in f and "2.0.0" in f for f in res_old["failures"])
+
+    # 3. Free port occupied vs free, and active service on TCP port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        busy_port = srv.getsockname()[1]
+
+        # Find an unused port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tmp_sock:
+            tmp_sock.bind(("127.0.0.1", 0))
+            free_port = tmp_sock.getsockname()[1]
+
+        # Busy port in free_ports -> fails
+        cfg_busy_port = {
+            "project": {
+                "preflight": {
+                    "free_ports": [busy_port],
+                }
+            }
+        }
+        res_busy = oc.run_project_preflight(cfg_busy_port, workspace=ws)
+        assert res_busy["ok"] is False
+        assert any(str(busy_port) in f for f in res_busy["failures"])
+
+        # Inactive service on free_port -> fails
+        cfg_dead_svc = {
+            "project": {
+                "preflight": {
+                    "services": {
+                        "test-db": {"port": free_port},
+                    }
+                }
+            }
+        }
+        res_dead_svc = oc.run_project_preflight(cfg_dead_svc, workspace=ws)
+        assert res_dead_svc["ok"] is False
+        assert any("test-db" in f for f in res_dead_svc["failures"])
+
+        # Impossible disk requirement -> fails
+        cfg_low_disk = {
+            "project": {
+                "preflight": {
+                    "min_disk_gb": 999999999,
+                }
+            }
+        }
+        res_low_disk = oc.run_project_preflight(cfg_low_disk, workspace=ws)
+        assert res_low_disk["ok"] is False
+        assert any("disk space" in f.lower() for f in res_low_disk["failures"])
+
+        # All checks passing (tool >= 1.2.0, free_port unused, service listening on busy_port, disk >= 1 MB)
+        cfg_all_ok = {
+            "project": {
+                "preflight": {
+                    "tools": {"fake-bun": ">=1.2.0"},
+                    "free_ports": [free_port],
+                    "services": {"active-srv": {"port": busy_port}},
+                    "min_disk_mb": 1,
+                }
+            }
+        }
+        res_ok = oc.run_project_preflight(cfg_all_ok, workspace=ws)
+        assert res_ok["ok"] is True, res_ok["failures"]
+        assert len(res_ok["checks"]) == 4
+
+
+def test_19_7_ai_orch_verify_checks_execution_and_timeouts(tmp_path: pathlib.Path) -> None:
+    """19.7: `[project.verification_checks]` is executable via `ai-orch verify-checks`
+    and respects per-project and per-check timeouts."""
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    ws = tmp_path / "verify_ws"
+    ws.mkdir()
+
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    proj_cfg.write_text(
+        '[project]\nname = "verify-demo"\ncommand_timeout_seconds = 45\n\n'
+        '[project.verification_checks.unit]\n'
+        'description = "Fast unit check"\n'
+        f'commands = ["{sys.executable} -c \\"print(\'UNIT_OK\')\\""]\n\n'
+        '[project.verification_checks.broken]\n'
+        'description = "Failing check"\n'
+        f'commands = ["{sys.executable} -c \\"import sys; sys.stderr.write(\'BROKEN_ERR\\\\n\'); sys.exit(3)\\""]\n\n'
+        '[project.verification_checks.slow]\n'
+        'description = "Slow check that exceeds timeout"\n'
+        'timeout_seconds = 0.3\n'
+        f'commands = ["{sys.executable} -c \\"import time; time.sleep(5)\\""]\n',
+        encoding="utf-8",
+    )
+
+    # 1. Run passing check only
+    res_pass = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "verify-checks", "unit", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_pass.returncode == 0, res_pass.stdout + res_pass.stderr
+    data_pass = json.loads(res_pass.stdout)
+    assert data_pass["ok"] is True
+    assert data_pass["passed_count"] == 1
+    assert data_pass["failed_count"] == 0
+    assert data_pass["timeout_seconds"] == 45.0
+    assert data_pass["checks"][0]["commands"][0]["stdout"] == "UNIT_OK"
+
+    # 2. Run failing check
+    res_fail = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "verify-checks", "--check", "broken", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_fail.returncode == 1
+    data_fail = json.loads(res_fail.stdout)
+    assert data_fail["ok"] is False
+    assert data_fail["failed_count"] == 1
+    assert data_fail["checks"][0]["commands"][0]["exit_code"] == 3
+    assert "BROKEN_ERR" in data_fail["checks"][0]["commands"][0]["stderr"]
+
+    # 3. Run slow check -> times out
+    res_slow = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "verify-checks", "slow", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_slow.returncode == 1
+    data_slow = json.loads(res_slow.stdout)
+    assert data_slow["ok"] is False
+    assert data_slow["checks"][0]["commands"][0]["timed_out"] is True
+
+
+def test_19_2_b1_find_and_strip_duplicated_handwritten_agents_sections_positive_matching_and_negative_cases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1: Duplicate-block detection requires positive whole-section matching against known historical
+    renderings (no keyword signatures), never reuses destructive stripping as the predicate, and
+    preserves ordinary user-authored sections even when they use orchestration vocabulary."""
+    user_doc_with_vocab = (
+        "# Project Guidelines\n\n"
+        "## Required Skills\n\n"
+        "Contributors and agents should know `task-pipeline` and `task-spec-authoring` when writing specs, "
+        "plus `orchestration-workflow` and `executor-contract` for background jobs.\n"
+        "- Python 3.12 async programming\n"
+        "- PostgreSQL query tuning\n\n"
+        "## Core Operating Rules\n\n"
+        "### Rule 1: Keep the Main Session Free for Design\n\n"
+        "Every PR must declare its `focus_files`, keep a disjoint write scope, and follow the "
+        "\"one task = one commit\" rule inside an isolated git worktree.\n\n"
+        "### Rule 2: Define Execution Tasks Before Delegating\n\n"
+        "Use `deep-reasoning` for tricky bugs and `bulk-execution` for routine changes.\n\n"
+        "## Orchestration Lifecycle\n\n"
+        "Tasks move from `open` → `in progress` → `delivered` → `verified` → `done`. "
+        "Attach a `Final Report` and run `git worktree remove` after the Post-Merge Integration Gate.\n\n"
+        "<!-- BEGIN ai-orchestration -->\n"
+        "Managed block.\n"
+        "<!-- END ai-orchestration -->\n"
+    )
+
+    # 1. Verify find_duplicated_handwritten_agents_sections never calls strip_duplicated_handwritten_agents_sections
+    def _forbidden_strip(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("find_duplicated_handwritten_agents_sections must not call strip_duplicated_handwritten_agents_sections")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(oc, "strip_duplicated_handwritten_agents_sections", _forbidden_strip)
+        assert oc.find_duplicated_handwritten_agents_sections(user_doc_with_vocab) == []
+
+    # 2. Stripping on user_doc_with_vocab must be a complete no-op and preserve user sections byte-for-byte
+    cleaned_user, removed_user = oc.strip_duplicated_handwritten_agents_sections(user_doc_with_vocab)
+    assert removed_user == []
+    assert cleaned_user == user_doc_with_vocab
+
+    # 3. Positive matches with real historical renderings from git history (2026-10-15 927244a & 2026-10-17 0eef7a8)
+    hist_dir = REPO_ROOT / "scripts" / "fixtures" / "historical_agents_md"
+    hist_2026_10_15 = (hist_dir / "2026-10-15_927244a_ricerca_auto.md").read_text(encoding="utf-8")
+    hist_2026_10_17 = (hist_dir / "2026-10-17_0eef7a8_default.md").read_text(encoding="utf-8")
+
+    for hist_raw in (hist_2026_10_15, hist_2026_10_17):
+        unmarked_hist = (
+            hist_raw.replace("<!-- BEGIN ai-orchestration -->\n", "")
+            .replace("<!-- END ai-orchestration -->\n", "")
+        )
+        user_prefix = (
+            "# Project Guidelines\n\n"
+            "## Required Skills\n\n"
+            "We use `task-pipeline` and `task-spec-authoring` alongside Python 3.12 (user section — keep verbatim).\n\n"
+            "## Core Operating Rules\n\n"
+            "List `focus_files` and follow \"one task = one commit\" in PRs (user section — keep verbatim).\n\n"
+        )
+        user_suffix = (
+            "\n## Custom Database Rules\n\n"
+            "Keep this footer verbatim.\n"
+        )
+        managed_part = (
+            "<!-- BEGIN ai-orchestration -->\n"
+            "Current managed block.\n"
+            "<!-- END ai-orchestration -->\n"
+        )
+        mixed_doc = user_prefix + unmarked_hist + managed_part + user_suffix
+
+        found_mixed = oc.find_duplicated_handwritten_agents_sections(mixed_doc)
+        assert "# Agent Orchestration & Development Guidelines (`AGENTS.md`)" in found_mixed
+        assert "## 1. Required Skills" in found_mixed
+        assert "## 2. Core Operating Rules" in found_mixed
+        assert "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate" in found_mixed
+        assert "## Required Skills" not in found_mixed
+        assert "## Core Operating Rules" not in found_mixed
+
+        cleaned_mixed, removed_mixed = oc.strip_duplicated_handwritten_agents_sections(mixed_doc)
+        assert removed_mixed == found_mixed
+        assert cleaned_mixed == user_prefix + managed_part + user_suffix
+
+    # 4. Whitespace normalization only (collapse runs of spaces/tabs, normalize CRLF, trim trailing spaces)
+    assert not hasattr(oc, "HISTORICAL_SECTION_MIN_SIMILARITY")
+    req_start = hist_2026_10_15.index("## 1. Required Skills")
+    core_start = hist_2026_10_15.index("## 2. Core Operating Rules")
+    hist_req_exact = hist_2026_10_15[req_start:core_start]
+    ws_varied_req = "\r\n".join(
+        line.replace("  ", "    \t ") + "   \t"
+        for line in hist_req_exact.splitlines()
+    ) + "\r\n\r\n"
+    ws_doc = (
+        ws_varied_req
+        + "<!-- BEGIN ai-orchestration -->\nManaged block.\n<!-- END ai-orchestration -->\n"
+    )
+    assert oc.find_duplicated_handwritten_agents_sections(ws_doc) == ["## 1. Required Skills"]
+    assert oc.find_preserved_manual_review_agents_sections(ws_doc) == []
+    cleaned_ws, removed_ws = oc.strip_duplicated_handwritten_agents_sections(ws_doc)
+    assert removed_ws == ["## 1. Required Skills"]
+    assert cleaned_ws == "<!-- BEGIN ai-orchestration -->\nManaged block.\n<!-- END ai-orchestration -->\n"
+
+    # 5. Historical `Required Skills` rendering plus a 393-character user subsection (`### Team-specific interpretation`)
+    #    must NOT match as a duplicate, must be reported for manual review, and must NEVER be deleted.
+    user_subsection = (
+        "\n### Team-specific interpretation\n\n"
+        "In this repository, scrapers under `backend/scrapers/` must always run inside a disposable SQLite "
+        "fixture before reporting `delivered`. Never invoke live portal endpoints from unit tests; capture "
+        "HTML snapshots under `tests/fixtures/portals/` and validate schema extraction deterministically.\n\n"
+    )
+    assert len(user_subsection.strip()) >= 300
+    hist_req_without_hr = hist_req_exact.rstrip().removesuffix("---").rstrip() + "\n"
+    hist_req_with_user_sub = hist_req_without_hr + user_subsection + "---\n\n"
+    hist_rest = (
+        hist_2026_10_15[core_start:]
+        .replace("<!-- BEGIN ai-orchestration -->\n", "")
+        .replace("<!-- END ai-orchestration -->\n", "")
+    )
+    managed_block = (
+        "<!-- BEGIN ai-orchestration -->\n"
+        "Current managed block.\n"
+        "<!-- END ai-orchestration -->\n"
+    )
+    doc_with_user_sub = hist_req_with_user_sub + hist_rest + managed_block
+
+    dup_with_sub = oc.find_duplicated_handwritten_agents_sections(doc_with_user_sub)
+    assert "## 1. Required Skills" not in dup_with_sub
+    assert "## 2. Core Operating Rules" in dup_with_sub
+    assert "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate" in dup_with_sub
+
+    review_with_sub = oc.find_preserved_manual_review_agents_sections(doc_with_user_sub)
+    assert review_with_sub == ["## 1. Required Skills"]
+
+    cleaned_sub, removed_sub = oc.strip_duplicated_handwritten_agents_sections(doc_with_user_sub)
+    assert "## 1. Required Skills" not in removed_sub
+    assert "## 2. Core Operating Rules" in removed_sub
+    assert "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate" in removed_sub
+    assert "### Team-specific interpretation" in cleaned_sub
+    assert cleaned_sub == hist_req_with_user_sub + managed_block
+
+
+def test_19_3_bounce2_b3_managed_block_predicate_and_docstring() -> None:
+    """Bounce 2 B3:
+    1. `find_duplicated_handwritten_agents_sections` docstring states exact matching after whitespace
+       normalization (not signature/similarity matching).
+    2. A duplicate marked block is flagged/removed ONLY if its content matches what the renderer
+       produces now or a historical rendering (exact match after whitespace normalization).
+       Otherwise it is kept byte-for-byte and reported in `find_preserved_manual_review_agents_sections`.
+    3. `inject_or_replace_agents_block` replaces only the single canonical managed block (`count=1`)
+       and ONLY if its content matches the current or a historical rendering; if the canonical managed
+       block contains user edits, it raises `AgentsMdManagedBlockModifiedError`.
+    """
+    doc_str = oc.find_duplicated_handwritten_agents_sections.__doc__ or ""
+    assert "signature/similarity" not in doc_str.lower()
+    assert "whitespace normalization" in doc_str.lower()
+
+    hist_dir = REPO_ROOT / "scripts" / "fixtures" / "historical_agents_md"
+    hist_2026_10_15 = (hist_dir / "2026-10-15_927244a_default.md").read_text(encoding="utf-8")
+    hist_2026_10_17 = (hist_dir / "2026-10-17_0eef7a8_default.md").read_text(encoding="utf-8")
+    current_rendered = oc.render_agents_md_block(oc.DEFAULT_GLOBAL_CONFIG)
+
+    # 1. Duplicate marked block that matches a historical rendering is detected and removed
+    doc_two_valid = hist_2026_10_17 + "\n" + hist_2026_10_15
+    assert oc.find_duplicated_handwritten_agents_sections(doc_two_valid, current_block=current_rendered) == [
+        "duplicate <!-- BEGIN ai-orchestration --> block"
+    ]
+    assert oc.find_preserved_manual_review_agents_sections(doc_two_valid, current_block=current_rendered) == []
+    cleaned_valid, removed_valid = oc.strip_duplicated_handwritten_agents_sections(
+        doc_two_valid, current_block=current_rendered
+    )
+    assert removed_valid == ["duplicate <!-- BEGIN ai-orchestration --> block"]
+    assert cleaned_valid == hist_2026_10_17 + "\n"
+
+    # 2. Duplicate marked block with user edits inside it is NOT removed, is reported for manual review,
+    #    and `inject_or_replace_agents_block` replaces only the canonical block (leaving the edited duplicate intact).
+    dup_edited = hist_2026_10_15.replace(
+        "## 2. Core Operating Rules\n",
+        "## 2. Core Operating Rules\n\n### Team Custom Rule\n\nUser edit inside duplicate marked block.\n",
+    )
+    doc_dup_edited = hist_2026_10_17 + "\n" + dup_edited
+    assert oc.find_duplicated_handwritten_agents_sections(doc_dup_edited, current_block=current_rendered) == []
+    assert oc.find_preserved_manual_review_agents_sections(doc_dup_edited, current_block=current_rendered) == [
+        "duplicate <!-- BEGIN ai-orchestration --> block"
+    ]
+    cleaned_edited, removed_edited = oc.strip_duplicated_handwritten_agents_sections(
+        doc_dup_edited, current_block=current_rendered
+    )
+    assert removed_edited == []
+    assert cleaned_edited == doc_dup_edited
+
+    replaced_only_first = oc.inject_or_replace_agents_block(cleaned_edited, current_rendered)
+    assert replaced_only_first == current_rendered.rstrip() + "\n\n" + dup_edited
+
+    # 3. Canonical managed block with user edits inside it is refused by `inject_or_replace_agents_block`
+    canon_edited = hist_2026_10_17.replace(
+        "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate\n",
+        "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate\n\nUser note inside canonical managed block.\n",
+    )
+    with pytest.raises(oc.AgentsMdManagedBlockModifiedError):
+        oc.inject_or_replace_agents_block(canon_edited, current_rendered)
+
+
+
+
+
+

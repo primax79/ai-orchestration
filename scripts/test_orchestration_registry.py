@@ -2,11 +2,14 @@
 """test_orchestration_registry.py — Tests for workspace identity, explicit projects, nesting & registry."""
 from __future__ import annotations
 
+import copy
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
+import time
 import uuid
 import pytest
 
@@ -666,4 +669,1453 @@ def test_discovery_hygiene_git_ignored_nested_repo_symlinks_and_projects_ignore(
     assert "libs-jdk17" not in disc_ids
     assert "external-lib" not in disc_ids
     assert set(disc_ids) == {"_workspace", "active-service", "portal-messages-portlet"}
+
+
+def test_19_1_discovery_filter_all_canonical_and_legacy_config_locations_and_shadowing(
+    isolated_env: pathlib.Path,
+    tmp_path: pathlib.Path,
+) -> None:
+    """19.1 (B2 & B3): Workspace discovery reads `[workspace.discovery]` from every canonical
+    and legacy project config location, and higher-precedence config shadows lower-precedence files."""
+    positions = [
+        ("local_dot", lambda ws: ws / ".ai-orchestration.local.toml"),
+        ("external_projects", lambda ws: isolated_env / "projects" / ws.name / "orchestration.toml"),
+        ("legacy_root", lambda ws: ws / "orchestration.toml"),
+        ("legacy_dot_dir", lambda ws: ws / ".ai-orchestration" / "orchestration.toml"),
+        ("legacy_tasks_dir", lambda ws: ws / "tasks" / "orchestration.toml"),
+        ("legacy_dot_toml", lambda ws: ws / ".ai-orchestration.toml"),
+    ]
+
+    for pos_name, path_fn in positions:
+        ws_dir = tmp_path / f"ws_{pos_name}"
+        (ws_dir / "tasks").mkdir(parents=True)
+        (ws_dir / "tasks" / "00-INDEX.md").write_text("# Root\n", encoding="utf-8")
+        for sub in ("packages/keep-me", "packages/drop-me"):
+            (ws_dir / sub / "tasks").mkdir(parents=True)
+            (ws_dir / sub / "tasks" / "00-INDEX.md").write_text("# Sub\n", encoding="utf-8")
+
+        cfg_file = path_fn(ws_dir)
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(
+            '[workspace.discovery]\n'
+            'include = ["packages/*"]\n'
+            'exclude = ["packages/drop-me"]\n',
+            encoding="utf-8",
+        )
+
+        plan = reg.plan_projects_discover(str(ws_dir), config_dir=isolated_env)
+        disc_paths = [p["path"] for p in plan["discovered"]]
+        assert "." in disc_paths, pos_name
+        assert "packages/keep-me" in disc_paths, pos_name
+        assert "packages/drop-me" not in disc_paths, pos_name
+
+        # If a higher-precedence `.ai-orchestration.local.toml` is added that drops `keep-me` and keeps `drop-me`,
+        # the lower-precedence file is shadowed and does not leak its exclude rule.
+        if pos_name != "local_dot":
+            (ws_dir / ".ai-orchestration.local.toml").write_text(
+                '[workspace.discovery]\n'
+                'include = ["packages/*"]\n'
+                'exclude = ["packages/keep-me"]\n',
+                encoding="utf-8",
+            )
+            plan2 = reg.plan_projects_discover(str(ws_dir), config_dir=isolated_env)
+            disc_paths2 = [p["path"] for p in plan2["discovered"]]
+            assert "packages/drop-me" in disc_paths2, pos_name
+            assert "packages/keep-me" not in disc_paths2, pos_name
+
+
+def _render_templated_migration_fixture(
+    tmp_path: pathlib.Path,
+    dest_name: str = "MIGRATION_REGISTRY.copy.json",
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, pathlib.Path]:
+    """Render `scripts/fixtures/migration_registry.json` with all roots under `tmp_path`."""
+    fixture_src = SCRIPT_DIR / "fixtures" / "migration_registry.json"
+    assert fixture_src.is_file()
+    raw_tpl = fixture_src.read_text(encoding="utf-8")
+    assert "/Users/Alfredo/works" not in raw_tpl
+    assert "/home/alfredo/works" not in raw_tpl
+
+    mac_root = tmp_path / "mac_works"
+    hub_root = tmp_path / "hub_works"
+    repos_root = tmp_path / "hub_git"
+    mac_root.mkdir(parents=True, exist_ok=True)
+    hub_root.mkdir(parents=True, exist_ok=True)
+    repos_root.mkdir(parents=True, exist_ok=True)
+
+    rendered = (
+        raw_tpl.replace("{{MAC_ROOT}}", str(mac_root))
+        .replace("{{HUB_ROOT}}", str(hub_root))
+        .replace("{{REPOS_ROOT}}", str(repos_root))
+    )
+    mig_copy = tmp_path / dest_name
+    mig_copy.write_text(rendered, encoding="utf-8")
+    return mig_copy, mac_root, hub_root, repos_root
+
+
+def test_19_16_b1_templated_fixture_isolation_and_root_guard(
+    tmp_path: pathlib.Path,
+) -> None:
+    """19.16 (B1):
+    1. `scripts/fixtures/migration_registry.json` uses templated placeholders (`{{MAC_ROOT}}`, `{{HUB_ROOT}}`, `{{REPOS_ROOT}}`), never real `~/works` paths.
+    2. When checkout directories exist under `tmp_path`, applying the import writes workspace configuration strictly inside `tmp_path`.
+    3. Any path outside configured roots (`hosts.<h>.root` / `allowed_roots`) is refused with a clear `ValueError`."""
+    mig_copy, mac_root, hub_root, _ = _render_templated_migration_fixture(tmp_path)
+    # Create actual checkout directories under `hub_root` and `mac_root` inside `tmp_path`
+    for proj_dir in ("ricerca_auto", "ai-coding-tools", "d4science_kb"):
+        (hub_root / proj_dir / "tasks").mkdir(parents=True, exist_ok=True)
+        (mac_root / proj_dir / "tasks").mkdir(parents=True, exist_ok=True)
+
+    hub_cfg_dir = tmp_path / "hub_cfg"
+    hub_cfg_dir.mkdir(parents=True)
+
+    plan = reg.plan_import_migration_registry(mig_copy, config_dir=hub_cfg_dir, host="alf_ubuntu")
+    res = reg.apply_import_migration_registry(plan, expect_hash=plan["plan_hash"], config_dir=hub_cfg_dir)
+    assert res["ok"] is True and res["applied"] is True
+
+    # Verify all written files (configs, SQLite DB, hub_registry.json) reside strictly under tmp_path
+    tmp_resolved = tmp_path.resolve()
+    for p in res["projects"]:
+        for hk, hp in p["paths"].items():
+            rp = pathlib.Path(hp).resolve()
+            assert tmp_resolved in rp.parents, f"Path {rp} for {p['slug']}@{hk} escaped tmp_path"
+    for root_dir, _, files in os.walk(str(hub_cfg_dir)):
+        for fn in files:
+            fpath = (pathlib.Path(root_dir) / fn).resolve()
+            assert tmp_resolved in fpath.parents
+
+    # Guard check 1: unexpanded template placeholder in migration file is refused
+    raw_unexpanded = tmp_path / "unexpanded.json"
+    raw_unexpanded.write_text((SCRIPT_DIR / "fixtures" / "migration_registry.json").read_text(encoding="utf-8"), encoding="utf-8")
+    with pytest.raises(ValueError, match="Unexpanded template placeholder"):
+        reg.plan_import_migration_registry(raw_unexpanded, config_dir=hub_cfg_dir, host="alf_ubuntu")
+
+    # Guard check 2: path outside configured `hosts.<h>.root` is refused at preview AND apply
+    escaped_json = tmp_path / "escaped.json"
+    outside_dir = pathlib.Path("/var/tmp/outside_allowed_roots_test_19_16")
+    escaped_payload = {
+        "schema_version": 1,
+        "hosts": {
+            "alf_ubuntu": {"root": str(hub_root)},
+            "mac": {"root": str(mac_root)},
+        },
+        "projects": [
+            {
+                "id": "rogue-proj",
+                "paths": {
+                    "alf_ubuntu": str(outside_dir / "rogue"),
+                },
+            }
+        ],
+    }
+    escaped_json.write_text(json.dumps(escaped_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="outside configured roots"):
+        reg.plan_import_migration_registry(escaped_json, config_dir=hub_cfg_dir, host="alf_ubuntu")
+
+    # Also test apply-time guard if a plan payload is tampered with an outside path
+    mig_copy2, _, _, _ = _render_templated_migration_fixture(tmp_path, dest_name="MIGRATION_REGISTRY.copy2.json")
+    plan2 = reg.plan_import_migration_registry(mig_copy2, config_dir=hub_cfg_dir, host="alf_ubuntu")
+    tampered_plan = copy.deepcopy(plan2)
+    tampered_plan["projects"][0]["paths"]["alf_ubuntu"] = str(outside_dir / "ricerca_auto")
+    tampered_plan["plan_hash"] = reg.compute_plan_hash(tampered_plan)
+    with pytest.raises(ValueError, match="outside configured roots"):
+        reg.apply_import_migration_registry(
+            tampered_plan,
+            expect_hash=tampered_plan["plan_hash"],
+            config_dir=hub_cfg_dir,
+        )
+
+
+def test_19_16_import_migration_registry_on_copy_and_same_uuid_across_hosts(
+    tmp_path: pathlib.Path,
+) -> None:
+    """19.16 (B1 & B2): Import a copy of `MIGRATION_REGISTRY.json`; verify explicit UUID preservation,
+    random UUID allocation + persistence for entries without an explicit UUID, per-host paths,
+    primary host, reference_repo, mirror, and convention_version on both Mac and hub."""
+    mig_copy, mac_root, hub_root, _ = _render_templated_migration_fixture(tmp_path)
+
+    hub_cfg_dir = tmp_path / "hub_cfg"
+    mac_cfg_dir = tmp_path / "mac_cfg"
+    hub_cfg_dir.mkdir(parents=True)
+    mac_cfg_dir.mkdir(parents=True)
+
+    # 1. Preview import on authoritative hub (`alf_ubuntu`)
+    plan_hub = reg.plan_import_migration_registry(mig_copy, config_dir=hub_cfg_dir, host="alf_ubuntu")
+
+    assert plan_hub["ok"] is True
+    assert plan_hub["imported_count"] == 3
+    assert not reg.get_hub_registry_path(hub_cfg_dir).exists()
+
+    # Refusal if --expect-hash is missing or mismatched
+    with pytest.raises(ValueError, match="--expect-hash is required"):
+        reg.apply_import_migration_registry(plan_hub, expect_hash=None, config_dir=hub_cfg_dir)
+    with pytest.raises(ValueError, match="Hash mismatch"):
+        reg.apply_import_migration_registry(plan_hub, expect_hash="bad_hash", config_dir=hub_cfg_dir)
+
+    # Refusal if the migration file content changes between preview and apply
+    mig_tampered, _, _, _ = _render_templated_migration_fixture(tmp_path, dest_name="MIGRATION_REGISTRY.tampered.json")
+    plan_tamper = reg.plan_import_migration_registry(mig_tampered, config_dir=hub_cfg_dir, host="alf_ubuntu")
+    mig_tampered.write_text(mig_tampered.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="changed between preview and apply"):
+        reg.apply_import_migration_registry(plan_tamper, expect_hash=plan_tamper["plan_hash"], config_dir=hub_cfg_dir)
+
+    # 2. Apply import on hub (persists newly generated random UUIDs into `mig_copy`), then import on Mac
+    res_hub = reg.apply_import_migration_registry(plan_hub, expect_hash=plan_hub["plan_hash"], config_dir=hub_cfg_dir)
+    assert res_hub["ok"] is True and res_hub["applied"] is True
+
+    # Verify `mig_copy` now has explicit UUIDs persisted for all 3 projects
+    persisted_mig = json.loads(mig_copy.read_text(encoding="utf-8"))
+    for p_item in persisted_mig["projects"]:
+        assert reg.is_valid_uuid4(p_item.get("uuid"))
+    ai_tools_item = next(p for p in persisted_mig["projects"] if p.get("id") == "ai-coding-tools")
+    assert ai_tools_item["uuid"] == "52c62ed7-47c6-45e0-8136-6aa92350e4de"
+
+    plan_mac = reg.plan_import_migration_registry(mig_copy, config_dir=mac_cfg_dir, host="mac")
+    res_mac = reg.apply_import_migration_registry(plan_mac, expect_hash=plan_mac["plan_hash"], config_dir=mac_cfg_dir)
+    assert res_mac["ok"] is True and res_mac["applied"] is True
+
+    # 3. Verify identical UUIDs and metadata on both hosts
+    hub_list = {w["slug"]: w for w in reg.list_workspaces(hub_cfg_dir)}
+    mac_list = {w["slug"]: w for w in reg.list_workspaces(mac_cfg_dir)}
+    assert set(hub_list.keys()) == {"ai-coding-tools", "d4science-kb", "ricerca-auto"}
+    assert set(mac_list.keys()) == {"ai-coding-tools", "d4science-kb", "ricerca-auto"}
+
+    for slug in ("ai-coding-tools", "d4science-kb", "ricerca-auto"):
+        assert hub_list[slug]["uuid"] == mac_list[slug]["uuid"], slug
+        assert hub_list[slug]["primary_host"] == mac_list[slug]["primary_host"], slug
+        assert hub_list[slug]["reference_repo"] == mac_list[slug]["reference_repo"], slug
+        assert hub_list[slug]["mirror_repo"] == mac_list[slug]["mirror_repo"], slug
+        assert hub_list[slug]["convention_version"] == "1.1.0", slug
+        assert hub_list[slug]["paths"]["mac"].startswith(str(mac_root))
+        assert hub_list[slug]["paths"]["alf_ubuntu"].startswith(str(hub_root))
+
+
+def test_19_16_b2_random_uuid_allocation_and_no_slug_identity_collision(
+    tmp_path: pathlib.Path,
+) -> None:
+    """19.16 (B2):
+    1. Workspace UUIDs are randomly allocated on the authoritative hub, never a hash of the display slug.
+    2. Two unrelated workspaces with the same name/slug on ONE shared hub never merge silently:
+       registering the second without an explicit link (`--link <uuid>` or `[workspace] uuid`) refuses with
+       a clear message, and registering with a distinct slug creates a second random UUID.
+    3. `find_hub_project_entry()` never matches by slug or unlinked path.
+    4. Adopting an existing hub entry works ONLY via explicit `--link <uuid>` or matching `[workspace] uuid` in config."""
+    shared_hub = tmp_path / "shared_hub"
+    shared_hub.mkdir()
+
+    ws_a = tmp_path / "host_a" / "same_name"
+    ws_b = tmp_path / "host_b" / "same_name"
+    ws_a.mkdir(parents=True)
+    ws_b.mkdir(parents=True)
+
+    # 1. Host `alf_ubuntu` registers `ws_a` (slug `same-name`) on the shared hub
+    plan_a = reg.plan_workspace_register(ws_a, slug="same-name", config_dir=shared_hub, host="alf_ubuntu")
+    uuid_a = plan_a["workspace"]["uuid"]
+    assert reg.is_valid_uuid4(uuid_a)
+    reg.apply_workspace_register(plan_a, expect_hash=plan_a["plan_hash"], config_dir=shared_hub)
+
+    # 2. Host `mac` attempts to register an unrelated project `ws_b` with the SAME slug `same-name`
+    #    against the SAME shared hub without `--link` or `[workspace] uuid` -> refused, never merged!
+    with pytest.raises(ValueError, match="Slug 'same-name' is already registered"):
+        reg.plan_workspace_register(ws_b, slug="same-name", config_dir=shared_hub, host="mac")
+
+    # Verify via CLI (`bin/ai-orch workspace register`) against the same shared hub -> also refused, never merged
+    res_cli_unlinked = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "workspace",
+            "register",
+            str(ws_b),
+            "--id",
+            "same-name",
+            "--host",
+            "mac",
+            "--config-dir",
+            str(shared_hub),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_cli_unlinked.returncode == 2
+    err_unlinked = json.loads(res_cli_unlinked.stdout)
+    assert err_unlinked["ok"] is False
+    assert "already registered" in err_unlinked["error"]
+    assert "--link" in err_unlinked["error"]
+
+    # Verify the hub registry still has ONLY `uuid_a` and `ws_b` was NOT merged into `uuid_a`'s paths
+    hub_doc_after = reg.load_hub_registry(shared_hub)
+    assert len(hub_doc_after["projects"]) == 1
+    assert hub_doc_after["projects"][0]["uuid"] == uuid_a
+    assert hub_doc_after["projects"][0]["paths"] == {"alf_ubuntu": str(ws_a.resolve())}
+
+    # 3. Migration import on the SAME shared hub with an unlinked entry sharing slug `same-name` (no `uuid`) -> refused!
+    unlinked_mig = tmp_path / "unlinked_migration.json"
+    unlinked_mig.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "hosts": {
+                    "alf_ubuntu": {"root": str(tmp_path / "host_a")},
+                    "mac": {"root": str(tmp_path / "host_b")},
+                },
+                "projects": [
+                    {
+                        "id": "same-name",
+                        "paths": {"mac": str(ws_b)},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Slug 'same-name' is already registered"):
+        reg.plan_import_migration_registry(unlinked_mig, config_dir=shared_hub, host="mac")
+
+    # 4. If `ws_b` on `mac` is registered on the SAME shared hub with a distinct slug, it gets a second UUID (`uuid_b != uuid_a`)
+    plan_b = reg.plan_workspace_register(ws_b, slug="same-name-mac", config_dir=shared_hub, host="mac")
+    uuid_b = plan_b["workspace"]["uuid"]
+    assert reg.is_valid_uuid4(uuid_b)
+    assert uuid_b != uuid_a
+    reg.apply_workspace_register(plan_b, expect_hash=plan_b["plan_hash"], config_dir=shared_hub)
+    hub_doc_two = reg.load_hub_registry(shared_hub)
+    assert {p["uuid"] for p in hub_doc_two["projects"]} == {uuid_a, uuid_b}
+
+    # 5. Explicit link via `--link <uuid_a>` (`link_uuid=uuid_a`) adopts `uuid_a` on `mac`
+    mac_checkout = tmp_path / "mac_checkouts" / "same_name"
+    (mac_checkout / "tasks").mkdir(parents=True)
+    (mac_checkout / "tasks" / "convention_version").write_text("1.1.0\n", encoding="utf-8")
+
+    # Without `--link`, registering `mac_checkout` with slug `same-name` on `shared_hub` is refused
+    with pytest.raises(ValueError, match="Slug 'same-name' is already registered"):
+        reg.plan_workspace_register(mac_checkout, slug="same-name", config_dir=shared_hub, host="mac")
+
+    # With explicit `--link <uuid_a>` via CLI, it adopts `uuid_a` and links the `mac` checkout path
+    res_link_prev = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "workspace",
+            "register",
+            str(mac_checkout),
+            "--id",
+            "same-name",
+            "--host",
+            "mac",
+            "--link",
+            uuid_a,
+            "--config-dir",
+            str(shared_hub),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    link_plan = json.loads(res_link_prev.stdout)
+    assert link_plan["workspace"]["uuid"] == uuid_a
+    assert link_plan["workspace"]["paths"] == {
+        "alf_ubuntu": str(ws_a.resolve()),
+        "mac": str(mac_checkout.resolve()),
+    }
+    res_link_apply = subprocess.run(
+        [
+            sys.executable,
+            str(BIN_AI_ORCH),
+            "workspace",
+            "register",
+            str(mac_checkout),
+            "--id",
+            "same-name",
+            "--host",
+            "mac",
+            "--link",
+            uuid_a,
+            "--apply",
+            "--expect-hash",
+            link_plan["plan_hash"],
+            "--config-dir",
+            str(shared_hub),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(res_link_apply.stdout)["ok"] is True
+
+    # 6. Explicit link via `[workspace] uuid = "<uuid_a>"` already in a third host's project config also adopts `uuid_a`
+    lab_checkout = tmp_path / "lab_checkouts" / "same_name"
+    lab_checkout.mkdir(parents=True)
+    (lab_checkout / ".ai-orchestration.local.toml").write_text(
+        f'[workspace]\nuuid = "{uuid_a}"\nid = "same-name"\n',
+        encoding="utf-8",
+    )
+    plan_lab = reg.plan_workspace_register(lab_checkout, config_dir=shared_hub, host="lab_worker")
+    assert plan_lab["workspace"]["uuid"] == uuid_a
+    reg.apply_workspace_register(plan_lab, expect_hash=plan_lab["plan_hash"], config_dir=shared_hub)
+    entry_a = reg.find_hub_project_entry(reg.load_hub_registry(shared_hub), ws_uuid=uuid_a)
+    assert entry_a is not None
+    assert entry_a["paths"] == {
+        "alf_ubuntu": str(ws_a.resolve()),
+        "mac": str(mac_checkout.resolve()),
+        "lab_worker": str(lab_checkout.resolve()),
+    }
+
+
+def test_19_16_console_status_lists_hub_projects_prunes_deleted_and_falls_back_offline(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.16 (B3):
+    1. `ai-orch console status` lists projects from the hub registry when reachable and caches the versioned snapshot.
+    2. When a project is unregistered/deleted on the hub, the next online sync atomically prunes the removed
+       hub-sourced row from the client's local cache (`hub_registry.json` and `registry.sqlite`).
+    3. When the hub becomes unreachable, `console status` and `workspace list` fall back to the last cached snapshot."""
+    hub_cfg_dir = tmp_path / "hub_config"
+    client_cfg_dir = tmp_path / "client_config"
+    hub_cfg_dir.mkdir(parents=True)
+    client_cfg_dir.mkdir(parents=True)
+
+    # Seed hub registry from templated fixture copy
+    mig_copy, _, _, _ = _render_templated_migration_fixture(tmp_path)
+    plan_hub = reg.plan_import_migration_registry(mig_copy, config_dir=hub_cfg_dir, host="alf_ubuntu")
+    reg.apply_import_migration_registry(plan_hub, expect_hash=plan_hub["plan_hash"], config_dir=hub_cfg_dir)
+
+    # Configure client (`mac`) with `alf_ubuntu` as `role = "hub"`
+    (client_cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\n',
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ssh = fake_bin / "ssh"
+
+    # 1. Fake ssh succeeds and returns hub's `ai-orch workspace list --json` (3 projects)
+    hub_list_res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "workspace", "list", "--config-dir", str(hub_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    hub_json_file = tmp_path / "hub_workspace_list.json"
+    hub_json_file.write_text(hub_list_res.stdout, encoding="utf-8")
+
+    fake_ssh.write_text(
+        f"#!/bin/sh\ncat '{hub_json_file}'\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(client_cfg_dir))
+
+    res_online = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    online_data = json.loads(res_online.stdout)
+    assert online_data["ok"] is True
+    assert online_data["host"] == "mac"
+    assert online_data["hub_host"] == "alf_ubuntu"
+    assert online_data["hub_reachable"] is True
+    assert online_data["registry_source"] == "hub"
+    assert online_data["snapshot_version"] >= 1
+    online_slugs = {p["slug"] for p in online_data["projects"]}
+    assert online_slugs == {"ai-coding-tools", "d4science-kb", "ricerca-auto"}
+
+    # 2. Delete `d4science-kb` on the hub, then refresh `console status` on the client -> pruned atomically (B3)
+    unreg_plan = reg.plan_workspace_unregister("d4science-kb", config_dir=hub_cfg_dir)
+    reg.apply_workspace_unregister(unreg_plan, expect_hash=unreg_plan["plan_hash"], config_dir=hub_cfg_dir)
+
+    hub_list_res2 = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "workspace", "list", "--config-dir", str(hub_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    hub_json_file.write_text(hub_list_res2.stdout, encoding="utf-8")
+
+    res_online2 = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    online_data2 = json.loads(res_online2.stdout)
+    assert online_data2["ok"] is True
+    assert online_data2["hub_reachable"] is True
+    assert online_data2["registry_source"] == "hub"
+    assert {p["slug"] for p in online_data2["projects"]} == {"ai-coding-tools", "ricerca-auto"}
+    assert {w["slug"] for w in reg.list_workspaces(client_cfg_dir)} == {"ai-coding-tools", "ricerca-auto"}
+
+    # 3. Simulate hub unreachable (fake ssh exits 255) -> local SQLite cache remains usable with the pruned snapshot
+    fake_ssh.write_text(
+        "#!/bin/sh\necho 'ssh: connect to host alf_ubuntu port 22: Operation timed out' >&2\nexit 255\n",
+        encoding="utf-8",
+    )
+    res_offline = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--all-hosts", "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    offline_data = json.loads(res_offline.stdout)
+    assert offline_data["ok"] is True
+    assert offline_data["hub_reachable"] is False
+    assert offline_data["registry_source"] == "local_cache"
+    assert offline_data["hosts"]["alf_ubuntu"]["reachable"] is False
+    assert offline_data["hosts"]["mac"]["reachable"] is True
+    offline_slugs = {p["slug"] for p in offline_data["projects"]}
+    assert offline_slugs == {"ai-coding-tools", "ricerca-auto"}
+
+    # Direct `workspace list` on client also works offline from local cache
+    ws_offline = reg.list_workspaces(client_cfg_dir)
+    assert {w["slug"] for w in ws_offline} == {"ai-coding-tools", "ricerca-auto"}
+
+
+def _seed_project_with_tasks_questions_and_runs(
+    proj_dir: pathlib.Path,
+    *,
+    proj_slug: str,
+    host_id: str,
+    tasks_spec: list[dict[str, Any]],
+    questions_spec: list[dict[str, Any]],
+    runs_spec: list[dict[str, Any]],
+) -> None:
+    """Create a realistic project tree with emergent tasks, questions, and `.ai-orchestration/runs/` records."""
+    tasks_dir = proj_dir / "tasks"
+    (tasks_dir / "core").mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "questions").mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    for t in tasks_spec:
+        tid = t["id"]
+        title = t.get("title", f"Task {tid}")
+        state = t.get("state", "open")
+        thost = t.get("host", "-")
+        vby = t.get("verify_by", "-")
+        run_id = t.get("run_id", "-")
+        t_file = tasks_dir / "core" / f"{tid}-task.md"
+        opt_lines = []
+        if vby != "-":
+            opt_lines.append(f"- verify-by: {vby}")
+        if run_id != "-":
+            opt_lines.append(f"- run-id: {run_id}")
+        if thost != "-":
+            opt_lines.append(f"- host: {thost}")
+        opt_block = ("\n".join(opt_lines) + "\n") if opt_lines else ""
+        t_file.write_text(
+            f"# {tid} {title}\n\n"
+            f"- id: {tid}\n"
+            f"- title: {title}\n"
+            f"- category: core\n"
+            f"- priority: {t.get('priority', 'P1')}\n"
+            f"- priority-reason: core work\n"
+            f"- next-up: yes\n"
+            f"- state: {state}\n"
+            f"- executor: {t.get('executor', 'kilo')}\n"
+            f"- depends-on: -\n"
+            f"- decider: owner\n"
+            f"- sources: -\n"
+            f"- paths: src/\n"
+            f"- handoff: -\n"
+            f"{opt_block}\n"
+            f"## Goal\n{title}\n\n"
+            f"## Steps\n- [ ] step 1\n\n"
+            f"## Verification\n- pytest\n",
+            encoding="utf-8",
+        )
+
+    for q in questions_spec:
+        qid = q["id"]
+        q_status = q.get("status", "open")
+        q_title = q.get("question", f"Question {qid}?")
+        q_blocks = q.get("blocks", "T001")
+        q_file = tasks_dir / "questions" / f"{qid}-question.md"
+        q_file.write_text(
+            f"# {qid} - {q_title}\n\n"
+            f"- id: {qid}\n"
+            f"- status: {q_status}\n"
+            f"- asked: 2026-10-30\n"
+            f"- asked-by: kilo\n"
+            f"- decider: owner\n"
+            f"- blocks: {q_blocks}\n"
+            f"- recommended: A\n"
+            f"- open-answer: yes\n"
+            f"- answered: {'2026-10-30' if q_status == 'answered' else '-'}\n"
+            f"- answered-by: {'owner' if q_status == 'answered' else '-'}\n"
+            f"- choice: {'A' if q_status == 'answered' else '-'}\n"
+            f"- applied: no\n\n"
+            f"## Question\n\n{q_title}\n\n"
+            f"## Context\n\nContext for {qid}.\n\n"
+            f"## Options\n\n### A — Option A\nDesc A.\n\n"
+            f"## Answer\n\n{'A' if q_status == 'answered' else ''}\n",
+            encoding="utf-8",
+        )
+
+    runs_root = proj_dir / ".ai-orchestration" / "runs"
+    for r in runs_spec:
+        rid = r["run_id"]
+        r_dir = runs_root / rid
+        r_dir.mkdir(parents=True, exist_ok=True)
+        r_payload = {
+            "run_id": rid,
+            "task_id": r["task_id"],
+            "mode": r.get("mode", "execute"),
+            "tool": r.get("tool", "kilo"),
+            "status": r.get("status", "running"),
+            "state": r.get("state", r.get("status", "running")),
+            "host": r.get("host", host_id),
+            "backend": r.get("backend", "screen"),
+            "screen_session": r.get("screen_session", f"agent-{proj_slug}-{r['task_id']}"),
+            "session_name": r.get("screen_session", f"agent-{proj_slug}-{r['task_id']}"),
+            "started_at": r.get("started_at", "2026-10-30T11:00:00+00:00"),
+            "ended_at": r.get("ended_at"),
+            "last_heartbeat": r.get("last_heartbeat", "2026-10-30T11:55:00+00:00"),
+            "workspace": str(proj_dir),
+            "cwd": str(proj_dir),
+        }
+        (r_dir / "run.json").write_text(json.dumps(r_payload, indent=2), encoding="utf-8")
+
+
+def test_19_8_console_status_multi_host_aggregation_with_one_host_down_and_timeout(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 19.8 Verification:
+    - `ai-orch console status [--all-hosts] [--json]` executes `ssh <host> ai-orch ... --json` (no daemon)
+      for each declared host.
+    - Simulates two remote hosts (`alf_ubuntu` up, `lab_worker` down) plus local `mac`.
+    - Aggregates projects, tasks by state and host, runs (with host, task, state, age, last_heartbeat),
+      open questions, and deliveries to verify.
+    - Unreachable host (`lab_worker`) is shown as unreachable without blocking the others; honours per-host timeout.
+    """
+    hub_cfg_dir = tmp_path / "hub_cfg"
+    client_cfg_dir = tmp_path / "client_cfg"
+    hub_cfg_dir.mkdir(parents=True)
+    client_cfg_dir.mkdir(parents=True)
+
+    hub_ws = tmp_path / "hub_works" / "ricerca_auto"
+    mac_ws = tmp_path / "mac_works" / "local_app"
+    hub_ws.mkdir(parents=True)
+    mac_ws.mkdir(parents=True)
+
+    run_hub_id = "20261030-110000-T001-kilo-a1b2"
+    run_mac_id = "20261030-113000-T010-kilo-c3d4"
+
+    _seed_project_with_tasks_questions_and_runs(
+        hub_ws,
+        proj_slug="ricerca-auto",
+        host_id="alf_ubuntu",
+        tasks_spec=[
+            {"id": "T001", "title": "Hub active task", "state": "in progress", "host": "alf_ubuntu", "run_id": run_hub_id},
+            {"id": "T002", "title": "Hub delivered task", "state": "delivered", "host": "alf_ubuntu", "verify_by": "claude"},
+            {"id": "T003", "title": "Hub open task", "state": "open", "host": "alf_ubuntu"},
+        ],
+        questions_spec=[
+            {"id": "Q001", "question": "Which OIDC realm on hub?", "status": "open", "blocks": "T001"},
+            {"id": "Q002", "question": "Already answered question", "status": "answered", "blocks": "T002"},
+        ],
+        runs_spec=[
+            {
+                "run_id": run_hub_id,
+                "task_id": "T001",
+                "status": "running",
+                "host": "alf_ubuntu",
+                "backend": "screen",
+                "screen_session": "agent-ricerca-auto-T001",
+                "started_at": "2026-10-30T11:00:00+00:00",
+                "last_heartbeat": "2026-10-30T11:58:00+00:00",
+            }
+        ],
+    )
+
+    _seed_project_with_tasks_questions_and_runs(
+        mac_ws,
+        proj_slug="local-app",
+        host_id="mac",
+        tasks_spec=[
+            {"id": "T010", "title": "Mac active task", "state": "in progress", "host": "mac", "run_id": run_mac_id},
+            {"id": "T011", "title": "Mac delivered task", "state": "delivered", "host": "mac", "verify_by": "owner"},
+        ],
+        questions_spec=[
+            {"id": "Q010", "question": "Mac local question?", "status": "open", "blocks": "T010"},
+        ],
+        runs_spec=[
+            {
+                "run_id": run_mac_id,
+                "task_id": "T010",
+                "status": "running",
+                "host": "mac",
+                "backend": "screen",
+                "screen_session": "agent-local-app-T010",
+                "started_at": "2026-10-30T11:30:00+00:00",
+                "last_heartbeat": "2026-10-30T11:59:00+00:00",
+            }
+        ],
+    )
+
+    # Configure hub and register `ricerca-auto` on hub
+    (hub_cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\n',
+        encoding="utf-8",
+    )
+    plan_hub_reg = reg.plan_workspace_register(
+        hub_ws,
+        slug="ricerca-auto",
+        config_dir=hub_cfg_dir,
+        host="alf_ubuntu",
+        primary_host="alf_ubuntu",
+    )
+    reg.apply_workspace_register(plan_hub_reg, expect_hash=plan_hub_reg["plan_hash"], config_dir=hub_cfg_dir)
+
+    # Configure client (`mac`) with two remote hosts: `alf_ubuntu` (up) and `lab_worker` (down, timeout=1)
+    (client_cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\ntimeout = 5\n\n'
+        '[hosts.lab_worker]\nssh_target = "lab_worker"\nrole = "client"\ntimeout = 1\n',
+        encoding="utf-8",
+    )
+    plan_mac_reg = reg.plan_workspace_register(
+        mac_ws,
+        slug="local-app",
+        config_dir=client_cfg_dir,
+        host="mac",
+        primary_host="mac",
+    )
+    reg.apply_workspace_register(plan_mac_reg, expect_hash=plan_mac_reg["plan_hash"], config_dir=client_cfg_dir)
+
+    # Create fake `ssh` script in PATH that:
+    # - records every invocation to `ssh_calls.log`
+    # - for `alf_ubuntu`: runs real `bin/ai-orch console status --local --config-dir <hub_cfg_dir> --json`
+    # - for `lab_worker`: simulates an unreachable host (exits 255 with connection error)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir( exist_ok=True)
+    ssh_log = tmp_path / "ssh_calls.log"
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        f"""#!{sys.executable}
+import os, subprocess, sys
+with open({str(ssh_log)!r}, "a", encoding="utf-8") as f:
+    f.write(" ".join(sys.argv[1:]) + "\\n")
+args = sys.argv[1:]
+if "lab_worker" in args:
+    sys.stderr.write("ssh: connect to host lab_worker port 22: No route to host\\n")
+    sys.exit(255)
+if "alf_ubuntu" in args:
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG={str(hub_cfg_dir)!r})
+    res = subprocess.run(
+        [{sys.executable!r}, {str(BIN_AI_ORCH)!r}, "console", "status", "--local", "--config-dir", {str(hub_cfg_dir)!r}, "--json"],
+         env=env,
+         capture_output=True,
+         text=True,
+    )
+    sys.stdout.write(res.stdout)
+    sys.stderr.write(res.stderr)
+    sys.exit(res.returncode)
+sys.exit(255)
+""",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(client_cfg_dir))
+
+    # 1. Run `ai-orch console status --all-hosts --json`
+    res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--all-hosts", "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    assert data["host"] == "mac"
+    assert data["hub_host"] == "alf_ubuntu"
+    assert data["hub_reachable"] is True
+
+    # Verify hosts reachability: mac (local, reachable), alf_ubuntu (hub, reachable), lab_worker (client, unreachable)
+    hosts = data["hosts"]
+    assert hosts["mac"]["reachable"] is True and hosts["mac"]["local"] is True
+    assert hosts["alf_ubuntu"]["reachable"] is True and hosts["alf_ubuntu"]["role"] == "hub"
+    assert hosts["lab_worker"]["reachable"] is False
+    assert hosts["lab_worker"]["timeout_sec"] == 1.0
+    assert "No route to host" in hosts["lab_worker"]["error"]
+
+    # Verify aggregated projects from both hub and local
+    proj_slugs = {p["slug"] for p in data["projects"]}
+    assert {"ricerca-auto", "local-app"}.issubset(proj_slugs)
+
+    # Verify aggregated tasks by state and by host
+    assert data["tasks_by_state"]["in progress"] == 2
+    assert data["tasks_by_state"]["delivered"] == 2
+    assert data["tasks_by_state"]["open"] == 1
+    assert data["tasks_by_host"]["alf_ubuntu"] == 3
+    assert data["tasks_by_host"]["mac"] == 2
+    assert data["tasks_by_state_and_host"]["in progress"] == {"alf_ubuntu": 1, "mac": 1}
+    assert data["tasks_by_state_and_host"]["delivered"] == {"alf_ubuntu": 1, "mac": 1}
+
+    # Verify aggregated runs from both hosts with host, task, state, age, last_heartbeat, and screen_session
+    runs_by_id = {r["run_id"]: r for r in data["runs"]}
+    assert set(runs_by_id.keys()) == {run_hub_id, run_mac_id}
+    r_hub = runs_by_id[run_hub_id]
+    assert r_hub["host"] == "alf_ubuntu"
+    assert r_hub["task_id"] == "T001"
+    assert r_hub["status"] == "running"
+    assert r_hub["screen_session"] == "agent-ricerca-auto-T001"
+    assert r_hub["last_heartbeat"] == "2026-10-30T11:58:00+00:00"
+    assert isinstance(r_hub["age_sec"], (int, float))
+    assert isinstance(r_hub["heartbeat_age_sec"], (int, float))
+
+    r_mac = runs_by_id[run_mac_id]
+    assert r_mac["host"] == "mac"
+    assert r_mac["task_id"] == "T010"
+    assert r_mac["status"] == "running"
+    assert r_mac["screen_session"] == "agent-local-app-T010"
+
+    # Verify open questions (answered Q002 excluded)
+    q_ids = {q["id"] for q in data["open_questions"]}
+    assert q_ids == {"Q001", "Q010"}
+
+    # Verify deliveries to verify
+    deliv_ids = {d["id"] for d in data["deliveries_to_verify"]}
+    assert deliv_ids == {"T002", "T011"}
+
+    # 2. Verify human-readable text output of `ai-orch console status --all-hosts`
+    res_txt = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--all-hosts", "--config-dir", str(client_cfg_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    out_txt = res_txt.stdout
+    assert "lab_worker" in out_txt and "UNREACHABLE" in out_txt
+    assert run_hub_id in out_txt and "agent-ricerca-auto-T001" in out_txt
+    assert run_mac_id in out_txt and "agent-local-app-T010" in out_txt
+    assert "Q001" in out_txt and "Q010" in out_txt
+    assert "T002" in out_txt and "T011" in out_txt
+
+
+def test_19_8_console_attach_resolves_host_and_screen_session_and_rejects_unsafe_input(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 19.8 Verification:
+    - `ai-orch console attach <run|task>` resolves host and session name from the run record and
+      executes `ssh -t <target> screen -x <name>` (using `agent_user` on the hub: `kilo@alf_ubuntu`).
+    - Resolves both by `run_id` and by `task_id` (both local runs and remote runs fetched from hub).
+    - Host and session names are resolved strictly from code/config and run records, never interpolated from free input.
+    """
+    hub_cfg_dir = tmp_path / "hub_cfg"
+    client_cfg_dir = tmp_path / "client_cfg"
+    hub_cfg_dir.mkdir(parents=True)
+    client_cfg_dir.mkdir(parents=True)
+
+    hub_ws = tmp_path / "hub_works" / "ricerca_auto"
+    mac_ws = tmp_path / "mac_works" / "local_app"
+    hub_ws.mkdir(parents=True)
+    mac_ws.mkdir(parents=True)
+
+    run_hub_id = "20261030-120000-T205-kilo-1111"
+    run_mac_id = "20261030-120500-T010-kilo-2222"
+    run_setsid_id = "20261030-121000-T012-kilo-3333"
+
+    _seed_project_with_tasks_questions_and_runs(
+        hub_ws,
+        proj_slug="ricerca-auto",
+        host_id="alf_ubuntu",
+        tasks_spec=[
+            {"id": "T205", "title": "Hub executor task", "state": "in progress", "host": "alf_ubuntu", "run_id": run_hub_id},
+        ],
+        questions_spec=[],
+        runs_spec=[
+            {
+                "run_id": run_hub_id,
+                "task_id": "T205",
+                "status": "running",
+                "host": "alf_ubuntu",
+                "backend": "screen",
+                "screen_session": "agent-ricerca-auto-T205",
+            }
+        ],
+    )
+
+    _seed_project_with_tasks_questions_and_runs(
+        mac_ws,
+        proj_slug="local-app",
+        host_id="mac",
+        tasks_spec=[
+            {"id": "T010", "title": "Mac executor task", "state": "in progress", "host": "mac", "run_id": run_mac_id},
+        ],
+        questions_spec=[],
+        runs_spec=[
+            {
+                "run_id": run_mac_id,
+                "task_id": "T010",
+                "status": "running",
+                "host": "mac",
+                "backend": "screen",
+                "screen_session": "agent-local-app-T010",
+            },
+            {
+                "run_id": run_setsid_id,
+                "task_id": "T012",
+                "status": "running",
+                "host": "mac",
+                "backend": "setsid",
+                "screen_session": None,
+            },
+        ],
+    )
+
+    (hub_cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\n',
+        encoding="utf-8",
+    )
+    plan_hub = reg.plan_workspace_register(hub_ws, slug="ricerca-auto", config_dir=hub_cfg_dir, host="alf_ubuntu")
+    reg.apply_workspace_register(plan_hub, expect_hash=plan_hub["plan_hash"], config_dir=hub_cfg_dir)
+
+    (client_cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\n\n'
+        '[hosts.mac]\nssh_target = "mac"\nrole = "client"\n',
+        encoding="utf-8",
+    )
+    plan_mac = reg.plan_workspace_register(mac_ws, slug="local-app", config_dir=client_cfg_dir, host="mac")
+    reg.apply_workspace_register(plan_mac, expect_hash=plan_mac["plan_hash"], config_dir=client_cfg_dir)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    attach_log = tmp_path / "attach_calls.jsonl"
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        f"""#!{sys.executable}
+import json, os, shlex, subprocess, sys
+args = sys.argv[1:]
+# Emulate OpenSSH concatenating trailing command arguments and parsing via remote shell
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-o", "-p", "-i", "-l", "-F", "-J", "-b", "-c", "-D", "-E", "-e", "-I", "-L", "-m", "-O", "-Q", "-R", "-S", "-W", "-w"):
+        i += 2
+    elif a.startswith("-"):
+        i += 1
+    else:
+        break
+target = args[i] if i < len(args) else ""
+remote_cmd_str = " ".join(args[i + 1:]) if i + 1 < len(args) else ""
+parsed_remote_argv = shlex.split(remote_cmd_str) if remote_cmd_str else []
+if "status" in parsed_remote_argv and "--local" in parsed_remote_argv:
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG={str(hub_cfg_dir)!r})
+    res = subprocess.run(
+        [{sys.executable!r}, {str(BIN_AI_ORCH)!r}, "console", "status", "--local", "--config-dir", {str(hub_cfg_dir)!r}, "--json"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    sys.stdout.write(res.stdout)
+    sys.exit(res.returncode)
+with open({str(attach_log)!r}, "a", encoding="utf-8") as f:
+    f.write(json.dumps(args) + "\\n")
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(client_cfg_dir))
+
+    # 1. Attach to hub run by task_id (`T205`) -> opens `ssh -t kilo@alf_ubuntu 'screen -x agent-ricerca-auto-T205'`
+    res_attach_hub = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "attach", "T205", "--config-dir", str(client_cfg_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert res_attach_hub.returncode == 0
+    logged_calls = [json.loads(line) for line in attach_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert logged_calls[-1] == ["-t", "kilo@alf_ubuntu", "screen -x agent-ricerca-auto-T205"]
+
+    # 2. Attach to hub run by run_id (`run_hub_id`) with `--json`
+    res_attach_hub_id = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "attach", run_hub_id, "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    hub_attach_data = json.loads(res_attach_hub_id.stdout)
+    assert hub_attach_data["ok"] is True
+    assert hub_attach_data["host"] == "alf_ubuntu"
+    assert hub_attach_data["ssh_target"] == "kilo@alf_ubuntu"
+    assert hub_attach_data["screen_session"] == "agent-ricerca-auto-T205"
+    assert hub_attach_data["command"] == ["ssh", "-t", "kilo@alf_ubuntu", "screen -x agent-ricerca-auto-T205"]
+    assert hub_attach_data["actor"] == "owner (via console@mac)"
+
+    # 3. Attach to client run (`T010` on `mac`) -> opens `ssh -t mac 'screen -x agent-local-app-T010'` (no `kilo@` prefix)
+    res_attach_mac = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "attach", "T010", "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    mac_attach_data = json.loads(res_attach_mac.stdout)
+    assert mac_attach_data["ok"] is True
+    assert mac_attach_data["host"] == "mac"
+    assert mac_attach_data["ssh_target"] == "mac"
+    assert mac_attach_data["command"] == ["ssh", "-t", "mac", "screen -x agent-local-app-T010"]
+
+    # 4. Rejects non-screen (`setsid`) run
+    res_setsid = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "attach", run_setsid_id, "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_setsid.returncode == 2
+    assert "does not have a screen session" in json.loads(res_setsid.stdout)["error"]
+
+    # 5. Rejects free-form / malicious input without invoking ssh
+    call_count_before = len(attach_log.read_text(encoding="utf-8").splitlines())
+    for bad_input in (
+        "; rm -rf /",
+        "$(whoami)",
+        "-oProxyCommand=evil",
+        "../T205",
+        "T205 && id",
+    ):
+        res_bad = subprocess.run(
+            [sys.executable, str(BIN_AI_ORCH), "console", "attach", bad_input, "--config-dir", str(client_cfg_dir), "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res_bad.returncode == 2, bad_input
+        assert json.loads(res_bad.stdout)["ok"] is False
+    call_count_after = len(attach_log.read_text(encoding="utf-8").splitlines())
+    assert call_count_after == call_count_before
+
+
+def test_19_8_per_host_timeout_and_undeclared_host_attach_rejection(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 19.8 Verification:
+    - Per-host timeout terminates a hanging SSH connection without blocking other hosts.
+    - `console attach` refuses a run record referencing an undeclared host ID.
+    - Hub host without explicit `agent_user` defaults to `kilo@<ssh_target>` on attach.
+    """
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir(parents=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+
+    run_hub_id = "20261030-130000-T301-kilo-aaaa"
+    run_evil_id = "20261030-130500-T302-kilo-bbbb"
+
+    _seed_project_with_tasks_questions_and_runs(
+        ws,
+        proj_slug="ws",
+        host_id="mac",
+        tasks_spec=[],
+        questions_spec=[],
+        runs_spec=[
+            {
+                "run_id": run_hub_id,
+                "task_id": "T301",
+                "status": "running",
+                "host": "alf_ubuntu",
+                "backend": "screen",
+                "screen_session": "agent-ws-T301",
+            },
+            {
+                "run_id": run_evil_id,
+                "task_id": "T302",
+                "status": "running",
+                "host": "undeclared_box",
+                "backend": "screen",
+                "screen_session": "agent-ws-T302",
+            },
+        ],
+    )
+
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nrole = "hub"\nport = 2222\n\n'
+        '[hosts.hanging_host]\nssh_target = "hanging_host"\nrole = "client"\ntimeout = 0.3\n',
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        f"""#!{sys.executable}
+import json, shlex, sys, time
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-o", "-p", "-i", "-l", "-F", "-J"):
+        i += 2
+    elif a.startswith("-"):
+        i += 1
+    else:
+        break
+target = args[i] if i < len(args) else ""
+remote_cmd_str = " ".join(args[i + 1:]) if i + 1 < len(args) else ""
+parsed_remote = shlex.split(remote_cmd_str) if remote_cmd_str else []
+if target == "hanging_host":
+    time.sleep(5)
+    sys.exit(0)
+if target == "alf_ubuntu" and "status" in parsed_remote:
+    print(json.dumps({{"ok": True, "host": "alf_ubuntu", "snapshot_version": 1, "items": [], "runs": []}}))
+    sys.exit(0)
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    import time
+
+    t0 = time.monotonic()
+    res = reg.get_console_status_projects(config_dir=cfg_dir, all_hosts=True, workspace=ws)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 3.0
+    assert res["hosts"]["alf_ubuntu"]["reachable"] is True
+    assert res["hosts"]["hanging_host"]["reachable"] is False
+    assert res["hosts"]["hanging_host"]["timed_out"] is True
+    assert "timed out" in res["hosts"]["hanging_host"]["error"]
+
+    # Hub without explicit agent_user defaults to `kilo@alf_ubuntu` and includes `-p 2222`
+    att = reg.resolve_console_attach("T301", config_dir=cfg_dir, workspace=ws)
+    assert att["ssh_target"] == "kilo@alf_ubuntu"
+    assert att["command"] == ["ssh", "-t", "-p", "2222", "kilo@alf_ubuntu", "screen -x agent-ws-T301"]
+
+    # Undeclared host in run record is rejected
+    with pytest.raises(ValueError, match="not declared in \\[hosts\\]"):
+        reg.resolve_console_attach(run_evil_id, config_dir=cfg_dir, workspace=ws)
+
+
+def test_19_8_bounce1_shlex_single_remote_arg_and_shell_parsing(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1 (high): Remote commands are built as ONE single remote-command argument with `shlex.join()`,
+    both for `status` and for `screen -x`, keeping argv for the local invocation.
+    Fake-ssh test emulating OpenSSH concatenation (`' '.join(remote_args)`) and remote shell parsing (`sh -c`)."""
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir(parents=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+
+    run_hub_id = "20261030-140000-T401-kilo-1234"
+    _seed_project_with_tasks_questions_and_runs(
+        ws,
+        proj_slug="ws",
+        host_id="mac",
+        tasks_spec=[],
+        questions_spec=[],
+        runs_spec=[
+            {
+                "run_id": run_hub_id,
+                "task_id": "T401",
+                "status": "running",
+                "host": "alf_ubuntu",
+                "backend": "screen",
+                "screen_session": "agent-ws-T401",
+            }
+        ],
+    )
+
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\n',
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    ssh_records_file = tmp_path / "ssh_records.jsonl"
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        f"""#!{sys.executable}
+import json, shlex, subprocess, sys
+args = sys.argv[1:]
+# Parse ssh flags vs target vs remote command args
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-o", "-p", "-i", "-l", "-F", "-J"):
+        i += 2
+    elif a.startswith("-"):
+        i += 1
+    else:
+        break
+ssh_flags = args[:i]
+target = args[i] if i < len(args) else ""
+remote_args = args[i + 1:] if i + 1 < len(args) else []
+# Emulate OpenSSH concatenating remote_args with spaces and passing to remote login shell (`sh -c`)
+concat_cmd = " ".join(remote_args)
+shell_tokens = shlex.split(concat_cmd)
+with open({str(ssh_records_file)!r}, "a", encoding="utf-8") as f:
+    f.write(json.dumps({{
+        "ssh_flags": ssh_flags,
+        "target": target,
+        "remote_args": remote_args,
+        "remote_args_count": len(remote_args),
+        "concat_cmd": concat_cmd,
+        "shell_tokens": shell_tokens,
+    }}) + "\\n")
+
+if shell_tokens == ["ai-orch", "console", "status", "--local", "--json"]:
+    print(json.dumps({{"ok": True, "host": "alf_ubuntu", "snapshot_version": 1, "items": [], "runs": []}}))
+    sys.exit(0)
+if shell_tokens and shell_tokens[0] == "screen":
+    sys.exit(0)
+sys.exit(255)
+""",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    # 1. Verify `console status` passes exactly 1 remote command argument built with `shlex.join()`
+    status_res = reg.get_console_status_projects(config_dir=cfg_dir, all_hosts=False, workspace=ws)
+    assert status_res["hub_reachable"] is True
+
+    # 2. Verify `console attach` passes local argv + target + 1 single shlex-joined remote command argument
+    att_res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "attach", "T401", "--workspace", str(ws), "--config-dir", str(cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    att_payload = json.loads(att_res.stdout)
+    assert att_payload["ok"] is True
+    assert att_payload["command"] == ["ssh", "-t", "kilo@alf_ubuntu", shlex.join(["screen", "-x", "agent-ws-T401"])]
+
+    records = [json.loads(line) for line in ssh_records_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(records) == 2
+
+    status_rec, attach_rec = records[0], records[1]
+    assert status_rec["remote_args_count"] == 1
+    assert status_rec["remote_args"] == [shlex.join(["ai-orch", "console", "status", "--local", "--json"])]
+    assert status_rec["shell_tokens"] == ["ai-orch", "console", "status", "--local", "--json"]
+
+    assert attach_rec["ssh_flags"] == ["-t"]
+    assert attach_rec["target"] == "kilo@alf_ubuntu"
+    assert attach_rec["remote_args_count"] == 1
+    assert attach_rec["remote_args"] == [shlex.join(["screen", "-x", "agent-ws-T401"])]
+    assert attach_rec["shell_tokens"] == ["screen", "-x", "agent-ws-T401"]
+
+
+def test_19_8_bounce1_hub_attach_enforces_agent_user_over_generic_user_and_ssh_target_prefix(
+    tmp_path: pathlib.Path,
+) -> None:
+    """B2 (high): Attach on the hub reliably uses the agents user (review §10.6):
+    1. A generic `user = "alfredo"` on the hub does NOT win over the `kilo` fallback when `agent_user` is omitted.
+    2. An `ssh_target = "owner@alf_ubuntu"` that already contains a conflicting username has its username stripped/replaced
+       by `agent_user` (`kilo@alf_ubuntu` or explicit `agent_user`)."""
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir(parents=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+
+    run_hub_id = "20261030-141000-T402-kilo-5678"
+    _seed_project_with_tasks_questions_and_runs(
+        ws,
+        proj_slug="ws",
+        host_id="mac",
+        tasks_spec=[],
+        questions_spec=[],
+        runs_spec=[
+            {
+                "run_id": run_hub_id,
+                "task_id": "T402",
+                "status": "running",
+                "host": "alf_ubuntu",
+                "backend": "screen",
+                "screen_session": "agent-ws-T402",
+            }
+        ],
+    )
+
+    # Conflict 1: Hub has generic `user = "alfredo"` and no `agent_user` -> must still use `kilo` fallback on the hub
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nuser = "alfredo"\nrole = "hub"\n',
+        encoding="utf-8",
+    )
+    att1 = reg.resolve_console_attach("T402", config_dir=cfg_dir, workspace=ws)
+    assert att1["agent_user"] == "kilo"
+    assert att1["ssh_target"] == "kilo@alf_ubuntu"
+    assert att1["command"] == ["ssh", "-t", "kilo@alf_ubuntu", "screen -x agent-ws-T402"]
+
+    # Conflict 2: Hub has `ssh_target = "owner@alf_ubuntu"` (and even `user = "owner"`) -> conflicting user stripped, uses `kilo@alf_ubuntu`
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "owner@alf_ubuntu"\nuser = "owner"\nrole = "hub"\n',
+        encoding="utf-8",
+    )
+    att2 = reg.resolve_console_attach("T402", config_dir=cfg_dir, workspace=ws)
+    assert att2["agent_user"] == "kilo"
+    assert att2["ssh_target"] == "kilo@alf_ubuntu"
+    assert att2["command"] == ["ssh", "-t", "kilo@alf_ubuntu", "screen -x agent-ws-T402"]
+
+    # Conflict 3: Hub has `ssh_target = "owner@alf_ubuntu"` and explicit `agent_user = "kilo_agent"` -> uses `kilo_agent@alf_ubuntu`
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "owner@alf_ubuntu"\nuser = "owner"\nagent_user = "kilo_agent"\nrole = "hub"\n',
+        encoding="utf-8",
+    )
+    att3 = reg.resolve_console_attach("T402", config_dir=cfg_dir, workspace=ws)
+    assert att3["agent_user"] == "kilo_agent"
+    assert att3["ssh_target"] == "kilo_agent@alf_ubuntu"
+    assert att3["command"] == ["ssh", "-t", "kilo_agent@alf_ubuntu", "screen -x agent-ws-T402"]
+
+
+def test_19_8_bounce1_concurrent_host_queries_and_all_hosts_flag_contract(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B3 (medium) & B4 (low):
+    - B3: Hosts are queried concurrently, each with its own timeout, and merged deterministically.
+      A hanging host placed BEFORE a reachable one does not delay the reachable host, and the reachable host's
+      timestamp shows it was queried in parallel while the hanging host was still sleeping.
+    - B4: Default behaviour (`all_hosts=False`, i.e. without `--all-hosts`) queries only local + remote hub.
+      `--all-hosts` (`all_hosts=True`) queries all declared remote hosts (hub + clients).
+      JSON contract tests verify both modes."""
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir(parents=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+
+    # Declare `aaa_hanging` BEFORE `zzz_fast_client` and `alf_ubuntu` in `orchestration.toml`
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.aaa_hanging]\nssh_target = "aaa_hanging"\nrole = "client"\ntimeout = 0.8\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\ntimeout = 2.0\n\n'
+        '[hosts.zzz_fast_client]\nssh_target = "zzz_fast_client"\nrole = "client"\ntimeout = 2.0\n',
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    timing_log = tmp_path / "timing.jsonl"
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        f"""#!{sys.executable}
+import json, sys, time
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-o", "-p", "-i", "-l", "-F", "-J"):
+        i += 2
+    elif a.startswith("-"):
+        i += 1
+    else:
+        break
+target = args[i] if i < len(args) else ""
+t_start = time.time()
+with open({str(timing_log)!r}, "a", encoding="utf-8") as f:
+    f.write(json.dumps({{"target": target, "event": "start", "ts": t_start}}) + "\\n")
+
+if target == "aaa_hanging":
+    time.sleep(5.0)
+    sys.exit(0)
+if target == "alf_ubuntu":
+    print(json.dumps({{
+        "ok": True,
+        "host": "alf_ubuntu",
+        "snapshot_version": 2,
+        "items": [{{"slug": "hub-proj", "uuid": "00000000-0000-4000-8000-000000000001", "canonical_path": "/hub/proj", "paths": {{"alf_ubuntu": "/hub/proj"}}}}],
+        "tasks": [{{"id": "T501", "project": "hub-proj", "title": "Hub task", "state": "open", "host": "alf_ubuntu"}}],
+        "runs": [],
+    }}))
+    sys.exit(0)
+if target == "zzz_fast_client":
+    print(json.dumps({{
+        "ok": True,
+        "host": "zzz_fast_client",
+        "items": [],
+        "tasks": [{{"id": "T502", "project": "hub-proj", "title": "Fast client task", "state": "in progress", "host": "zzz_fast_client"}}],
+        "runs": [{{
+            "run_id": "20261030-150000-T502-kilo-fast",
+            "task_id": "T502",
+            "project": "hub-proj",
+            "status": "running",
+            "host": "zzz_fast_client",
+            "backend": "screen",
+            "screen_session": "agent-hub-proj-T502",
+        }}],
+    }}))
+    sys.exit(0)
+sys.exit(255)
+""",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    # 1. Default mode (without `--all-hosts`): queries ONLY local (`mac`) + remote hub (`alf_ubuntu`).
+    #    Does NOT query `aaa_hanging` or `zzz_fast_client`.
+    res_default = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--config-dir", str(cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    default_data = json.loads(res_default.stdout)
+    assert default_data["ok"] is True
+    assert default_data["all_hosts"] is False
+    assert set(default_data["hosts"].keys()) == {"mac", "alf_ubuntu"}
+    assert default_data["hosts"]["alf_ubuntu"]["reachable"] is True
+    assert {t["id"] for t in default_data["tasks"]} == {"T501"}
+    assert default_data["runs"] == []
+
+    events_default = [json.loads(line) for line in timing_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [e["target"] for e in events_default] == ["alf_ubuntu"]
+
+    # 2. `--all-hosts` mode: queries all declared remote hosts concurrently (`alf_ubuntu`, `aaa_hanging`, `zzz_fast_client`).
+    timing_log.unlink()
+    t0 = time.monotonic()
+    res_all = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--all-hosts", "--config-dir", str(cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    elapsed_all = time.monotonic() - t0
+    all_data = json.loads(res_all.stdout)
+    assert all_data["ok"] is True
+    assert all_data["all_hosts"] is True
+    # Deterministic host order: local (`mac`), hub (`alf_ubuntu`), then declared clients (`aaa_hanging`, `zzz_fast_client`)
+    assert list(all_data["hosts"].keys()) == ["mac", "alf_ubuntu", "aaa_hanging", "zzz_fast_client"]
+    assert all_data["hosts"]["alf_ubuntu"]["reachable"] is True
+    assert all_data["hosts"]["aaa_hanging"]["reachable"] is False
+    assert all_data["hosts"]["aaa_hanging"]["timed_out"] is True
+    assert all_data["hosts"]["zzz_fast_client"]["reachable"] is True
+    assert {t["id"] for t in all_data["tasks"]} == {"T501", "T502"}
+    assert [r["run_id"] for r in all_data["runs"]] == ["20261030-150000-T502-kilo-fast"]
+
+    # Verify concurrent execution: `zzz_fast_client` (placed AFTER `aaa_hanging` which has timeout=0.8s)
+    # started within <0.4s of `aaa_hanging`, not after 0.8s.
+    events_all = [json.loads(line) for line in timing_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    start_by_target = {e["target"]: e["ts"] for e in events_all if e["event"] == "start"}
+    assert {"alf_ubuntu", "aaa_hanging", "zzz_fast_client"} == set(start_by_target.keys())
+    assert abs(start_by_target["zzz_fast_client"] - start_by_target["aaa_hanging"]) < 0.5
+    assert elapsed_all < 2.5
+
+
+
+
+
 

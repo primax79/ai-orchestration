@@ -10,6 +10,9 @@ Dispatches:
   - `ai-orch events <subcommand> [args...]` -> `orchestration_events.py`
   - `ai-orch sessions <subcommand> [args...]` -> `orchestration_sessions.py`
   - `ai-orch triggers <subcommand> [args...]` -> `orchestration_triggers.py`
+  - `ai-orch console status|attach [args...]` -> `orchestration_registry.py console`
+  - `ai-orch doctor [--project <dir>] [--json]` -> `orchestration_env.py doctor`
+  - `ai-orch upgrade [--project <dir>] [--apply --expect-hash <hash>] [--json]` -> `orchestration_env.py upgrade`
   - `ai-orch render-agents-md [args...]`    -> `orchestration_config.py render-agents-md`
   - `ai-orch describe [--json]`             -> machine-readable command & schema catalog
 """
@@ -49,6 +52,18 @@ ORCH_TRIGGERS_SCRIPT = REPO_ROOT / "scripts" / "orchestration_triggers.py"
 ORCH_ORCHESTRATOR_SCRIPT = REPO_ROOT / "scripts" / "orchestration_orchestrator.py"
 ORCH_BROKER_LOCK_SCRIPT = REPO_ROOT / "scripts" / "orchestration_broker_lock.py"
 ORCH_REGISTRY_SCRIPT = REPO_ROOT / "scripts" / "orchestration_registry.py"
+
+
+def _get_run_subcommands() -> dict[str, dict[str, str]]:
+    if str(REPO_ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        import orchestration_runs
+
+        return orchestration_runs.get_subcommands_description(prog_prefix="ai-orch run")
+    except Exception:
+        return {}
+
 
 CLI_DESCRIPTION: dict[str, Any] = {
     "name": "ai-orch",
@@ -152,6 +167,14 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "status": {
                     "usage": "ai-orch env status [--workspace <dir>] [--json]",
                     "description": "Verify status & drift of CLIs (kilo, claude, codex), installed skills, and MCP servers.",
+                },
+                "doctor": {
+                    "usage": "ai-orch env doctor [--project <dir>] [--workspace <dir>] [--check] [--json]",
+                    "description": "Inspect project and global convention drift with severity and fix commands.",
+                },
+                "upgrade": {
+                    "usage": "ai-orch env upgrade [--project <dir>] [--workspace <dir>] [--apply --expect-hash <hash>] [--json]",
+                    "description": "Preview or apply unified project upgrade (config, workspace registration, AGENTS.md, task headers, index markers, convention_version).",
                 },
                 "fetch-repos": {
                     "usage": "ai-orch env fetch-repos [--repos ai-orchestration kilo-mcp] [--json]",
@@ -517,32 +540,23 @@ CLI_DESCRIPTION: dict[str, Any] = {
             ),
             "description": "Shortcut alias for `ai-orch config render-agents-md`.",
         },
+        "preflight": {
+            "script": str(ORCH_CONFIG_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch preflight [--workspace <dir>] [--global-config <file>] [--json]",
+            "description": "Execute [project.preflight] host checks (tools/versions, free ports, services, disk space).",
+        },
+        "verify-checks": {
+            "script": str(ORCH_CONFIG_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": (
+                "ai-orch verify-checks [<check>...] [--check <name>...] [--workspace <dir>] "
+                "[--timeout <sec>] [--fail-fast] [--dry-run] [--global-config <file>] [--json]"
+            ),
+            "description": "Execute [project.verification_checks] subsystem commands with per-project/check timeouts.",
+        },
         "run": {
             "script": str(ORCH_RUNS_SCRIPT.relative_to(REPO_ROOT)),
             "usage": "ai-orch run <subcommand> [options] [--json]",
-            "subcommands": {
-                "options": {
-                    "usage": "ai-orch run options --task <id> [--workspace <dir>] [--json]",
-                    "description": "Show available tools, resolved defaults, and usable verify targets for a task.",
-                },
-                "preview": {
-                    "usage": (
-                        "ai-orch run preview --task <id> [--mode <orchestrate|execute|verify>] "
-                        "[--tool <tool>] [--profile <profile>] [--model <model>] [--variant <variant>] "
-                        "[--effort <effort>] [--isolation <worktree|none>] [--target-run <id|none>] "
-                        "[--instructions <text>] [--allow-same-tool] [--force] [--workspace <dir>] [--json]"
-                    ),
-                    "description": "Validate launch request and return prompt, redacted argv, cwd, planned worktree/branch, and binding plan_hash.",
-                },
-                "list": {
-                    "usage": "ai-orch run list [--task <id>] [--active] [--workspace <dir>] [--json]",
-                    "description": "List agent runs, newest first, after reconciliation.",
-                },
-                "show": {
-                    "usage": "ai-orch run show <run_id> [--workspace <dir>] [--json]",
-                    "description": "Display a specific run record after reconciliation.",
-                },
-            },
+            "subcommands": _get_run_subcommands(),
         },
         "events": {
             "script": str(ORCH_EVENTS_SCRIPT.relative_to(REPO_ROOT)),
@@ -730,16 +744,16 @@ CLI_DESCRIPTION: dict[str, Any] = {
             "description": "Manage workspace registration, move tracking, and registry queries.",
             "subcommands": {
                 "register": {
-                    "usage": "ai-orch workspace register [PATH] [--id <slug>] [--title <title>] [--apply] [--expect-hash <hash>] [--json]",
-                    "description": "Register a workspace (creates [workspace] in config if missing, detects moves, verifies paths).",
+                    "usage": "ai-orch workspace register [PATH] [--id <slug>] [--title <title>] [--host <id>] [--primary-host <id>] [--reference-repo <repo>] [--mirror-repo <repo>] [--convention-version <ver>] [--link <uuid>] [--apply] [--expect-hash <hash>] [--json]",
+                    "description": "Register a workspace in the portable hub registry and local SQLite cache.",
                 },
                 "unregister": {
                     "usage": "ai-orch workspace unregister <id> [--apply] [--expect-hash <hash>] [--json]",
-                    "description": "Unregister a workspace from SQLite registry.",
+                    "description": "Unregister a workspace from hub and SQLite registry.",
                 },
                 "list": {
                     "usage": "ai-orch workspace list [--json]",
-                    "description": "List all registered workspaces with stale status.",
+                    "description": "List all registered workspaces with stale status and portable hub metadata.",
                 },
                 "show": {
                     "usage": "ai-orch workspace show <id> [--json]",
@@ -748,6 +762,10 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "next": {
                     "usage": "ai-orch workspace next [--root <dir>] [--limit <N>] [--json]",
                     "description": "Show ready queue / next actionable tasks across all projects in the workspace.",
+                },
+                "import-migration": {
+                    "usage": "ai-orch workspace import-migration [FILE] [--host <id>] [--apply] [--expect-hash <hash>] [--json]",
+                    "description": "Import MIGRATION_REGISTRY.json into the portable hub registry and local SQLite cache.",
                 },
             },
         },
@@ -764,10 +782,125 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch projects list [WORKSPACE] [--json]",
                     "description": "List registered projects and nested sub-workspaces in a workspace.",
                 },
+                "import-migration": {
+                    "usage": "ai-orch projects import-migration [FILE] [--host <id>] [--apply] [--expect-hash <hash>] [--json]",
+                    "description": "Import MIGRATION_REGISTRY.json into the portable hub registry and local SQLite cache.",
+                },
             },
+        },
+        "console": {
+            "script": str(ORCH_REGISTRY_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch console <status|attach> [options] [--json]",
+            "description": "Multi-host CLI console: aggregate projects, tasks, runs, open questions, and deliveries across hosts, and attach to live screen sessions over SSH.",
+            "subcommands": {
+                "status": {
+                    "usage": "ai-orch console status [--all-hosts] [--local] [--timeout <sec>] [--project <dir>] [--config-dir <dir>] [--json]",
+                    "description": "Aggregate projects, tasks by state and host, runs, open questions, and deliveries to verify across declared hosts over stateless SSH.",
+                },
+                "attach": {
+                    "usage": "ai-orch console attach <run|task> [--project <dir>] [--timeout <sec>] [--dry-run] [--config-dir <dir>] [--json]",
+                    "description": "Resolve host and screen session name from a run or task and open ssh -t <target> screen -x <session> (using agent_user on the hub).",
+                },
+            },
+        },
+        "doctor": {
+            "script": str(ORCH_ENV_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch doctor [--project <dir>] [--workspace <dir>] [--check] [--json]",
+            "description": (
+                "Inspect project and global convention drift (missing config, unregistered workspace, "
+                "index without markers, stale/duplicated AGENTS.md, legacy task headers, convention_version, "
+                "and global skill/config version drift) with severity and fix commands."
+            ),
+            "subcommands": {
+                "ack": {
+                    "usage": "ai-orch doctor ack <finding_key> [--project <dir>] [--note <text>] [--dry-run] [--expect-plan-hash <hash>] [--json]",
+                    "description": "Acknowledge a doctor finding until its content changes.",
+                },
+                "unack": {
+                    "usage": "ai-orch doctor unack <finding_key> [--project <dir>] [--dry-run] [--expect-plan-hash <hash>] [--json]",
+                    "description": "Remove persistent acknowledgment for a doctor finding.",
+                },
+            },
+        },
+        "upgrade": {
+            "script": str(ORCH_ENV_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch upgrade [--project <dir>] [--workspace <dir>] [--apply --expect-hash <hash>] [--migrate-plans] [--json]",
+            "description": (
+                "Preview or apply unified project upgrade (tasks upgrade, index marker adoption, "
+                "project config write/migration, workspace registration, AGENTS.md deduplication & re-render, "
+                "task/use-case header migration, and convention_version update; refuses if executor worktrees are active)."
+            ),
         },
     },
 }
+
+
+def _extract_flag_value(args: list[str], flags: tuple[str, ...]) -> str | None:
+    for idx, arg in enumerate(args):
+        if arg in flags and idx + 1 < len(args):
+            return args[idx + 1]
+        for fl in flags:
+            if arg.startswith(fl + "="):
+                return arg.split("=", 1)[1]
+    return None
+
+
+# Command groups/subcommands excluded from the automatic 1-line stderr drift warning:
+# 1. `doctor` / `upgrade` (and `env doctor|upgrade|ack|unack`): these ARE the drift
+#    inspection and remediation commands; emitting a "run ai-orch doctor or ai-orch
+#    upgrade" banner on top of their own output would be redundant self-reference.
+# 2. `mcp` and `broker serve|shim`: stdio JSON-RPC / daemon transport processes where
+#    unsolicited stderr output during protocol startup is undesirable.
+# 3. Help invocations (`-h`, `--help`, `help`): usage output only.
+DRIFT_WARNING_EXCLUDED_GROUPS: frozenset[str] = frozenset({"doctor", "upgrade", "mcp"})
+DRIFT_WARNING_EXCLUDED_ENV_SUBCOMMANDS: frozenset[str] = frozenset({"doctor", "upgrade", "ack", "unack"})
+DRIFT_WARNING_EXCLUDED_BROKER_SUBCOMMANDS: frozenset[str] = frozenset({"serve", "shim"})
+
+
+def _maybe_warn_project_drift(group: str, rest: list[str], raw_argv: list[str]) -> None:
+    """Emit a single-line stderr warning if the command runs in a project with convention drift."""
+    if group in DRIFT_WARNING_EXCLUDED_GROUPS:
+        return
+    if group == "env" and rest and rest[0] in DRIFT_WARNING_EXCLUDED_ENV_SUBCOMMANDS:
+        return
+    if group == "broker" and rest and rest[0] in DRIFT_WARNING_EXCLUDED_BROKER_SUBCOMMANDS:
+        return
+    if any(h in rest for h in ("-h", "--help", "help")):
+        return
+
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_orch_env_drift_mod", ORCH_ENV_SCRIPT)
+        if spec is None or spec.loader is None:
+            return
+        env_mod = importlib.util.module_from_spec(spec)
+        sys.modules["_orch_env_drift_mod"] = env_mod
+        spec.loader.exec_module(env_mod)
+
+        ws_val = _extract_flag_value(rest, ("--project", "--workspace", "--root", "--dir"))
+        if ws_val is None:
+            td_val = _extract_flag_value(rest, ("--tasks-dir",))
+            if td_val is not None:
+                td_p = pathlib.Path(td_val).resolve()
+                ws_val = str(td_p.parent if td_p.name == "tasks" else td_p)
+        ws_path = pathlib.Path(ws_val).resolve() if ws_val else pathlib.Path.cwd()
+
+        home_val = _extract_flag_value(rest, ("--home",)) or os.environ.get("AI_ORCH_HOME")
+        home_path = pathlib.Path(home_val).resolve() if home_val else None
+
+        gcfg_val = _extract_flag_value(rest, ("--global-config",))
+        gcfg_path = pathlib.Path(gcfg_val).resolve() if gcfg_val else None
+
+        env_mod.maybe_emit_drift_warning(
+            workspace=ws_path,
+            home=home_path,
+            global_config=gcfg_path,
+            argv=raw_argv,
+            stream=sys.stderr,
+        )
+    except Exception:
+        pass
 
 
 def _resolve_ui_broker_root() -> pathlib.Path | None:
@@ -811,7 +944,8 @@ def print_help() -> None:
 
 def main() -> int:
     os.environ.setdefault("AI_ORCH_BIN", str(pathlib.Path(__file__).resolve()))
-    argv = sys.argv[1:]
+    raw_argv = list(sys.argv[1:])
+    argv = [a for a in raw_argv if a not in ("--no-drift-warning", "--quiet-drift")]
     if not argv or argv[0] in ("-h", "--help", "help"):
         print_help()
         return 0
@@ -830,9 +964,21 @@ def main() -> int:
     if top_json and "--json" not in rest and group not in ("mcp",):
         rest = rest + ["--json"]
 
+    _maybe_warn_project_drift(group, rest, raw_argv)
+
     if group == "describe":
+        if not CLI_DESCRIPTION["commands"]["run"].get("subcommands"):
+            CLI_DESCRIPTION["commands"]["run"]["subcommands"] = _get_run_subcommands()
         print(json.dumps(CLI_DESCRIPTION, indent=2))
         return 0
+
+    if group == "doctor":
+        proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), "doctor", *rest], check=False)
+        return proc.returncode
+
+    if group == "upgrade":
+        proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), "upgrade", *rest], check=False)
+        return proc.returncode
 
     if group == "install-launcher":
         proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), "install-launcher", *rest], check=False)
@@ -930,8 +1076,20 @@ def main() -> int:
         proc = subprocess.run([sys.executable, str(ORCH_REGISTRY_SCRIPT), "projects", *rest], check=False)
         return proc.returncode
 
+    if group == "console":
+        proc = subprocess.run([sys.executable, str(ORCH_REGISTRY_SCRIPT), "console", *rest], check=False)
+        return proc.returncode
+
     if group == "render-agents-md":
         proc = subprocess.run([sys.executable, str(ORCH_CONFIG_SCRIPT), "render-agents-md", *rest], check=False)
+        return proc.returncode
+
+    if group == "preflight":
+        proc = subprocess.run([sys.executable, str(ORCH_CONFIG_SCRIPT), "preflight", *rest], check=False)
+        return proc.returncode
+
+    if group in ("verify-checks", "verification-checks"):
+        proc = subprocess.run([sys.executable, str(ORCH_CONFIG_SCRIPT), "verify-checks", *rest], check=False)
         return proc.returncode
 
     print(f"Unknown command group: {group!r}. Run 'ai-orch --help' or 'ai-orch describe --json'.", file=sys.stderr)
