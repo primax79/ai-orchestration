@@ -3293,16 +3293,42 @@ def _section_matches_legacy_orchestration(heading: str, section_text: str) -> tu
     return (False, [])
 
 
-def _analyze_legacy_orchestration_segment(segment: str) -> tuple[list[tuple[int, int]], list[str]]:
+def _section_has_candidate_orchestration_heading(heading: str, section_text: str) -> bool:
+    h_stripped = heading.strip()
+    if (
+        LEGACY_INTRO_HEADING_RE.match(h_stripped)
+        or LEGACY_REQUIRED_SKILLS_HEADING_RE.match(h_stripped)
+        or LEGACY_CORE_RULES_HEADING_RE.match(h_stripped)
+        or LEGACY_LIFECYCLE_HEADING_RE.match(h_stripped)
+    ):
+        return True
+    in_fenced = False
+    for raw_line in section_text.splitlines()[1:]:
+        sline = raw_line.strip()
+        if sline.startswith("```"):
+            in_fenced = not in_fenced
+            continue
+        if not in_fenced and any(pat.match(sline) for pat in CANONICAL_RULE_SUBHEADING_PATTERNS):
+            return True
+    return False
+
+
+def _analyze_legacy_orchestration_segment_with_review(
+    segment: str,
+) -> tuple[list[tuple[int, int]], list[str], list[str]]:
     """Pure read-only analysis of a markdown segment outside managed markers.
 
     Parses top-level (`#`) and second-level (`##`) sections outside fenced code blocks and
-    returns `(byte_or_char_spans, matched_headings)` for sections that positively match
-    known legacy orchestration renderings.
+    returns `(byte_or_char_spans, matched_headings, manual_review_headings)` where:
+      - `spans` and `matched_headings` cover sections positively matched by
+        `_section_matches_legacy_orchestration` to a known legacy rendering;
+      - `manual_review_headings` lists sections that carry a candidate orchestration
+        heading/subheading but were NOT positively matched and are therefore preserved
+        byte-for-byte for manual review.
     """
     lines = segment.splitlines(keepends=True)
     if not lines:
-        return ([], [])
+        return ([], [], [])
 
     # Locate `#` and `##` section boundaries outside fenced code blocks
     boundaries: list[tuple[int, int, str]] = []  # (char_offset, heading_level, heading_stripped)
@@ -3319,10 +3345,11 @@ def _analyze_legacy_orchestration_segment(segment: str) -> tuple[list[tuple[int,
         offset += len(line)
 
     if not boundaries:
-        return ([], [])
+        return ([], [], [])
 
     spans: list[tuple[int, int]] = []
     matched_headings: list[str] = []
+    manual_review_headings: list[str] = []
     for idx, (start_pos, _level, heading_str) in enumerate(boundaries):
         end_pos = boundaries[idx + 1][0] if idx + 1 < len(boundaries) else len(segment)
         sec_text = segment[start_pos:end_pos]
@@ -3330,8 +3357,41 @@ def _analyze_legacy_orchestration_segment(segment: str) -> tuple[list[tuple[int,
         if is_match:
             spans.append((start_pos, end_pos))
             matched_headings.extend(sec_headings)
+        elif _section_has_candidate_orchestration_heading(heading_str, sec_text):
+            manual_review_headings.append(heading_str.strip())
 
+    return (spans, matched_headings, manual_review_headings)
+
+
+def _analyze_legacy_orchestration_segment(segment: str) -> tuple[list[tuple[int, int]], list[str]]:
+    """Pure read-only analysis of a markdown segment outside managed markers.
+
+    Parses top-level (`#`) and second-level (`##`) sections outside fenced code blocks and
+    returns `(byte_or_char_spans, matched_headings)` for sections that positively match
+    known legacy orchestration renderings.
+    """
+    spans, matched_headings, _ = _analyze_legacy_orchestration_segment_with_review(segment)
     return (spans, matched_headings)
+
+
+def find_preserved_manual_review_agents_sections(existing_text: str) -> list[str]:
+    """Return headings of sections outside markers that use orchestration-like headings
+    but are NOT positively matched to a known legacy rendering (and are preserved for manual review)."""
+    block_re = re.compile(
+        re.escape(BEGIN_MARKER) + r".*?" + re.escape(END_MARKER) + r"\n?",
+        re.DOTALL,
+    )
+    matches = list(block_re.finditer(existing_text))
+    if not matches:
+        _, _, review = _analyze_legacy_orchestration_segment_with_review(existing_text)
+        return review
+
+    first = matches[0]
+    before = existing_text[: first.start()]
+    after = block_re.sub("", existing_text[first.end() :])
+    _, _, rev_before = _analyze_legacy_orchestration_segment_with_review(before)
+    _, _, rev_after = _analyze_legacy_orchestration_segment_with_review(after)
+    return rev_before + rev_after
 
 
 def find_duplicated_handwritten_agents_sections(existing_text: str) -> list[str]:
