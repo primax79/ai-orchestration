@@ -321,43 +321,54 @@ def find_config_files(
     workspace: pathlib.Path | str,
     global_path: pathlib.Path | str | None = None,
 ) -> list[pathlib.Path]:
-    """Find candidate orchestration.toml files in order of precedence via the unified project config lookup."""
+    """Find active project orchestration.toml (highest precedence candidate only) and global orchestration.toml."""
     ws = pathlib.Path(workspace).resolve()
     candidates: list[pathlib.Path] = []
 
-    if inspect_project_config is not None:
-        proj_info = inspect_project_config(ws, global_path)
-        for cand in proj_info.get("candidates", []):
-            cp = cand["path"]
-            if cp.is_file() and cp not in candidates:
-                candidates.append(cp)
-    else:
-        for rel in (
-            ".ai-orchestration.local.toml",
-            "orchestration.toml",
-            ".ai-orchestration/orchestration.toml",
-            "tasks/orchestration.toml",
-            ".ai-orchestration.toml",
-        ):
-            cp = ws / rel
-            if cp.is_file() and cp not in candidates:
-                candidates.append(cp)
-        proj_dir = pathlib.Path.home() / ".config" / "ai-orchestration" / "projects" / ws.name / "orchestration.toml"
-        if proj_dir.is_file() and proj_dir not in candidates:
-            candidates.append(proj_dir)
-
     if global_path is not None:
         gp = pathlib.Path(global_path).expanduser().resolve()
-        gpath = gp / "orchestration.toml" if gp.is_dir() else gp
+        if gp.is_dir():
+            gpath = gp / "orchestration.toml"
+        elif gp.is_file() or gp.suffix.lower() == ".toml" or gp.name.endswith(".toml"):
+            gpath = gp
+        else:
+            gpath = gp / "orchestration.toml"
     elif default_global_config_path is not None:
         gpath = default_global_config_path()
     else:
         env_gpath = os.environ.get("AI_ORCHESTRATION_CONFIG")
-        if env_gpath:
+        if env_gpath and env_gpath.strip():
             gp = pathlib.Path(env_gpath).expanduser().resolve()
-            gpath = gp / "orchestration.toml" if gp.is_dir() else gp
+            if gp.is_dir():
+                gpath = gp / "orchestration.toml"
+            elif gp.is_file() or gp.suffix.lower() == ".toml" or gp.name.endswith(".toml"):
+                gpath = gp
+            else:
+                gpath = gp / "orchestration.toml"
+        elif os.environ.get("AI_ORCH_CONFIG_DIR", "").strip():
+            gpath = pathlib.Path(os.environ["AI_ORCH_CONFIG_DIR"]).expanduser().resolve() / "orchestration.toml"
         else:
             gpath = pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml"
+
+    if inspect_project_config is not None:
+        proj_info = inspect_project_config(ws, gpath)
+        cp = proj_info.get("path")
+        if proj_info.get("exists") and isinstance(cp, pathlib.Path) and cp.is_file():
+            candidates.append(cp)
+    else:
+        ext_proj = gpath.parent / "projects" / ws.name / "orchestration.toml"
+        for cp in (
+            ws / ".ai-orchestration.local.toml",
+            ext_proj,
+            ws / "orchestration.toml",
+            ws / ".ai-orchestration" / "orchestration.toml",
+            ws / "tasks" / "orchestration.toml",
+            ws / ".ai-orchestration.toml",
+        ):
+            if cp.is_file():
+                candidates.append(cp)
+                break
+
     if gpath.is_file() and gpath not in candidates:
         candidates.append(gpath)
 

@@ -667,3 +667,57 @@ def test_discovery_hygiene_git_ignored_nested_repo_symlinks_and_projects_ignore(
     assert "external-lib" not in disc_ids
     assert set(disc_ids) == {"_workspace", "active-service", "portal-messages-portlet"}
 
+
+def test_19_1_discovery_filter_all_canonical_and_legacy_config_locations_and_shadowing(
+    isolated_env: pathlib.Path,
+    tmp_path: pathlib.Path,
+) -> None:
+    """19.1 (B2 & B3): Workspace discovery reads `[workspace.discovery]` from every canonical
+    and legacy project config location, and higher-precedence config shadows lower-precedence files."""
+    positions = [
+        ("local_dot", lambda ws: ws / ".ai-orchestration.local.toml"),
+        ("external_projects", lambda ws: isolated_env / "projects" / ws.name / "orchestration.toml"),
+        ("legacy_root", lambda ws: ws / "orchestration.toml"),
+        ("legacy_dot_dir", lambda ws: ws / ".ai-orchestration" / "orchestration.toml"),
+        ("legacy_tasks_dir", lambda ws: ws / "tasks" / "orchestration.toml"),
+        ("legacy_dot_toml", lambda ws: ws / ".ai-orchestration.toml"),
+    ]
+
+    for pos_name, path_fn in positions:
+        ws_dir = tmp_path / f"ws_{pos_name}"
+        (ws_dir / "tasks").mkdir(parents=True)
+        (ws_dir / "tasks" / "00-INDEX.md").write_text("# Root\n", encoding="utf-8")
+        for sub in ("packages/keep-me", "packages/drop-me"):
+            (ws_dir / sub / "tasks").mkdir(parents=True)
+            (ws_dir / sub / "tasks" / "00-INDEX.md").write_text("# Sub\n", encoding="utf-8")
+
+        cfg_file = path_fn(ws_dir)
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(
+            '[workspace.discovery]\n'
+            'include = ["packages/*"]\n'
+            'exclude = ["packages/drop-me"]\n',
+            encoding="utf-8",
+        )
+
+        plan = reg.plan_projects_discover(str(ws_dir), config_dir=isolated_env)
+        disc_paths = [p["path"] for p in plan["discovered"]]
+        assert "." in disc_paths, pos_name
+        assert "packages/keep-me" in disc_paths, pos_name
+        assert "packages/drop-me" not in disc_paths, pos_name
+
+        # If a higher-precedence `.ai-orchestration.local.toml` is added that drops `keep-me` and keeps `drop-me`,
+        # the lower-precedence file is shadowed and does not leak its exclude rule.
+        if pos_name != "local_dot":
+            (ws_dir / ".ai-orchestration.local.toml").write_text(
+                '[workspace.discovery]\n'
+                'include = ["packages/*"]\n'
+                'exclude = ["packages/keep-me"]\n',
+                encoding="utf-8",
+            )
+            plan2 = reg.plan_projects_discover(str(ws_dir), config_dir=isolated_env)
+            disc_paths2 = [p["path"] for p in plan2["discovered"]]
+            assert "packages/drop-me" in disc_paths2, pos_name
+            assert "packages/keep-me" not in disc_paths2, pos_name
+
+

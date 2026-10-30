@@ -327,7 +327,9 @@ def default_global_config_path() -> pathlib.Path:
         p = pathlib.Path(env_path).expanduser().resolve()
         if p.is_dir():
             return p / "orchestration.toml"
-        return p
+        if p.is_file() or p.suffix.lower() == ".toml" or p.name.endswith(".toml"):
+            return p
+        return p / "orchestration.toml"
     env_dir = os.environ.get("AI_ORCH_CONFIG_DIR")
     if env_dir and env_dir.strip():
         return pathlib.Path(env_dir).expanduser().resolve() / "orchestration.toml"
@@ -372,7 +374,12 @@ def project_config_candidates(
     ws_resolved = ws.resolve()
     if global_path is not None:
         gp = pathlib.Path(global_path).expanduser().resolve()
-        gpath = gp / "orchestration.toml" if gp.is_dir() else gp
+        if gp.is_dir():
+            gpath = gp / "orchestration.toml"
+        elif gp.is_file() or gp.suffix.lower() == ".toml" or gp.name.endswith(".toml"):
+            gpath = gp
+        else:
+            gpath = gp / "orchestration.toml"
     else:
         gpath = default_global_config_path()
     projects_root = gpath.parent / "projects"
@@ -992,11 +999,9 @@ def resolve_config(
     if workspace is not None:
         proj_info = inspect_project_config(workspace, gpath)
         ppath = proj_info["path"]
-        # Merge existing candidates from lowest precedence to highest precedence
-        for cand in reversed(proj_info["candidates"]):
-            c_path = cand["path"]
-            if c_path.exists():
-                project_cfg = deep_merge(project_cfg, load_toml_file(c_path))
+        # Load only the selected highest-precedence project config file; lower-precedence files are shadowed.
+        if proj_info["exists"] and ppath.is_file():
+            project_cfg = load_toml_file(ppath)
 
     merged = deep_merge(DEFAULT_GLOBAL_CONFIG, global_cfg)
     if project_cfg:

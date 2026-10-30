@@ -72,6 +72,7 @@ except ImportError:
 
 try:
     from orchestration_config import (
+        inspect_project_config,
         find_project_config_path,
         config_lock,
         load_toml_file,
@@ -83,25 +84,61 @@ try:
     )
 except ImportError:
     # Standalone fallbacks if orchestration_config cannot be imported directly
+    def inspect_project_config(
+        ws: pathlib.Path | str,
+        global_path: pathlib.Path | str | None = None,
+    ) -> dict[str, Any]:
+        ws_p = pathlib.Path(ws)
+        local_dot = ws_p / ".ai-orchestration.local.toml"
+        gpath = pathlib.Path(global_path) if global_path else (get_global_config_dir() / "orchestration.toml")
+        if gpath.is_dir():
+            gpath = gpath / "orchestration.toml"
+        ext_path = gpath.parent / "projects" / ws_p.resolve().name / "orchestration.toml"
+        write_path = local_dot if local_dot.is_file() else ext_path
+        cands = [
+            (local_dot, ".ai-orchestration.local.toml", False),
+            (ext_path, f"~/.config/ai-orchestration/projects/{ws_p.resolve().name}/orchestration.toml", False),
+            (ws_p / "orchestration.toml", "orchestration.toml", True),
+            (ws_p / ".ai-orchestration" / "orchestration.toml", ".ai-orchestration/orchestration.toml", True),
+            (ws_p / "tasks" / "orchestration.toml", "tasks/orchestration.toml", True),
+            (ws_p / ".ai-orchestration.toml", ".ai-orchestration.toml", True),
+        ]
+        existing = [
+            {"path": p, "label": lbl, "is_legacy": is_leg}
+            for p, lbl, is_leg in cands
+            if p.is_file()
+        ]
+        if existing:
+            act = existing[0]
+            return {
+                "path": act["path"],
+                "write_path": write_path,
+                "exists": True,
+                "is_legacy": bool(act["is_legacy"]),
+                "label": act["label"],
+                "candidates": existing,
+                "legacy_paths": [c["path"] for c in existing if c["is_legacy"]],
+                "warnings": [],
+            }
+        return {
+            "path": ext_path,
+            "write_path": write_path,
+            "exists": False,
+            "is_legacy": False,
+            "label": cands[1][1],
+            "candidates": [],
+            "legacy_paths": [],
+            "warnings": [],
+        }
+
     def find_project_config_path(
         ws: pathlib.Path,
         global_path: pathlib.Path | None = None,
         *,
         for_write: bool = False,
     ) -> pathlib.Path:
-        local_dot = ws / ".ai-orchestration.local.toml"
-        if local_dot.exists():
-            return local_dot
-        gpath = global_path or (get_global_config_dir() / "orchestration.toml")
-        projects_root = gpath.parent / "projects"
-        ext_path = projects_root / ws.resolve().name / "orchestration.toml"
-        if for_write or ext_path.exists():
-            return ext_path
-        for rel in ("orchestration.toml", ".ai-orchestration/orchestration.toml", "tasks/orchestration.toml", ".ai-orchestration.toml"):
-            cand = ws / rel
-            if cand.is_file():
-                return cand
-        return ext_path
+        info = inspect_project_config(ws, global_path)
+        return info["write_path"] if for_write else info["path"]
 
     @contextlib.contextmanager
     def config_lock(target_path: pathlib.Path | str) -> Iterator[pathlib.Path]:
@@ -517,39 +554,45 @@ class WorkspaceDiscoveryFilter:
         return True
 
 
-def load_workspace_discovery_filter(ws_path: pathlib.Path) -> WorkspaceDiscoveryFilter:
-    """Load discovery include/exclude rules from `orchestration.toml` and `.ai-orchestration/projects-ignore`."""
+def load_workspace_discovery_filter(
+    ws_path: pathlib.Path,
+    config_dir: pathlib.Path | str | None = None,
+) -> WorkspaceDiscoveryFilter:
+    """Load discovery include/exclude rules from the active project `orchestration.toml` and `.ai-orchestration/projects-ignore`."""
     include_patterns: list[str] = []
     ignore_rules: list[tuple[str, bool]] = []
 
-    for cfg_cand in (
-        ws_path / "orchestration.toml",
-        ws_path / ".ai-orchestration" / "orchestration.toml",
-        ws_path / ".ai-orchestration.local.toml",
+    _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
+    proj_info = inspect_project_config(ws_path, _gpath)
+    cfg_cand = proj_info.get("path")
+    if (
+        proj_info.get("exists")
+        and isinstance(cfg_cand, pathlib.Path)
+        and cfg_cand.is_file()
+        and not cfg_cand.is_symlink()
     ):
-        if cfg_cand.is_file() and not cfg_cand.is_symlink():
-            try:
-                data = oc.load_toml_file(cfg_cand)
-                ws_sec = data.get("workspace")
-                if isinstance(ws_sec, dict):
-                    disc = ws_sec.get("discovery")
-                    if isinstance(disc, dict):
-                        inc = disc.get("include")
-                        if isinstance(inc, list):
-                            include_patterns.extend(str(x) for x in inc if x)
-                        for key in ("exclude", "ignore"):
-                            exc = disc.get(key)
-                            if isinstance(exc, list):
-                                for item in exc:
-                                    s = str(item).strip()
-                                    if not s or s.startswith("#"):
-                                        continue
-                                    if s.startswith("!"):
-                                        ignore_rules.append((s[1:].strip(), True))
-                                    else:
-                                        ignore_rules.append((s, False))
-            except Exception:
-                pass
+        try:
+            data = load_toml_file(cfg_cand)
+            ws_sec = data.get("workspace")
+            if isinstance(ws_sec, dict):
+                disc = ws_sec.get("discovery")
+                if isinstance(disc, dict):
+                    inc = disc.get("include")
+                    if isinstance(inc, list):
+                        include_patterns.extend(str(x) for x in inc if x)
+                    for key in ("exclude", "ignore"):
+                        exc = disc.get(key)
+                        if isinstance(exc, list):
+                            for item in exc:
+                                s = str(item).strip()
+                                if not s or s.startswith("#"):
+                                    continue
+                                if s.startswith("!"):
+                                    ignore_rules.append((s[1:].strip(), True))
+                                else:
+                                    ignore_rules.append((s, False))
+        except Exception:
+            pass
 
     for ign_file in (
         ws_path / ".ai-orchestration" / "projects-ignore",
@@ -1248,7 +1291,7 @@ def plan_projects_discover(
 
         # Discover folders containing tasks/00-INDEX.md
         candidate_folders: list[pathlib.Path] = []
-        disc_filter = load_workspace_discovery_filter(ws_path)
+        disc_filter = load_workspace_discovery_filter(ws_path, config_dir=config_dir)
 
         # Check workspace root
         root_tasks_dir = ws_path / "tasks"
@@ -1465,7 +1508,7 @@ def list_projects(
     db_path = get_db_path(config_dir)
     conn = get_connection(db_path)
     try:
-        disc_filter = load_workspace_discovery_filter(ws_path)
+        disc_filter = load_workspace_discovery_filter(ws_path, config_dir=config_dir)
 
         # Load inner registered workspaces
         other_workspaces = conn.execute(

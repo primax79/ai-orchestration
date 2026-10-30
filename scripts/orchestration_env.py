@@ -414,6 +414,8 @@ def _get_global_config_path(home: pathlib.Path | None = None) -> pathlib.Path:
     env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
     if env_cfg and env_cfg.strip():
         p = pathlib.Path(env_cfg).expanduser().resolve()
+        if p.is_dir():
+            return p / "orchestration.toml"
         if p.is_file() or p.suffix.lower() == ".toml" or p.name.endswith(".toml"):
             return p
         return p / "orchestration.toml"
@@ -435,7 +437,10 @@ def _inspect_project_config_env(
         if setup_scripts.is_dir() and str(setup_scripts) not in sys.path:
             sys.path.insert(0, str(setup_scripts))
         import orchestration_config  # type: ignore
-        return orchestration_config.inspect_project_config(workspace, gpath)
+        return orchestration_config.inspect_project_config(
+            workspace,
+            gpath if (global_config is not None or home is not None) else None,
+        )
     except Exception:
         ws = pathlib.Path(workspace)
         ext_path = gpath.parent / "projects" / ws.resolve().name / "orchestration.toml"
@@ -1268,10 +1273,10 @@ def find_configured_local_checkout(
 
     tfiles: list[pathlib.Path] = []
     if workspace:
-        for cand in _inspect_project_config_env(workspace, h).get("candidates", []):
-            cp = cand["path"]
-            if cp.is_file() and cp not in tfiles:
-                tfiles.append(cp)
+        pinfo_ws = _inspect_project_config_env(workspace, home)
+        cp_ws = pinfo_ws.get("path")
+        if pinfo_ws.get("exists") and isinstance(cp_ws, pathlib.Path) and cp_ws.is_file() and cp_ws not in tfiles:
+            tfiles.append(cp_ws)
         for fname in ("orchestration.toml", ".ai-orchestration.local.toml"):
             cp = workspace / ".config" / "ai-orchestration" / fname
             if cp.is_file() and cp not in tfiles:
@@ -1280,7 +1285,7 @@ def find_configured_local_checkout(
         cp = h / ".config" / "ai-orchestration" / fname
         if cp.is_file() and cp not in tfiles:
             tfiles.append(cp)
-    gpath_cand = _get_global_config_path(h)
+    gpath_cand = _get_global_config_path(home)
     if gpath_cand.is_file() and gpath_cand not in tfiles:
         tfiles.append(gpath_cand)
 
@@ -5770,7 +5775,7 @@ def inspect_environment(
     cfg_ws = ws if ws is not None else pathlib.Path.cwd().resolve()
     if cfg_ws.name == "tasks" and cfg_ws.parent != cfg_ws:
         cfg_ws = cfg_ws.parent
-    proj_cfg_info = _inspect_project_config_env(cfg_ws, h)
+    proj_cfg_info = _inspect_project_config_env(cfg_ws, home)
 
     return {
         "clis": clis,
@@ -8212,7 +8217,7 @@ def inspect_global_skills_and_config_drift(
     gpath = (
         pathlib.Path(global_config).resolve()
         if global_config is not None
-        else (get_config_dir(h) / "orchestration.toml")
+        else _get_global_config_path(home)
     )
     global_cfg_drifted = False
     global_cfg_reasons: list[str] = []
@@ -8328,7 +8333,7 @@ def inspect_project_doctor(
     gpath = (
         pathlib.Path(global_config).resolve()
         if global_config is not None
-        else (get_config_dir(h) / "orchestration.toml")
+        else _get_global_config_path(home)
     )
 
     acks = load_doctor_acks(h)
@@ -8390,7 +8395,7 @@ def inspect_project_doctor(
     # ------------------------------------------------------------------
     # 2. Project config check (`missing-project-config` / `legacy-project-config`)
     # ------------------------------------------------------------------
-    proj_cfg_info = _inspect_project_config_env(ws, h, gpath)
+    proj_cfg_info = _inspect_project_config_env(ws, home, gpath)
     if not proj_cfg_info.get("exists"):
         cfg_fix = f"ai-orch config init-project --workspace {ws}"
         cfg_msg = (
@@ -8943,7 +8948,7 @@ def is_drift_warning_disabled(
         gpath = (
             pathlib.Path(global_config).resolve()
             if global_config is not None
-            else (get_config_dir(h) / "orchestration.toml")
+            else _get_global_config_path(home)
         )
         candidates: list[pathlib.Path] = []
         if gpath.is_file():
@@ -9004,7 +9009,7 @@ def quick_check_project_drift(
     gpath = (
         pathlib.Path(global_config).resolve()
         if global_config is not None
-        else (get_config_dir(h) / "orchestration.toml")
+        else _get_global_config_path(home)
     )
 
     reasons: list[str] = []
@@ -9020,7 +9025,7 @@ def quick_check_project_drift(
     if recorded_conv != CONVENTION_VERSION:
         reasons.append(f"convention_version={recorded_conv or 'unrecorded'} vs tool {CONVENTION_VERSION}")
 
-    proj_cfg_info = _inspect_project_config_env(target_ws, h, gpath)
+    proj_cfg_info = _inspect_project_config_env(target_ws, home, gpath)
     if not proj_cfg_info.get("exists"):
         reasons.append("missing project config")
     elif proj_cfg_info.get("is_legacy"):
@@ -9528,11 +9533,11 @@ def upgrade_project(
     """
     ws = pathlib.Path(workspace or ".").resolve()
     h = (home or get_home_dir()).resolve()
-    cdir = get_config_dir(h)
+    cdir = get_config_dir(home)
     gpath = (
         pathlib.Path(global_config).resolve()
         if global_config is not None
-        else (cdir / "orchestration.toml")
+        else _get_global_config_path(home)
     )
     tasks_dir = ws / "tasks"
     is_apply = bool(apply) and not bool(dry_run)
@@ -9583,7 +9588,7 @@ def upgrade_project(
     # ------------------------------------------------------------------
     # Step A: Project config & workspace registration
     # ------------------------------------------------------------------
-    proj_cfg_info = _inspect_project_config_env(ws, h, gpath)
+    proj_cfg_info = _inspect_project_config_env(ws, home, gpath)
     write_path = pathlib.Path(
         proj_cfg_info.get("write_path")
         or (cdir / "projects" / ws.name / "orchestration.toml")
