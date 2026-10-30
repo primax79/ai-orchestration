@@ -1059,5 +1059,607 @@ def test_19_16_console_status_lists_hub_projects_prunes_deleted_and_falls_back_o
     assert {w["slug"] for w in ws_offline} == {"ai-coding-tools", "ricerca-auto"}
 
 
+def _seed_project_with_tasks_questions_and_runs(
+    proj_dir: pathlib.Path,
+    *,
+    proj_slug: str,
+    host_id: str,
+    tasks_spec: list[dict[str, Any]],
+    questions_spec: list[dict[str, Any]],
+    runs_spec: list[dict[str, Any]],
+) -> None:
+    """Create a realistic project tree with emergent tasks, questions, and `.ai-orchestration/runs/` records."""
+    tasks_dir = proj_dir / "tasks"
+    (tasks_dir / "core").mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "questions").mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    for t in tasks_spec:
+        tid = t["id"]
+        title = t.get("title", f"Task {tid}")
+        state = t.get("state", "open")
+        thost = t.get("host", "-")
+        vby = t.get("verify_by", "-")
+        run_id = t.get("run_id", "-")
+        t_file = tasks_dir / "core" / f"{tid}-task.md"
+        opt_lines = []
+        if vby != "-":
+            opt_lines.append(f"- verify-by: {vby}")
+        if run_id != "-":
+            opt_lines.append(f"- run-id: {run_id}")
+        if thost != "-":
+            opt_lines.append(f"- host: {thost}")
+        opt_block = ("\n".join(opt_lines) + "\n") if opt_lines else ""
+        t_file.write_text(
+            f"# {tid} {title}\n\n"
+            f"- id: {tid}\n"
+            f"- title: {title}\n"
+            f"- category: core\n"
+            f"- priority: {t.get('priority', 'P1')}\n"
+            f"- priority-reason: core work\n"
+            f"- next-up: yes\n"
+            f"- state: {state}\n"
+            f"- executor: {t.get('executor', 'kilo')}\n"
+            f"- depends-on: -\n"
+            f"- decider: owner\n"
+            f"- sources: -\n"
+            f"- paths: src/\n"
+            f"- handoff: -\n"
+            f"{opt_block}\n"
+            f"## Goal\n{title}\n\n"
+            f"## Steps\n- [ ] step 1\n\n"
+            f"## Verification\n- pytest\n",
+            encoding="utf-8",
+        )
+
+    for q in questions_spec:
+        qid = q["id"]
+        q_status = q.get("status", "open")
+        q_title = q.get("question", f"Question {qid}?")
+        q_blocks = q.get("blocks", "T001")
+        q_file = tasks_dir / "questions" / f"{qid}-question.md"
+        q_file.write_text(
+            f"# {qid} - {q_title}\n\n"
+            f"- id: {qid}\n"
+            f"- status: {q_status}\n"
+            f"- asked: 2026-10-30\n"
+            f"- asked-by: kilo\n"
+            f"- decider: owner\n"
+            f"- blocks: {q_blocks}\n"
+            f"- recommended: A\n"
+            f"- open-answer: yes\n"
+            f"- answered: {'2026-10-30' if q_status == 'answered' else '-'}\n"
+            f"- answered-by: {'owner' if q_status == 'answered' else '-'}\n"
+            f"- choice: {'A' if q_status == 'answered' else '-'}\n"
+            f"- applied: no\n\n"
+            f"## Question\n\n{q_title}\n\n"
+            f"## Context\n\nContext for {qid}.\n\n"
+            f"## Options\n\n### A — Option A\nDesc A.\n\n"
+            f"## Answer\n\n{'A' if q_status == 'answered' else ''}\n",
+            encoding="utf-8",
+        )
+
+    runs_root = proj_dir / ".ai-orchestration" / "runs"
+    for r in runs_spec:
+        rid = r["run_id"]
+        r_dir = runs_root / rid
+        r_dir.mkdir(parents=True, exist_ok=True)
+        r_payload = {
+            "run_id": rid,
+            "task_id": r["task_id"],
+            "mode": r.get("mode", "execute"),
+            "tool": r.get("tool", "kilo"),
+            "status": r.get("status", "running"),
+            "state": r.get("state", r.get("status", "running")),
+            "host": r.get("host", host_id),
+            "backend": r.get("backend", "screen"),
+            "screen_session": r.get("screen_session", f"agent-{proj_slug}-{r['task_id']}"),
+            "session_name": r.get("screen_session", f"agent-{proj_slug}-{r['task_id']}"),
+            "started_at": r.get("started_at", "2026-10-30T11:00:00+00:00"),
+            "ended_at": r.get("ended_at"),
+            "last_heartbeat": r.get("last_heartbeat", "2026-10-30T11:55:00+00:00"),
+            "workspace": str(proj_dir),
+            "cwd": str(proj_dir),
+        }
+        (r_dir / "run.json").write_text(json.dumps(r_payload, indent=2), encoding="utf-8")
+
+
+def test_19_8_console_status_multi_host_aggregation_with_one_host_down_and_timeout(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 19.8 Verification:
+    - `ai-orch console status [--all-hosts] [--json]` executes `ssh <host> ai-orch ... --json` (no daemon)
+      for each declared host.
+    - Simulates two remote hosts (`alf_ubuntu` up, `lab_worker` down) plus local `mac`.
+    - Aggregates projects, tasks by state and host, runs (with host, task, state, age, last_heartbeat),
+      open questions, and deliveries to verify.
+    - Unreachable host (`lab_worker`) is shown as unreachable without blocking the others; honours per-host timeout.
+    """
+    hub_cfg_dir = tmp_path / "hub_cfg"
+    client_cfg_dir = tmp_path / "client_cfg"
+    hub_cfg_dir.mkdir(parents=True)
+    client_cfg_dir.mkdir(parents=True)
+
+    hub_ws = tmp_path / "hub_works" / "ricerca_auto"
+    mac_ws = tmp_path / "mac_works" / "local_app"
+    hub_ws.mkdir(parents=True)
+    mac_ws.mkdir(parents=True)
+
+    run_hub_id = "20261030-110000-T001-kilo-a1b2"
+    run_mac_id = "20261030-113000-T010-kilo-c3d4"
+
+    _seed_project_with_tasks_questions_and_runs(
+        hub_ws,
+        proj_slug="ricerca-auto",
+        host_id="alf_ubuntu",
+        tasks_spec=[
+            {"id": "T001", "title": "Hub active task", "state": "in progress", "host": "alf_ubuntu", "run_id": run_hub_id},
+            {"id": "T002", "title": "Hub delivered task", "state": "delivered", "host": "alf_ubuntu", "verify_by": "claude"},
+            {"id": "T003", "title": "Hub open task", "state": "open", "host": "alf_ubuntu"},
+        ],
+        questions_spec=[
+            {"id": "Q001", "question": "Which OIDC realm on hub?", "status": "open", "blocks": "T001"},
+            {"id": "Q002", "question": "Already answered question", "status": "answered", "blocks": "T002"},
+        ],
+        runs_spec=[
+            {
+                "run_id": run_hub_id,
+                "task_id": "T001",
+                "status": "running",
+                "host": "alf_ubuntu",
+                "backend": "screen",
+                "screen_session": "agent-ricerca-auto-T001",
+                "started_at": "2026-10-30T11:00:00+00:00",
+                "last_heartbeat": "2026-10-30T11:58:00+00:00",
+            }
+        ],
+    )
+
+    _seed_project_with_tasks_questions_and_runs(
+        mac_ws,
+        proj_slug="local-app",
+        host_id="mac",
+        tasks_spec=[
+            {"id": "T010", "title": "Mac active task", "state": "in progress", "host": "mac", "run_id": run_mac_id},
+            {"id": "T011", "title": "Mac delivered task", "state": "delivered", "host": "mac", "verify_by": "owner"},
+        ],
+        questions_spec=[
+            {"id": "Q010", "question": "Mac local question?", "status": "open", "blocks": "T010"},
+        ],
+        runs_spec=[
+            {
+                "run_id": run_mac_id,
+                "task_id": "T010",
+                "status": "running",
+                "host": "mac",
+                "backend": "screen",
+                "screen_session": "agent-local-app-T010",
+                "started_at": "2026-10-30T11:30:00+00:00",
+                "last_heartbeat": "2026-10-30T11:59:00+00:00",
+            }
+        ],
+    )
+
+    # Configure hub and register `ricerca-auto` on hub
+    (hub_cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\n',
+        encoding="utf-8",
+    )
+    plan_hub_reg = reg.plan_workspace_register(
+        hub_ws,
+        slug="ricerca-auto",
+        config_dir=hub_cfg_dir,
+        host="alf_ubuntu",
+        primary_host="alf_ubuntu",
+    )
+    reg.apply_workspace_register(plan_hub_reg, expect_hash=plan_hub_reg["plan_hash"], config_dir=hub_cfg_dir)
+
+    # Configure client (`mac`) with two remote hosts: `alf_ubuntu` (up) and `lab_worker` (down, timeout=1)
+    (client_cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\ntimeout = 5\n\n'
+        '[hosts.lab_worker]\nssh_target = "lab_worker"\nrole = "client"\ntimeout = 1\n',
+        encoding="utf-8",
+    )
+    plan_mac_reg = reg.plan_workspace_register(
+        mac_ws,
+        slug="local-app",
+        config_dir=client_cfg_dir,
+        host="mac",
+        primary_host="mac",
+    )
+    reg.apply_workspace_register(plan_mac_reg, expect_hash=plan_mac_reg["plan_hash"], config_dir=client_cfg_dir)
+
+    # Create fake `ssh` script in PATH that:
+    # - records every invocation to `ssh_calls.log`
+    # - for `alf_ubuntu`: runs real `bin/ai-orch console status --local --config-dir <hub_cfg_dir> --json`
+    # - for `lab_worker`: simulates an unreachable host (exits 255 with connection error)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir( exist_ok=True)
+    ssh_log = tmp_path / "ssh_calls.log"
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        f"""#!{sys.executable}
+import os, subprocess, sys
+with open({str(ssh_log)!r}, "a", encoding="utf-8") as f:
+    f.write(" ".join(sys.argv[1:]) + "\\n")
+args = sys.argv[1:]
+if "lab_worker" in args:
+    sys.stderr.write("ssh: connect to host lab_worker port 22: No route to host\\n")
+    sys.exit(255)
+if "alf_ubuntu" in args:
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG={str(hub_cfg_dir)!r})
+    res = subprocess.run(
+        [{sys.executable!r}, {str(BIN_AI_ORCH)!r}, "console", "status", "--local", "--config-dir", {str(hub_cfg_dir)!r}, "--json"],
+         env=env,
+         capture_output=True,
+         text=True,
+    )
+    sys.stdout.write(res.stdout)
+    sys.stderr.write(res.stderr)
+    sys.exit(res.returncode)
+sys.exit(255)
+""",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(client_cfg_dir))
+
+    # 1. Run `ai-orch console status --all-hosts --json`
+    res = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--all-hosts", "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(res.stdout)
+    assert data["ok"] is True
+    assert data["host"] == "mac"
+    assert data["hub_host"] == "alf_ubuntu"
+    assert data["hub_reachable"] is True
+
+    # Verify hosts reachability: mac (local, reachable), alf_ubuntu (hub, reachable), lab_worker (client, unreachable)
+    hosts = data["hosts"]
+    assert hosts["mac"]["reachable"] is True and hosts["mac"]["local"] is True
+    assert hosts["alf_ubuntu"]["reachable"] is True and hosts["alf_ubuntu"]["role"] == "hub"
+    assert hosts["lab_worker"]["reachable"] is False
+    assert hosts["lab_worker"]["timeout_sec"] == 1.0
+    assert "No route to host" in hosts["lab_worker"]["error"]
+
+    # Verify aggregated projects from both hub and local
+    proj_slugs = {p["slug"] for p in data["projects"]}
+    assert {"ricerca-auto", "local-app"}.issubset(proj_slugs)
+
+    # Verify aggregated tasks by state and by host
+    assert data["tasks_by_state"]["in progress"] == 2
+    assert data["tasks_by_state"]["delivered"] == 2
+    assert data["tasks_by_state"]["open"] == 1
+    assert data["tasks_by_host"]["alf_ubuntu"] == 3
+    assert data["tasks_by_host"]["mac"] == 2
+    assert data["tasks_by_state_and_host"]["in progress"] == {"alf_ubuntu": 1, "mac": 1}
+    assert data["tasks_by_state_and_host"]["delivered"] == {"alf_ubuntu": 1, "mac": 1}
+
+    # Verify aggregated runs from both hosts with host, task, state, age, last_heartbeat, and screen_session
+    runs_by_id = {r["run_id"]: r for r in data["runs"]}
+    assert set(runs_by_id.keys()) == {run_hub_id, run_mac_id}
+    r_hub = runs_by_id[run_hub_id]
+    assert r_hub["host"] == "alf_ubuntu"
+    assert r_hub["task_id"] == "T001"
+    assert r_hub["status"] == "running"
+    assert r_hub["screen_session"] == "agent-ricerca-auto-T001"
+    assert r_hub["last_heartbeat"] == "2026-10-30T11:58:00+00:00"
+    assert isinstance(r_hub["age_sec"], (int, float))
+    assert isinstance(r_hub["heartbeat_age_sec"], (int, float))
+
+    r_mac = runs_by_id[run_mac_id]
+    assert r_mac["host"] == "mac"
+    assert r_mac["task_id"] == "T010"
+    assert r_mac["status"] == "running"
+    assert r_mac["screen_session"] == "agent-local-app-T010"
+
+    # Verify open questions (answered Q002 excluded)
+    q_ids = {q["id"] for q in data["open_questions"]}
+    assert q_ids == {"Q001", "Q010"}
+
+    # Verify deliveries to verify
+    deliv_ids = {d["id"] for d in data["deliveries_to_verify"]}
+    assert deliv_ids == {"T002", "T011"}
+
+    # 2. Verify human-readable text output of `ai-orch console status --all-hosts`
+    res_txt = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--all-hosts", "--config-dir", str(client_cfg_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    out_txt = res_txt.stdout
+    assert "lab_worker" in out_txt and "UNREACHABLE" in out_txt
+    assert run_hub_id in out_txt and "agent-ricerca-auto-T001" in out_txt
+    assert run_mac_id in out_txt and "agent-local-app-T010" in out_txt
+    assert "Q001" in out_txt and "Q010" in out_txt
+    assert "T002" in out_txt and "T011" in out_txt
+
+
+def test_19_8_console_attach_resolves_host_and_screen_session_and_rejects_unsafe_input(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 19.8 Verification:
+    - `ai-orch console attach <run|task>` resolves host and session name from the run record and
+      executes `ssh -t <target> screen -x <name>` (using `agent_user` on the hub: `kilo@alf_ubuntu`).
+    - Resolves both by `run_id` and by `task_id` (both local runs and remote runs fetched from hub).
+    - Host and session names are resolved strictly from code/config and run records, never interpolated from free input.
+    """
+    hub_cfg_dir = tmp_path / "hub_cfg"
+    client_cfg_dir = tmp_path / "client_cfg"
+    hub_cfg_dir.mkdir(parents=True)
+    client_cfg_dir.mkdir(parents=True)
+
+    hub_ws = tmp_path / "hub_works" / "ricerca_auto"
+    mac_ws = tmp_path / "mac_works" / "local_app"
+    hub_ws.mkdir(parents=True)
+    mac_ws.mkdir(parents=True)
+
+    run_hub_id = "20261030-120000-T205-kilo-1111"
+    run_mac_id = "20261030-120500-T010-kilo-2222"
+    run_setsid_id = "20261030-121000-T012-kilo-3333"
+
+    _seed_project_with_tasks_questions_and_runs(
+        hub_ws,
+        proj_slug="ricerca-auto",
+        host_id="alf_ubuntu",
+        tasks_spec=[
+            {"id": "T205", "title": "Hub executor task", "state": "in progress", "host": "alf_ubuntu", "run_id": run_hub_id},
+        ],
+        questions_spec=[],
+        runs_spec=[
+            {
+                "run_id": run_hub_id,
+                "task_id": "T205",
+                "status": "running",
+                "host": "alf_ubuntu",
+                "backend": "screen",
+                "screen_session": "agent-ricerca-auto-T205",
+            }
+        ],
+    )
+
+    _seed_project_with_tasks_questions_and_runs(
+        mac_ws,
+        proj_slug="local-app",
+        host_id="mac",
+        tasks_spec=[
+            {"id": "T010", "title": "Mac executor task", "state": "in progress", "host": "mac", "run_id": run_mac_id},
+        ],
+        questions_spec=[],
+        runs_spec=[
+            {
+                "run_id": run_mac_id,
+                "task_id": "T010",
+                "status": "running",
+                "host": "mac",
+                "backend": "screen",
+                "screen_session": "agent-local-app-T010",
+            },
+            {
+                "run_id": run_setsid_id,
+                "task_id": "T012",
+                "status": "running",
+                "host": "mac",
+                "backend": "setsid",
+                "screen_session": None,
+            },
+        ],
+    )
+
+    (hub_cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\n',
+        encoding="utf-8",
+    )
+    plan_hub = reg.plan_workspace_register(hub_ws, slug="ricerca-auto", config_dir=hub_cfg_dir, host="alf_ubuntu")
+    reg.apply_workspace_register(plan_hub, expect_hash=plan_hub["plan_hash"], config_dir=hub_cfg_dir)
+
+    (client_cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nrole = "hub"\nagent_user = "kilo"\n\n'
+        '[hosts.mac]\nssh_target = "mac"\nrole = "client"\n',
+        encoding="utf-8",
+    )
+    plan_mac = reg.plan_workspace_register(mac_ws, slug="local-app", config_dir=client_cfg_dir, host="mac")
+    reg.apply_workspace_register(plan_mac, expect_hash=plan_mac["plan_hash"], config_dir=client_cfg_dir)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    attach_log = tmp_path / "attach_calls.jsonl"
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        f"""#!{sys.executable}
+import json, os, subprocess, sys
+args = sys.argv[1:]
+if "status" in args and "--local" in args:
+    env = dict(os.environ, AI_ORCHESTRATION_CONFIG={str(hub_cfg_dir)!r})
+    res = subprocess.run(
+        [{sys.executable!r}, {str(BIN_AI_ORCH)!r}, "console", "status", "--local", "--config-dir", {str(hub_cfg_dir)!r}, "--json"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    sys.stdout.write(res.stdout)
+    sys.exit(res.returncode)
+with open({str(attach_log)!r}, "a", encoding="utf-8") as f:
+    f.write(json.dumps(args) + "\\n")
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(client_cfg_dir))
+
+    # 1. Attach to hub run by task_id (`T205`) -> opens `ssh -t kilo@alf_ubuntu screen -x agent-ricerca-auto-T205`
+    res_attach_hub = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "attach", "T205", "--config-dir", str(client_cfg_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert res_attach_hub.returncode == 0
+    logged_calls = [json.loads(line) for line in attach_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert logged_calls[-1] == ["-t", "kilo@alf_ubuntu", "screen", "-x", "agent-ricerca-auto-T205"]
+
+    # 2. Attach to hub run by run_id (`run_hub_id`) with `--json`
+    res_attach_hub_id = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "attach", run_hub_id, "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    hub_attach_data = json.loads(res_attach_hub_id.stdout)
+    assert hub_attach_data["ok"] is True
+    assert hub_attach_data["host"] == "alf_ubuntu"
+    assert hub_attach_data["ssh_target"] == "kilo@alf_ubuntu"
+    assert hub_attach_data["screen_session"] == "agent-ricerca-auto-T205"
+    assert hub_attach_data["command"] == ["ssh", "-t", "kilo@alf_ubuntu", "screen", "-x", "agent-ricerca-auto-T205"]
+    assert hub_attach_data["actor"] == "owner (via console@mac)"
+
+    # 3. Attach to client run (`T010` on `mac`) -> opens `ssh -t mac screen -x agent-local-app-T010` (no `kilo@` prefix)
+    res_attach_mac = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "attach", "T010", "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    mac_attach_data = json.loads(res_attach_mac.stdout)
+    assert mac_attach_data["ok"] is True
+    assert mac_attach_data["host"] == "mac"
+    assert mac_attach_data["ssh_target"] == "mac"
+    assert mac_attach_data["command"] == ["ssh", "-t", "mac", "screen", "-x", "agent-local-app-T010"]
+
+    # 4. Rejects non-screen (`setsid`) run
+    res_setsid = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "attach", run_setsid_id, "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_setsid.returncode == 2
+    assert "does not have a screen session" in json.loads(res_setsid.stdout)["error"]
+
+    # 5. Rejects free-form / malicious input without invoking ssh
+    call_count_before = len(attach_log.read_text(encoding="utf-8").splitlines())
+    for bad_input in (
+        "; rm -rf /",
+        "$(whoami)",
+        "-oProxyCommand=evil",
+        "../T205",
+        "T205 && id",
+    ):
+        res_bad = subprocess.run(
+            [sys.executable, str(BIN_AI_ORCH), "console", "attach", bad_input, "--config-dir", str(client_cfg_dir), "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res_bad.returncode == 2, bad_input
+        assert json.loads(res_bad.stdout)["ok"] is False
+    call_count_after = len(attach_log.read_text(encoding="utf-8").splitlines())
+    assert call_count_after == call_count_before
+
+
+def test_19_8_per_host_timeout_and_undeclared_host_attach_rejection(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 19.8 Verification:
+    - Per-host timeout terminates a hanging SSH connection without blocking other hosts.
+    - `console attach` refuses a run record referencing an undeclared host ID.
+    - Hub host without explicit `agent_user` defaults to `kilo@<ssh_target>` on attach.
+    """
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir(parents=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+
+    run_hub_id = "20261030-130000-T301-kilo-aaaa"
+    run_evil_id = "20261030-130500-T302-kilo-bbbb"
+
+    _seed_project_with_tasks_questions_and_runs(
+        ws,
+        proj_slug="ws",
+        host_id="mac",
+        tasks_spec=[],
+        questions_spec=[],
+        runs_spec=[
+            {
+                "run_id": run_hub_id,
+                "task_id": "T301",
+                "status": "running",
+                "host": "alf_ubuntu",
+                "backend": "screen",
+                "screen_session": "agent-ws-T301",
+            },
+            {
+                "run_id": run_evil_id,
+                "task_id": "T302",
+                "status": "running",
+                "host": "undeclared_box",
+                "backend": "screen",
+                "screen_session": "agent-ws-T302",
+            },
+        ],
+    )
+
+    (cfg_dir / "orchestration.toml").write_text(
+        '[host]\nid = "mac"\nrole = "client"\n\n'
+        '[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nrole = "hub"\nport = 2222\n\n'
+        '[hosts.hanging_host]\nssh_target = "hanging_host"\nrole = "client"\ntimeout = 0.3\n',
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        f"""#!{sys.executable}
+import json, sys, time
+args = sys.argv[1:]
+if "hanging_host" in args:
+    time.sleep(5)
+    sys.exit(0)
+if "alf_ubuntu" in args and "status" in args:
+    print(json.dumps({{"ok": True, "host": "alf_ubuntu", "snapshot_version": 1, "items": [], "runs": []}}))
+    sys.exit(0)
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    import time
+
+    t0 = time.monotonic()
+    res = reg.get_console_status_projects(config_dir=cfg_dir, all_hosts=True, workspace=ws)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 3.0
+    assert res["hosts"]["alf_ubuntu"]["reachable"] is True
+    assert res["hosts"]["hanging_host"]["reachable"] is False
+    assert res["hosts"]["hanging_host"]["timed_out"] is True
+    assert "timed out" in res["hosts"]["hanging_host"]["error"]
+
+    # Hub without explicit agent_user defaults to `kilo@alf_ubuntu` and includes `-p 2222`
+    att = reg.resolve_console_attach("T301", config_dir=cfg_dir, workspace=ws)
+    assert att["ssh_target"] == "kilo@alf_ubuntu"
+    assert att["command"] == ["ssh", "-t", "-p", "2222", "kilo@alf_ubuntu", "screen", "-x", "agent-ws-T301"]
+
+    # Undeclared host in run record is rejected
+    with pytest.raises(ValueError, match="not declared in \\[hosts\\]"):
+        reg.resolve_console_attach(run_evil_id, config_dir=cfg_dir, workspace=ws)
+
+
+
+
 
 
