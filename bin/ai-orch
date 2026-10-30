@@ -517,6 +517,19 @@ CLI_DESCRIPTION: dict[str, Any] = {
             ),
             "description": "Shortcut alias for `ai-orch config render-agents-md`.",
         },
+        "preflight": {
+            "script": str(ORCH_CONFIG_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch preflight [--workspace <dir>] [--global-config <file>] [--json]",
+            "description": "Execute [project.preflight] host checks (tools/versions, free ports, services, disk space).",
+        },
+        "verify-checks": {
+            "script": str(ORCH_CONFIG_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": (
+                "ai-orch verify-checks [<check>...] [--check <name>...] [--workspace <dir>] "
+                "[--timeout <sec>] [--fail-fast] [--dry-run] [--global-config <file>] [--json]"
+            ),
+            "description": "Execute [project.verification_checks] subsystem commands with per-project/check timeouts.",
+        },
         "run": {
             "script": str(ORCH_RUNS_SCRIPT.relative_to(REPO_ROOT)),
             "usage": "ai-orch run <subcommand> [options] [--json]",
@@ -932,6 +945,14 @@ def main() -> int:
 
     if group == "render-agents-md":
         proc = subprocess.run([sys.executable, str(ORCH_CONFIG_SCRIPT), "render-agents-md", *rest], check=False)
+        return proc.returncode
+
+    if group == "preflight":
+        proc = subprocess.run([sys.executable, str(ORCH_CONFIG_SCRIPT), "preflight", *rest], check=False)
+        return proc.returncode
+
+    if group in ("verify-checks", "verification-checks"):
+        proc = subprocess.run([sys.executable, str(ORCH_CONFIG_SCRIPT), "verify-checks", *rest], check=False)
         return proc.returncode
 
     print(f"Unknown command group: {group!r}. Run 'ai-orch --help' or 'ai-orch describe --json'.", file=sys.stderr)
