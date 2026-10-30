@@ -3225,19 +3225,25 @@ def test_19_7_ai_orch_verify_checks_execution_and_timeouts(tmp_path: pathlib.Pat
 def test_19_2_b1_find_and_strip_duplicated_handwritten_agents_sections_positive_matching_and_negative_cases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """B1: Duplicate-block detection requires positive matching against known legacy renderings,
-    never reuses destructive stripping as the predicate, and preserves ordinary user-authored
-    `## Required Skills` / `## Core Operating Rules` / `## Orchestration Lifecycle` sections."""
-    user_doc = (
+    """B1: Duplicate-block detection requires positive whole-section matching against known historical
+    renderings (no keyword signatures), never reuses destructive stripping as the predicate, and
+    preserves ordinary user-authored sections even when they use orchestration vocabulary."""
+    user_doc_with_vocab = (
         "# Project Guidelines\n\n"
         "## Required Skills\n\n"
+        "Contributors and agents should know `task-pipeline` and `task-spec-authoring` when writing specs, "
+        "plus `orchestration-workflow` and `executor-contract` for background jobs.\n"
         "- Python 3.12 async programming\n"
         "- PostgreSQL query tuning\n\n"
         "## Core Operating Rules\n\n"
-        "### Rule 1: Keep PRs Small\n\n"
-        "Never merge without green CI.\n\n"
+        "### Rule 1: Keep the Main Session Free for Design\n\n"
+        "Every PR must declare its `focus_files`, keep a disjoint write scope, and follow the "
+        "\"one task = one commit\" rule inside an isolated git worktree.\n\n"
+        "### Rule 2: Define Execution Tasks Before Delegating\n\n"
+        "Use `deep-reasoning` for tricky bugs and `bulk-execution` for routine changes.\n\n"
         "## Orchestration Lifecycle\n\n"
-        "Docker Compose services start via `make up` and stop via `make down`.\n\n"
+        "Tasks move from `open` → `in progress` → `delivered` → `verified` → `done`. "
+        "Attach a `Final Report` and run `git worktree remove` after the Post-Merge Integration Gate.\n\n"
         "<!-- BEGIN ai-orchestration -->\n"
         "Managed block.\n"
         "<!-- END ai-orchestration -->\n"
@@ -3249,43 +3255,53 @@ def test_19_2_b1_find_and_strip_duplicated_handwritten_agents_sections_positive_
 
     with monkeypatch.context() as mp:
         mp.setattr(oc, "strip_duplicated_handwritten_agents_sections", _forbidden_strip)
-        assert oc.find_duplicated_handwritten_agents_sections(user_doc) == []
+        assert oc.find_duplicated_handwritten_agents_sections(user_doc_with_vocab) == []
 
-    # 2. Stripping on user_doc must be a complete no-op and preserve user sections byte-for-byte
-    cleaned_user, removed_user = oc.strip_duplicated_handwritten_agents_sections(user_doc)
+    # 2. Stripping on user_doc_with_vocab must be a complete no-op and preserve user sections byte-for-byte
+    cleaned_user, removed_user = oc.strip_duplicated_handwritten_agents_sections(user_doc_with_vocab)
     assert removed_user == []
-    assert cleaned_user == user_doc
+    assert cleaned_user == user_doc_with_vocab
 
-    # 3. Positive match: legacy 2026-10-17 orchestration sections alongside user-authored sections
-    mixed_doc = (
-        "# Project Guidelines\n\n"
-        "## Required Skills\n\n"
-        "- Python 3.12 async programming (user section — must be preserved)\n\n"
-        "## 1. Required Skills\n\n"
-        "Load and follow these skills whenever planning, delegating, executing, or reviewing work:\n"
-        "- `orchestration-workflow` and `task-spec-authoring`\n\n"
-        "## Core Operating Rules\n\n"
-        "- User rule: never drop production tables.\n\n"
-        "## 2. Core Operating Rules\n\n"
-        "### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)\n\n"
-        "### Rule 2: Define Execution Tasks Before Delegating\n\n"
-        "Include `focus_files`, Disjoint Write Scope, and One Task = One Commit.\n\n"
-        "<!-- BEGIN ai-orchestration -->\n"
-        "Managed block.\n"
-        "<!-- END ai-orchestration -->\n"
-    )
-    found_mixed = oc.find_duplicated_handwritten_agents_sections(mixed_doc)
-    assert "## 1. Required Skills" in found_mixed
-    assert "## 2. Core Operating Rules" in found_mixed
-    assert "## Required Skills" not in found_mixed
-    assert "## Core Operating Rules" not in found_mixed
+    # 3. Positive matches with real historical renderings from git history (2026-10-15 927244a & 2026-10-17 0eef7a8)
+    hist_dir = REPO_ROOT / "scripts" / "fixtures" / "historical_agents_md"
+    hist_2026_10_15 = (hist_dir / "2026-10-15_927244a_ricerca_auto.md").read_text(encoding="utf-8")
+    hist_2026_10_17 = (hist_dir / "2026-10-17_0eef7a8_default.md").read_text(encoding="utf-8")
 
-    cleaned_mixed, removed_mixed = oc.strip_duplicated_handwritten_agents_sections(mixed_doc)
-    assert removed_mixed == found_mixed
-    assert "## Required Skills\n\n- Python 3.12 async programming (user section — must be preserved)\n\n" in cleaned_mixed
-    assert "## Core Operating Rules\n\n- User rule: never drop production tables.\n\n" in cleaned_mixed
-    assert "## 1. Required Skills" not in cleaned_mixed
-    assert "## 2. Core Operating Rules" not in cleaned_mixed
+    for hist_raw in (hist_2026_10_15, hist_2026_10_17):
+        unmarked_hist = (
+            hist_raw.replace("<!-- BEGIN ai-orchestration -->\n", "")
+            .replace("<!-- END ai-orchestration -->\n", "")
+        )
+        user_prefix = (
+            "# Project Guidelines\n\n"
+            "## Required Skills\n\n"
+            "We use `task-pipeline` and `task-spec-authoring` alongside Python 3.12 (user section — keep verbatim).\n\n"
+            "## Core Operating Rules\n\n"
+            "List `focus_files` and follow \"one task = one commit\" in PRs (user section — keep verbatim).\n\n"
+        )
+        user_suffix = (
+            "\n## Custom Database Rules\n\n"
+            "Keep this footer verbatim.\n"
+        )
+        managed_part = (
+            "<!-- BEGIN ai-orchestration -->\n"
+            "Current managed block.\n"
+            "<!-- END ai-orchestration -->\n"
+        )
+        mixed_doc = user_prefix + unmarked_hist + managed_part + user_suffix
+
+        found_mixed = oc.find_duplicated_handwritten_agents_sections(mixed_doc)
+        assert "# Agent Orchestration & Development Guidelines (`AGENTS.md`)" in found_mixed
+        assert "## 1. Required Skills" in found_mixed
+        assert "## 2. Core Operating Rules" in found_mixed
+        assert "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate" in found_mixed
+        assert "## Required Skills" not in found_mixed
+        assert "## Core Operating Rules" not in found_mixed
+
+        cleaned_mixed, removed_mixed = oc.strip_duplicated_handwritten_agents_sections(mixed_doc)
+        assert removed_mixed == found_mixed
+        assert cleaned_mixed == user_prefix + managed_part + user_suffix
+
 
 
 

@@ -8327,7 +8327,10 @@ def inspect_global_skills_and_config_drift(
         })
 
     # Global config inspection
-    oc = _load_orchestration_config()
+    try:
+        oc = _load_orchestration_config()
+    except Exception:
+        oc = None
     gpath = (
         pathlib.Path(global_config).resolve()
         if global_config is not None
