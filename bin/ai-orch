@@ -766,26 +766,6 @@ CLI_DESCRIPTION: dict[str, Any] = {
                     "usage": "ai-orch workspace import-migration [FILE] [--host <id>] [--apply] [--expect-hash <hash>] [--json]",
                     "description": "Import MIGRATION_REGISTRY.json into the portable hub registry and local SQLite cache.",
                 },
-                "reconcile": {
-                    "usage": "ai-orch workspace reconcile [--root <dir>...] [--json]",
-                    "description": "Read-only reconciliation report across hub_registry.json, registry.sqlite, and projects/*/orchestration.toml.",
-                },
-                "scan": {
-                    "usage": "ai-orch workspace scan [--root <dir>...] [--json]",
-                    "description": "Scan configured [discovery] workspace_roots for unregistered workspace suggestions (Q026=A).",
-                },
-                "relink": {
-                    "usage": "ai-orch workspace relink <id> [NEW_PATH] [--host <id>] [--apply] [--expect-hash <hash>] [--json]",
-                    "description": "Relink a moved workspace or refresh shifted device ID.",
-                },
-                "quarantine-config": {
-                    "usage": "ai-orch workspace quarantine-config <name>... [--apply] [--expect-hash <hash>] [--json]",
-                    "description": "Reversibly move selected orphan project configs into .trash/<timestamp>/ with manifest.json.",
-                },
-                "restore-config": {
-                    "usage": "ai-orch workspace restore-config <name-or-batch> [--json]",
-                    "description": "Restore a quarantined project config from .trash/.",
-                },
             },
         },
         "projects": {

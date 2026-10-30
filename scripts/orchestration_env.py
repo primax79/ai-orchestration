@@ -8641,10 +8641,9 @@ def inspect_project_doctor(
                 if ws_registered:
                     try:
                         st = ws.stat()
-                        rec_ino = nearest_ws.get("inode") or 0
-                        if rec_ino and rec_ino != st.st_ino:
+                        if nearest_ws.get("device") != st.st_dev or nearest_ws.get("inode") != st.st_ino:
                             ws_stale = True
-                            ws_stale_reasons.append("inode mismatch")
+                            ws_stale_reasons.append("device/inode mismatch")
                     except OSError:
                         ws_stale = True
                         ws_stale_reasons.append("workspace directory inaccessible")
@@ -10038,6 +10037,9 @@ def upgrade_project(
                 _snap_file(db_path)
                 _snap_file(pathlib.Path(str(db_path) + "-wal"))
                 _snap_file(pathlib.Path(str(db_path) + "-shm"))
+                if hasattr(reg, "get_hub_registry_path"):
+                    _snap_file(reg.get_hub_registry_path(cdir).resolve())
+                _snap_file((cdir / "broker" / "pending_uuids.json").resolve())
 
             existing_tasks_files: set[pathlib.Path] = set()
             existing_tasks_dirs: set[pathlib.Path] = set()

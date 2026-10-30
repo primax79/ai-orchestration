@@ -1440,19 +1440,6 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
                             else:
                                 seen_paths.add(norm_path)
 
-    disc_cfg = cfg.get("discovery")
-    if disc_cfg is not None:
-        if not isinstance(disc_cfg, dict):
-            errors.append("[discovery] must be a table.")
-        else:
-            for dkey in ("workspace_roots", "roots", "scan_roots"):
-                if dkey in disc_cfg:
-                    dval = disc_cfg[dkey]
-                    if not isinstance(dval, list) or not all(isinstance(x, str) and x.strip() for x in dval):
-                        errors.append(f"[discovery].{dkey} must be a list of non-empty strings.")
-            if "enabled" in disc_cfg and not isinstance(disc_cfg["enabled"], bool):
-                errors.append("[discovery].enabled must be a boolean.")
-
     host_cfg = cfg.get("host")
     if host_cfg is not None:
         if not isinstance(host_cfg, dict):

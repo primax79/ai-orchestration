@@ -2,6 +2,7 @@
 """test_orchestration_registry.py — Tests for workspace identity, explicit projects, nesting & registry."""
 from __future__ import annotations
 
+import copy
 import json
 import os
 import pathlib
@@ -721,26 +722,122 @@ def test_19_1_discovery_filter_all_canonical_and_legacy_config_locations_and_sha
             assert "packages/keep-me" not in disc_paths2, pos_name
 
 
+def _render_templated_migration_fixture(
+    tmp_path: pathlib.Path,
+    dest_name: str = "MIGRATION_REGISTRY.copy.json",
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, pathlib.Path]:
+    """Render `scripts/fixtures/migration_registry.json` with all roots under `tmp_path`."""
+    fixture_src = SCRIPT_DIR / "fixtures" / "migration_registry.json"
+    assert fixture_src.is_file()
+    raw_tpl = fixture_src.read_text(encoding="utf-8")
+    assert "/Users/Alfredo/works" not in raw_tpl
+    assert "/home/alfredo/works" not in raw_tpl
+
+    mac_root = tmp_path / "mac_works"
+    hub_root = tmp_path / "hub_works"
+    repos_root = tmp_path / "hub_git"
+    mac_root.mkdir(parents=True, exist_ok=True)
+    hub_root.mkdir(parents=True, exist_ok=True)
+    repos_root.mkdir(parents=True, exist_ok=True)
+
+    rendered = (
+        raw_tpl.replace("{{MAC_ROOT}}", str(mac_root))
+        .replace("{{HUB_ROOT}}", str(hub_root))
+        .replace("{{REPOS_ROOT}}", str(repos_root))
+    )
+    mig_copy = tmp_path / dest_name
+    mig_copy.write_text(rendered, encoding="utf-8")
+    return mig_copy, mac_root, hub_root, repos_root
+
+
+def test_19_16_b1_templated_fixture_isolation_and_root_guard(
+    tmp_path: pathlib.Path,
+) -> None:
+    """19.16 (B1):
+    1. `scripts/fixtures/migration_registry.json` uses templated placeholders (`{{MAC_ROOT}}`, `{{HUB_ROOT}}`, `{{REPOS_ROOT}}`), never real `~/works` paths.
+    2. When checkout directories exist under `tmp_path`, applying the import writes workspace configuration strictly inside `tmp_path`.
+    3. Any path outside configured roots (`hosts.<h>.root` / `allowed_roots`) is refused with a clear `ValueError`."""
+    mig_copy, mac_root, hub_root, _ = _render_templated_migration_fixture(tmp_path)
+    # Create actual checkout directories under `hub_root` and `mac_root` inside `tmp_path`
+    for proj_dir in ("ricerca_auto", "ai-coding-tools", "d4science_kb"):
+        (hub_root / proj_dir / "tasks").mkdir(parents=True, exist_ok=True)
+        (mac_root / proj_dir / "tasks").mkdir(parents=True, exist_ok=True)
+
+    hub_cfg_dir = tmp_path / "hub_cfg"
+    hub_cfg_dir.mkdir(parents=True)
+
+    plan = reg.plan_import_migration_registry(mig_copy, config_dir=hub_cfg_dir, host="alf_ubuntu")
+    res = reg.apply_import_migration_registry(plan, expect_hash=plan["plan_hash"], config_dir=hub_cfg_dir)
+    assert res["ok"] is True and res["applied"] is True
+
+    # Verify all written files (configs, SQLite DB, hub_registry.json) reside strictly under tmp_path
+    tmp_resolved = tmp_path.resolve()
+    for p in res["projects"]:
+        for hk, hp in p["paths"].items():
+            rp = pathlib.Path(hp).resolve()
+            assert tmp_resolved in rp.parents, f"Path {rp} for {p['slug']}@{hk} escaped tmp_path"
+    for root_dir, _, files in os.walk(str(hub_cfg_dir)):
+        for fn in files:
+            fpath = (pathlib.Path(root_dir) / fn).resolve()
+            assert tmp_resolved in fpath.parents
+
+    # Guard check 1: unexpanded template placeholder in migration file is refused
+    raw_unexpanded = tmp_path / "unexpanded.json"
+    raw_unexpanded.write_text((SCRIPT_DIR / "fixtures" / "migration_registry.json").read_text(encoding="utf-8"), encoding="utf-8")
+    with pytest.raises(ValueError, match="Unexpanded template placeholder"):
+        reg.plan_import_migration_registry(raw_unexpanded, config_dir=hub_cfg_dir, host="alf_ubuntu")
+
+    # Guard check 2: path outside configured `hosts.<h>.root` is refused at preview AND apply
+    escaped_json = tmp_path / "escaped.json"
+    outside_dir = pathlib.Path("/var/tmp/outside_allowed_roots_test_19_16")
+    escaped_payload = {
+        "schema_version": 1,
+        "hosts": {
+            "alf_ubuntu": {"root": str(hub_root)},
+            "mac": {"root": str(mac_root)},
+        },
+        "projects": [
+            {
+                "id": "rogue-proj",
+                "paths": {
+                    "alf_ubuntu": str(outside_dir / "rogue"),
+                },
+            }
+        ],
+    }
+    escaped_json.write_text(json.dumps(escaped_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="outside configured roots"):
+        reg.plan_import_migration_registry(escaped_json, config_dir=hub_cfg_dir, host="alf_ubuntu")
+
+    # Also test apply-time guard if a plan payload is tampered with an outside path
+    mig_copy2, _, _, _ = _render_templated_migration_fixture(tmp_path, dest_name="MIGRATION_REGISTRY.copy2.json")
+    plan2 = reg.plan_import_migration_registry(mig_copy2, config_dir=hub_cfg_dir, host="alf_ubuntu")
+    tampered_plan = copy.deepcopy(plan2)
+    tampered_plan["projects"][0]["paths"]["alf_ubuntu"] = str(outside_dir / "ricerca_auto")
+    tampered_plan["plan_hash"] = reg.compute_plan_hash(tampered_plan)
+    with pytest.raises(ValueError, match="outside configured roots"):
+        reg.apply_import_migration_registry(
+            tampered_plan,
+            expect_hash=tampered_plan["plan_hash"],
+            config_dir=hub_cfg_dir,
+        )
+
+
 def test_19_16_import_migration_registry_on_copy_and_same_uuid_across_hosts(
     tmp_path: pathlib.Path,
 ) -> None:
-    """19.16: Import a copy of `MIGRATION_REGISTRY.json`; verify portable UUID identity,
-    per-host paths, primary host, reference_repo, mirror, and convention_version on both Mac and hub."""
-    fixture_src = SCRIPT_DIR / "fixtures" / "migration_registry.json"
-    assert fixture_src.is_file()
-
-    # Work on an isolated copy of the migration registry fixture
-    mig_copy = tmp_path / "MIGRATION_REGISTRY.copy.json"
-    mig_copy.write_text(fixture_src.read_text(encoding="utf-8"), encoding="utf-8")
+    """19.16 (B1 & B2): Import a copy of `MIGRATION_REGISTRY.json`; verify explicit UUID preservation,
+    random UUID allocation + persistence for entries without an explicit UUID, per-host paths,
+    primary host, reference_repo, mirror, and convention_version on both Mac and hub."""
+    mig_copy, mac_root, hub_root, _ = _render_templated_migration_fixture(tmp_path)
 
     hub_cfg_dir = tmp_path / "hub_cfg"
     mac_cfg_dir = tmp_path / "mac_cfg"
     hub_cfg_dir.mkdir(parents=True)
     mac_cfg_dir.mkdir(parents=True)
 
-    # 1. Preview import on hub (`alf_ubuntu`) and Mac (`mac`)
+    # 1. Preview import on authoritative hub (`alf_ubuntu`)
     plan_hub = reg.plan_import_migration_registry(mig_copy, config_dir=hub_cfg_dir, host="alf_ubuntu")
-    plan_mac = reg.plan_import_migration_registry(mig_copy, config_dir=mac_cfg_dir, host="mac")
 
     assert plan_hub["ok"] is True
     assert plan_hub["imported_count"] == 3
@@ -753,17 +850,25 @@ def test_19_16_import_migration_registry_on_copy_and_same_uuid_across_hosts(
         reg.apply_import_migration_registry(plan_hub, expect_hash="bad_hash", config_dir=hub_cfg_dir)
 
     # Refusal if the migration file content changes between preview and apply
-    mig_tampered = tmp_path / "MIGRATION_REGISTRY.tampered.json"
-    mig_tampered.write_text(fixture_src.read_text(encoding="utf-8"), encoding="utf-8")
+    mig_tampered, _, _, _ = _render_templated_migration_fixture(tmp_path, dest_name="MIGRATION_REGISTRY.tampered.json")
     plan_tamper = reg.plan_import_migration_registry(mig_tampered, config_dir=hub_cfg_dir, host="alf_ubuntu")
-    mig_tampered.write_text(fixture_src.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    mig_tampered.write_text(mig_tampered.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="changed between preview and apply"):
         reg.apply_import_migration_registry(plan_tamper, expect_hash=plan_tamper["plan_hash"], config_dir=hub_cfg_dir)
 
-    # 2. Apply import on both hub and Mac
+    # 2. Apply import on hub (persists newly generated random UUIDs into `mig_copy`), then import on Mac
     res_hub = reg.apply_import_migration_registry(plan_hub, expect_hash=plan_hub["plan_hash"], config_dir=hub_cfg_dir)
-    res_mac = reg.apply_import_migration_registry(plan_mac, expect_hash=plan_mac["plan_hash"], config_dir=mac_cfg_dir)
     assert res_hub["ok"] is True and res_hub["applied"] is True
+
+    # Verify `mig_copy` now has explicit UUIDs persisted for all 3 projects
+    persisted_mig = json.loads(mig_copy.read_text(encoding="utf-8"))
+    for p_item in persisted_mig["projects"]:
+        assert reg.is_valid_uuid4(p_item.get("uuid"))
+    ai_tools_item = next(p for p in persisted_mig["projects"] if p.get("id") == "ai-coding-tools")
+    assert ai_tools_item["uuid"] == "52c62ed7-47c6-45e0-8136-6aa92350e4de"
+
+    plan_mac = reg.plan_import_migration_registry(mig_copy, config_dir=mac_cfg_dir, host="mac")
+    res_mac = reg.apply_import_migration_registry(plan_mac, expect_hash=plan_mac["plan_hash"], config_dir=mac_cfg_dir)
     assert res_mac["ok"] is True and res_mac["applied"] is True
 
     # 3. Verify identical UUIDs and metadata on both hosts
@@ -778,54 +883,84 @@ def test_19_16_import_migration_registry_on_copy_and_same_uuid_across_hosts(
         assert hub_list[slug]["reference_repo"] == mac_list[slug]["reference_repo"], slug
         assert hub_list[slug]["mirror_repo"] == mac_list[slug]["mirror_repo"], slug
         assert hub_list[slug]["convention_version"] == "1.1.0", slug
-        assert hub_list[slug]["paths"]["mac"].startswith("/Users/Alfredo/works/")
-        assert hub_list[slug]["paths"]["alf_ubuntu"].startswith("/home/alfredo/works/")
+        assert hub_list[slug]["paths"]["mac"].startswith(str(mac_root))
+        assert hub_list[slug]["paths"]["alf_ubuntu"].startswith(str(hub_root))
 
-    # Also verify fresh registration of the same project at different paths on Mac vs hub yields identical UUID
-    mac_ws_dir = tmp_path / "Users" / "Alfredo" / "works" / "new_project"
-    hub_ws_dir = tmp_path / "home" / "alfredo" / "works" / "new_project"
-    (mac_ws_dir / "tasks").mkdir(parents=True)
-    (hub_ws_dir / "tasks").mkdir(parents=True)
-    (mac_ws_dir / "tasks" / "convention_version").write_text("1.1.0\n", encoding="utf-8")
-    (hub_ws_dir / "tasks" / "convention_version").write_text("1.1.0\n", encoding="utf-8")
 
-    reg_plan_mac = reg.plan_workspace_register(
-        mac_ws_dir,
-        slug="new-project",
-        config_dir=mac_cfg_dir,
+def test_19_16_b2_random_uuid_allocation_and_no_slug_identity_collision(
+    tmp_path: pathlib.Path,
+) -> None:
+    """19.16 (B2):
+    1. Workspace UUIDs are randomly allocated on the authoritative hub, never a hash of the display slug.
+    2. Two unrelated workspaces with the same name/slug on different isolated hubs get distinct random UUIDs.
+    3. `upsert_hub_project_entry()` keys by UUID and refuses to merge two different UUIDs that share a display slug.
+    4. Distributing the hub's allocated UUID to another host (via `hub_registry.json` snapshot or `[workspace] uuid`)
+       preserves the exact same UUID across Mac and hub."""
+    cfg_a = tmp_path / "cfg_a"
+    cfg_b = tmp_path / "cfg_b"
+    cfg_a.mkdir()
+    cfg_b.mkdir()
+
+    ws_a = tmp_path / "host_a" / "same_name"
+    ws_b = tmp_path / "host_b" / "same_name"
+    ws_a.mkdir(parents=True)
+    ws_b.mkdir(parents=True)
+
+    # Two unrelated workspaces with the same slug `same-name` allocate distinct random UUIDs
+    plan_a = reg.plan_workspace_register(ws_a, slug="same-name", config_dir=cfg_a, host="alf_ubuntu")
+    plan_b = reg.plan_workspace_register(ws_b, slug="same-name", config_dir=cfg_b, host="mac")
+    uuid_a = plan_a["workspace"]["uuid"]
+    uuid_b = plan_b["workspace"]["uuid"]
+    assert reg.is_valid_uuid4(uuid_a)
+    assert reg.is_valid_uuid4(uuid_b)
+    assert uuid_a != uuid_b
+
+    reg.apply_workspace_register(plan_a, expect_hash=plan_a["plan_hash"], config_dir=cfg_a)
+
+    # Attempting to upsert a second project with a different UUID but the same slug in the same hub registry is refused
+    with pytest.raises(ValueError, match="already registered in hub registry to UUID"):
+        reg.upsert_hub_project_entry(
+            cfg_a,
+            ws_uuid=uuid_b,
+            ws_slug="same-name",
+            host_id="mac",
+            host_path=str(ws_b),
+        )
+
+    # Distributing the hub's entry (`uuid_a`) to Mac and registering the Mac checkout preserves `uuid_a`
+    cfg_mac = tmp_path / "cfg_mac"
+    cfg_mac.mkdir()
+    hub_doc_a = reg.load_hub_registry(cfg_a)
+    reg.replace_hub_snapshot_cache(cfg_mac, hub_doc_a["projects"], host_id="mac")
+
+    mac_checkout = tmp_path / "mac_checkouts" / "same_name"
+    (mac_checkout / "tasks").mkdir(parents=True)
+    (mac_checkout / "tasks" / "convention_version").write_text("1.1.0\n", encoding="utf-8")
+    plan_mac_join = reg.plan_workspace_register(
+        mac_checkout,
+        slug="same-name",
+        config_dir=cfg_mac,
         host="mac",
-        primary_host="alf_ubuntu",
-        reference_repo="alf_ubuntu:/home/alfredo/git/new_project.git",
-        mirror_repo="ssh://git@gitea.local/alfredo/new_project.git",
     )
-    reg_plan_hub = reg.plan_workspace_register(
-        hub_ws_dir,
-        slug="new-project",
-        config_dir=hub_cfg_dir,
-        host="alf_ubuntu",
-        primary_host="alf_ubuntu",
-        reference_repo="alf_ubuntu:/home/alfredo/git/new_project.git",
-        mirror_repo="ssh://git@gitea.local/alfredo/new_project.git",
-    )
-    assert reg_plan_mac["workspace"]["uuid"] == reg_plan_hub["workspace"]["uuid"]
-    assert reg_plan_hub["workspace"]["convention_version"] == "1.1.0"
+    assert plan_mac_join["workspace"]["uuid"] == uuid_a
 
 
-def test_19_16_console_status_lists_hub_projects_and_falls_back_to_local_cache_when_hub_unreachable(
+def test_19_16_console_status_lists_hub_projects_prunes_deleted_and_falls_back_offline(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """19.16: `ai-orch console status` lists projects from the hub registry when reachable,
-    updates the local SQLite cache, and remains usable from the local cache when the hub is unreachable."""
+    """19.16 (B3):
+    1. `ai-orch console status` lists projects from the hub registry when reachable and caches the versioned snapshot.
+    2. When a project is unregistered/deleted on the hub, the next online sync atomically prunes the removed
+       hub-sourced row from the client's local cache (`hub_registry.json` and `registry.sqlite`).
+    3. When the hub becomes unreachable, `console status` and `workspace list` fall back to the last cached snapshot."""
     hub_cfg_dir = tmp_path / "hub_config"
     client_cfg_dir = tmp_path / "client_config"
     hub_cfg_dir.mkdir(parents=True)
     client_cfg_dir.mkdir(parents=True)
 
-    # Seed hub registry from fixture copy
-    fixture_src = SCRIPT_DIR / "fixtures" / "migration_registry.json"
-    mig_copy = tmp_path / "mig.json"
-    mig_copy.write_text(fixture_src.read_text(encoding="utf-8"), encoding="utf-8")
+    # Seed hub registry from templated fixture copy
+    mig_copy, _, _, _ = _render_templated_migration_fixture(tmp_path)
     plan_hub = reg.plan_import_migration_registry(mig_copy, config_dir=hub_cfg_dir, host="alf_ubuntu")
     reg.apply_import_migration_registry(plan_hub, expect_hash=plan_hub["plan_hash"], config_dir=hub_cfg_dir)
 
@@ -840,7 +975,7 @@ def test_19_16_console_status_lists_hub_projects_and_falls_back_to_local_cache_w
     fake_bin.mkdir()
     fake_ssh = fake_bin / "ssh"
 
-    # 1. Fake ssh succeeds and returns hub's `ai-orch workspace list --json`
+    # 1. Fake ssh succeeds and returns hub's `ai-orch workspace list --json` (3 projects)
     hub_list_res = subprocess.run(
         [sys.executable, str(BIN_AI_ORCH), "workspace", "list", "--config-dir", str(hub_cfg_dir), "--json"],
         capture_output=True,
@@ -870,10 +1005,36 @@ def test_19_16_console_status_lists_hub_projects_and_falls_back_to_local_cache_w
     assert online_data["hub_host"] == "alf_ubuntu"
     assert online_data["hub_reachable"] is True
     assert online_data["registry_source"] == "hub"
+    assert online_data["snapshot_version"] >= 1
     online_slugs = {p["slug"] for p in online_data["projects"]}
     assert online_slugs == {"ai-coding-tools", "d4science-kb", "ricerca-auto"}
 
-    # 2. Simulate hub unreachable (fake ssh exits 255) -> local SQLite cache remains usable
+    # 2. Delete `d4science-kb` on the hub, then refresh `console status` on the client -> pruned atomically (B3)
+    unreg_plan = reg.plan_workspace_unregister("d4science-kb", config_dir=hub_cfg_dir)
+    reg.apply_workspace_unregister(unreg_plan, expect_hash=unreg_plan["plan_hash"], config_dir=hub_cfg_dir)
+
+    hub_list_res2 = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "workspace", "list", "--config-dir", str(hub_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    hub_json_file.write_text(hub_list_res2.stdout, encoding="utf-8")
+
+    res_online2 = subprocess.run(
+        [sys.executable, str(BIN_AI_ORCH), "console", "status", "--config-dir", str(client_cfg_dir), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    online_data2 = json.loads(res_online2.stdout)
+    assert online_data2["ok"] is True
+    assert online_data2["hub_reachable"] is True
+    assert online_data2["registry_source"] == "hub"
+    assert {p["slug"] for p in online_data2["projects"]} == {"ai-coding-tools", "ricerca-auto"}
+    assert {w["slug"] for w in reg.list_workspaces(client_cfg_dir)} == {"ai-coding-tools", "ricerca-auto"}
+
+    # 3. Simulate hub unreachable (fake ssh exits 255) -> local SQLite cache remains usable with the pruned snapshot
     fake_ssh.write_text(
         "#!/bin/sh\necho 'ssh: connect to host alf_ubuntu port 22: Operation timed out' >&2\nexit 255\n",
         encoding="utf-8",
@@ -891,102 +1052,12 @@ def test_19_16_console_status_lists_hub_projects_and_falls_back_to_local_cache_w
     assert offline_data["hosts"]["alf_ubuntu"]["reachable"] is False
     assert offline_data["hosts"]["mac"]["reachable"] is True
     offline_slugs = {p["slug"] for p in offline_data["projects"]}
-    assert offline_slugs == {"ai-coding-tools", "d4science-kb", "ricerca-auto"}
+    assert offline_slugs == {"ai-coding-tools", "ricerca-auto"}
 
     # Direct `workspace list` on client also works offline from local cache
     ws_offline = reg.list_workspaces(client_cfg_dir)
-    assert {w["slug"] for w in ws_offline} == {"ai-coding-tools", "d4science-kb", "ricerca-auto"}
+    assert {w["slug"] for w in ws_offline} == {"ai-coding-tools", "ricerca-auto"}
 
-
-def test_19_16_q026_scan_roots_and_t073_device_shift_reconcile_relink_quarantine(
-    isolated_env: pathlib.Path,
-    tmp_path: pathlib.Path,
-) -> None:
-    """19.16 + Q026=A + T073:
-    1. Q026=A: Unregistered workspace scan is off by default; when `[discovery] workspace_roots` is configured,
-       it returns candidate suggestions (`candidate_unregistered`) without auto-registering them.
-    2. T073: When `st_dev` changes across a reboot while `canonical_path`, `inode`, and `uuid` match,
-       `stale` is False and `device_changed` is True (`reconciliation_status == 'device_shifted'`).
-    3. T073: `workspace reconcile` is read-only and reports `device_shifted` and `unregistered_project_config`;
-       `workspace relink` updates device/path; `workspace quarantine-config` and `restore-config` reversibly
-       move orphan project configs to `.trash/<ts>/` with `manifest.json`."""
-    # 1. Q026=A: off by default
-    scan_off = reg.scan_unregistered_workspaces(config_dir=isolated_env)
-    assert scan_off["ok"] is True
-    assert scan_off["scan_enabled"] is False
-    assert scan_off["suggestions"] == []
-
-    # Create a registered workspace and an unregistered workspace under scan_root
-    scan_root = tmp_path / "works_root"
-    reg_ws = scan_root / "registered_proj"
-    unreg_ws = scan_root / "unregistered_proj"
-    (reg_ws / "tasks").mkdir(parents=True)
-    (reg_ws / "tasks" / "00-INDEX.md").write_text("# Reg\n", encoding="utf-8")
-    (unreg_ws / "tasks").mkdir(parents=True)
-    (unreg_ws / "tasks" / "00-INDEX.md").write_text("# Unreg\n", encoding="utf-8")
-
-    plan_r = reg.plan_workspace_register(reg_ws, slug="registered-proj", config_dir=isolated_env)
-    reg.apply_workspace_register(plan_r, expect_hash=plan_r["plan_hash"], config_dir=isolated_env)
-
-    # Configure `[discovery] workspace_roots` in global `orchestration.toml`
-    (isolated_env / "orchestration.toml").write_text(
-        f'[discovery]\nworkspace_roots = ["{scan_root}"]\n',
-        encoding="utf-8",
-    )
-    scan_on = reg.scan_unregistered_workspaces(config_dir=isolated_env)
-    assert scan_on["scan_enabled"] is True
-    assert scan_on["suggestions_count"] == 1
-    sug = scan_on["suggestions"][0]
-    assert sug["slug"] == "unregistered-proj"
-    assert sug["status"] == "candidate_unregistered"
-    assert sug["authority"] == "suggestion_only"
-    # Verify scan did not auto-register `unregistered-proj`
-    assert [w["slug"] for w in reg.list_workspaces(isolated_env)] == ["registered-proj"]
-
-    # 2. T073: Simulate `st_dev` shift in SQLite while inode and uuid match
-    conn = reg.get_connection(reg.get_db_path(isolated_env))
-    with conn:
-        conn.execute("UPDATE workspaces SET device = 99999999 WHERE slug = 'registered-proj';")
-    conn.close()
-
-    ws_items = reg.list_workspaces(isolated_env)
-    assert len(ws_items) == 1
-    assert ws_items[0]["stale"] is False
-    assert ws_items[0]["device_changed"] is True
-    assert ws_items[0]["reconciliation_status"] == "device_shifted"
-
-    # 3. Create an orphan project config in `projects/orphan_test_ws/orchestration.toml`
-    orphan_dir = isolated_env / "projects" / "orphan_test_ws"
-    orphan_dir.mkdir(parents=True)
-    (orphan_dir / "orchestration.toml").write_text(
-        f'[workspace]\nuuid = "{uuid.uuid4()}"\nid = "orphan-test-ws"\n',
-        encoding="utf-8",
-    )
-
-    rec_report = reg.reconcile_registry(config_dir=isolated_env)
-    assert rec_report["ok"] is True
-    assert rec_report["read_only"] is True
-    kinds = {f["kind"] for f in rec_report["reconciliation_report"]}
-    assert "device_shifted" in kinds
-    assert "unregistered_project_config" in kinds
-
-    # Relink fixes the shifted device ID
-    relink_plan = reg.plan_workspace_relink("registered-proj", config_dir=isolated_env)
-    reg.apply_workspace_relink(relink_plan, expect_hash=relink_plan["plan_hash"], config_dir=isolated_env)
-    ws_after_relink = reg.list_workspaces(isolated_env)[0]
-    assert ws_after_relink["device_changed"] is False
-    assert ws_after_relink["reconciliation_status"] == "ok"
-
-    # Quarantine and restore the orphan project config
-    q_plan = reg.plan_quarantine_project_configs(["orphan_test_ws"], config_dir=isolated_env)
-    q_res = reg.apply_quarantine_project_configs(q_plan, expect_hash=q_plan["plan_hash"], config_dir=isolated_env)
-    assert q_res["ok"] is True
-    assert not orphan_dir.exists()
-    assert pathlib.Path(q_res["manifest_path"]).is_file()
-
-    r_res = reg.restore_quarantined_project_config("orphan_test_ws", config_dir=isolated_env)
-    assert r_res["ok"] is True
-    assert (orphan_dir / "orchestration.toml").is_file()
 
 
 
