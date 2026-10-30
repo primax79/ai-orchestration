@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import datetime
 import hashlib
 import json
@@ -21,6 +22,8 @@ import logging
 import os
 import pathlib
 import re
+import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -81,9 +84,53 @@ try:
         is_valid_workspace_slug,
         is_valid_project_slug,
         is_valid_uuid4,
+        resolve_host_id,
+        resolve_hosts_table,
+        normalize_host_id,
     )
 except ImportError:
     # Standalone fallbacks if orchestration_config cannot be imported directly
+    def normalize_host_id(raw: str | None = None) -> str:
+        if raw is None:
+            try:
+                raw = socket.gethostname()
+            except Exception:
+                raw = "localhost"
+        s = str(raw or "").strip()
+        if "." in s:
+            s = s.split(".", 1)[0]
+        s = re.sub(r"[^a-z0-9_-]+", "-", s.lower())
+        s = re.sub(r"-{2,}", "-", s)
+        s = re.sub(r"^[^a-z0-9]+", "", s).rstrip("_-")
+        return s[:63].rstrip("_-") if s else "localhost"
+
+    def resolve_host_id(
+        cfg: dict[str, Any] | None = None,
+        global_path: pathlib.Path | None = None,
+        hostname: str | None = None,
+        workspace: pathlib.Path | str | None = None,
+    ) -> str:
+        if isinstance(cfg, dict):
+            hid = cfg.get("host", {}).get("id")
+            if isinstance(hid, str) and hid.strip():
+                return hid.strip()
+        env_hid = os.environ.get("AI_ORCH_HOST_ID")
+        if hostname is None and env_hid and env_hid.strip():
+            return normalize_host_id(env_hid.strip())
+        return normalize_host_id(hostname)
+
+    def resolve_hosts_table(
+        cfg: dict[str, Any] | None = None,
+        global_path: pathlib.Path | None = None,
+        workspace: pathlib.Path | str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        if not isinstance(cfg, dict):
+            return {}
+        raw_hosts = cfg.get("hosts")
+        if not isinstance(raw_hosts, dict):
+            return {}
+        return {str(k): dict(v) for k, v in raw_hosts.items() if isinstance(v, dict)}
+
     def inspect_project_config(
         ws: pathlib.Path | str,
         global_path: pathlib.Path | str | None = None,
@@ -235,6 +282,50 @@ def get_lock_path(config_dir: pathlib.Path | str | None = None) -> pathlib.Path:
     return broker_dir / "registry.lock"
 
 
+def get_hub_registry_path(config_dir: pathlib.Path | str | None = None) -> pathlib.Path:
+    """Return path to the portable hub project registry JSON (`<config_dir>/broker/hub_registry.json`)."""
+    env_hub = os.environ.get("AI_ORCH_HUB_REGISTRY")
+    if env_hub and env_hub.strip() and config_dir is None:
+        return pathlib.Path(env_hub.strip()).expanduser().resolve()
+    cdir = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
+    broker_dir = cdir / "broker"
+    broker_dir.mkdir(parents=True, exist_ok=True)
+    return broker_dir / "hub_registry.json"
+
+
+def _resolve_current_host_id(
+    config_dir: pathlib.Path | str | None = None,
+    workspace: pathlib.Path | str | None = None,
+    host_override: str | None = None,
+) -> str:
+    if host_override and str(host_override).strip():
+        return normalize_host_id(str(host_override).strip())
+    gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
+    try:
+        return resolve_host_id(global_path=gpath, workspace=workspace)
+    except Exception:
+        return normalize_host_id(None)
+
+
+def _read_workspace_convention_version(ws_path: pathlib.Path) -> str | None:
+    """Read `tasks/convention_version` (or legacy `.convention-version` / `.convention_version`) if present."""
+    tasks_dir = ws_path / "tasks"
+    if not tasks_dir.is_dir():
+        return None
+    for fname in ("convention_version", ".convention-version", ".convention_version"):
+        cfile = tasks_dir / fname
+        if cfile.is_file() and not cfile.is_symlink():
+            try:
+                raw = cfile.read_text(encoding="utf-8", errors="replace").strip()
+                if raw:
+                    first = raw.splitlines()[0].strip()
+                    if first:
+                        return first
+            except Exception:
+                pass
+    return None
+
+
 @contextlib.contextmanager
 def registry_lock(
     config_dir: pathlib.Path | str | None = None,
@@ -289,7 +380,7 @@ def get_connection(db_path: pathlib.Path) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Initialize SQLite schema if not present."""
+    """Initialize SQLite schema if not present and apply additive column migrations."""
     with conn:
         conn.execute(
             """
@@ -301,10 +392,30 @@ def init_db(conn: sqlite3.Connection) -> None:
                 device INTEGER NOT NULL,
                 inode INTEGER NOT NULL,
                 registered_at TEXT NOT NULL,
-                last_seen TEXT NOT NULL
+                last_seen TEXT NOT NULL,
+                primary_host TEXT,
+                reference_repo TEXT,
+                mirror_repo TEXT,
+                convention_version TEXT,
+                paths_json TEXT NOT NULL DEFAULT '{}'
             );
             """
         )
+        # Additive migration for existing databases
+        ws_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(workspaces);").fetchall()
+        }
+        for col_name, col_def in (
+            ("primary_host", "TEXT"),
+            ("reference_repo", "TEXT"),
+            ("mirror_repo", "TEXT"),
+            ("convention_version", "TEXT"),
+            ("paths_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            if col_name not in ws_cols:
+                conn.execute(f"ALTER TABLE workspaces ADD COLUMN {col_name} {col_def};")
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS projects (
@@ -312,8 +423,36 @@ def init_db(conn: sqlite3.Connection) -> None:
                 workspace_uuid TEXT NOT NULL REFERENCES workspaces(uuid) ON DELETE CASCADE,
                 slug TEXT NOT NULL,
                 rel_path TEXT NOT NULL,
+                primary_host TEXT,
+                reference_repo TEXT,
+                mirror_repo TEXT,
+                convention_version TEXT,
                 UNIQUE (workspace_uuid, slug),
                 UNIQUE (workspace_uuid, rel_path)
+            );
+            """
+        )
+        proj_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(projects);").fetchall()
+        }
+        for col_name, col_def in (
+            ("primary_host", "TEXT"),
+            ("reference_repo", "TEXT"),
+            ("mirror_repo", "TEXT"),
+            ("convention_version", "TEXT"),
+        ):
+            if col_name not in proj_cols:
+                conn.execute(f"ALTER TABLE projects ADD COLUMN {col_name} {col_def};")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_host_paths (
+                workspace_uuid TEXT NOT NULL REFERENCES workspaces(uuid) ON DELETE CASCADE,
+                host TEXT NOT NULL,
+                path TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (workspace_uuid, host)
             );
             """
         )
@@ -326,6 +465,376 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_workspaces_slug ON workspaces(slug);"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ws_host_paths_host ON workspace_host_paths(host);"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Portable Hub Registry (`hub_registry.json`) & SQLite Cache Sync
+# ---------------------------------------------------------------------------
+
+
+def load_hub_registry(config_dir: pathlib.Path | str | None = None) -> dict[str, Any]:
+    """Load the portable hub project registry JSON document."""
+    hub_path = get_hub_registry_path(config_dir)
+    if not hub_path.is_file():
+        return {
+            "schema_version": 1,
+            "updated_at": None,
+            "projects": [],
+        }
+    try:
+        data = json.loads(hub_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            projs = data.get("projects")
+            if not isinstance(projs, list):
+                projs = []
+            return {
+                "schema_version": int(data.get("schema_version", 1)),
+                "updated_at": data.get("updated_at"),
+                "projects": [dict(p) for p in projs if isinstance(p, dict)],
+            }
+    except Exception:
+        pass
+    return {
+        "schema_version": 1,
+        "updated_at": None,
+        "projects": [],
+    }
+
+
+def save_hub_registry(
+    doc: dict[str, Any],
+    config_dir: pathlib.Path | str | None = None,
+) -> pathlib.Path:
+    """Atomically write the portable hub project registry JSON document."""
+    hub_path = get_hub_registry_path(config_dir)
+    hub_path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    projs = [dict(p) for p in doc.get("projects", []) if isinstance(p, dict)]
+    projs.sort(key=lambda item: (str(item.get("slug") or item.get("id") or ""), str(item.get("uuid") or "")))
+    payload = {
+        "schema_version": int(doc.get("schema_version", 1)),
+        "updated_at": doc.get("updated_at") or now,
+        "projects": projs,
+    }
+    text = json.dumps(payload, indent=2, sort_keys=False) + "\n"
+    tmp_file = hub_path.parent / f"{hub_path.name}.tmp.{os.getpid()}"
+    tmp_file.write_text(text, encoding="utf-8")
+    os.replace(str(tmp_file), str(hub_path))
+    return hub_path
+
+
+def find_hub_project_entry(
+    doc: dict[str, Any],
+    *,
+    ws_uuid: str | None = None,
+    ws_slug: str | None = None,
+    canonical_path: str | None = None,
+) -> dict[str, Any] | None:
+    """Find a matching project/workspace entry in the portable hub registry."""
+    projs = doc.get("projects", [])
+    if not isinstance(projs, list):
+        return None
+    if ws_uuid:
+        for p in projs:
+            if isinstance(p, dict) and p.get("uuid") == ws_uuid:
+                return p
+    if ws_slug:
+        for p in projs:
+            if isinstance(p, dict) and (p.get("slug") == ws_slug or p.get("id") == ws_slug):
+                return p
+    if canonical_path:
+        for p in projs:
+            if not isinstance(p, dict):
+                continue
+            paths = p.get("paths")
+            if isinstance(paths, dict) and canonical_path in paths.values():
+                return p
+    return None
+
+
+def upsert_hub_project_entry(
+    config_dir: pathlib.Path | str | None,
+    *,
+    ws_uuid: str,
+    ws_slug: str,
+    ws_title: str | None = None,
+    host_id: str | None = None,
+    host_path: str | None = None,
+    paths: dict[str, str] | None = None,
+    primary_host: str | None = None,
+    reference_repo: str | None = None,
+    mirror_repo: str | None = None,
+    convention_version: str | None = None,
+    subprojects: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Insert or update an entry in `hub_registry.json` (must be called under `registry_lock` or atomically)."""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    doc = load_hub_registry(config_dir)
+    projs = list(doc.get("projects", []))
+    target_idx: int | None = None
+    for idx, p in enumerate(projs):
+        if p.get("uuid") == ws_uuid or p.get("slug") == ws_slug or p.get("id") == ws_slug:
+            target_idx = idx
+            break
+
+    existing = dict(projs[target_idx]) if target_idx is not None else {}
+    merged_paths: dict[str, str] = {}
+    if isinstance(existing.get("paths"), dict):
+        for hk, hv in existing["paths"].items():
+            if isinstance(hk, str) and isinstance(hv, str) and hv.strip():
+                merged_paths[hk] = hv.strip()
+    if isinstance(paths, dict):
+        for hk, hv in paths.items():
+            if isinstance(hk, str) and isinstance(hv, str) and hv.strip():
+                merged_paths[normalize_host_id(hk)] = hv.strip()
+    if host_id and host_path:
+        merged_paths[normalize_host_id(host_id)] = str(host_path).strip()
+
+    eff_title = ws_title if ws_title is not None else existing.get("title")
+    eff_primary = primary_host if primary_host is not None else existing.get("primary_host")
+    if not eff_primary and host_id:
+        eff_primary = normalize_host_id(host_id)
+    eff_ref = reference_repo if reference_repo is not None else existing.get("reference_repo")
+    eff_mirror = (
+        mirror_repo
+        if mirror_repo is not None
+        else (existing.get("mirror_repo") or existing.get("mirror"))
+    )
+    eff_conv = convention_version if convention_version is not None else existing.get("convention_version")
+
+    if subprojects is not None:
+        norm_subs: list[dict[str, Any]] = []
+        for sp in subprojects:
+            if not isinstance(sp, dict):
+                continue
+            sp_slug = str(sp.get("slug") or sp.get("id") or "_workspace")
+            sp_rel = str(sp.get("rel_path") or sp.get("path") or ".")
+            sp_uuid = str(sp.get("uuid") or portable_project_uuid(ws_uuid, sp_rel))
+            norm_subs.append({
+                "uuid": sp_uuid,
+                "id": sp_slug,
+                "slug": sp_slug,
+                "path": sp_rel,
+                "rel_path": sp_rel,
+                "convention_version": sp.get("convention_version") or eff_conv,
+            })
+    else:
+        norm_subs = list(existing.get("subprojects", []))
+
+    entry: dict[str, Any] = {
+        "uuid": ws_uuid,
+        "id": ws_slug,
+        "slug": ws_slug,
+        "title": eff_title,
+        "primary_host": eff_primary,
+        "paths": merged_paths,
+        "reference_repo": eff_ref,
+        "mirror_repo": eff_mirror,
+        "mirror": eff_mirror,
+        "convention_version": eff_conv,
+        "subprojects": norm_subs,
+        "registered_at": existing.get("registered_at") or now,
+        "updated_at": now,
+    }
+    if target_idx is not None:
+        projs[target_idx] = entry
+    else:
+        projs.append(entry)
+    doc["projects"] = projs
+    doc["updated_at"] = now
+    save_hub_registry(doc, config_dir)
+    return entry
+
+
+def remove_hub_project_entry(
+    ws_uuid_or_slug: str,
+    config_dir: pathlib.Path | str | None = None,
+) -> bool:
+    """Remove an entry from `hub_registry.json` by UUID or slug."""
+    doc = load_hub_registry(config_dir)
+    projs = list(doc.get("projects", []))
+    filtered = [
+        p
+        for p in projs
+        if p.get("uuid") != ws_uuid_or_slug
+        and p.get("slug") != ws_uuid_or_slug
+        and p.get("id") != ws_uuid_or_slug
+    ]
+    if len(filtered) == len(projs):
+        return False
+    doc["projects"] = filtered
+    doc["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save_hub_registry(doc, config_dir)
+    return True
+
+
+def sync_hub_entry_to_sqlite_conn(
+    conn: sqlite3.Connection,
+    entry: dict[str, Any],
+    *,
+    current_host: str,
+) -> None:
+    """Sync one portable hub registry entry into the local SQLite cache."""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    ws_uuid = str(entry["uuid"])
+    ws_slug = str(entry.get("slug") or entry.get("id"))
+    ws_title = entry.get("title")
+    paths = entry.get("paths") if isinstance(entry.get("paths"), dict) else {}
+    primary_host = entry.get("primary_host")
+    ref_repo = entry.get("reference_repo")
+    mirror_repo = entry.get("mirror_repo") or entry.get("mirror")
+    conv_ver = entry.get("convention_version")
+
+    existing = conn.execute(
+        "SELECT * FROM workspaces WHERE uuid = ?", (ws_uuid,)
+    ).fetchone()
+
+    local_path_str = paths.get(current_host)
+    if not local_path_str and existing is not None:
+        local_path_str = existing["canonical_path"]
+    if not local_path_str and primary_host and paths.get(primary_host):
+        local_path_str = paths[primary_host]
+    if not local_path_str and paths:
+        local_path_str = next(iter(paths.values()))
+    if not local_path_str:
+        local_path_str = f"/unmapped/{ws_slug}"
+
+    dev = int(existing["device"]) if existing is not None else 0
+    ino = int(existing["inode"]) if existing is not None else 0
+    lp = pathlib.Path(local_path_str).expanduser()
+    if lp.exists() and lp.is_dir() and not lp.is_symlink():
+        try:
+            resolved_lp = lp.resolve()
+            local_path_str = str(resolved_lp)
+            paths = dict(paths)
+            paths[current_host] = local_path_str
+            if existing is None or (dev == 0 and ino == 0):
+                st = os.stat(resolved_lp)
+                dev, ino = st.st_dev, st.st_ino
+        except OSError:
+            pass
+
+    reg_at = (
+        existing["registered_at"]
+        if existing is not None
+        else (entry.get("registered_at") or now)
+    )
+    paths_json = json.dumps(paths, sort_keys=True)
+
+    conn.execute(
+        """
+        INSERT INTO workspaces (
+            uuid, slug, title, canonical_path, device, inode,
+            registered_at, last_seen, primary_host, reference_repo,
+            mirror_repo, convention_version, paths_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(uuid) DO UPDATE SET
+            slug = excluded.slug,
+            title = excluded.title,
+            canonical_path = excluded.canonical_path,
+            device = excluded.device,
+            inode = excluded.inode,
+            last_seen = excluded.last_seen,
+            primary_host = excluded.primary_host,
+            reference_repo = excluded.reference_repo,
+            mirror_repo = excluded.mirror_repo,
+            convention_version = excluded.convention_version,
+            paths_json = excluded.paths_json;
+        """,
+        (
+            ws_uuid,
+            ws_slug,
+            ws_title,
+            local_path_str,
+            dev,
+            ino,
+            reg_at,
+            now,
+            primary_host,
+            ref_repo,
+            mirror_repo,
+            conv_ver,
+            paths_json,
+        ),
+    )
+
+    conn.execute("DELETE FROM workspace_host_paths WHERE workspace_uuid = ?", (ws_uuid,))
+    for hk, hv in sorted(paths.items()):
+        if isinstance(hk, str) and isinstance(hv, str) and hv.strip():
+            conn.execute(
+                """
+                INSERT INTO workspace_host_paths (workspace_uuid, host, path, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(workspace_uuid, host) DO UPDATE SET
+                    path = excluded.path,
+                    updated_at = excluded.updated_at;
+                """,
+                (ws_uuid, hk, hv.strip(), now),
+            )
+
+    subprojects = entry.get("subprojects")
+    if isinstance(subprojects, list) and subprojects:
+        for sp in subprojects:
+            if not isinstance(sp, dict):
+                continue
+            sp_slug = str(sp.get("slug") or sp.get("id") or "_workspace")
+            sp_rel = str(sp.get("rel_path") or sp.get("path") or ".")
+            sp_uuid = str(sp.get("uuid") or portable_project_uuid(ws_uuid, sp_rel))
+            sp_conv = sp.get("convention_version") or conv_ver
+            conn.execute(
+                """
+                INSERT INTO projects (
+                    uuid, workspace_uuid, slug, rel_path,
+                    primary_host, reference_repo, mirror_repo, convention_version
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workspace_uuid, slug) DO UPDATE SET
+                    uuid = excluded.uuid,
+                    rel_path = excluded.rel_path,
+                    primary_host = excluded.primary_host,
+                    reference_repo = excluded.reference_repo,
+                    mirror_repo = excluded.mirror_repo,
+                    convention_version = excluded.convention_version;
+                """,
+                (
+                    sp_uuid,
+                    ws_uuid,
+                    sp_slug,
+                    sp_rel,
+                    primary_host,
+                    ref_repo,
+                    mirror_repo,
+                    sp_conv,
+                ),
+            )
+
+
+def sync_hub_registry_to_sqlite(
+    config_dir: pathlib.Path | str | None = None,
+    *,
+    host_id: str | None = None,
+) -> int:
+    """Ensure all entries in `hub_registry.json` are reflected in the local SQLite cache."""
+    doc = load_hub_registry(config_dir)
+    projs = doc.get("projects", [])
+    if not projs:
+        return 0
+    cur_host = _resolve_current_host_id(config_dir, host_override=host_id)
+    db_path = get_db_path(config_dir)
+    conn = get_connection(db_path)
+    try:
+        with conn:
+            for entry in projs:
+                if isinstance(entry, dict) and entry.get("uuid") and (entry.get("slug") or entry.get("id")):
+                    sync_hub_entry_to_sqlite_conn(conn, entry, current_host=cur_host)
+        return len(projs)
+    finally:
+        conn.close()
+
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +864,17 @@ def deterministic_uuid4(seed: str) -> str:
     h[6] = (h[6] & 0x0F) | 0x40  # version 4
     h[8] = (h[8] & 0x3F) | 0x80  # variant RFC 4122
     return str(uuid.UUID(bytes=bytes(h)))
+
+
+def portable_workspace_uuid(ws_slug: str) -> str:
+    """Generate a portable, host-independent UUID4 for a workspace from its canonical slug."""
+    return deterministic_uuid4(f"portable-workspace:{sanitize_slug(ws_slug)}")
+
+
+def portable_project_uuid(ws_uuid: str, rel_path: str) -> str:
+    """Generate a portable, host-independent UUID4 for a project within a workspace."""
+    norm_rel = os.path.normpath(rel_path or ".").replace("\\", "/")
+    return deterministic_uuid4(f"project:{ws_uuid}:{norm_rel}")
 
 
 def check_symlinked_components(ws_path: pathlib.Path) -> None:
@@ -714,6 +1234,12 @@ def plan_workspace_register(
     slug: str | None = None,
     title: str | None = None,
     config_dir: pathlib.Path | str | None = None,
+    *,
+    host: str | None = None,
+    primary_host: str | None = None,
+    reference_repo: str | None = None,
+    mirror_repo: str | None = None,
+    convention_version: str | None = None,
 ) -> dict[str, Any]:
     """Build a preview plan for registering a workspace."""
     raw_path = pathlib.Path(path or ".").expanduser()
@@ -734,16 +1260,63 @@ def plan_workspace_register(
     existing_cfg = load_toml_file(read_cfg_path) if read_cfg_path.exists() else {}
     ws_cfg = existing_cfg.get("workspace", {})
 
-    ws_uuid = ws_cfg.get("uuid") or deterministic_uuid4(f"workspace:{canonical}")
     ws_slug = slug or ws_cfg.get("id") or sanitize_slug(canonical.name)
-    ws_title = title if title is not None else ws_cfg.get("title")
-
     if not is_valid_workspace_slug(ws_slug):
         raise ValueError(
             f"Invalid workspace slug '{ws_slug}': must match ^[a-z0-9][a-z0-9-]{{1,47}}$"
         )
+
+    hub_doc = load_hub_registry(config_dir)
+    hub_entry = find_hub_project_entry(
+        hub_doc,
+        ws_uuid=ws_cfg.get("uuid"),
+        ws_slug=ws_slug,
+        canonical_path=str(canonical),
+    )
+
+    ws_uuid = (
+        ws_cfg.get("uuid")
+        or (hub_entry.get("uuid") if hub_entry else None)
+        or portable_workspace_uuid(ws_slug)
+    )
+    ws_title = (
+        title
+        if title is not None
+        else (ws_cfg.get("title") or (hub_entry.get("title") if hub_entry else None))
+    )
+
     if not is_valid_uuid4(ws_uuid):
         raise ValueError(f"Invalid workspace UUID '{ws_uuid}': must be a valid UUID4")
+
+    cur_host = _resolve_current_host_id(config_dir, workspace=canonical, host_override=host)
+    eff_primary = (
+        normalize_host_id(primary_host)
+        if primary_host
+        else (ws_cfg.get("primary_host") or (hub_entry.get("primary_host") if hub_entry else None) or cur_host)
+    )
+    eff_ref = (
+        reference_repo
+        if reference_repo is not None
+        else (ws_cfg.get("reference_repo") or (hub_entry.get("reference_repo") if hub_entry else None))
+    )
+    eff_mirror = (
+        mirror_repo
+        if mirror_repo is not None
+        else (
+            ws_cfg.get("mirror_repo")
+            or ws_cfg.get("mirror")
+            or (hub_entry.get("mirror_repo") or hub_entry.get("mirror") if hub_entry else None)
+        )
+    )
+    eff_conv = (
+        convention_version
+        if convention_version is not None
+        else (
+            _read_workspace_convention_version(canonical)
+            or ws_cfg.get("convention_version")
+            or (hub_entry.get("convention_version") if hub_entry else None)
+        )
+    )
 
     db_path = get_db_path(config_dir)
     conn = get_connection(db_path)
@@ -808,6 +1381,9 @@ def plan_workspace_register(
                 }
                 break
 
+        existing_paths = dict(hub_entry.get("paths", {})) if (hub_entry and isinstance(hub_entry.get("paths"), dict)) else {}
+        existing_paths[cur_host] = str(canonical)
+
         plan: dict[str, Any] = {
             "action": action,
             "workspace": {
@@ -818,6 +1394,12 @@ def plan_workspace_register(
                 "config_path": str(cfg_path),
                 "device": dev,
                 "inode": ino,
+                "host": cur_host,
+                "primary_host": eff_primary,
+                "reference_repo": eff_ref,
+                "mirror_repo": eff_mirror,
+                "convention_version": eff_conv,
+                "paths": existing_paths,
             },
         }
         if moved_from:
@@ -857,6 +1439,13 @@ def apply_workspace_register(
     cfg_path = pathlib.Path(ws_data["config_path"])
     dev = ws_data["device"]
     ino = ws_data["inode"]
+    cur_host = ws_data.get("host") or _resolve_current_host_id(config_dir, workspace=canonical_path)
+    primary_host = ws_data.get("primary_host") or cur_host
+    ref_repo = ws_data.get("reference_repo")
+    mirror_repo = ws_data.get("mirror_repo")
+    conv_ver = ws_data.get("convention_version") or _read_workspace_convention_version(canonical_path)
+    paths_map = dict(ws_data.get("paths") or {})
+    paths_map[cur_host] = str(canonical_path)
 
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -871,7 +1460,25 @@ def apply_workspace_register(
         # 1. Update config file
         write_workspace_to_config(cfg_path, ws_uuid, ws_slug, ws_title)
 
-        # 2. Update SQLite
+        # 2. Update hub registry JSON
+        cfg = load_toml_file(cfg_path)
+        ws_projects = cfg.get("workspace", {}).get("projects", [])
+        hub_entry = upsert_hub_project_entry(
+            config_dir,
+            ws_uuid=ws_uuid,
+            ws_slug=ws_slug,
+            ws_title=ws_title,
+            host_id=cur_host,
+            host_path=str(canonical_path),
+            paths=paths_map,
+            primary_host=primary_host,
+            reference_repo=ref_repo,
+            mirror_repo=mirror_repo,
+            convention_version=conv_ver,
+            subprojects=ws_projects if ws_projects else None,
+        )
+
+        # 3. Update SQLite cache
         conn = get_connection(db_path)
         try:
             with conn:
@@ -879,21 +1486,59 @@ def apply_workspace_register(
                     "SELECT registered_at FROM workspaces WHERE uuid = ?", (ws_uuid,)
                 ).fetchone()
                 reg_at = existing["registered_at"] if existing else now
+                merged_paths = dict(hub_entry.get("paths") or paths_map)
+                paths_json = json.dumps(merged_paths, sort_keys=True)
 
                 conn.execute(
                     """
-                    INSERT INTO workspaces (uuid, slug, title, canonical_path, device, inode, registered_at, last_seen)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO workspaces (
+                        uuid, slug, title, canonical_path, device, inode,
+                        registered_at, last_seen, primary_host, reference_repo,
+                        mirror_repo, convention_version, paths_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(uuid) DO UPDATE SET
                         slug = excluded.slug,
                         title = excluded.title,
                         canonical_path = excluded.canonical_path,
                         device = excluded.device,
                         inode = excluded.inode,
-                        last_seen = excluded.last_seen;
+                        last_seen = excluded.last_seen,
+                        primary_host = excluded.primary_host,
+                        reference_repo = excluded.reference_repo,
+                        mirror_repo = excluded.mirror_repo,
+                        convention_version = excluded.convention_version,
+                        paths_json = excluded.paths_json;
                     """,
-                    (ws_uuid, ws_slug, ws_title, str(canonical_path), dev, ino, reg_at, now),
+                    (
+                        ws_uuid,
+                        ws_slug,
+                        ws_title,
+                        str(canonical_path),
+                        dev,
+                        ino,
+                        reg_at,
+                        now,
+                        primary_host,
+                        ref_repo,
+                        mirror_repo,
+                        conv_ver,
+                        paths_json,
+                    ),
                 )
+
+                for hk, hv in sorted(merged_paths.items()):
+                    if isinstance(hk, str) and isinstance(hv, str) and hv.strip():
+                        conn.execute(
+                            """
+                            INSERT INTO workspace_host_paths (workspace_uuid, host, path, updated_at)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(workspace_uuid, host) DO UPDATE SET
+                                path = excluded.path,
+                                updated_at = excluded.updated_at;
+                            """,
+                            (ws_uuid, hk, hv.strip(), now),
+                        )
 
                 # If inner workspace, remove leaving projects from outer workspace in SQLite
                 projects_leaving = plan.get("projects_leaving", [])
@@ -906,18 +1551,32 @@ def apply_workspace_register(
                         )
 
                 # Sync any existing projects in this workspace's config to SQLite
-                cfg = load_toml_file(cfg_path)
-                ws_projects = cfg.get("workspace", {}).get("projects", [])
                 for p in ws_projects:
                     conn.execute(
                         """
-                        INSERT INTO projects (uuid, workspace_uuid, slug, rel_path)
-                        VALUES (?, ?, ?, ?)
+                        INSERT INTO projects (
+                            uuid, workspace_uuid, slug, rel_path,
+                            primary_host, reference_repo, mirror_repo, convention_version
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(workspace_uuid, slug) DO UPDATE SET
                             uuid = excluded.uuid,
-                            rel_path = excluded.rel_path;
+                            rel_path = excluded.rel_path,
+                            primary_host = excluded.primary_host,
+                            reference_repo = excluded.reference_repo,
+                            mirror_repo = excluded.mirror_repo,
+                            convention_version = excluded.convention_version;
                         """,
-                        (p["uuid"], ws_uuid, p["id"], p["path"]),
+                        (
+                            p["uuid"],
+                            ws_uuid,
+                            p["id"],
+                            p["path"],
+                            primary_host,
+                            ref_repo,
+                            mirror_repo,
+                            conv_ver,
+                        ),
                     )
         finally:
             conn.close()
@@ -931,6 +1590,12 @@ def apply_workspace_register(
             "slug": ws_slug,
             "canonical_path": str(canonical_path),
             "title": ws_title,
+            "host": cur_host,
+            "primary_host": primary_host,
+            "reference_repo": ref_repo,
+            "mirror_repo": mirror_repo,
+            "convention_version": conv_ver,
+            "paths": dict(hub_entry.get("paths") or paths_map),
         },
     }
 
@@ -975,6 +1640,100 @@ def plan_workspace_unregister(
         conn.close()
 
 
+def _evaluate_workspace_liveness_and_paths(
+    conn: sqlite3.Connection,
+    row_dict: dict[str, Any],
+    *,
+    config_dir: pathlib.Path | str | None = None,
+    hub_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Evaluate stale/device_shifted state and merge host paths for a workspace row."""
+    d = dict(row_dict)
+    ws_uuid = d["uuid"]
+    cpath = pathlib.Path(d["canonical_path"])
+    stale = False
+    device_changed = False
+
+    paths: dict[str, str] = {}
+    raw_paths_json = d.get("paths_json")
+    if isinstance(raw_paths_json, str) and raw_paths_json.strip():
+        try:
+            loaded_p = json.loads(raw_paths_json)
+            if isinstance(loaded_p, dict):
+                for hk, hv in loaded_p.items():
+                    if isinstance(hk, str) and isinstance(hv, str) and hv.strip():
+                        paths[hk] = hv.strip()
+        except Exception:
+            pass
+    try:
+        hp_rows = conn.execute(
+            "SELECT host, path FROM workspace_host_paths WHERE workspace_uuid = ?",
+            (ws_uuid,),
+        ).fetchall()
+        for hpr in hp_rows:
+            paths[str(hpr["host"])] = str(hpr["path"])
+    except Exception:
+        pass
+
+    hub_entry = (
+        find_hub_project_entry(hub_doc, ws_uuid=ws_uuid, ws_slug=d.get("slug"))
+        if hub_doc is not None
+        else None
+    )
+    if hub_entry and isinstance(hub_entry.get("paths"), dict):
+        for hk, hv in hub_entry["paths"].items():
+            if isinstance(hk, str) and isinstance(hv, str) and hv.strip():
+                paths.setdefault(hk, hv.strip())
+
+    cur_host = _resolve_current_host_id(config_dir)
+    if str(cpath) and not str(cpath).startswith("/unmapped/"):
+        paths.setdefault(cur_host, str(cpath))
+
+    if not cpath.exists() or not cpath.is_dir():
+        stale = True
+    else:
+        try:
+            cur_st = os.stat(cpath)
+            inode_matches = (cur_st.st_ino == d["inode"]) or (d["inode"] == 0)
+            dev_matches = (cur_st.st_dev == d["device"]) or (d["device"] == 0)
+            _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
+            cfg_path = find_project_config_path(cpath, _gpath)
+            uuid_matches = False
+            if cfg_path.exists():
+                cfg = load_toml_file(cfg_path)
+                uuid_matches = (cfg.get("workspace", {}).get("uuid") == ws_uuid)
+            elif hub_entry is not None and hub_entry.get("uuid") == ws_uuid:
+                uuid_matches = True
+
+            if not inode_matches or not uuid_matches:
+                stale = True
+            elif not dev_matches:
+                # T073: st_dev shift across reboot when canonical_path, inode, and uuid match
+                device_changed = True
+                stale = False
+        except Exception:
+            stale = True
+
+    d["stale"] = stale
+    d["device_changed"] = device_changed
+    d["reconciliation_status"] = "stale" if stale else ("device_shifted" if device_changed else "ok")
+    d["paths"] = paths
+    d["primary_host"] = d.get("primary_host") or (hub_entry.get("primary_host") if hub_entry else None) or cur_host
+    d["reference_repo"] = d.get("reference_repo") or (hub_entry.get("reference_repo") if hub_entry else None)
+    d["mirror_repo"] = (
+        d.get("mirror_repo")
+        or (hub_entry.get("mirror_repo") or hub_entry.get("mirror") if hub_entry else None)
+    )
+    d["mirror"] = d["mirror_repo"]
+    conv_v = (
+        d.get("convention_version")
+        or (_read_workspace_convention_version(cpath) if cpath.is_dir() else None)
+        or (hub_entry.get("convention_version") if hub_entry else None)
+    )
+    d["convention_version"] = conv_v
+    return d
+
+
 def apply_workspace_unregister(
     plan: dict[str, Any],
     expect_hash: str | None = None,
@@ -996,6 +1755,7 @@ def apply_workspace_unregister(
 
     db_path = get_db_path(config_dir)
     with registry_lock(config_dir):
+        remove_hub_project_entry(ws_uuid, config_dir=config_dir)
         conn = get_connection(db_path)
         try:
             with conn:
@@ -1031,38 +1791,23 @@ def apply_workspace_unregister(
 
 
 def list_workspaces(config_dir: pathlib.Path | str | None = None) -> list[dict[str, Any]]:
-    """List all registered workspaces with stale flags."""
+    """List all registered workspaces with stale flags and portable hub metadata."""
+    sync_hub_registry_to_sqlite(config_dir)
+    hub_doc = load_hub_registry(config_dir)
     db_path = get_db_path(config_dir)
     conn = get_connection(db_path)
     try:
         rows = conn.execute("SELECT * FROM workspaces ORDER BY slug ASC").fetchall()
         items: list[dict[str, Any]] = []
-
         for r in rows:
-            d = dict(r)
-            cpath = pathlib.Path(d["canonical_path"])
-            stale = False
-
-            if not cpath.exists() or not cpath.is_dir():
-                stale = True
-            else:
-                try:
-                    cur_st = os.stat(cpath)
-                    if cur_st.st_dev != d["device"] or cur_st.st_ino != d["inode"]:
-                        stale = True
-                    _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
-                    cfg_path = find_project_config_path(cpath, _gpath)
-                    if not cfg_path.exists():
-                        stale = True
-                    else:
-                        cfg = load_toml_file(cfg_path)
-                        if cfg.get("workspace", {}).get("uuid") != d["uuid"]:
-                            stale = True
-                except Exception:
-                    stale = True
-
-            d["stale"] = stale
-            items.append(d)
+            items.append(
+                _evaluate_workspace_liveness_and_paths(
+                    conn,
+                    dict(r),
+                    config_dir=config_dir,
+                    hub_doc=hub_doc,
+                )
+            )
         return items
     finally:
         conn.close()
@@ -1073,6 +1818,8 @@ def show_workspace(
     config_dir: pathlib.Path | str | None = None,
 ) -> dict[str, Any]:
     """Show details of one workspace with projects and sub-workspaces."""
+    sync_hub_registry_to_sqlite(config_dir)
+    hub_doc = load_hub_registry(config_dir)
     db_path = get_db_path(config_dir)
     conn = get_connection(db_path)
     try:
@@ -1082,33 +1829,17 @@ def show_workspace(
         if not row:
             raise KeyError(f"Workspace not found: {ws_id}")
 
-        ws_data = dict(row)
+        ws_data = _evaluate_workspace_liveness_and_paths(
+            conn,
+            dict(row),
+            config_dir=config_dir,
+            hub_doc=hub_doc,
+        )
         cpath = pathlib.Path(ws_data["canonical_path"])
-        stale = False
-
-        if not cpath.exists() or not cpath.is_dir():
-            stale = True
-        else:
-            try:
-                cur_st = os.stat(cpath)
-                if cur_st.st_dev != ws_data["device"] or cur_st.st_ino != ws_data["inode"]:
-                    stale = True
-                _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
-                cfg_path = find_project_config_path(cpath, _gpath)
-                if not cfg_path.exists():
-                    stale = True
-                else:
-                    cfg = load_toml_file(cfg_path)
-                    if cfg.get("workspace", {}).get("uuid") != ws_data["uuid"]:
-                        stale = True
-            except Exception:
-                stale = True
-
-        ws_data["stale"] = stale
 
         # Fetch projects from SQLite
         proj_rows = conn.execute(
-            "SELECT uuid, slug, rel_path FROM projects WHERE workspace_uuid = ? ORDER BY slug ASC",
+            "SELECT uuid, slug, rel_path, primary_host, reference_repo, mirror_repo, convention_version FROM projects WHERE workspace_uuid = ? ORDER BY slug ASC",
             (ws_data["uuid"],),
         ).fetchall()
         ws_data["projects"] = [dict(pr) for pr in proj_rows]
@@ -1143,6 +1874,7 @@ def find_workspace_for_arg(
     config_dir: pathlib.Path | str | None = None,
 ) -> dict[str, Any]:
     """Resolve a workspace by slug, uuid, directory path, or cwd."""
+    sync_hub_registry_to_sqlite(config_dir)
     db_path = get_db_path(config_dir)
     conn = get_connection(db_path)
     try:
@@ -1193,6 +1925,8 @@ def plan_projects_discover(
     config_dir: pathlib.Path | str | None = None,
 ) -> dict[str, Any]:
     """Scan workspace for candidate projects with tasks/00-INDEX.md and propose entries."""
+    sync_hub_registry_to_sqlite(config_dir)
+    hub_doc = load_hub_registry(config_dir)
     db_path = get_db_path(config_dir)
     conn = get_connection(db_path)
     try:
@@ -1263,9 +1997,19 @@ def plan_projects_discover(
             ws_slug = ws["slug"]
             ws_title = ws.get("title")
         else:
-            ws_uuid = ws_cfg.get("uuid") or deterministic_uuid4(f"workspace:{ws_path}")
             ws_slug = ws_cfg.get("id") or sanitize_slug(ws_path.name)
-            ws_title = ws_cfg.get("title")
+            hub_entry = find_hub_project_entry(
+                hub_doc,
+                ws_uuid=ws_cfg.get("uuid"),
+                ws_slug=ws_slug,
+                canonical_path=str(ws_path),
+            )
+            ws_uuid = (
+                ws_cfg.get("uuid")
+                or (hub_entry.get("uuid") if hub_entry else None)
+                or portable_workspace_uuid(ws_slug)
+            )
+            ws_title = ws_cfg.get("title") or (hub_entry.get("title") if hub_entry else None)
 
         # Load inner registered workspaces under ws_path
         if is_registered and ws is not None:
@@ -1441,13 +2185,25 @@ def apply_projects_discover(
     ws_path = pathlib.Path(plan.get("canonical_path", plan.get("workspace_path"))).resolve()
     ws_title = plan.get("title")
     proposed = plan["proposed_projects"]
+    cur_host = _resolve_current_host_id(config_dir, workspace=ws_path)
+    conv_ver = _read_workspace_convention_version(ws_path)
 
     # 1. Update config file
     write_workspace_to_config(cfg_path, ws_uuid, ws_slug, ws_title=ws_title, projects=proposed)
 
-    # 2. Update SQLite projects table
+    # 2. Update hub registry and SQLite projects table
     db_path = get_db_path(config_dir)
     with registry_lock(config_dir):
+        upsert_hub_project_entry(
+            config_dir,
+            ws_uuid=ws_uuid,
+            ws_slug=ws_slug,
+            ws_title=ws_title,
+            host_id=cur_host,
+            host_path=str(ws_path),
+            convention_version=conv_ver,
+            subprojects=proposed,
+        )
         conn = get_connection(db_path)
         try:
             with conn:
@@ -1455,34 +2211,51 @@ def apply_projects_discover(
                 existing = conn.execute(
                     "SELECT * FROM workspaces WHERE uuid = ?", (ws_uuid,)
                 ).fetchone()
+                now = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 if not existing:
                     check_symlinked_components(ws_path)
                     dev, ino = check_device_inode(ws_path)
-                    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    paths_json = json.dumps({cur_host: str(ws_path)}, sort_keys=True)
                     conn.execute(
                         """
-                        INSERT INTO workspaces (uuid, slug, title, canonical_path, device, inode, registered_at, last_seen)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO workspaces (
+                            uuid, slug, title, canonical_path, device, inode,
+                            registered_at, last_seen, primary_host, convention_version, paths_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(uuid) DO UPDATE SET
                             slug = excluded.slug,
                             title = excluded.title,
                             canonical_path = excluded.canonical_path,
                             device = excluded.device,
                             inode = excluded.inode,
-                            last_seen = excluded.last_seen;
+                            last_seen = excluded.last_seen,
+                            convention_version = COALESCE(excluded.convention_version, workspaces.convention_version);
                         """,
-                        (ws_uuid, ws_slug, ws_title, str(ws_path), dev, ino, now, now),
+                        (ws_uuid, ws_slug, ws_title, str(ws_path), dev, ino, now, now, cur_host, conv_ver, paths_json),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO workspace_host_paths (workspace_uuid, host, path, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(workspace_uuid, host) DO UPDATE SET
+                            path = excluded.path,
+                            updated_at = excluded.updated_at;
+                        """,
+                        (ws_uuid, cur_host, str(ws_path), now),
                     )
 
                 # Clear existing projects for this workspace and insert new ones
                 conn.execute("DELETE FROM projects WHERE workspace_uuid = ?", (ws_uuid,))
                 for p in proposed:
+                    p_folder = (ws_path / p["path"]).resolve() if p.get("path") not in (".", "") else ws_path
+                    p_conv = _read_workspace_convention_version(p_folder) or conv_ver
                     conn.execute(
                         """
-                        INSERT INTO projects (uuid, workspace_uuid, slug, rel_path)
-                        VALUES (?, ?, ?, ?);
+                        INSERT INTO projects (uuid, workspace_uuid, slug, rel_path, convention_version)
+                        VALUES (?, ?, ?, ?, ?);
                         """,
-                        (p["uuid"], ws_uuid, p["id"], p["path"]),
+                        (p["uuid"], ws_uuid, p["id"], p["path"], p_conv),
                     )
         finally:
             conn.close()
@@ -1572,6 +2345,9 @@ def resolve_workspace_for_path(
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Resolve nearest registered workspace and containing project for a path."""
     target = pathlib.Path(path).expanduser().resolve()
+    hub_path = get_hub_registry_path(config_dir)
+    if hub_path.is_file():
+        sync_hub_registry_to_sqlite(config_dir)
     db_path = get_db_path(config_dir)
     if not db_path.exists():
         return None, None
@@ -1617,6 +2393,1112 @@ def resolve_workspace_for_path(
 
 
 # ---------------------------------------------------------------------------
+# Migration Registry Importer (`MIGRATION_REGISTRY.json`), Q026 Scan Roots,
+# T073 Reconciliation / Relink / Quarantine, and Console Status
+# ---------------------------------------------------------------------------
+
+
+def _normalize_migration_record(
+    raw_item: dict[str, Any],
+    *,
+    default_slug_hint: str | None = None,
+    default_primary_host: str | None = None,
+    existing_hub_doc: dict[str, Any] | None = None,
+    cur_host: str = "localhost",
+) -> dict[str, Any]:
+    """Normalize a single entry from `MIGRATION_REGISTRY.json` into canonical hub registry schema."""
+    raw_slug = (
+        raw_item.get("slug")
+        or raw_item.get("id")
+        or raw_item.get("name")
+        or default_slug_hint
+        or ""
+    )
+    if not raw_slug:
+        for pkey in ("mac_path", "hub_path", "server_path", "alf_ubuntu_path", "path"):
+            pv = raw_item.get(pkey)
+            if isinstance(pv, str) and pv.strip():
+                raw_slug = pathlib.PurePosixPath(pv.strip().rstrip("/")).name
+                break
+        if not raw_slug and isinstance(raw_item.get("paths"), dict):
+            for pv in raw_item["paths"].values():
+                if isinstance(pv, str) and pv.strip():
+                    raw_slug = pathlib.PurePosixPath(pv.strip().rstrip("/")).name
+                    break
+    ws_slug = sanitize_slug(str(raw_slug or "workspace"))
+
+    hub_existing = (
+        find_hub_project_entry(
+            existing_hub_doc,
+            ws_uuid=raw_item.get("uuid") if isinstance(raw_item.get("uuid"), str) else None,
+            ws_slug=ws_slug,
+        )
+        if existing_hub_doc is not None
+        else None
+    )
+
+    raw_uuid = raw_item.get("uuid")
+    if isinstance(raw_uuid, str) and is_valid_uuid4(raw_uuid.strip()):
+        ws_uuid = raw_uuid.strip()
+    elif hub_existing and is_valid_uuid4(hub_existing.get("uuid")):
+        ws_uuid = str(hub_existing["uuid"])
+    else:
+        ws_uuid = portable_workspace_uuid(ws_slug)
+
+    ws_title = (
+        raw_item.get("title")
+        or raw_item.get("description")
+        or (hub_existing.get("title") if hub_existing else None)
+    )
+
+    paths: dict[str, str] = {}
+    if hub_existing and isinstance(hub_existing.get("paths"), dict):
+        for hk, hv in hub_existing["paths"].items():
+            if isinstance(hk, str) and isinstance(hv, str) and hv.strip():
+                paths[normalize_host_id(hk)] = hv.strip()
+
+    for dict_key in ("paths", "hosts", "machines", "locations"):
+        sub_map = raw_item.get(dict_key)
+        if isinstance(sub_map, dict):
+            for hk, hv in sub_map.items():
+                norm_hk = normalize_host_id(str(hk))
+                if isinstance(hv, str) and hv.strip():
+                    paths[norm_hk] = hv.strip()
+                elif isinstance(hv, dict):
+                    p_str = hv.get("path") or hv.get("canonical_path") or hv.get("dir")
+                    if isinstance(p_str, str) and p_str.strip():
+                        paths[norm_hk] = p_str.strip()
+
+    shorthand_hosts = (
+        ("mac_path", "mac"),
+        ("path_mac", "mac"),
+        ("alf_ubuntu_path", "alf_ubuntu"),
+        ("path_alf_ubuntu", "alf_ubuntu"),
+        ("hub_path", "alf_ubuntu"),
+        ("server_path", "alf_ubuntu"),
+        ("ubuntu_path", "alf_ubuntu"),
+    )
+    for field_name, target_host in shorthand_hosts:
+        fval = raw_item.get(field_name)
+        if isinstance(fval, str) and fval.strip():
+            paths[normalize_host_id(target_host)] = fval.strip()
+
+    if isinstance(raw_item.get("path"), str) and raw_item["path"].strip():
+        p_single = raw_item["path"].strip()
+        if not paths:
+            paths[cur_host] = p_single
+        else:
+            paths.setdefault(cur_host, p_single)
+
+    raw_primary = (
+        raw_item.get("primary_host")
+        or raw_item.get("primary")
+        or raw_item.get("primary_machine")
+        or raw_item.get("owner_host")
+        or raw_item.get("active_host")
+        or (hub_existing.get("primary_host") if hub_existing else None)
+        or default_primary_host
+        or ("alf_ubuntu" if "alf_ubuntu" in paths else (next(iter(paths.keys())) if paths else cur_host))
+    )
+    primary_host = normalize_host_id(str(raw_primary)) if raw_primary else cur_host
+
+    ref_repo: str | None = None
+    for rkey in ("reference_repo", "bare_repo", "hub_repo", "origin", "git_repo", "repo"):
+        rv = raw_item.get(rkey)
+        if isinstance(rv, str) and rv.strip():
+            ref_repo = rv.strip()
+            break
+    if ref_repo is None and isinstance(raw_item.get("remote"), dict):
+        rv = raw_item["remote"].get("reference") or raw_item["remote"].get("bare") or raw_item["remote"].get("origin")
+        if isinstance(rv, str) and rv.strip():
+            ref_repo = rv.strip()
+    if ref_repo is None and hub_existing:
+        ref_repo = hub_existing.get("reference_repo")
+
+    mirror_repo: str | None = None
+    for mkey in ("mirror_repo", "mirror", "gitea_mirror", "gitea", "backup_repo", "offsite_mirror"):
+        mv = raw_item.get(mkey)
+        if isinstance(mv, str) and mv.strip():
+            mirror_repo = mv.strip()
+            break
+    if mirror_repo is None and isinstance(raw_item.get("remote"), dict):
+        mv = raw_item["remote"].get("mirror") or raw_item["remote"].get("gitea")
+        if isinstance(mv, str) and mv.strip():
+            mirror_repo = mv.strip()
+    if mirror_repo is None and hub_existing:
+        mirror_repo = hub_existing.get("mirror_repo") or hub_existing.get("mirror")
+
+    conv_ver: str | None = None
+    for ckey in ("convention_version", "schema_version", "version"):
+        cv = raw_item.get(ckey)
+        if isinstance(cv, (str, int, float)) and not isinstance(cv, bool) and str(cv).strip():
+            conv_ver = str(cv).strip()
+            break
+
+    # Check if local path exists and has tasks/convention_version
+    local_cand = paths.get(cur_host)
+    if local_cand:
+        lp = pathlib.Path(local_cand).expanduser()
+        if lp.is_dir() and not conv_ver:
+            conv_ver = _read_workspace_convention_version(lp)
+
+    if not conv_ver and hub_existing:
+        conv_ver = hub_existing.get("convention_version")
+
+    raw_subs = raw_item.get("subprojects") or raw_item.get("projects") or []
+    subprojects: list[dict[str, Any]] = []
+    if isinstance(raw_subs, list) and raw_subs:
+        for sp in raw_subs:
+            if isinstance(sp, str) and sp.strip():
+                sp_slug = "_workspace" if sp.strip() in (".", "_workspace") else sanitize_slug(pathlib.PurePosixPath(sp.strip()).name)
+                sp_rel = "." if sp_slug == "_workspace" else sp.strip()
+                subprojects.append({
+                    "uuid": portable_project_uuid(ws_uuid, sp_rel),
+                    "id": sp_slug,
+                    "slug": sp_slug,
+                    "path": sp_rel,
+                    "rel_path": sp_rel,
+                    "convention_version": conv_ver,
+                })
+            elif isinstance(sp, dict):
+                sp_rel = str(sp.get("path") or sp.get("rel_path") or ".")
+                raw_sp_id = sp.get("id") or sp.get("slug")
+                if raw_sp_id:
+                    sp_slug = "_workspace" if raw_sp_id == "_workspace" else sanitize_slug(str(raw_sp_id))
+                else:
+                    sp_slug = "_workspace" if sp_rel in (".", "") else sanitize_slug(pathlib.PurePosixPath(sp_rel).name)
+                sp_uuid = (
+                    str(sp["uuid"]).strip()
+                    if isinstance(sp.get("uuid"), str) and is_valid_uuid4(str(sp["uuid"]).strip())
+                    else portable_project_uuid(ws_uuid, sp_rel)
+                )
+                subprojects.append({
+                    "uuid": sp_uuid,
+                    "id": sp_slug,
+                    "slug": sp_slug,
+                    "path": sp_rel,
+                    "rel_path": sp_rel,
+                    "convention_version": sp.get("convention_version") or conv_ver,
+                })
+    elif hub_existing and isinstance(hub_existing.get("subprojects"), list) and hub_existing["subprojects"]:
+        subprojects = copy.deepcopy(hub_existing["subprojects"])
+    else:
+        subprojects = [{
+            "uuid": portable_project_uuid(ws_uuid, "."),
+            "id": "_workspace",
+            "slug": "_workspace",
+            "path": ".",
+            "rel_path": ".",
+            "convention_version": conv_ver,
+        }]
+
+    return {
+        "uuid": ws_uuid,
+        "id": ws_slug,
+        "slug": ws_slug,
+        "title": ws_title,
+        "primary_host": primary_host,
+        "paths": dict(sorted(paths.items())),
+        "reference_repo": ref_repo,
+        "mirror_repo": mirror_repo,
+        "mirror": mirror_repo,
+        "convention_version": conv_ver,
+        "subprojects": subprojects,
+    }
+
+
+def plan_import_migration_registry(
+    migration_file: str | pathlib.Path,
+    config_dir: pathlib.Path | str | None = None,
+    *,
+    host: str | None = None,
+) -> dict[str, Any]:
+    """Build a preview plan for importing `MIGRATION_REGISTRY.json` into the hub registry and SQLite cache."""
+    mpath = pathlib.Path(migration_file).expanduser().resolve()
+    if not mpath.is_file():
+        raise FileNotFoundError(f"Migration registry file not found: {mpath}")
+
+    raw_text = mpath.read_text(encoding="utf-8")
+    source_sha256 = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+    raw_data = json.loads(raw_text)
+
+    cur_host = _resolve_current_host_id(config_dir, host_override=host)
+    existing_hub_doc = load_hub_registry(config_dir)
+
+    default_primary: str | None = None
+    raw_items: list[tuple[str | None, dict[str, Any]]] = []
+
+    if isinstance(raw_data, list):
+        for item in raw_data:
+            if isinstance(item, dict):
+                raw_items.append((None, item))
+    elif isinstance(raw_data, dict):
+        if isinstance(raw_data.get("primary_host"), str):
+            default_primary = raw_data["primary_host"]
+        list_cand = (
+            raw_data.get("projects")
+            if "projects" in raw_data
+            else (
+                raw_data.get("workspaces")
+                if "workspaces" in raw_data
+                else raw_data.get("entries")
+            )
+        )
+        if isinstance(list_cand, list):
+            for item in list_cand:
+                if isinstance(item, dict):
+                    raw_items.append((None, item))
+        elif isinstance(list_cand, dict):
+            for k, v in list_cand.items():
+                if isinstance(v, dict):
+                    raw_items.append((str(k), v))
+        else:
+            reserved = {"schema_version", "version", "updated_at", "generated_at", "hosts", "machines", "primary_host", "defaults"}
+            for k, v in raw_data.items():
+                if k not in reserved and isinstance(v, dict):
+                    raw_items.append((str(k), v))
+    else:
+        raise ValueError(f"Unsupported migration registry JSON structure in {mpath}")
+
+    imported_entries: list[dict[str, Any]] = []
+    seen_slugs: set[str] = set()
+    for slug_hint, raw_item in raw_items:
+        norm = _normalize_migration_record(
+            raw_item,
+            default_slug_hint=slug_hint,
+            default_primary_host=default_primary,
+            existing_hub_doc=existing_hub_doc,
+            cur_host=cur_host,
+        )
+        if norm["slug"] in seen_slugs:
+            raise ValueError(f"Duplicate project slug '{norm['slug']}' in migration registry {mpath}")
+        seen_slugs.add(norm["slug"])
+        imported_entries.append(norm)
+
+    imported_entries.sort(key=lambda e: e["slug"])
+    hub_registry_path = get_hub_registry_path(config_dir)
+
+    after_payload = json.dumps(imported_entries, sort_keys=True, separators=(",", ":"))
+    after_hash = hashlib.sha256(after_payload.encode("utf-8")).hexdigest()
+
+    plan: dict[str, Any] = {
+        "ok": True,
+        "action": "import-migration-registry",
+        "source_path": str(mpath),
+        "source_sha256": source_sha256,
+        "hub_registry_path": str(hub_registry_path),
+        "host": cur_host,
+        "imported_count": len(imported_entries),
+        "projects": imported_entries,
+        "after_hash": after_hash,
+    }
+    plan["plan_hash"] = compute_plan_hash(plan)
+    return plan
+
+
+def apply_import_migration_registry(
+    plan: dict[str, Any],
+    expect_hash: str | None = None,
+    config_dir: pathlib.Path | str | None = None,
+) -> dict[str, Any]:
+    """Apply a migration registry import plan to `hub_registry.json`, local SQLite cache, and local workspace configs."""
+    plan_hash = plan.get("plan_hash")
+    if not expect_hash:
+        raise ValueError(
+            f"--expect-hash is required when applying. Computed plan_hash is: {plan_hash}"
+        )
+    if expect_hash != plan_hash:
+        raise ValueError(
+            f"Hash mismatch: expected {expect_hash}, computed plan_hash {plan_hash}"
+        )
+
+    source_path = pathlib.Path(plan["source_path"])
+    if source_path.is_file():
+        cur_sha = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        if cur_sha != plan.get("source_sha256"):
+            raise ValueError(
+                f"Source migration file {source_path} changed between preview and apply "
+                f"(expected sha256 {plan.get('source_sha256')}, got {cur_sha})"
+            )
+
+    cur_host = plan.get("host") or _resolve_current_host_id(config_dir)
+    entries = plan.get("projects", [])
+    db_path = get_db_path(config_dir)
+    _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
+
+    with registry_lock(config_dir):
+        for entry in entries:
+            upsert_hub_project_entry(
+                config_dir,
+                ws_uuid=entry["uuid"],
+                ws_slug=entry["slug"],
+                ws_title=entry.get("title"),
+                paths=entry.get("paths"),
+                primary_host=entry.get("primary_host"),
+                reference_repo=entry.get("reference_repo"),
+                mirror_repo=entry.get("mirror_repo"),
+                convention_version=entry.get("convention_version"),
+                subprojects=entry.get("subprojects"),
+            )
+
+            # If the current host's checkout path exists on disk, also align its project config
+            local_p_str = (entry.get("paths") or {}).get(cur_host)
+            if local_p_str:
+                lp = pathlib.Path(local_p_str).expanduser()
+                if lp.is_dir() and not lp.is_symlink():
+                    try:
+                        cfg_wpath = find_project_config_path(lp.resolve(), _gpath, for_write=True)
+                        subs_for_cfg = [
+                            {"uuid": sp["uuid"], "id": sp["id"], "path": sp["path"]}
+                            for sp in (entry.get("subprojects") or [])
+                            if isinstance(sp, dict) and sp.get("uuid") and sp.get("id") and sp.get("path")
+                        ]
+                        write_workspace_to_config(
+                            cfg_wpath,
+                            entry["uuid"],
+                            entry["slug"],
+                            ws_title=entry.get("title"),
+                            projects=subs_for_cfg if subs_for_cfg else None,
+                        )
+                    except Exception:
+                        pass
+
+        conn = get_connection(db_path)
+        try:
+            with conn:
+                for entry in entries:
+                    sync_hub_entry_to_sqlite_conn(conn, entry, current_host=cur_host)
+        finally:
+            conn.close()
+
+    return {
+        "ok": True,
+        "applied": True,
+        "plan_hash": plan_hash,
+        "hub_registry_path": str(get_hub_registry_path(config_dir)),
+        "host": cur_host,
+        "imported_count": len(entries),
+        "projects": entries,
+    }
+
+
+def scan_unregistered_workspaces(
+    roots: list[str | pathlib.Path] | None = None,
+    config_dir: pathlib.Path | str | None = None,
+) -> dict[str, Any]:
+    """Scan configured `[discovery] workspace_roots` (or explicit `--root` dirs) for unregistered workspaces (Q026=A).
+
+    Off by default when no roots are configured or passed. Strictly read-only: returns candidate
+    suggestions (`candidate_unregistered`) with preview registration commands; never auto-registers.
+    """
+    sync_hub_registry_to_sqlite(config_dir)
+    _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else (get_global_config_dir() / "orchestration.toml")
+    gcfg = load_toml_file(_gpath) if _gpath.is_file() else {}
+    disc_cfg = gcfg.get("discovery") if isinstance(gcfg.get("discovery"), dict) else {}
+
+    configured_roots: list[str] = []
+    if roots:
+        configured_roots = [str(r).strip() for r in roots if str(r).strip()]
+    else:
+        raw_roots = (
+            disc_cfg.get("workspace_roots")
+            or disc_cfg.get("roots")
+            or disc_cfg.get("scan_roots")
+            or []
+        )
+        if isinstance(raw_roots, list):
+            configured_roots = [str(r).strip() for r in raw_roots if isinstance(r, str) and r.strip()]
+
+    db_path = get_db_path(config_dir)
+    conn = get_connection(db_path)
+    try:
+        reg_rows = conn.execute("SELECT uuid, slug, canonical_path FROM workspaces").fetchall()
+    finally:
+        conn.close()
+
+    registered_paths: set[pathlib.Path] = set()
+    registered_slugs: set[str] = set()
+    registered_uuids: set[str] = set()
+    for r in reg_rows:
+        registered_slugs.add(str(r["slug"]))
+        registered_uuids.add(str(r["uuid"]))
+        try:
+            registered_paths.add(pathlib.Path(r["canonical_path"]).expanduser().resolve())
+        except Exception:
+            pass
+
+    hub_doc = load_hub_registry(config_dir)
+    for hp in hub_doc.get("projects", []):
+        if isinstance(hp, dict) and isinstance(hp.get("paths"), dict):
+            for pv in hp["paths"].values():
+                if isinstance(pv, str) and pv.strip():
+                    try:
+                        registered_paths.add(pathlib.Path(pv).expanduser().resolve())
+                    except Exception:
+                        pass
+
+    suggestions: list[dict[str, Any]] = []
+    seen_candidates: set[pathlib.Path] = set()
+
+    for raw_root in configured_roots:
+        root_p = pathlib.Path(raw_root).expanduser()
+        if not root_p.exists() or not root_p.is_dir() or root_p.is_symlink():
+            continue
+        root_res = root_p.resolve()
+
+        # Check root itself and immediate children (plus 1 level for group folders like gcube/*)
+        candidates_to_inspect: list[pathlib.Path] = [root_res]
+        try:
+            for child in sorted(root_res.iterdir()):
+                if child.name.startswith(".") or child.name in EXCLUDE_DIR_NAMES or child.is_symlink():
+                    continue
+                if child.is_dir():
+                    candidates_to_inspect.append(child.resolve())
+                    try:
+                        for subchild in sorted(child.iterdir()):
+                            if subchild.name.startswith(".") or subchild.name in EXCLUDE_DIR_NAMES or subchild.is_symlink():
+                                continue
+                            if subchild.is_dir():
+                                candidates_to_inspect.append(subchild.resolve())
+                    except OSError:
+                        pass
+        except OSError:
+            continue
+
+        for cand in candidates_to_inspect:
+            if cand in seen_candidates or cand in registered_paths:
+                continue
+            # Skip if inside an already-registered workspace or already-suggested parent workspace
+            if any(rp in cand.parents for rp in registered_paths):
+                continue
+            if any(sc in cand.parents for sc in seen_candidates):
+                continue
+
+            has_tasks_index = (cand / "tasks" / "00-INDEX.md").is_file()
+            has_tasks_dir = (cand / "tasks").is_dir() and (
+                (cand / "tasks" / "AGENTS.md").is_file() or has_tasks_index
+            )
+            has_local_cfg = (cand / ".ai-orchestration.local.toml").is_file()
+            has_dot_orch = (cand / ".ai-orchestration").is_dir()
+            has_rendered_agents = False
+            agents_f = cand / "AGENTS.md"
+            if agents_f.is_file() and not agents_f.is_symlink():
+                try:
+                    txt = agents_f.read_text(encoding="utf-8", errors="replace")
+                    if "<!-- BEGIN ai-orchestration -->" in txt:
+                        has_rendered_agents = True
+                except Exception:
+                    pass
+
+            if not (has_tasks_index or has_tasks_dir or has_local_cfg or has_dot_orch or has_rendered_agents):
+                continue
+
+            seen_candidates.add(cand)
+            cand_slug = sanitize_slug(cand.name)
+            hub_match = find_hub_project_entry(hub_doc, ws_slug=cand_slug, canonical_path=str(cand))
+            cand_uuid = (
+                str(hub_match["uuid"])
+                if hub_match and is_valid_uuid4(hub_match.get("uuid"))
+                else portable_workspace_uuid(cand_slug)
+            )
+            quoted = f'"{cand}"' if " " in str(cand) else str(cand)
+            suggestions.append({
+                "status": "candidate_unregistered",
+                "authority": "suggestion_only",
+                "slug": cand_slug,
+                "uuid": cand_uuid,
+                "path": str(cand),
+                "has_tasks_index": has_tasks_index,
+                "has_rendered_agents_md": has_rendered_agents,
+                "has_local_config": has_local_cfg,
+                "has_dot_orchestration": has_dot_orch,
+                "register_preview_command": f"ai-orch workspace register {quoted}",
+            })
+
+    return {
+        "ok": True,
+        "scan_enabled": bool(configured_roots),
+        "configured_roots": configured_roots,
+        "suggestions_count": len(suggestions),
+        "suggestions": suggestions,
+    }
+
+
+def reconcile_registry(
+    config_dir: pathlib.Path | str | None = None,
+    *,
+    scan_roots: list[str | pathlib.Path] | None = None,
+) -> dict[str, Any]:
+    """Read-only registry reconciliation report across `hub_registry.json`, `registry.sqlite`, and `projects/*/orchestration.toml` (T073)."""
+    cdir = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
+    hub_doc = load_hub_registry(cdir)
+    db_path = get_db_path(cdir)
+    conn = get_connection(db_path)
+    try:
+        ws_rows = [dict(r) for r in conn.execute("SELECT * FROM workspaces ORDER BY slug ASC").fetchall()]
+    finally:
+        conn.close()
+
+    by_uuid = {r["uuid"]: r for r in ws_rows}
+    by_slug = {r["slug"]: r for r in ws_rows}
+    findings: list[dict[str, Any]] = []
+
+    # 1. Check registered SQLite rows for missing paths, device shifts, or legacy dot configs
+    for r in ws_rows:
+        cpath = pathlib.Path(r["canonical_path"])
+        ws_uuid = r["uuid"]
+        ws_slug = r["slug"]
+        if not cpath.exists() or not cpath.is_dir():
+            findings.append({
+                "kind": "missing_canonical_path",
+                "workspace_uuid": ws_uuid,
+                "workspace_slug": ws_slug,
+                "canonical_path": str(cpath),
+                "suggested_action": "relink_or_unregister",
+                "fix_command": f"ai-orch workspace relink {ws_slug} <new-path>",
+            })
+            continue
+
+        try:
+            cur_st = os.stat(cpath)
+            inode_matches = (cur_st.st_ino == r["inode"]) or (r["inode"] == 0)
+            dev_matches = (cur_st.st_dev == r["device"]) or (r["device"] == 0)
+            _gpath = cdir / "orchestration.toml"
+            cfg_path = find_project_config_path(cpath, _gpath)
+            uuid_matches = False
+            if cfg_path.is_file():
+                cfg = load_toml_file(cfg_path)
+                uuid_matches = (cfg.get("workspace", {}).get("uuid") == ws_uuid)
+            if inode_matches and uuid_matches and not dev_matches:
+                findings.append({
+                    "kind": "device_shifted",
+                    "workspace_uuid": ws_uuid,
+                    "workspace_slug": ws_slug,
+                    "canonical_path": str(cpath),
+                    "recorded_device": r["device"],
+                    "current_device": cur_st.st_dev,
+                    "inode_matches": True,
+                    "uuid_matches": True,
+                    "suggested_action": "relink",
+                    "fix_command": f"ai-orch workspace relink {ws_slug} {cpath}",
+                })
+        except OSError:
+            pass
+
+        legacy_dot = cpath / ".ai-orchestration" / "orchestration.toml"
+        if legacy_dot.is_file():
+            findings.append({
+                "kind": "legacy_dot_config",
+                "workspace_uuid": ws_uuid,
+                "workspace_slug": ws_slug,
+                "path": str(legacy_dot),
+                "suggested_action": "upgrade_project",
+                "fix_command": f"ai-orch upgrade --project {cpath}",
+            })
+
+    # 2. Check `~/.config/ai-orchestration/projects/*/orchestration.toml` for unregistered project configs
+    projects_cfg_root = cdir / "projects"
+    if projects_cfg_root.is_dir():
+        for pdir in sorted(projects_cfg_root.iterdir()):
+            if not pdir.is_dir() or pdir.name.startswith("."):
+                continue
+            ptoml = pdir / "orchestration.toml"
+            if not ptoml.is_file():
+                continue
+            try:
+                pdata = load_toml_file(ptoml)
+            except Exception:
+                pdata = {}
+            ws_sec = pdata.get("workspace") if isinstance(pdata.get("workspace"), dict) else {}
+            cfg_uuid = ws_sec.get("uuid")
+            cfg_slug = ws_sec.get("id") or sanitize_slug(pdir.name)
+            in_sqlite = (
+                (isinstance(cfg_uuid, str) and cfg_uuid in by_uuid)
+                or (isinstance(cfg_slug, str) and cfg_slug in by_slug)
+            )
+            if not in_sqlite:
+                # Check if a matching path exists in hub_registry or parent directories of registered workspaces
+                matching_path: str | None = None
+                hub_e = find_hub_project_entry(hub_doc, ws_uuid=cfg_uuid, ws_slug=cfg_slug)
+                cur_host = _resolve_current_host_id(cdir)
+                if hub_e and isinstance(hub_e.get("paths"), dict):
+                    cand_str = hub_e["paths"].get(cur_host)
+                    if cand_str and pathlib.Path(cand_str).expanduser().is_dir():
+                        matching_path = str(pathlib.Path(cand_str).expanduser().resolve())
+                if not matching_path:
+                    for r in ws_rows:
+                        parent_p = pathlib.Path(r["canonical_path"]).parent
+                        cand_p = parent_p / pdir.name
+                        if cand_p.is_dir():
+                            matching_path = str(cand_p.resolve())
+                            break
+                has_orch_json = bool(
+                    matching_path and (pathlib.Path(matching_path) / ".ai-orchestration" / "orchestrator.json").is_file()
+                )
+                findings.append({
+                    "kind": "unregistered_project_config",
+                    "config_dir_name": pdir.name,
+                    "config_path": str(ptoml),
+                    "workspace_uuid": cfg_uuid,
+                    "workspace_slug": cfg_slug,
+                    "matching_workspace_path": matching_path,
+                    "has_orchestrator_json": has_orch_json,
+                    "suggested_action": "register_or_relink" if matching_path else "owner_review_for_quarantine",
+                    "fix_command": (
+                        f"ai-orch workspace register {matching_path}"
+                        if matching_path
+                        else f"ai-orch workspace quarantine-config {pdir.name}"
+                    ),
+                })
+
+    scan_res = scan_unregistered_workspaces(roots=scan_roots, config_dir=cdir)
+    return {
+        "ok": True,
+        "read_only": True,
+        "registered_workspaces_count": len(ws_rows),
+        "hub_projects_count": len(hub_doc.get("projects", [])),
+        "reconciliation_issues_count": len(findings),
+        "reconciliation_report": findings,
+        "discovery": scan_res,
+    }
+
+
+def plan_workspace_relink(
+    ws_id: str,
+    new_path: str | pathlib.Path | None = None,
+    config_dir: pathlib.Path | str | None = None,
+    *,
+    host: str | None = None,
+) -> dict[str, Any]:
+    """Build a preview plan to relink a registered workspace to a new path or refresh a shifted st_dev."""
+    sync_hub_registry_to_sqlite(config_dir)
+    db_path = get_db_path(config_dir)
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM workspaces WHERE uuid = ? OR slug = ?", (ws_id, ws_id)
+        ).fetchone()
+        if not row:
+            raise KeyError(f"Workspace not found: {ws_id}")
+        ws_row = dict(row)
+    finally:
+        conn.close()
+
+    target_raw = pathlib.Path(new_path if new_path is not None else ws_row["canonical_path"]).expanduser()
+    if not target_raw.exists():
+        raise FileNotFoundError(f"Target workspace path does not exist: {target_raw}")
+    check_symlinked_components(target_raw)
+    canonical = target_raw.resolve()
+    dev, ino = check_device_inode(target_raw)
+    cur_host = _resolve_current_host_id(config_dir, workspace=canonical, host_override=host)
+
+    plan: dict[str, Any] = {
+        "ok": True,
+        "action": "relink",
+        "workspace_uuid": ws_row["uuid"],
+        "workspace_slug": ws_row["slug"],
+        "host": cur_host,
+        "old_path": ws_row["canonical_path"],
+        "new_path": str(canonical),
+        "old_device": ws_row["device"],
+        "new_device": dev,
+        "old_inode": ws_row["inode"],
+        "new_inode": ino,
+    }
+    plan["plan_hash"] = compute_plan_hash(plan)
+    return plan
+
+
+def apply_workspace_relink(
+    plan: dict[str, Any],
+    expect_hash: str | None = None,
+    config_dir: pathlib.Path | str | None = None,
+) -> dict[str, Any]:
+    """Apply a workspace relink plan."""
+    plan_hash = plan.get("plan_hash")
+    if not expect_hash:
+        raise ValueError(f"--expect-hash is required when applying. Computed plan_hash is: {plan_hash}")
+    if expect_hash != plan_hash:
+        raise ValueError(f"Hash mismatch: expected {expect_hash}, computed plan_hash {plan_hash}")
+
+    ws_uuid = plan["workspace_uuid"]
+    ws_slug = plan["workspace_slug"]
+    cur_host = plan.get("host") or _resolve_current_host_id(config_dir)
+    new_path = pathlib.Path(plan["new_path"])
+    check_symlinked_components(new_path)
+    dev, ino = check_device_inode(new_path)
+    if dev != plan["new_device"] or ino != plan["new_inode"]:
+        raise ValueError(f"Device/inode changed between plan and apply: ({plan['new_device']},{plan['new_inode']}) vs ({dev},{ino})")
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
+    cfg_path = find_project_config_path(new_path, _gpath, for_write=True)
+
+    db_path = get_db_path(config_dir)
+    with registry_lock(config_dir):
+        write_workspace_to_config(cfg_path, ws_uuid, ws_slug)
+        hub_entry = upsert_hub_project_entry(
+            config_dir,
+            ws_uuid=ws_uuid,
+            ws_slug=ws_slug,
+            host_id=cur_host,
+            host_path=str(new_path),
+        )
+        conn = get_connection(db_path)
+        try:
+            with conn:
+                paths_json = json.dumps(hub_entry.get("paths") or {cur_host: str(new_path)}, sort_keys=True)
+                conn.execute(
+                    """
+                    UPDATE workspaces
+                    SET canonical_path = ?, device = ?, inode = ?, last_seen = ?, paths_json = ?
+                    WHERE uuid = ?;
+                    """,
+                    (str(new_path), dev, ino, now, paths_json, ws_uuid),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO workspace_host_paths (workspace_uuid, host, path, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(workspace_uuid, host) DO UPDATE SET
+                        path = excluded.path,
+                        updated_at = excluded.updated_at;
+                    """,
+                    (ws_uuid, cur_host, str(new_path), now),
+                )
+        finally:
+            conn.close()
+
+    return {
+        "ok": True,
+        "applied": True,
+        "plan_hash": plan_hash,
+        "workspace_uuid": ws_uuid,
+        "workspace_slug": ws_slug,
+        "canonical_path": str(new_path),
+        "device": dev,
+        "inode": ino,
+    }
+
+
+def plan_quarantine_project_configs(
+    names: list[str],
+    config_dir: pathlib.Path | str | None = None,
+) -> dict[str, Any]:
+    """Build a preview plan for reversibly quarantining explicitly selected orphan project configs to `.trash/<ts>/` (T073)."""
+    if not names:
+        raise ValueError("At least one project config name must be specified for quarantine.")
+    cdir = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
+    projects_root = cdir / "projects"
+    items: list[dict[str, Any]] = []
+    for raw_name in names:
+        clean = str(raw_name).strip()
+        if not clean or "/" in clean or "\\" in clean or clean in (".", ".."):
+            raise ValueError(f"Invalid project config directory name: {raw_name!r}")
+        target_dir = projects_root / clean
+        if not target_dir.exists() or not target_dir.is_dir():
+            raise FileNotFoundError(f"Project config directory not found: {target_dir}")
+        ptoml = target_dir / "orchestration.toml"
+        sha = hashlib.sha256(ptoml.read_bytes()).hexdigest() if ptoml.is_file() else ""
+        items.append({
+            "name": clean,
+            "source_dir": str(target_dir),
+            "config_sha256": sha,
+        })
+
+    plan: dict[str, Any] = {
+        "ok": True,
+        "action": "quarantine-config",
+        "items": items,
+    }
+    plan["plan_hash"] = compute_plan_hash(plan)
+    return plan
+
+
+def apply_quarantine_project_configs(
+    plan: dict[str, Any],
+    expect_hash: str | None = None,
+    config_dir: pathlib.Path | str | None = None,
+) -> dict[str, Any]:
+    """Move selected project config folders to `<config_dir>/.trash/<timestamp>/<name>` with a reversible `manifest.json`."""
+    plan_hash = plan.get("plan_hash")
+    if not expect_hash:
+        raise ValueError(f"--expect-hash is required when applying. Computed plan_hash is: {plan_hash}")
+    if expect_hash != plan_hash:
+        raise ValueError(f"Hash mismatch: expected {expect_hash}, computed plan_hash {plan_hash}")
+
+    cdir = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    trash_batch_dir = cdir / ".trash" / ts
+    counter = 1
+    while trash_batch_dir.exists():
+        trash_batch_dir = cdir / ".trash" / f"{ts}_{counter}"
+        counter += 1
+    trash_batch_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_entries: list[dict[str, Any]] = []
+    for item in plan.get("items", []):
+        src = pathlib.Path(item["source_dir"])
+        if not src.exists():
+            raise FileNotFoundError(f"Source directory disappeared before apply: {src}")
+        ptoml = src / "orchestration.toml"
+        cur_sha = hashlib.sha256(ptoml.read_bytes()).hexdigest() if ptoml.is_file() else ""
+        if cur_sha != item.get("config_sha256", ""):
+            raise ValueError(
+                f"Config file {ptoml} changed between preview and apply "
+                f"(expected sha256 {item.get('config_sha256', '')}, got {cur_sha})"
+            )
+
+    for item in plan.get("items", []):
+        src = pathlib.Path(item["source_dir"])
+        dest = trash_batch_dir / item["name"]
+        shutil.move(str(src), str(dest))
+        manifest_entries.append({
+            "name": item["name"],
+            "original_path": str(src),
+            "quarantined_path": str(dest),
+            "config_sha256": item.get("config_sha256", ""),
+            "quarantined_at": ts,
+        })
+
+    manifest_path = trash_batch_dir / "manifest.json"
+    manifest_doc = {
+        "batch_id": trash_batch_dir.name,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "items": manifest_entries,
+    }
+    manifest_path.write_text(json.dumps(manifest_doc, indent=2) + "\n", encoding="utf-8")
+
+    return {
+        "ok": True,
+        "applied": True,
+        "plan_hash": plan_hash,
+        "batch_id": trash_batch_dir.name,
+        "trash_dir": str(trash_batch_dir),
+        "manifest_path": str(manifest_path),
+        "quarantined": manifest_entries,
+    }
+
+
+def restore_quarantined_project_config(
+    name_or_batch: str,
+    config_dir: pathlib.Path | str | None = None,
+) -> dict[str, Any]:
+    """Restore a quarantined project config by name or batch ID from `<config_dir>/.trash/`."""
+    cdir = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
+    trash_root = cdir / ".trash"
+    if not trash_root.is_dir():
+        raise FileNotFoundError(f"No .trash directory found at {trash_root}")
+
+    restored: list[dict[str, Any]] = []
+    batches = sorted([d for d in trash_root.iterdir() if d.is_dir()], key=lambda p: p.name, reverse=True)
+    for bdir in batches:
+        mfile = bdir / "manifest.json"
+        if not mfile.is_file():
+            continue
+        try:
+            mdoc = json.loads(mfile.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        items = mdoc.get("items", [])
+        remaining: list[dict[str, Any]] = []
+        for it in items:
+            if bdir.name == name_or_batch or it.get("name") == name_or_batch:
+                qpath = pathlib.Path(it["quarantined_path"])
+                opath = pathlib.Path(it["original_path"])
+                if qpath.exists():
+                    opath.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(qpath), str(opath))
+                    restored.append({
+                        "name": it.get("name"),
+                        "restored_to": str(opath),
+                        "from_batch": bdir.name,
+                    })
+                else:
+                    remaining.append(it)
+            else:
+                remaining.append(it)
+        if len(remaining) != len(items):
+            mdoc["items"] = remaining
+            mfile.write_text(json.dumps(mdoc, indent=2) + "\n", encoding="utf-8")
+            if rest := restored:
+                break
+
+    if not restored:
+        raise KeyError(f"No quarantined project config found matching '{name_or_batch}'")
+
+    return {
+        "ok": True,
+        "restored": restored,
+    }
+
+
+def get_console_status_projects(
+    config_dir: pathlib.Path | str | None = None,
+    *,
+    all_hosts: bool = False,
+    ssh_timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Return console status projects list from the hub registry, falling back to local SQLite cache if hub is unreachable."""
+    cdir = pathlib.Path(config_dir).resolve() if config_dir is not None else get_global_config_dir()
+    gpath = cdir / "orchestration.toml"
+    gcfg = load_toml_file(gpath) if gpath.is_file() else {}
+    cur_host = _resolve_current_host_id(cdir)
+    hosts_table = resolve_hosts_table(gcfg, gpath)
+
+    hub_host_id: str | None = None
+    hub_host_cfg: dict[str, Any] | None = None
+    if isinstance(gcfg.get("host"), dict) and gcfg["host"].get("role") == "hub":
+        hub_host_id = cur_host
+        hub_host_cfg = gcfg["host"]
+    for hid, hcfg in hosts_table.items():
+        if isinstance(hcfg, dict) and hcfg.get("role") == "hub":
+            hub_host_id = hid
+            hub_host_cfg = hcfg
+            break
+
+    hub_reachable = True
+    registry_source = "hub"
+    hub_error: str | None = None
+    remote_hub_projects: list[dict[str, Any]] | None = None
+
+    # If a remote hub host is declared (different from current host), try querying it over ssh
+    if hub_host_id and hub_host_id != cur_host and hub_host_cfg is not None:
+        ssh_target = (
+            hub_host_cfg.get("ssh_target")
+            or hub_host_cfg.get("ssh")
+            or hub_host_cfg.get("target")
+            or hub_host_cfg.get("hostname")
+            or hub_host_id
+        )
+        ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={max(1, int(ssh_timeout))}"]
+        if isinstance(hub_host_cfg.get("port"), int):
+            ssh_cmd.extend(["-p", str(hub_host_cfg["port"])])
+        ssh_cmd.extend([str(ssh_target), "ai-orch", "workspace", "list", "--json"])
+        try:
+            proc = subprocess.run(
+                ssh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=ssh_timeout,
+                check=False,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                remote_data = json.loads(proc.stdout)
+                remote_items = remote_data.get("items") or remote_data.get("projects") or []
+                if isinstance(remote_items, list):
+                    remote_hub_projects = remote_items
+                    # Cache remote hub entries into local hub_registry.json and SQLite cache
+                    with registry_lock(cdir):
+                        for item in remote_items:
+                            if isinstance(item, dict) and item.get("uuid") and (item.get("slug") or item.get("id")):
+                                upsert_hub_project_entry(
+                                    cdir,
+                                    ws_uuid=str(item["uuid"]),
+                                    ws_slug=str(item.get("slug") or item.get("id")),
+                                    ws_title=item.get("title"),
+                                    paths=item.get("paths") if isinstance(item.get("paths"), dict) else None,
+                                    primary_host=item.get("primary_host"),
+                                    reference_repo=item.get("reference_repo"),
+                                    mirror_repo=item.get("mirror_repo") or item.get("mirror"),
+                                    convention_version=item.get("convention_version"),
+                                    subprojects=item.get("projects") or item.get("subprojects"),
+                                )
+                    sync_hub_registry_to_sqlite(cdir, host_id=cur_host)
+            else:
+                hub_reachable = False
+                registry_source = "local_cache"
+                hub_error = (proc.stderr or proc.stdout or f"ssh exited with code {proc.returncode}").strip()
+        except Exception as exc:
+            hub_reachable = False
+            registry_source = "local_cache"
+            hub_error = str(exc)
+
+    local_workspaces = list_workspaces(cdir)
+    hub_doc = load_hub_registry(cdir)
+    if not hub_doc.get("projects") and local_workspaces and registry_source == "hub":
+        registry_source = "local_cache"
+
+    # Query additional declared hosts if --all-hosts is requested
+    hosts_status: dict[str, dict[str, Any]] = {
+        cur_host: {
+            "host": cur_host,
+            "reachable": True,
+            "local": True,
+            "role": "hub" if hub_host_id == cur_host else (hosts_table.get(cur_host, {}).get("role") or "client"),
+        }
+    }
+    if hub_host_id and hub_host_id != cur_host:
+        hosts_status[hub_host_id] = {
+            "host": hub_host_id,
+            "reachable": hub_reachable,
+            "local": False,
+            "role": "hub",
+            "error": hub_error,
+        }
+
+    if all_hosts:
+        for hid, hcfg in hosts_table.items():
+            if hid in hosts_status:
+                continue
+            ssh_target = (
+                hcfg.get("ssh_target")
+                or hcfg.get("ssh")
+                or hcfg.get("target")
+                or hcfg.get("hostname")
+                or hid
+            )
+            ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={max(1, int(ssh_timeout))}"]
+            if isinstance(hcfg.get("port"), int):
+                ssh_cmd.extend(["-p", str(hcfg["port"])])
+            ssh_cmd.extend([str(ssh_target), "ai-orch", "workspace", "list", "--json"])
+            try:
+                proc = subprocess.run(
+                    ssh_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=ssh_timeout,
+                    check=False,
+                )
+                if proc.returncode == 0:
+                    hosts_status[hid] = {
+                        "host": hid,
+                        "reachable": True,
+                        "local": False,
+                        "role": hcfg.get("role") or "client",
+                    }
+                else:
+                    hosts_status[hid] = {
+                        "host": hid,
+                        "reachable": False,
+                        "local": False,
+                        "role": hcfg.get("role") or "client",
+                        "error": (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip(),
+                    }
+            except Exception as exc:
+                hosts_status[hid] = {
+                    "host": hid,
+                    "reachable": False,
+                    "local": False,
+                    "role": hcfg.get("role") or "client",
+                    "error": str(exc),
+                }
+
+    return {
+        "ok": True,
+        "host": cur_host,
+        "hub_host": hub_host_id or cur_host,
+        "hub_reachable": hub_reachable,
+        "registry_source": registry_source,
+        "hub_error": hub_error,
+        "hosts": hosts_status,
+        "projects": local_workspaces,
+        "workspaces": local_workspaces,
+    }
+
+
+
+# ---------------------------------------------------------------------------
 # CLI Commands
 # ---------------------------------------------------------------------------
 
@@ -1639,6 +3521,11 @@ def cli_workspace_register(args: argparse.Namespace) -> int:
             slug=args.id,
             title=args.title,
             config_dir=args.config_dir,
+            host=getattr(args, "host", None),
+            primary_host=getattr(args, "primary_host", None),
+            reference_repo=getattr(args, "reference_repo", None),
+            mirror_repo=getattr(args, "mirror_repo", None),
+            convention_version=getattr(args, "convention_version", None),
         )
     except Exception as e:
         if args.json:
@@ -1872,12 +3759,241 @@ def cli_workspace_next(args: argparse.Namespace) -> int:
     return proc.returncode
 
 
+def cli_workspace_import_migration(args: argparse.Namespace) -> int:
+    target_file = _join_positional(args.file, None) or str(pathlib.Path.home() / "works" / "MIGRATION_REGISTRY.json")
+    try:
+        plan = plan_import_migration_registry(
+            target_file,
+            config_dir=args.config_dir,
+            host=getattr(args, "host", None),
+        )
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] {e}", file=sys.stderr)
+        return 2
+
+    if not args.apply:
+        if args.json:
+            print(json.dumps(plan, indent=2))
+        else:
+            print("=" * 70)
+            print("Migration Registry Import Plan Preview")
+            print("=" * 70)
+            print(f"Source        : {plan['source_path']}")
+            print(f"Hub Registry  : {plan['hub_registry_path']}")
+            print(f"Host          : {plan['host']}")
+            print(f"Projects      : {plan['imported_count']}")
+            for p in plan["projects"]:
+                print(f"  - {p['slug']:<22} {p['uuid']} (primary={p['primary_host']})")
+            print(f"\nPlan hash     : {plan['plan_hash']}")
+            quoted = f'"{target_file}"' if " " in target_file else target_file
+            print(f"\nTo apply: ai-orch workspace import-migration {quoted} --apply --expect-hash {plan['plan_hash']}")
+        return 0
+
+    try:
+        res = apply_import_migration_registry(plan, expect_hash=args.expect_hash, config_dir=args.config_dir)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print(f"[OK] Imported {res['imported_count']} project(s) into {res['hub_registry_path']}")
+        return 0
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] Failed to import migration registry: {e}", file=sys.stderr)
+        return 2
+
+
+def cli_workspace_reconcile(args: argparse.Namespace) -> int:
+    try:
+        roots = getattr(args, "root", None)
+        res = reconcile_registry(config_dir=args.config_dir, scan_roots=roots)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print(f"Registered workspaces : {res['registered_workspaces_count']}")
+            print(f"Hub projects          : {res['hub_projects_count']}")
+            print(f"Reconciliation issues : {res['reconciliation_issues_count']}")
+            for f in res["reconciliation_report"]:
+                print(f"  - [{f['kind']}] {f.get('workspace_slug') or f.get('config_dir_name')} -> {f.get('suggested_action')}")
+            disc = res.get("discovery", {})
+            if disc.get("suggestions"):
+                print(f"Unregistered suggestions ({len(disc['suggestions'])}):")
+                for s in disc["suggestions"]:
+                    print(f"  - {s['slug']:<20} {s['path']} ({s['register_preview_command']})")
+        return 0
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] {e}", file=sys.stderr)
+        return 2
+
+
+def cli_workspace_scan(args: argparse.Namespace) -> int:
+    try:
+        roots = getattr(args, "root", None)
+        res = scan_unregistered_workspaces(roots=roots, config_dir=args.config_dir)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            if not res["scan_enabled"]:
+                print("Workspace discovery scan is disabled by default (configure [discovery] workspace_roots or pass --root <dir>).")
+                return 0
+            if not res["suggestions"]:
+                print("No unregistered workspaces found in configured roots.")
+                return 0
+            print(f"Candidate Unregistered Workspaces ({res['suggestions_count']}):")
+            for s in res["suggestions"]:
+                print(f"  - {s['slug']:<20} {s['uuid']} {s['path']}")
+                print(f"    Preview: {s['register_preview_command']}")
+        return 0
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] {e}", file=sys.stderr)
+        return 2
+
+
+def cli_workspace_relink(args: argparse.Namespace) -> int:
+    try:
+        plan = plan_workspace_relink(
+            args.id,
+            new_path=getattr(args, "new_path", None),
+            config_dir=args.config_dir,
+            host=getattr(args, "host", None),
+        )
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] {e}", file=sys.stderr)
+        return 2
+
+    if not args.apply:
+        if args.json:
+            print(json.dumps(plan, indent=2))
+        else:
+            print("=" * 70)
+            print("Workspace Relink Plan Preview")
+            print("=" * 70)
+            print(f"Slug      : {plan['workspace_slug']} ({plan['workspace_uuid']})")
+            print(f"Old path  : {plan['old_path']}")
+            print(f"New path  : {plan['new_path']}")
+            print(f"Device    : {plan['old_device']} -> {plan['new_device']}")
+            print(f"\nPlan hash : {plan['plan_hash']}")
+            print(f"\nTo apply: ai-orch workspace relink {args.id} {plan['new_path']} --apply --expect-hash {plan['plan_hash']}")
+        return 0
+
+    try:
+        res = apply_workspace_relink(plan, expect_hash=args.expect_hash, config_dir=args.config_dir)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print(f"[OK] Relinked workspace {res['workspace_slug']} to {res['canonical_path']}")
+        return 0
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] Failed to relink workspace: {e}", file=sys.stderr)
+        return 2
+
+
+def cli_workspace_quarantine_config(args: argparse.Namespace) -> int:
+    try:
+        plan = plan_quarantine_project_configs(list(args.names or []), config_dir=args.config_dir)
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] {e}", file=sys.stderr)
+        return 2
+
+    if not args.apply:
+        if args.json:
+            print(json.dumps(plan, indent=2))
+        else:
+            print("=" * 70)
+            print("Quarantine Project Config Plan Preview")
+            print("=" * 70)
+            for it in plan["items"]:
+                print(f"  - {it['name']:<25} {it['source_dir']}")
+            print(f"\nPlan hash : {plan['plan_hash']}")
+            names_str = " ".join(it["name"] for it in plan["items"])
+            print(f"\nTo apply: ai-orch workspace quarantine-config {names_str} --apply --expect-hash {plan['plan_hash']}")
+        return 0
+
+    try:
+        res = apply_quarantine_project_configs(plan, expect_hash=args.expect_hash, config_dir=args.config_dir)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print(f"[OK] Quarantined {len(res['quarantined'])} project config(s) to {res['trash_dir']}")
+        return 0
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] Failed to quarantine project config: {e}", file=sys.stderr)
+        return 2
+
+
+def cli_workspace_restore_config(args: argparse.Namespace) -> int:
+    try:
+        res = restore_quarantined_project_config(args.name, config_dir=args.config_dir)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            for r in res["restored"]:
+                print(f"[OK] Restored {r['name']} to {r['restored_to']}")
+        return 0
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] {e}", file=sys.stderr)
+        return 2
+
+
+def cli_console_status(args: argparse.Namespace) -> int:
+    try:
+        res = get_console_status_projects(
+            config_dir=args.config_dir,
+            all_hosts=bool(getattr(args, "all_hosts", False)),
+            ssh_timeout=float(getattr(args, "timeout", 5.0) or 5.0),
+        )
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            hub_str = "reachable" if res["hub_reachable"] else f"UNREACHABLE ({res['registry_source']})"
+            print(f"Host: {res['host']} | Hub ({res['hub_host']}): {hub_str} | Source: {res['registry_source']}")
+            print(f"{'SLUG':<22} {'UUID':<38} {'PRIMARY':<12} {'CONV':<8} {'PATH'}")
+            print("-" * 100)
+            for p in res.get("projects", []):
+                conv = p.get("convention_version") or "-"
+                prim = p.get("primary_host") or "-"
+                print(f"{p['slug']:<22} {p['uuid']:<38} {prim:<12} {conv:<8} {p['canonical_path']}")
+        return 0
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            print(f"[ERROR] {e}", file=sys.stderr)
+        return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_args = list(argv if argv is not None else sys.argv[1:])
 
     # Support shorthand invocation:
     # "ai-orch workspace <subcmd>" or "orchestration_registry.py workspace <subcmd>"
     # or "orchestration_registry.py register" -> "workspace register"
+    is_console_group = False
     if raw_args and raw_args[0] in ("workspace", "workspaces"):
         raw_args = raw_args[1:]
         is_workspace_group = True
@@ -1886,6 +4002,11 @@ def main(argv: list[str] | None = None) -> int:
         raw_args = raw_args[1:]
         is_workspace_group = False
         is_projects_group = True
+    elif raw_args and raw_args[0] == "console":
+        raw_args = raw_args[1:]
+        is_workspace_group = False
+        is_projects_group = False
+        is_console_group = True
     else:
         is_workspace_group = False
         is_projects_group = False
@@ -1898,6 +4019,11 @@ def main(argv: list[str] | None = None) -> int:
     p_reg.add_argument("path", nargs="*", default=["."], help="Workspace path (default: .)")
     p_reg.add_argument("--id", dest="id", default=None, help="Workspace slug ID")
     p_reg.add_argument("--title", default=None, help="Workspace title")
+    p_reg.add_argument("--host", default=None, help="Host ID for this checkout")
+    p_reg.add_argument("--primary-host", dest="primary_host", default=None, help="Primary development host ID")
+    p_reg.add_argument("--reference-repo", dest="reference_repo", default=None, help="Reference repository URL/path on hub")
+    p_reg.add_argument("--mirror-repo", "--mirror", dest="mirror_repo", default=None, help="Off-site mirror repository URL")
+    p_reg.add_argument("--convention-version", dest="convention_version", default=None, help="Project convention_version")
     p_reg.add_argument("--apply", action="store_true", help="Apply registration")
     p_reg.add_argument("--expect-hash", dest="expect_hash", default=None, help="Expected plan hash")
     p_reg.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
@@ -1930,6 +4056,58 @@ def main(argv: list[str] | None = None) -> int:
     p_wnext.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
     p_wnext.add_argument("--json", action="store_true", help="Output JSON")
 
+    # workspace import-migration
+    p_imp = subparsers.add_parser("import-migration", help="Import MIGRATION_REGISTRY.json into the hub registry")
+    p_imp.add_argument("file", nargs="*", default=None, help="Path to MIGRATION_REGISTRY.json")
+    p_imp.add_argument("--host", default=None, help="Override current host ID")
+    p_imp.add_argument("--apply", action="store_true", help="Apply migration import")
+    p_imp.add_argument("--expect-hash", dest="expect_hash", default=None, help="Expected plan hash")
+    p_imp.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
+    p_imp.add_argument("--json", action="store_true", help="Output JSON")
+
+    # workspace reconcile
+    p_rec = subparsers.add_parser("reconcile", help="Read-only registry reconciliation report")
+    p_rec.add_argument("--root", action="append", default=None, help="Optional scan root for unregistered workspace suggestions")
+    p_rec.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
+    p_rec.add_argument("--json", action="store_true", help="Output JSON")
+
+    # workspace scan
+    p_scan = subparsers.add_parser("scan", help="Scan configured roots for unregistered workspace suggestions (Q026=A)")
+    p_scan.add_argument("--root", action="append", default=None, help="Directory root to scan for unregistered workspaces")
+    p_scan.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
+    p_scan.add_argument("--json", action="store_true", help="Output JSON")
+
+    # workspace relink
+    p_relink = subparsers.add_parser("relink", help="Relink a moved workspace or update shifted device ID")
+    p_relink.add_argument("id", help="Workspace slug or UUID")
+    p_relink.add_argument("new_path", nargs="?", default=None, help="New path (defaults to current canonical_path)")
+    p_relink.add_argument("--host", default=None, help="Host ID")
+    p_relink.add_argument("--apply", action="store_true", help="Apply relink")
+    p_relink.add_argument("--expect-hash", dest="expect_hash", default=None, help="Expected plan hash")
+    p_relink.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
+    p_relink.add_argument("--json", action="store_true", help="Output JSON")
+
+    # workspace quarantine-config
+    p_quar = subparsers.add_parser("quarantine-config", help="Reversibly quarantine selected orphan project configs to .trash/")
+    p_quar.add_argument("names", nargs="+", help="Project config folder names under projects/")
+    p_quar.add_argument("--apply", action="store_true", help="Apply quarantine")
+    p_quar.add_argument("--expect-hash", dest="expect_hash", default=None, help="Expected plan hash")
+    p_quar.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
+    p_quar.add_argument("--json", action="store_true", help="Output JSON")
+
+    # workspace restore-config
+    p_rest = subparsers.add_parser("restore-config", help="Restore a quarantined project config from .trash/")
+    p_rest.add_argument("name", help="Project config name or batch ID")
+    p_rest.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
+    p_rest.add_argument("--json", action="store_true", help="Output JSON")
+
+    # console status
+    p_cstat = subparsers.add_parser("console-status", help="List projects and status from the hub registry (with local cache fallback)")
+    p_cstat.add_argument("--all-hosts", dest="all_hosts", action="store_true", help="Query all declared hosts")
+    p_cstat.add_argument("--timeout", type=float, default=5.0, help="SSH timeout in seconds")
+    p_cstat.add_argument("--config-dir", dest="config_dir", default=None, help="Override global config dir")
+    p_cstat.add_argument("--json", action="store_true", help="Output JSON")
+
     # projects discover
     p_disc = subparsers.add_parser("discover", help="Discover projects in a workspace")
     p_disc.add_argument("workspace", nargs="*", default=None, help="Workspace slug, UUID, or path")
@@ -1947,6 +4125,12 @@ def main(argv: list[str] | None = None) -> int:
     # If dispatched as "projects list", map "list" to "projects-list"
     if is_projects_group and raw_args and raw_args[0] == "list":
         raw_args[0] = "projects-list"
+    elif is_projects_group and raw_args and raw_args[0] in ("import-migration", "import-migration-registry"):
+        raw_args[0] = "import-migration"
+    elif is_console_group and (not raw_args or raw_args[0] == "status"):
+        raw_args = ["console-status"] + (raw_args[1:] if raw_args else [])
+    elif raw_args and raw_args[0] == "import-migration-registry":
+        raw_args[0] = "import-migration"
 
     if not raw_args or raw_args[0] in ("-h", "--help"):
         parser.print_help()
@@ -1964,6 +4148,20 @@ def main(argv: list[str] | None = None) -> int:
         return cli_workspace_show(args)
     elif args.command == "next":
         return cli_workspace_next(args)
+    elif args.command == "import-migration":
+        return cli_workspace_import_migration(args)
+    elif args.command == "reconcile":
+        return cli_workspace_reconcile(args)
+    elif args.command == "scan":
+        return cli_workspace_scan(args)
+    elif args.command == "relink":
+        return cli_workspace_relink(args)
+    elif args.command == "quarantine-config":
+        return cli_workspace_quarantine_config(args)
+    elif args.command == "restore-config":
+        return cli_workspace_restore_config(args)
+    elif args.command == "console-status":
+        return cli_console_status(args)
     elif args.command == "discover":
         return cli_projects_discover(args)
     elif args.command == "projects-list":

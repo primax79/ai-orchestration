@@ -8605,9 +8605,10 @@ def inspect_project_doctor(
                 if ws_registered:
                     try:
                         st = ws.stat()
-                        if nearest_ws.get("device") != st.st_dev or nearest_ws.get("inode") != st.st_ino:
+                        rec_ino = nearest_ws.get("inode") or 0
+                        if rec_ino and rec_ino != st.st_ino:
                             ws_stale = True
-                            ws_stale_reasons.append("device/inode mismatch")
+                            ws_stale_reasons.append("inode mismatch")
                     except OSError:
                         ws_stale = True
                         ws_stale_reasons.append("workspace directory inaccessible")
