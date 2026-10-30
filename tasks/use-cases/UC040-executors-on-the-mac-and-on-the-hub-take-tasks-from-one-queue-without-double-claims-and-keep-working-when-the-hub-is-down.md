@@ -5,7 +5,7 @@
 - actor: Orchestrator
 - approval: proposed
 - priority: P1
-- linked-tasks: 19.4, 19.7, 19.10, 19.11, 19.12, 19.13, 19.17
+- linked-tasks: 19.4, 19.7, 19.10, 19.11, 19.12, 19.13, 19.17, 19.18
 - verification-type: e2e
 - last-tested: -
 - last-verdict: -

@@ -5,7 +5,7 @@
 - actor: Owner
 - approval: proposed
 - priority: P1
-- linked-tasks: 19.4, 19.5, 19.6, 19.8, 19.9, 19.15, 19.16
+- linked-tasks: 19.4, 19.5, 19.6, 19.8, 19.9, 19.15, 19.16, 19.18
 - verification-type: e2e
 - last-tested: -
 - last-verdict: -
