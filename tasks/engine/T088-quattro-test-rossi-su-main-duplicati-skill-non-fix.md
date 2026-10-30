@@ -35,6 +35,9 @@ Riportare verde la suite completa. Baseline 2026-10-29 su alf_ubuntu (uvx pytest
 
 ## Log (newest first)
 
+- 2026-10-30, orchestrator: state `bounced` -> `in progress` — terzo rinvio su alf_ubuntu
+- 2026-10-30, codex: state `delivered` -> `bounced` — Terza verifica Codex NON OK: escape YAML e chiavi tra virgolette; richiesto sottoinsieme esplicito che fallisce chiuso
+- 2026-10-30, kilo: state `in progress` -> `delivered` — fix 9d45091, unito in integration/19
 - 2026-10-30, orchestrator: state `bounced` -> `in progress` — secondo rinvio allo stesso executor su alf_ubuntu
 - 2026-10-30, codex: state `delivered` -> `bounced` — Seconda verifica Codex NON OK: B1 parziale (vedi nota di verifica)
 - 2026-10-30, kilo: state `in progress` -> `delivered` — fix dopo la verifica, unito in integration/19
