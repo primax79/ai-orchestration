@@ -145,7 +145,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T079 (Workspace da sottocartella) | P2 | [I comandi lanciati da una sottocartella risolvono il workspace che la contiene](engine/T079-i-comandi-lanciati-da-una-sottocartella-risolvono.md) | open | kilo | - |
 | T081 (Branch e sblocco dipendenti) | P2 | [tasks_engine: list --branches, sblocco dei dipendenti e validate --branch](engine/T081-tasks-engine-list-branches-sblocco-dei-dipendenti.md) | open | kilo | - |
 | T083 (Rinomina sessione per provider) | P3 | [L'id del provider identifica la sessione: un nome nuovo rinomina il record invece di crearne un altro](engine/T083-l-id-del-provider-identifica-la-sessione-un-nome-n.md) | open | kilo | - |
-| T088 (Test rossi su main) | P1 | [Quattro test rossi su main: duplicati skill non fixable, kill dei discendenti su Linux, runaway stub lento](engine/T088-quattro-test-rossi-su-main-duplicati-skill-non-fix.md) | in progress | kilo | - |
+| T088 (Test rossi su main) | P1 | [Quattro test rossi su main: duplicati skill non fixable, kill dei discendenti su Linux, runaway stub lento](engine/T088-quattro-test-rossi-su-main-duplicati-skill-non-fix.md) | verified | kilo | - |
 
 ### methodology
 

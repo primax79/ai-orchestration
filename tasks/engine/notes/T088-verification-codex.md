@@ -41,3 +41,7 @@ The indentation indicators are fixed and tested (`orchestration_env.py:663-724`,
   - inline `#` after a value, unless the value is quoted (or reject it);
   - duplicate keys.
 - **Tests:** a table-driven test of semantically different pairs that must NEVER compare equal (include Codex's probes and at least one case per rejected construct). The two original baseline tests (reserialized frontmatter, folded description) must stay green.
+
+## Round 4 (Codex, 2026-10-30, fix commit 1396135): PASS
+
+The required fail-closed subset is implemented and documented (`orchestration_env.py:717-738`), with every rejected construct cited. A table-driven negative test covers all rejected constructs and the earlier probes (`test_orchestration_env.py:4488-4744`). Both original baseline tests hold by design. No pair inside the subset collapses to equal.

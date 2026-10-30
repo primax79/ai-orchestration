@@ -6,7 +6,7 @@
 - priority: P1
 - priority-reason: Suite rossa su main: maschera le regressioni degli executor dell'iniziativa 19
 - next-up: no
-- state: in progress
+- state: verified
 - executor: kilo
 - depends-on: -
 - decider: -
@@ -35,6 +35,8 @@ Riportare verde la suite completa. Baseline 2026-10-29 su alf_ubuntu (uvx pytest
 
 ## Log (newest first)
 
+- 2026-10-30, codex: state `delivered` -> `verified` — OK: quarta verifica Codex PASS; su integration/19, non ancora su main
+- 2026-10-30, kilo: state `in progress` -> `delivered` — fix 1396135, unito in integration/19
 - 2026-10-30, orchestrator: state `bounced` -> `in progress` — terzo rinvio su alf_ubuntu
 - 2026-10-30, codex: state `delivered` -> `bounced` — Terza verifica Codex NON OK: escape YAML e chiavi tra virgolette; richiesto sottoinsieme esplicito che fallisce chiuso
 - 2026-10-30, kilo: state `in progress` -> `delivered` — fix 9d45091, unito in integration/19
