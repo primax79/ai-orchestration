@@ -404,6 +404,53 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 
 MANAGED_AGENTS_BEGIN = "<!-- ai-orch:managed begin -->"
 MANAGED_AGENTS_END = "<!-- ai-orch:managed end -->"
+
+CONVENTION_VERSION = "1.1.0"
+CONVENTION_VERSION_FILENAME = "convention_version"
+LEGACY_CONVENTION_VERSION_FILENAMES = (".convention-version", ".convention_version")
+
+
+def read_convention_version(tasks_dir: pathlib.Path) -> str | None:
+    """Read the recorded per-project convention_version from tasks/convention_version (or legacy fallbacks)."""
+    t_dir = pathlib.Path(tasks_dir).resolve()
+    for fname in (CONVENTION_VERSION_FILENAME, *LEGACY_CONVENTION_VERSION_FILENAMES):
+        cand = t_dir / fname
+        if cand.is_file():
+            try:
+                raw = cand.read_text(encoding="utf-8").strip()
+            except Exception:
+                continue
+            if not raw:
+                continue
+            if raw.startswith("{"):
+                try:
+                    data = json.loads(raw)
+                    val = data.get("convention_version") or data.get("version")
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+                except Exception:
+                    pass
+            for line in raw.splitlines():
+                stripped = line.split("#", 1)[0].strip()
+                if not stripped:
+                    continue
+                m = re.match(r"^(?:convention_version|version)\s*=\s*['\"]?([^'\"]+)['\"]?$", stripped)
+                if m:
+                    return m.group(1).strip()
+                return stripped
+    return None
+
+
+def write_convention_version(
+    tasks_dir: pathlib.Path,
+    version: str = CONVENTION_VERSION,
+) -> pathlib.Path:
+    """Write tasks/convention_version atomically with the given convention version."""
+    t_dir = pathlib.Path(tasks_dir).resolve()
+    t_dir.mkdir(parents=True, exist_ok=True)
+    target = t_dir / CONVENTION_VERSION_FILENAME
+    write_file_atomic(target, f"{version.strip()}\n")
+    return target
 _MANAGED_AGENTS_BODY = "\n".join(CANONICAL_TASKS_AGENTS_MD.strip().splitlines()[1:]).strip()
 MANAGED_TASKS_AGENTS_BLOCK = f"{MANAGED_AGENTS_BEGIN}\n## task-pipeline managed convention\n\n{_MANAGED_AGENTS_BODY}\n{MANAGED_AGENTS_END}\n"
 
@@ -20613,6 +20660,31 @@ def upgrade_tasks_tree(
                     })
                     new_ga = existing_ga + ("\n" if existing_ga and not existing_ga.endswith("\n") else "") + f"{rule_line}\n"
                     pending_writes.append((gitattributes_path, new_ga))
+
+            # 2.55. Ensure tasks/convention_version records CONVENTION_VERSION
+            conv_version_path = tasks_dir / CONVENTION_VERSION_FILENAME
+            expected_conv_text = f"{CONVENTION_VERSION}\n"
+            current_conv = read_convention_version(tasks_dir)
+            if not conv_version_path.is_file():
+                created.append(str(conv_version_path))
+                upgraded_files.append(str(conv_version_path))
+                operations.append({
+                    "action": "create",
+                    "path": CONVENTION_VERSION_FILENAME,
+                    "before_hash": "",
+                    "summary": f"convention_version={CONVENTION_VERSION}",
+                })
+                pending_writes.append((conv_version_path, expected_conv_text))
+            elif current_conv != CONVENTION_VERSION:
+                updated.append(str(conv_version_path))
+                upgraded_files.append(str(conv_version_path))
+                operations.append({
+                    "action": "modify",
+                    "path": CONVENTION_VERSION_FILENAME,
+                    "before_hash": _file_sha256(conv_version_path),
+                    "summary": f"convention_version={current_conv or 'none'}->{CONVENTION_VERSION}",
+                })
+                pending_writes.append((conv_version_path, expected_conv_text))
 
             # 2.6. Register git merge driver in repository's local git config
             pending_git_config: tuple[str, str] | None = None

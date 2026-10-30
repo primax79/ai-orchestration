@@ -2680,6 +2680,112 @@ def inject_or_replace_agents_block(existing_text: str, new_block: str) -> str:
     return existing_text.rstrip() + "\n\n" + new_block.rstrip() + "\n"
 
 
+ORCHESTRATION_HEADING_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^#\s+Agent Orchestration\s*&\s*Development Guidelines\b", re.IGNORECASE),
+    re.compile(r"^##\s+(?:\d+\.\s+)?Required Skills\b", re.IGNORECASE),
+    re.compile(r"^##\s+(?:\d+\.\s+)?Core Operating Rules\b", re.IGNORECASE),
+    re.compile(
+        r"^###\s+Rule\s+1:\s+(?:Keep the Main Session Free|Focus the Main Session on Architecture)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^###\s+Rule\s+2:\s+Define Execution Tasks Before Delegating\b", re.IGNORECASE),
+    re.compile(r"^###\s+Rule\s+3:\s+Delegate Maximum Work\b", re.IGNORECASE),
+    re.compile(r"^###\s+Rule\s+4:\s+Select the Right Model\b", re.IGNORECASE),
+    re.compile(r"^##\s+(?:\d+\.\s+)?Orchestration Lifecycle\b", re.IGNORECASE),
+)
+
+
+def _is_orchestration_heading(line: str) -> tuple[bool, int]:
+    stripped = line.strip()
+    m = re.match(r"^(#{1,6})\s+", stripped)
+    if not m:
+        return (False, 0)
+    level = len(m.group(1))
+    for pat in ORCHESTRATION_HEADING_PATTERNS:
+        if pat.match(stripped):
+            return (True, level)
+    return (False, 0)
+
+
+def _strip_orchestration_sections_from_segment(segment: str) -> tuple[str, list[str]]:
+    """Strip hand-written orchestration sections from a text segment outside managed markers,
+    preserving all non-orchestration sections byte-for-byte."""
+    lines = segment.splitlines(keepends=True)
+    kept: list[str] = []
+    removed_headings: list[str] = []
+    in_fenced = False
+    skipping_level: int | None = None
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fenced = not in_fenced
+        if not in_fenced:
+            is_orch, orch_level = _is_orchestration_heading(line)
+            if is_orch:
+                removed_headings.append(stripped)
+                if skipping_level is None or orch_level < skipping_level:
+                    skipping_level = orch_level
+                continue
+            m_h = re.match(r"^(#{1,6})\s+", stripped)
+            if m_h and skipping_level is not None:
+                cur_level = len(m_h.group(1))
+                # If we entered via `# Agent Orchestration & Development Guidelines` (level 1),
+                # any subsequent non-orchestration `# ` or `## ` exits the skipped header block
+                # unless it's another orchestration heading (handled above).
+                if skipping_level == 1 or cur_level <= skipping_level:
+                    skipping_level = None
+            if skipping_level is not None and stripped == "---":
+                continue
+
+        if skipping_level is None:
+            kept.append(line)
+
+    return ("".join(kept), removed_headings)
+
+
+def strip_duplicated_handwritten_agents_sections(existing_text: str) -> tuple[str, list[str]]:
+    """Detect and strip duplicated hand-written orchestration sections outside
+    <!-- BEGIN ai-orchestration --> ... <!-- END ai-orchestration --> markers,
+    while preserving non-duplicated blocks outside markers byte-for-byte."""
+    block_re = re.compile(
+        re.escape(BEGIN_MARKER) + r".*?" + re.escape(END_MARKER) + r"\n?",
+        re.DOTALL,
+    )
+    matches = list(block_re.finditer(existing_text))
+    removed: list[str] = []
+
+    if not matches:
+        cleaned, rem = _strip_orchestration_sections_from_segment(existing_text)
+        return (cleaned, rem)
+
+    first = matches[0]
+    before = existing_text[: first.start()]
+    managed = existing_text[first.start() : first.end()]
+    after = existing_text[first.end() :]
+
+    if len(matches) > 1:
+        for extra in matches[1:]:
+            removed.append("duplicate <!-- BEGIN ai-orchestration --> block")
+        after = block_re.sub("", after)
+
+    cleaned_before, rem_before = _strip_orchestration_sections_from_segment(before)
+    cleaned_after, rem_after = _strip_orchestration_sections_from_segment(after)
+    removed.extend(rem_before)
+    removed.extend(rem_after)
+
+    if not removed:
+        return (existing_text, [])
+
+    return (cleaned_before + managed + cleaned_after, removed)
+
+
+def find_duplicated_handwritten_agents_sections(existing_text: str) -> list[str]:
+    """Return list of duplicated hand-written orchestration section headings outside markers."""
+    _, removed = strip_duplicated_handwritten_agents_sections(existing_text)
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------

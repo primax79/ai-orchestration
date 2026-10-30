@@ -426,8 +426,9 @@ def _get_global_config_path(home: pathlib.Path | None = None) -> pathlib.Path:
 def _inspect_project_config_env(
     workspace: pathlib.Path,
     home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
 ) -> dict[str, Any]:
-    gpath = _get_global_config_path(home)
+    gpath = global_config if global_config is not None else _get_global_config_path(home)
     try:
         setup_scripts = REPO_ROOT / "plugins" / "shared" / "skills" / "orchestration-setup" / "scripts"
         if setup_scripts.is_dir() and str(setup_scripts) not in sys.path:
@@ -6101,6 +6102,7 @@ def install_skills(
                         "repo": op["repo"],
                         "plugin": op["plugin"],
                         "name": op["skill"],
+                        "version": "1.1.0",
                         "source_hash": hash_directory(op["src"]),
                         "installed_at": datetime.now(timezone.utc).isoformat(),
                         "mode": "copy",
@@ -6341,6 +6343,7 @@ def resolve_conflicts(
                     "repo": item["repo"],
                     "plugin": item["plugin"],
                     "name": item["skill"],
+                    "version": "1.1.0",
                     "source_hash": src_hash or compute_target_hash(target_dir),
                     "installed_at": datetime.now(timezone.utc).isoformat(),
                     "mode": "copy",
@@ -6379,6 +6382,7 @@ def resolve_conflicts(
                     "repo": item["repo"],
                     "plugin": item["plugin"],
                     "name": item["skill"],
+                    "version": "1.1.0",
                     "source_hash": hash_directory(src_dir),
                     "installed_at": datetime.now(timezone.utc).isoformat(),
                     "mode": "copy",
@@ -7425,7 +7429,17 @@ def acknowledge_finding(
     h = home or get_home_dir()
     ws = workspace.resolve() if workspace else None
     report = inspect_environment(ws, h)
-    groups = report.get("finding_groups", [])
+    groups = list(report.get("finding_groups", []))
+    if ws is not None or (pathlib.Path.cwd() / "tasks").is_dir():
+        try:
+            proj_doc = inspect_project_doctor(ws or pathlib.Path.cwd(), h)
+            seen_gkeys = {g.get("group_key") for g in groups}
+            for fg in proj_doc.get("findings", []):
+                if fg.get("group_key") not in seen_gkeys:
+                    groups.append(fg)
+                    seen_gkeys.add(fg.get("group_key"))
+        except Exception:
+            pass
 
     matched_group = None
     exact_matches = [g for g in groups if g["group_key"] == finding_key]
@@ -7637,6 +7651,1551 @@ def cmd_unack(args: argparse.Namespace) -> int:
     return 0 if res.get("ok") else 1
 
 
+# ---------------------------------------------------------------------------
+# Project Doctor & Convention Drift Detection (Task 19.2 / N078)
+# ---------------------------------------------------------------------------
+
+TOOL_VERSION = "1.1.0"
+CONVENTION_VERSION = "1.1.0"
+SEVERITY_RANK: dict[str, int] = {"error": 0, "warning": 1, "info": 2, "neutral": 3}
+
+_CACHED_TASKS_ENGINE: Any = None
+_CACHED_ORCH_REGISTRY: Any = None
+_CACHED_ORCH_CONFIG: Any = None
+
+
+def _load_orchestration_config() -> Any:
+    """Import orchestration_config.py from the orchestration-setup skill."""
+    global _CACHED_ORCH_CONFIG
+    if _CACHED_ORCH_CONFIG is not None:
+        return _CACHED_ORCH_CONFIG
+    oc_path = (
+        REPO_ROOT
+        / "plugins"
+        / "shared"
+        / "skills"
+        / "orchestration-setup"
+        / "scripts"
+        / "orchestration_config.py"
+    )
+    if not oc_path.is_file():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_orch_config_mod", oc_path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_orch_config_mod"] = mod
+    spec.loader.exec_module(mod)
+    _CACHED_ORCH_CONFIG = mod
+    return mod
+
+
+def _load_tasks_engine() -> Any:
+    """Import tasks_engine.py from the task-pipeline skill."""
+    global _CACHED_TASKS_ENGINE
+    if _CACHED_TASKS_ENGINE is not None:
+        return _CACHED_TASKS_ENGINE
+    te_path = (
+        REPO_ROOT
+        / "plugins"
+        / "architect-side"
+        / "skills"
+        / "task-pipeline"
+        / "scripts"
+        / "tasks_engine.py"
+    )
+    if not te_path.is_file():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_orch_tasks_engine_mod", te_path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_orch_tasks_engine_mod"] = mod
+    spec.loader.exec_module(mod)
+    _CACHED_TASKS_ENGINE = mod
+    return mod
+
+
+def _load_orchestration_registry() -> Any:
+    """Import orchestration_registry.py from scripts/."""
+    global _CACHED_ORCH_REGISTRY
+    if _CACHED_ORCH_REGISTRY is not None:
+        return _CACHED_ORCH_REGISTRY
+    reg_path = REPO_ROOT / "scripts" / "orchestration_registry.py"
+    if not reg_path.is_file():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_orch_registry_mod", reg_path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_orch_registry_mod"] = mod
+    spec.loader.exec_module(mod)
+    _CACHED_ORCH_REGISTRY = mod
+    return mod
+
+
+def _extract_installed_skill_version(skill_dir: pathlib.Path) -> str | None:
+    """Extract an explicit version string from an installed skill directory if present."""
+    if not skill_dir.is_dir():
+        return None
+
+    # 1. Check .ai-orch-source.json receipt
+    marker = skill_dir / ".ai-orch-source.json"
+    if marker.is_file():
+        try:
+            mdata = json.loads(marker.read_text(encoding="utf-8"))
+            if isinstance(mdata, dict):
+                for key in ("version", "convention_version", "plugin_version"):
+                    val = mdata.get(key)
+                    if isinstance(val, (str, int, float)) and str(val).strip():
+                        return str(val).strip()
+        except Exception:
+            pass
+
+    # 2. Check VERSION / .version file
+    for vfile in ("VERSION", ".version", "version.txt"):
+        vp = skill_dir / vfile
+        if vp.is_file():
+            try:
+                raw = vp.read_text(encoding="utf-8").strip()
+                if raw:
+                    return raw.splitlines()[0].strip()
+            except Exception:
+                pass
+
+    # 3. Check SKILL.md frontmatter or version comment
+    skill_md = skill_dir / "SKILL.md"
+    if skill_md.is_file():
+        try:
+            text = skill_md.read_text(encoding="utf-8", errors="replace")
+            fm, _ = parse_frontmatter_and_body(text)
+            if isinstance(fm, dict):
+                for key in ("version", "convention_version", "plugin_version"):
+                    val = fm.get(key)
+                    if isinstance(val, (str, int, float)) and str(val).strip():
+                        return str(val).strip()
+                meta = fm.get("metadata")
+                if isinstance(meta, dict):
+                    for key in ("version", "convention_version", "plugin_version"):
+                        val = meta.get(key)
+                        if isinstance(val, (str, int, float)) and str(val).strip():
+                            return str(val).strip()
+            m_ver = re.search(
+                r"(?:<!--\s*version:\s*([^\s>]+)\s*-->|^version:\s*['\"]?([0-9A-Za-z._-]+)['\"]?\s*$)",
+                text,
+                re.MULTILINE | re.IGNORECASE,
+            )
+            if m_ver:
+                return (m_ver.group(1) or m_ver.group(2)).strip()
+        except Exception:
+            pass
+
+    # 4. Check parent plugin .claude-plugin/plugin.json
+    if skill_dir.parent.name == "skills":
+        pjson = skill_dir.parent.parent / ".claude-plugin" / "plugin.json"
+        if pjson.is_file():
+            try:
+                pdata = json.loads(pjson.read_text(encoding="utf-8"))
+                if isinstance(pdata, dict) and pdata.get("version"):
+                    return str(pdata["version"]).strip()
+            except Exception:
+                pass
+
+    return None
+
+
+def inspect_global_skills_and_config_drift(
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+    catalog: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Inspect global skills and global config for version/content drift against the tool."""
+    h = (home or get_home_dir()).resolve()
+    cat = catalog if catalog is not None else discover_available_skills(h)
+    catalog_by_name: dict[str, list[dict[str, Any]]] = {}
+    for entry in cat.values():
+        catalog_by_name.setdefault(entry["name"], []).append(entry)
+
+    # Scan global skill installations across all assistants
+    installations: list[dict[str, Any]] = []
+    by_skill: dict[str, list[dict[str, Any]]] = {}
+
+    for assistant in ASSISTANTS:
+        roots = [h / ".kilo" / "skills", h / ".config" / "kilo" / "skills"] if assistant == "kilo" else [assistant_skills_dir(assistant, "global", None, h)]
+        seen_names: set[str] = set()
+        for sdir in roots:
+            if not sdir.is_dir():
+                continue
+            for child in sorted(sdir.iterdir()):
+                if child.name.startswith("."):
+                    continue
+                if not (child.is_dir() or child.is_symlink()):
+                    continue
+                if child.name in seen_names:
+                    continue
+                seen_names.add(child.name)
+                sname = child.name
+                s_state, s_repo, s_hash = detect_skill_state(child, cat, h)
+                inst_hash = (
+                    hash_directory(child)
+                    if (child.is_dir() and not child.is_symlink())
+                    or (child.is_symlink() and child.resolve().is_dir())
+                    else ""
+                )
+                inst_ver = _extract_installed_skill_version(child)
+                has_receipt = (child / ".ai-orch-source.json").is_file()
+                is_managed = bool(
+                    sname in catalog_by_name
+                    or has_receipt
+                    or sname in OBSOLETE_SKILL_RENAMES
+                    or inst_ver is not None
+                )
+                rec = {
+                    "assistant": assistant,
+                    "scope": "global",
+                    "name": sname,
+                    "path": str(child),
+                    "state": s_state,
+                    "installed_version": inst_ver,
+                    "installed_hash": inst_hash,
+                    "expected_version": TOOL_VERSION if sname in catalog_by_name or has_receipt else None,
+                    "expected_hash": s_hash,
+                    "source_repo": s_repo,
+                    "has_receipt": has_receipt,
+                    "is_managed": is_managed,
+                }
+                installations.append(rec)
+                by_skill.setdefault(sname, []).append(rec)
+
+    # Also inspect Claude plugin skills and stale plugins
+    stale_plugins = discover_stale_claude_plugins(h)
+    for sp in discover_claude_plugin_skills(h):
+        sname = sp["name"]
+        sp_path = pathlib.Path(sp["path"])
+        inst_ver = _extract_installed_skill_version(sp_path) or sp.get("version")
+        rec = {
+            "assistant": "claude",
+            "scope": "global",
+            "name": sname,
+            "path": sp["path"],
+            "state": sp.get("state", "up-to-date"),
+            "installed_version": inst_ver,
+            "installed_hash": sp.get("installed_hash", ""),
+            "expected_version": TOOL_VERSION if sname in catalog_by_name else None,
+            "expected_hash": sp.get("source_hash"),
+            "source_repo": sp.get("source_repo"),
+            "has_receipt": False,
+            "is_managed": bool(sname in catalog_by_name or sp.get("source_repo") in ("ai-orchestration", "kilo-mcp", "claude-mcp")),
+        }
+        installations.append(rec)
+        by_skill.setdefault(sname, []).append(rec)
+
+    drifted_skills: list[dict[str, Any]] = []
+    drifted_names: set[str] = set()
+    versions_found: set[str] = set()
+    reasons: list[str] = []
+
+    # 1. Check each installed skill against tool version & catalog hash
+    for rec in installations:
+        sname = rec["name"]
+        inst_ver = rec["installed_version"]
+        if inst_ver:
+            versions_found.add(inst_ver)
+        if not rec["is_managed"]:
+            continue
+
+        s_state = rec["state"]
+        ver_mismatch = bool(inst_ver and inst_ver != TOOL_VERSION)
+        state_drifted = (
+            s_state in ("outdated", "outdated-legacy", "modified-or-outdated", "foreign")
+            or s_state.startswith("obsolete-")
+        )
+        if ver_mismatch or state_drifted:
+            drifted_names.add(sname)
+            reason_parts = []
+            if ver_mismatch:
+                reason_parts.append(f"installed version {inst_ver!r} != tool version {TOOL_VERSION!r}")
+            if state_drifted:
+                reason_parts.append(f"state={s_state}")
+            reason_str = f"{rec['assistant']}:{sname} ({', '.join(reason_parts)})"
+            reasons.append(reason_str)
+            drifted_skills.append({
+                **rec,
+                "drift_reason": ", ".join(reason_parts),
+            })
+
+    # 2. Check cross-installation version/content divergence for the same skill name
+    #    (e.g. two fake installed versions across assistants or roots)
+    for sname, recs in sorted(by_skill.items()):
+        if len(recs) < 2:
+            continue
+        distinct_vers = sorted({r["installed_version"] for r in recs if r["installed_version"]})
+        if len(distinct_vers) > 1:
+            drifted_names.add(sname)
+            reasons.append(f"{sname}: multiple installed versions {distinct_vers}")
+            for r in recs:
+                if r not in drifted_skills:
+                    drifted_skills.append({**r, "drift_reason": f"version mismatch across installs {distinct_vers}"})
+            continue
+        # Content divergence across global installs of the same skill
+        first_path = pathlib.Path(recs[0]["path"])
+        diverged = False
+        for other in recs[1:]:
+            other_path = pathlib.Path(other["path"])
+            if recs[0]["installed_hash"] != other["installed_hash"] and not skill_equivalent(first_path, other_path):
+                diverged = True
+                break
+        if diverged:
+            drifted_names.add(sname)
+            reasons.append(f"{sname}: content/version differs across global installations ({[r['assistant'] for r in recs]})")
+            for r in recs:
+                if r not in drifted_skills:
+                    drifted_skills.append({**r, "drift_reason": "content differs across global installations"})
+
+    # 3. Check if multiple explicit versions exist across installed managed skills
+    if len(versions_found) > 1:
+        for rec in installations:
+            if rec["installed_version"]:
+                drifted_names.add(rec["name"])
+                if rec not in drifted_skills:
+                    drifted_skills.append({
+                        **rec,
+                        "drift_reason": f"inconsistent installed versions across global skills: {sorted(versions_found)}",
+                    })
+        reasons.append(f"multiple skill versions installed globally: {sorted(versions_found)}")
+
+    # 4. Stale Claude plugins
+    for sp in stale_plugins:
+        pname = sp["plugin"]
+        drifted_names.add(pname)
+        reasons.append(
+            f"Claude plugin {pname}: cached {sp.get('cached_version')} vs source {sp.get('source_version')}"
+        )
+        drifted_skills.append({
+            "assistant": "claude",
+            "scope": "global",
+            "name": pname,
+            "path": sp["install_path"],
+            "state": "stale-plugin-copy",
+            "installed_version": sp.get("cached_version"),
+            "installed_hash": sp.get("cached_commit") or "",
+            "expected_version": sp.get("source_version") or TOOL_VERSION,
+            "expected_hash": sp.get("source_commit"),
+            "source_repo": sp.get("marketplace"),
+            "drift_reason": "stale Claude plugin cache",
+        })
+
+    # Global config inspection
+    oc = _load_orchestration_config()
+    gpath = (
+        pathlib.Path(global_config).resolve()
+        if global_config is not None
+        else (get_config_dir(h) / "orchestration.toml")
+    )
+    global_cfg_drifted = False
+    global_cfg_reasons: list[str] = []
+    global_cfg_version: Any = None
+    if gpath.is_file() and oc is not None:
+        try:
+            raw_gcfg = oc.load_toml_file(gpath)
+            schema_ver = raw_gcfg.get("schema_version", 1)
+            global_cfg_version = raw_gcfg.get("convention_version") or raw_gcfg.get("version") or schema_ver
+            if schema_ver != 1:
+                global_cfg_drifted = True
+                global_cfg_reasons.append(f"schema_version={schema_ver!r} (expected 1)")
+            explicit_ver = raw_gcfg.get("convention_version") or raw_gcfg.get("version") or raw_gcfg.get("tool_version")
+            if explicit_ver is not None and str(explicit_ver).strip() != TOOL_VERSION:
+                global_cfg_drifted = True
+                global_cfg_reasons.append(
+                    f"global config version {explicit_ver!r} != tool version {TOOL_VERSION!r}"
+                )
+            merged_gcfg = oc.deep_merge(oc.DEFAULT_GLOBAL_CONFIG, raw_gcfg)
+            g_errors, _ = oc.validate_config(merged_gcfg)
+            if g_errors:
+                global_cfg_drifted = True
+                global_cfg_reasons.extend(g_errors)
+        except Exception as exc:
+            global_cfg_drifted = True
+            global_cfg_reasons.append(f"invalid TOML in {gpath}: {exc}")
+
+    return {
+        "tool_version": TOOL_VERSION,
+        "skills": {
+            "drifted": len(drifted_names) > 0,
+            "drifted_names": sorted(drifted_names),
+            "versions_found": sorted(versions_found),
+            "reasons": reasons,
+            "drifted_skills": drifted_skills,
+            "installed_count": len(installations),
+        },
+        "global_config": {
+            "path": str(gpath),
+            "exists": gpath.is_file(),
+            "version": global_cfg_version,
+            "expected_version": TOOL_VERSION,
+            "drifted": global_cfg_drifted,
+            "reasons": global_cfg_reasons,
+        },
+    }
+
+
+def _make_doctor_finding(
+    *,
+    group_key: str,
+    kind: str,
+    title: str,
+    severity: str,
+    message: str,
+    fix_command: str,
+    path: str,
+    names: list[str],
+    entries: list[dict[str, Any]],
+    acks: dict[str, dict[str, Any]],
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Construct a standardized doctor finding dict with ack/unack support."""
+    acked, ack_info = is_finding_acknowledged(kind, names, entries, acks, group_key=group_key)
+    eff_severity = "info" if acked else severity
+    finding: dict[str, Any] = {
+        "id": group_key,
+        "group_key": group_key,
+        "group": f"project:{kind}",
+        "title": title,
+        "kind": kind,
+        "names": names,
+        "path": path,
+        "severity": eff_severity,
+        "acknowledged": acked,
+        "message": message,
+        "fix": fix_command,
+        "fix_command": fix_command,
+        "locations": [{"scope": "project", "path": path}],
+        "entries": entries,
+        "fixable": True,
+        "actionable": True,
+        "actions": [{"action": "fix", "command": fix_command, "path": path}],
+        "advice": [message],
+        "count": 1,
+    }
+    if ack_info:
+        finding["ack_info"] = ack_info
+    if extra:
+        finding.update(extra)
+    return finding
+
+
+def inspect_project_doctor(
+    workspace: pathlib.Path | str | None = None,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    """Run project & global convention drift checks (Task 19.2 / N078).
+
+    Detects:
+      1. Missing or legacy project configuration (`missing-project-config` / `legacy-project-config`)
+      2. Unregistered or stale workspace in the registry (`unregistered-workspace`)
+      3. `tasks/00-INDEX.md` missing generated-region markers or out of sync (`index-missing-markers` / `index-out-of-sync` / `missing-index`)
+      4. Stale rendered `AGENTS.md` or duplicated hand-written orchestration blocks (`stale-agents-md` / `duplicated-agents-md`)
+      5. Task header fields from older schemas / `tasks validate` errors (`legacy-task-headers`)
+      6. Missing or outdated `tasks/convention_version` (`convention-version-drift`)
+      7. Global skills or global config of a different version from the tool (`global-skill-drift` / `global-config-drift`)
+    """
+    h = (home or get_home_dir()).resolve()
+    ws = pathlib.Path(workspace or ".").resolve()
+    tasks_dir = ws / "tasks"
+    gpath = (
+        pathlib.Path(global_config).resolve()
+        if global_config is not None
+        else (get_config_dir(h) / "orchestration.toml")
+    )
+
+    acks = load_doctor_acks(h)
+    te = _load_tasks_engine()
+    oc = _load_orchestration_config()
+    reg = _load_orchestration_registry()
+
+    findings: list[dict[str, Any]] = []
+
+    # ------------------------------------------------------------------
+    # 1. Convention version check (`tasks/convention_version`)
+    # ------------------------------------------------------------------
+    conv_file = tasks_dir / "convention_version"
+    recorded_conv: str | None = None
+    if te is not None and tasks_dir.is_dir():
+        recorded_conv = te.read_convention_version(tasks_dir)
+    elif conv_file.is_file():
+        try:
+            recorded_conv = conv_file.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+        except Exception:
+            recorded_conv = None
+
+    conv_up_to_date = (recorded_conv == CONVENTION_VERSION)
+    if not conv_up_to_date:
+        conv_msg = (
+            f"Project convention_version is not recorded in {conv_file} "
+            f"(tool convention_version is {CONVENTION_VERSION}). "
+            f"Fix: ai-orch upgrade --project {ws}"
+            if recorded_conv is None
+            else f"Project convention_version is {recorded_conv!r}, "
+            f"expected tool convention_version {CONVENTION_VERSION!r}. "
+            f"Fix: ai-orch upgrade --project {ws}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:convention-version",
+                kind="convention-version-drift",
+                title="Project convention_version missing or outdated",
+                severity="warning",
+                message=conv_msg,
+                fix_command=f"ai-orch upgrade --project {ws}",
+                path=str(conv_file),
+                names=["convention_version"],
+                entries=[{
+                    "name": "convention_version",
+                    "path": str(conv_file),
+                    "scope": "project",
+                    "state": "missing" if recorded_conv is None else "outdated",
+                    "installed_hash": recorded_conv or "missing",
+                }],
+                acks=acks,
+                extra={
+                    "current_version": recorded_conv,
+                    "expected_version": CONVENTION_VERSION,
+                },
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 2. Project config check (`missing-project-config` / `legacy-project-config`)
+    # ------------------------------------------------------------------
+    proj_cfg_info = _inspect_project_config_env(ws, h, gpath if gpath.is_file() else None)
+    if not proj_cfg_info.get("exists"):
+        cfg_fix = f"ai-orch config init-project --workspace {ws}"
+        cfg_msg = (
+            f"Missing project orchestration configuration for {ws.name} "
+            f"(expected at {proj_cfg_info.get('write_path')}). Fix: {cfg_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:missing-project-config",
+                kind="missing-project-config",
+                title="Missing project orchestration configuration",
+                severity="warning",
+                message=cfg_msg,
+                fix_command=cfg_fix,
+                path=str(proj_cfg_info.get("write_path") or (ws / ".ai-orchestration.local.toml")),
+                names=["orchestration.toml"],
+                entries=[{
+                    "name": "orchestration.toml",
+                    "path": str(proj_cfg_info.get("write_path") or (ws / ".ai-orchestration.local.toml")),
+                    "scope": "project",
+                    "state": "missing",
+                    "installed_hash": "missing",
+                }],
+                acks=acks,
+            )
+        )
+    elif proj_cfg_info.get("is_legacy") or proj_cfg_info.get("legacy_paths"):
+        legacy_p = proj_cfg_info.get("path") if proj_cfg_info.get("is_legacy") else proj_cfg_info["legacy_paths"][0]
+        cfg_fix = f"ai-orch upgrade --project {ws}"
+        cfg_msg = (
+            f"Project configuration is at legacy location {legacy_p} "
+            f"(canonical location: {proj_cfg_info.get('write_path')}). Fix: {cfg_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:legacy-project-config",
+                kind="legacy-project-config",
+                title="Project configuration in legacy location",
+                severity="warning",
+                message=cfg_msg,
+                fix_command=cfg_fix,
+                path=str(legacy_p),
+                names=["orchestration.toml"],
+                entries=[{
+                    "name": "orchestration.toml",
+                    "path": str(legacy_p),
+                    "scope": "project",
+                    "state": "legacy",
+                }],
+                acks=acks,
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 3. Workspace registration check (`unregistered-workspace`)
+    # ------------------------------------------------------------------
+    ws_registered = False
+    ws_stale = False
+    ws_stale_reasons: list[str] = []
+    ws_record: dict[str, Any] | None = None
+    if reg is not None:
+        try:
+            cdir = get_config_dir(h)
+            nearest_ws, proj_row = reg.resolve_workspace_for_path(ws, config_dir=cdir)
+            if nearest_ws is not None:
+                n_path = pathlib.Path(nearest_ws["canonical_path"]).resolve()
+                if n_path == ws:
+                    ws_registered = True
+                    ws_record = nearest_ws
+                elif proj_row is not None:
+                    p_path = (n_path / proj_row["rel_path"]).resolve()
+                    if p_path == ws:
+                        ws_registered = True
+                        ws_record = nearest_ws
+                if ws_registered:
+                    try:
+                        st = ws.stat()
+                        if nearest_ws.get("device") != st.st_dev or nearest_ws.get("inode") != st.st_ino:
+                            ws_stale = True
+                            ws_stale_reasons.append("device/inode mismatch")
+                    except OSError:
+                        ws_stale = True
+                        ws_stale_reasons.append("workspace directory inaccessible")
+        except Exception:
+            ws_registered = False
+
+    if not ws_registered or ws_stale:
+        reg_fix = f"ai-orch workspace register {ws} --apply"
+        reg_msg = (
+            f"Workspace {ws} is not registered in the workspace registry. Fix: {reg_fix}"
+            if not ws_registered
+            else f"Workspace registration for {ws} is stale ({', '.join(ws_stale_reasons)}). Fix: {reg_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:unregistered-workspace",
+                kind="unregistered-workspace",
+                title="Workspace not registered in registry" if not ws_registered else "Stale workspace registration",
+                severity="warning",
+                message=reg_msg,
+                fix_command=reg_fix,
+                path=str(ws),
+                names=[ws.name],
+                entries=[{
+                    "name": ws.name,
+                    "path": str(ws),
+                    "scope": "project",
+                    "state": "unregistered" if not ws_registered else "stale",
+                    "installed_hash": "unregistered" if not ws_registered else "stale",
+                }],
+                acks=acks,
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 4. `tasks/00-INDEX.md` markers & sync check (`index-missing-markers`)
+    # ------------------------------------------------------------------
+    idx_path = tasks_dir / "00-INDEX.md"
+    idx_has_markers = False
+    idx_in_sync = False
+    if tasks_dir.is_dir() and te is not None:
+        if not idx_path.is_file():
+            idx_fix = f"ai-orch tasks upgrade --tasks-dir {tasks_dir}"
+            idx_msg = f"Missing task index {idx_path}. Fix: {idx_fix}"
+            findings.append(
+                _make_doctor_finding(
+                    group_key="project-drift:index-missing-markers",
+                    kind="index-missing-markers",
+                    title="Task index 00-INDEX.md is missing",
+                    severity="error",
+                    message=idx_msg,
+                    fix_command=idx_fix,
+                    path=str(idx_path),
+                    names=["00-INDEX.md"],
+                    entries=[{
+                        "name": "00-INDEX.md",
+                        "path": str(idx_path),
+                        "scope": "project",
+                        "state": "missing",
+                        "installed_hash": "missing",
+                    }],
+                    acks=acks,
+                )
+            )
+        else:
+            idx_text = idx_path.read_text(encoding="utf-8", errors="replace")
+            idx_has_markers = bool(te.has_generated_markers(idx_text))
+            if not idx_has_markers:
+                idx_fix = f"ai-orch tasks sync-index --tasks-dir {tasks_dir} --adopt --apply"
+                idx_msg = (
+                    f"{idx_path} has no generated-region markers (<!-- ai-orch:generated ... -->). "
+                    f"Fix: {idx_fix}"
+                )
+                findings.append(
+                    _make_doctor_finding(
+                        group_key="project-drift:index-missing-markers",
+                        kind="index-missing-markers",
+                        title="00-INDEX.md has no generated-region markers",
+                        severity="error",
+                        message=idx_msg,
+                        fix_command=idx_fix,
+                        path=str(idx_path),
+                        names=["00-INDEX.md"],
+                        entries=[{
+                            "name": "00-INDEX.md",
+                            "path": str(idx_path),
+                            "scope": "project",
+                            "state": "missing-markers",
+                        }],
+                        acks=acks,
+                    )
+                )
+            else:
+                try:
+                    rendered_idx = te.render_synced_index(tasks_dir, idx_text, adopt=False)
+                    idx_in_sync = (rendered_idx.strip() == idx_text.strip())
+                except Exception:
+                    idx_in_sync = True
+                if not idx_in_sync:
+                    idx_fix = f"ai-orch tasks sync-index --tasks-dir {tasks_dir} --apply"
+                    idx_msg = f"{idx_path} is out of sync with task files on disk. Fix: {idx_fix}"
+                    findings.append(
+                        _make_doctor_finding(
+                            group_key="project-drift:index-out-of-sync",
+                            kind="index-out-of-sync",
+                            title="00-INDEX.md is out of sync with disk",
+                            severity="warning",
+                            message=idx_msg,
+                            fix_command=idx_fix,
+                            path=str(idx_path),
+                            names=["00-INDEX.md"],
+                            entries=[{
+                                "name": "00-INDEX.md",
+                                "path": str(idx_path),
+                                "scope": "project",
+                                "state": "out-of-sync",
+                            }],
+                            acks=acks,
+                        )
+                    )
+
+    # ------------------------------------------------------------------
+    # 5. `AGENTS.md` check (stale rendered block or duplicated hand-written blocks)
+    # ------------------------------------------------------------------
+    agents_md_path = ws / "AGENTS.md"
+    tasks_agents_path = tasks_dir / "AGENTS.md"
+    agents_stale_rendered = False
+    agents_dup_sections: list[str] = []
+    tasks_agents_stale = False
+
+    if oc is not None:
+        try:
+            eff_gpath = gpath if gpath.is_file() else None
+            cfg, _ = oc.resolve_config(eff_gpath, ws)
+            expected_block = oc.render_agents_md_block(cfg, ws, eff_gpath)
+            if not agents_md_path.is_file():
+                agents_stale_rendered = True
+            else:
+                existing_agents_text = agents_md_path.read_text(encoding="utf-8", errors="replace")
+                agents_dup_sections = oc.find_duplicated_handwritten_agents_sections(existing_agents_text)
+                has_begin_end = (
+                    oc.BEGIN_MARKER in existing_agents_text and oc.END_MARKER in existing_agents_text
+                )
+                if not has_begin_end:
+                    agents_stale_rendered = True
+                else:
+                    replaced = oc.inject_or_replace_agents_block(existing_agents_text, expected_block)
+                    if replaced != existing_agents_text:
+                        agents_stale_rendered = True
+        except Exception:
+            pass
+
+    if te is not None and tasks_dir.is_dir() and tasks_agents_path.is_file():
+        try:
+            t_agents_text = tasks_agents_path.read_text(encoding="utf-8", errors="replace")
+            if te.render_upgraded_agents_md(t_agents_text, tasks_dir=tasks_dir) != t_agents_text:
+                tasks_agents_stale = True
+        except Exception:
+            pass
+
+    if agents_stale_rendered or agents_dup_sections or tasks_agents_stale:
+        agents_fix = (
+            f"ai-orch upgrade --project {ws}"
+            if agents_dup_sections or tasks_agents_stale
+            else f"ai-orch config render-agents-md --workspace {ws} --apply"
+        )
+        detail_parts: list[str] = []
+        if not agents_md_path.is_file():
+            detail_parts.append(f"{agents_md_path} is missing")
+        else:
+            if agents_stale_rendered:
+                detail_parts.append(f"{agents_md_path} rendered block is missing or stale")
+            if agents_dup_sections:
+                detail_parts.append(
+                    f"{agents_md_path} has duplicated hand-written orchestration blocks outside markers "
+                    f"({', '.join(agents_dup_sections)})"
+                )
+        if tasks_agents_stale:
+            detail_parts.append(f"{tasks_agents_path} managed task-pipeline block is missing or outdated")
+
+        agents_kind = "duplicated-agents-md" if (agents_dup_sections and not agents_stale_rendered) else "stale-agents-md"
+        agents_msg = "; ".join(detail_parts) + f". Fix: {agents_fix}"
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:stale-agents-md",
+                kind=agents_kind,
+                title="Stale or duplicated rendered AGENTS.md",
+                severity="warning",
+                message=agents_msg,
+                fix_command=agents_fix,
+                path=str(agents_md_path),
+                names=["AGENTS.md"],
+                entries=[{
+                    "name": "AGENTS.md",
+                    "path": str(agents_md_path),
+                    "scope": "project",
+                    "state": "duplicated" if agents_dup_sections else "stale",
+                    "installed_hash": compute_target_hash(agents_md_path) or "missing",
+                }],
+                acks=acks,
+                extra={
+                    "stale_rendered": agents_stale_rendered,
+                    "duplicated_blocks": bool(agents_dup_sections),
+                    "duplicated_sections": agents_dup_sections,
+                    "tasks_agents_stale": tasks_agents_stale,
+                    "subkinds": (
+                        (["stale-agents-md"] if agents_stale_rendered else [])
+                        + (["duplicated-agents-md"] if agents_dup_sections else [])
+                        + (["stale-tasks-agents-md"] if tasks_agents_stale else [])
+                    ),
+                },
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 6. Task header fields from older schemas & validation errors (`legacy-task-headers`)
+    # ------------------------------------------------------------------
+    val_errors: list[str] = []
+    val_warnings: list[str] = []
+    header_issues: list[str] = []
+    if te is not None and tasks_dir.is_dir():
+        try:
+            val_errors, val_warnings, emergent, _ = te.validate_tasks_tree(tasks_dir)
+            for err in val_errors:
+                header_issues.append(err)
+            for warn in val_warnings:
+                if (
+                    "is missing 'approval' header field" in warn
+                    or "non-canonical state spelling" in warn
+                    or "header field" in warn
+                ):
+                    header_issues.append(warn)
+            for em in emergent:
+                vp = em.get("verification_pending")
+                st_raw = (em.get("headers", {}).get("state") or "").strip().lower()
+                if vp and st_raw not in ("delivered", ""):
+                    header_issues.append(
+                        f"{em.get('rel_path')}: residual 'verification pending:' line on task in state {st_raw!r}"
+                    )
+        except Exception as exc:
+            header_issues.append(f"tasks validation failed: {exc}")
+
+    if header_issues:
+        hdr_severity = "error" if val_errors else "warning"
+        hdr_fix = f"ai-orch upgrade --project {ws}"
+        sample = "; ".join(header_issues[:3])
+        more = f" (+{len(header_issues) - 3} more)" if len(header_issues) > 3 else ""
+        hdr_msg = (
+            f"Found {len(header_issues)} task header / schema validation issue(s) "
+            f"({len(val_errors)} error(s)): {sample}{more}. Fix: {hdr_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="project-drift:legacy-task-headers",
+                kind="legacy-task-headers",
+                title="Task header fields from older schemas or validation errors",
+                severity=hdr_severity,
+                message=hdr_msg,
+                fix_command=hdr_fix,
+                path=str(tasks_dir),
+                names=["tasks"],
+                entries=[{
+                    "name": "tasks",
+                    "path": str(tasks_dir),
+                    "scope": "project",
+                    "state": "invalid-headers",
+                    "installed_hash": hashlib.sha256("\n".join(sorted(header_issues)).encode("utf-8")).hexdigest(),
+                }],
+                acks=acks,
+                extra={
+                    "error_count": len(val_errors),
+                    "issue_count": len(header_issues),
+                    "errors": val_errors,
+                    "issues": header_issues,
+                },
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 7. Global skills & global config version drift (`global-skill-drift` / `global-config-drift`)
+    # ------------------------------------------------------------------
+    global_drift = inspect_global_skills_and_config_drift(h, gpath if gpath.is_file() else None)
+    g_skills = global_drift["skills"]
+    if g_skills["drifted"]:
+        sk_fix = "ai-orch env install-skills --scope global --overwrite"
+        sk_reasons = "; ".join(g_skills["reasons"][:4])
+        sk_msg = (
+            f"Global skill version/content drift detected across {len(g_skills['drifted_names'])} skill(s) "
+            f"(tool version {TOOL_VERSION}): {sk_reasons}. Fix: {sk_fix}"
+        )
+        sk_entries = [
+            {
+                "name": item["name"],
+                "path": item["path"],
+                "assistant": item.get("assistant", "global"),
+                "scope": "global",
+                "state": item.get("state", "drifted"),
+                "installed_hash": f"{item.get('installed_version') or ''}:{item.get('installed_hash') or ''}",
+            }
+            for item in g_skills["drifted_skills"]
+        ]
+        findings.append(
+            _make_doctor_finding(
+                group_key="global-drift:skills",
+                kind="global-skill-drift",
+                title="Global skills version or content drift",
+                severity="warning",
+                message=sk_msg,
+                fix_command=sk_fix,
+                path=str(h),
+                names=g_skills["drifted_names"],
+                entries=sk_entries,
+                acks=acks,
+                extra={
+                    "tool_version": TOOL_VERSION,
+                    "versions_found": g_skills["versions_found"],
+                    "drifted_skills": g_skills["drifted_skills"],
+                },
+            )
+        )
+
+    g_cfg = global_drift["global_config"]
+    if g_cfg["drifted"]:
+        gcfg_fix = f"ai-orch config init-global --global-config {g_cfg['path']} --force"
+        gcfg_msg = (
+            f"Global configuration at {g_cfg['path']} has version/schema drift "
+            f"({'; '.join(g_cfg['reasons'])}). Fix: {gcfg_fix}"
+        )
+        findings.append(
+            _make_doctor_finding(
+                group_key="global-drift:config",
+                kind="global-config-drift",
+                title="Global configuration version or schema drift",
+                severity="warning",
+                message=gcfg_msg,
+                fix_command=gcfg_fix,
+                path=g_cfg["path"],
+                names=["global:orchestration.toml"],
+                entries=[{
+                    "name": "global:orchestration.toml",
+                    "path": g_cfg["path"],
+                    "scope": "global",
+                    "state": "drifted",
+                }],
+                acks=acks,
+                extra={
+                    "current_version": g_cfg["version"],
+                    "expected_version": TOOL_VERSION,
+                    "reasons": g_cfg["reasons"],
+                },
+            )
+        )
+
+    # Sort findings deterministically by (severity_rank, group_key)
+    findings.sort(key=lambda item: (SEVERITY_RANK.get(item.get("severity", "info"), 99), item.get("group_key", "")))
+
+    summary_counts: dict[str, int] = {
+        "error": 0,
+        "warning": 0,
+        "info": 0,
+        "neutral": 0,
+        "acknowledged": 0,
+        "total": len(findings),
+        "total_groups": len(findings),
+    }
+    for f in findings:
+        sev = f.get("severity", "info")
+        if sev in summary_counts:
+            summary_counts[sev] += 1
+        if f.get("acknowledged"):
+            summary_counts["acknowledged"] += 1
+
+    drifted = (summary_counts["error"] + summary_counts["warning"]) > 0
+
+    return {
+        "ok": not drifted,
+        "drifted": drifted,
+        "project": str(ws),
+        "project_path": str(ws),
+        "workspace": str(ws),
+        "tasks_dir": str(tasks_dir),
+        "convention_version": recorded_conv,
+        "tool_convention_version": CONVENTION_VERSION,
+        "convention_version_info": {
+            "current": recorded_conv,
+            "recorded": recorded_conv,
+            "expected": CONVENTION_VERSION,
+            "tool": CONVENTION_VERSION,
+            "path": str(conv_file),
+            "exists": conv_file.is_file(),
+            "up_to_date": conv_up_to_date,
+        },
+        "findings": findings,
+        "finding_groups": findings,
+        "groups": findings,
+        "summary": summary_counts,
+        "severity_counts": dict(summary_counts),
+        "checks": {
+            "convention_version": {
+                "ok": conv_up_to_date,
+                "current": recorded_conv,
+                "expected": CONVENTION_VERSION,
+                "path": str(conv_file),
+            },
+            "project_config": {
+                "ok": bool(proj_cfg_info.get("exists")) and not bool(proj_cfg_info.get("is_legacy")) and not bool(proj_cfg_info.get("legacy_paths")),
+                "path": str(proj_cfg_info["path"]) if proj_cfg_info.get("path") else None,
+                "write_path": str(proj_cfg_info["write_path"]) if proj_cfg_info.get("write_path") else None,
+                "exists": bool(proj_cfg_info.get("exists")),
+                "is_legacy": bool(proj_cfg_info.get("is_legacy")),
+                "label": proj_cfg_info.get("label"),
+                "legacy_paths": [str(p) for p in proj_cfg_info.get("legacy_paths", [])],
+            },
+            "workspace_registry": {
+                "ok": ws_registered and not ws_stale,
+                "registered": ws_registered,
+                "stale": ws_stale,
+                "reasons": ws_stale_reasons,
+            },
+            "index_markers": {
+                "ok": idx_path.is_file() and idx_has_markers and idx_in_sync,
+                "exists": idx_path.is_file(),
+                "has_markers": idx_has_markers,
+                "in_sync": idx_in_sync,
+                "path": str(idx_path),
+            },
+            "agents_md": {
+                "ok": not agents_stale_rendered and not agents_dup_sections and not tasks_agents_stale,
+                "path": str(agents_md_path),
+                "exists": agents_md_path.is_file(),
+                "stale_rendered": agents_stale_rendered,
+                "duplicated_blocks": bool(agents_dup_sections),
+                "duplicated_sections": agents_dup_sections,
+                "tasks_agents_stale": tasks_agents_stale,
+            },
+            "task_headers": {
+                "ok": len(header_issues) == 0,
+                "error_count": len(val_errors),
+                "issue_count": len(header_issues),
+                "errors": val_errors,
+                "issues": header_issues,
+            },
+            "global_skills": g_skills,
+            "global_config": g_cfg,
+        },
+    }
+
+
+def is_drift_warning_disabled(
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+    argv: list[str] | None = None,
+) -> bool:
+    """Check if the one-line project drift warning is disabled via CLI flag, env var, or config."""
+    if argv:
+        if "--no-drift-warning" in argv or "--quiet-drift" in argv:
+            return True
+
+    env_no = os.environ.get("AI_ORCH_NO_DRIFT_WARNING", "").strip().lower()
+    if env_no in ("1", "true", "yes", "on"):
+        return True
+    env_dw = os.environ.get("AI_ORCH_DRIFT_WARNING", "").strip().lower()
+    if env_dw in ("0", "false", "no", "off", "disabled"):
+        return True
+
+    oc = _load_orchestration_config()
+    if oc is not None:
+        h = (home or get_home_dir()).resolve()
+        ws = pathlib.Path(workspace).resolve() if workspace else None
+        gpath = (
+            pathlib.Path(global_config).resolve()
+            if global_config is not None
+            else (get_config_dir(h) / "orchestration.toml")
+        )
+        candidates: list[pathlib.Path] = []
+        if gpath.is_file():
+            candidates.append(gpath)
+        if ws is not None:
+            try:
+                pinfo = oc.inspect_project_config(ws, gpath if gpath.is_file() else None)
+                if pinfo.get("exists") and pinfo.get("path"):
+                    candidates.append(pathlib.Path(pinfo["path"]))
+            except Exception:
+                pass
+        for cpath in candidates:
+            try:
+                data = oc.load_toml_file(cpath)
+                for sec_name in ("doctor", "project"):
+                    sec = data.get(sec_name)
+                    if isinstance(sec, dict):
+                        for k in ("drift_warning", "warn_on_drift", "enabled"):
+                            if k in sec and sec[k] is False:
+                                return True
+                for k in ("drift_warning", "warn_on_drift"):
+                    if k in data and data[k] is False:
+                        return True
+            except Exception:
+                pass
+    return False
+
+
+def quick_check_project_drift(
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    """Fast drift check for emitting a single-line warning from any ai-orch command."""
+    ws = pathlib.Path(workspace or ".").resolve()
+    # Walk up to nearest parent with tasks/ if ws itself has no tasks/
+    cur = ws
+    target_ws: pathlib.Path | None = None
+    while True:
+        if (cur / "tasks").is_dir():
+            target_ws = cur
+            break
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+
+    if target_ws is None:
+        return {"has_tasks": False, "drifted": False, "reasons": [], "project": str(ws)}
+
+    # Skip warning inside the ai-orchestration tool repo itself unless convention_version is explicitly set and mismatched
+    if (target_ws / "bin" / "ai-orch").is_file() and (target_ws / "scripts" / "orchestration_env.py").is_file():
+        conv_file = target_ws / "tasks" / "convention_version"
+        if not conv_file.is_file():
+            return {"has_tasks": True, "drifted": False, "reasons": [], "project": str(target_ws)}
+
+    h = (home or get_home_dir()).resolve()
+    tasks_dir = target_ws / "tasks"
+    gpath = (
+        pathlib.Path(global_config).resolve()
+        if global_config is not None
+        else (get_config_dir(h) / "orchestration.toml")
+    )
+
+    reasons: list[str] = []
+    conv_file = tasks_dir / "convention_version"
+    recorded_conv: str | None = None
+    if conv_file.is_file():
+        try:
+            raw = conv_file.read_text(encoding="utf-8").strip()
+            if raw:
+                recorded_conv = raw.splitlines()[0].strip()
+        except Exception:
+            pass
+    if recorded_conv != CONVENTION_VERSION:
+        reasons.append(f"convention_version={recorded_conv or 'unrecorded'} vs tool {CONVENTION_VERSION}")
+
+    proj_cfg_info = _inspect_project_config_env(target_ws, h, gpath if gpath.is_file() else None)
+    if not proj_cfg_info.get("exists"):
+        reasons.append("missing project config")
+    elif proj_cfg_info.get("is_legacy"):
+        reasons.append("legacy project config location")
+
+    idx_path = tasks_dir / "00-INDEX.md"
+    if not idx_path.is_file():
+        reasons.append("missing 00-INDEX.md")
+    else:
+        try:
+            idx_text = idx_path.read_text(encoding="utf-8", errors="replace")
+            if "<!-- ai-orch:generated" not in idx_text:
+                reasons.append("00-INDEX.md missing markers")
+        except Exception:
+            pass
+
+    agents_md_path = target_ws / "AGENTS.md"
+    if not agents_md_path.is_file():
+        reasons.append("missing AGENTS.md")
+    else:
+        try:
+            ag_text = agents_md_path.read_text(encoding="utf-8", errors="replace")
+            if "<!-- BEGIN ai-orchestration -->" not in ag_text:
+                reasons.append("AGENTS.md missing managed block")
+            else:
+                oc = _load_orchestration_config()
+                if oc is not None and oc.find_duplicated_handwritten_agents_sections(ag_text):
+                    reasons.append("AGENTS.md has duplicated hand-written blocks")
+        except Exception:
+            pass
+
+    return {
+        "has_tasks": True,
+        "drifted": len(reasons) > 0,
+        "reasons": reasons,
+        "project": str(target_ws),
+        "project_name": target_ws.name,
+        "convention_version": recorded_conv,
+        "tool_convention_version": CONVENTION_VERSION,
+    }
+
+
+def format_project_drift_warning(drift_info: dict[str, Any]) -> str | None:
+    """Format a single-line stderr drift warning when a project has convention drift."""
+    if not drift_info.get("drifted"):
+        return None
+    proj_name = drift_info.get("project_name") or pathlib.Path(drift_info.get("project", ".")).name
+    reasons = drift_info.get("reasons", [])
+    summary = ", ".join(reasons[:3])
+    if len(reasons) > 3:
+        summary += f", +{len(reasons) - 3} more"
+    return (
+        f"[ai-orch] warning: project '{proj_name}' has convention drift ({summary}) — "
+        f"run 'ai-orch doctor' or 'ai-orch upgrade' "
+        f"(disable with AI_ORCH_NO_DRIFT_WARNING=1 or [doctor] drift_warning = false)."
+    )
+
+
+def maybe_emit_drift_warning(
+    workspace: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+    argv: list[str] | None = None,
+    stream: Any = None,
+) -> str | None:
+    """Check if the active project has convention drift and print a 1-line warning to stderr unless disabled."""
+    if is_drift_warning_disabled(workspace=workspace, home=home, global_config=global_config, argv=argv):
+        return None
+    info = quick_check_project_drift(workspace=workspace, home=home, global_config=global_config)
+    line = format_project_drift_warning(info)
+    if line:
+        out = stream if stream is not None else sys.stderr
+        print(line, file=out)
+    return line
+
+
+def create_2026_10_17_fixture(project_dir: pathlib.Path) -> pathlib.Path:
+    """Construct a '2026-10-17 style' drifted project fixture reconstructed from N078:
+      - No project orchestration.toml config
+      - Workspace not registered in the registry
+      - tasks/00-INDEX.md without <!-- ai-orch:generated ... --> markers
+      - AGENTS.md containing custom project header + old hand-written orchestration blocks
+        followed by a stale 2026-10-17 rendered block (duplicated content) + custom footer
+      - tasks/AGENTS.md without <!-- ai-orch:managed begin --> markers
+      - Task files with header fields from older schemas (unknown fields, wrong order, missing mandatory fields,
+        residual 'verification pending:' on a done task, use case missing 'approval' field)
+      - No tasks/convention_version recorded
+    """
+    proj = pathlib.Path(project_dir).resolve()
+    tasks_dir = proj / "tasks"
+    (tasks_dir / "scrapers").mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "done" / "scrapers").mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "use-cases").mkdir(parents=True, exist_ok=True)
+
+    # 1. AGENTS.md: custom project intro + duplicated hand-written 2026-10-17 orchestration sections
+    #    + stale rendered block (referencing tasks/orchestration.toml) + custom project footer
+    agents_md_content = (
+        "# ricerca_auto — Project Architecture & Notes\n\n"
+        " Project-specific domain rules and scraper notes that must remain intact.\n\n"
+        "## 1. Required Skills\n\n"
+        "| Skill | Role |\n"
+        "| :--- | :--- |\n"
+        "| `orchestration-workflow` | Old hand-written table from 2026-10-17 |\n\n"
+        "## 2. Core Operating Rules\n\n"
+        "### Rule 1: Keep the Main Session Free (Orchestrate, Don't Implement)\n\n"
+        "Hand-written Rule 1 before markers were introduced.\n\n"
+        "### Rule 2: Define Execution Tasks Before Delegating\n\n"
+        "Hand-written Rule 2.\n\n"
+        "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate\n\n"
+        "Hand-written lifecycle section.\n\n"
+        "<!-- BEGIN ai-orchestration -->\n"
+        "# Agent Orchestration & Development Guidelines\n"
+        "<!-- Auto-generated from orchestration.toml (2026-10-17 commit 94f31dd). -->\n"
+        "<!-- Edit tasks/orchestration.toml and re-run render-agents-md. -->\n\n"
+        "## 1. Required Skills\n\n"
+        "Stale 2026-10-17 rendered block.\n"
+        "<!-- END ai-orchestration -->\n\n"
+        "## Project Database Notes\n\n"
+        "PostgreSQL port 5432; keep this footer byte-for-byte.\n"
+    )
+    (proj / "AGENTS.md").write_text(agents_md_content, encoding="utf-8")
+
+    # 2. tasks/AGENTS.md without managed markers
+    (tasks_dir / "AGENTS.md").write_text(
+        "# tasks/ — 2026-10-17 hand-written convention\n\n"
+        "Legacy unmarked tasks/AGENTS.md referencing macroplan-authoring.\n",
+        encoding="utf-8",
+    )
+
+    # 3. tasks/00-INDEX.md without generated-region markers
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n"
+        "## Next up\n\n"
+        "| Id | Priority | Task | Executor | Handoff |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| T001 | P0 | [AutoScout24 adapter](scrapers/T001-autoscout-adapter.md) | kilo | - |\n\n"
+        "## Tasks by category\n\n"
+        "### scrapers\n\n"
+        "| Id | Priority | Task | State | Executor | Depends on |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| T001 | P0 | [AutoScout24 adapter](scrapers/T001-autoscout-adapter.md) | in progress | kilo | - |\n\n"
+        "## Decisions waiting\n\n"
+        "| Id | Question | Blocks | Owner |\n"
+        "| --- | --- | --- | --- |\n"
+        "| - | None. | - | - |\n\n"
+        "## Done\n\n"
+        "| Id | Task | Result | Closed |\n"
+        "| --- | --- | --- | --- |\n"
+        "| T002 | [Subito parser](done/scrapers/T002-subito-parser.md) | Merged | 2026-10-17 |\n",
+        encoding="utf-8",
+    )
+
+    # 4. Emergent task with legacy 2026-10-17 header schema (unknown field 'status', missing mandatory fields, out-of-order optional field)
+    (tasks_dir / "scrapers" / "T001-autoscout-adapter.md").write_text(
+        "# T001: AutoScout24 adapter\n\n"
+        "- id: T001\n"
+        "- title: AutoScout24 adapter\n"
+        "- short: AutoScout24 adapter\n"
+        "- category: scrapers\n"
+        "- priority: P0\n"
+        "- status: in progress\n"
+        "- state: in progress\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- paths: src/scrapers/autoscout.py\n"
+        "- handoff: -\n\n"
+        "## Goal\n\n"
+        "Implement the AutoScout24 scraper adapter.\n\n"
+        "## Context\n\n"
+        "- Read `src/scrapers/autoscout.py`.\n\n"
+        "## Steps\n\n"
+        "- [ ] Implement parser.\n\n"
+        "## Verification\n\n"
+        "- `pytest tests/test_autoscout.py` passes.\n\n"
+        "## Progress\n\n"
+        "- 2026-10-17: started.\n",
+        encoding="utf-8",
+    )
+
+    # 5. Closed task with leftover 'verification pending:' line and missing mandatory header fields
+    (tasks_dir / "done" / "scrapers" / "T002-subito-parser.md").write_text(
+        "# T002: Subito parser\n\n"
+        "- id: T002\n"
+        "- title: Subito parser\n"
+        "- category: scrapers\n"
+        "- priority: P1\n"
+        "- priority-reason: core scraper\n"
+        "- next-up: no\n"
+        "- state: done\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: src/scrapers/subito.py\n"
+        "- handoff: -\n"
+        "verification pending: pytest tests/test_subito.py (verify-by: claude:deep-reasoning)\n\n"
+        "## Goal\n\n"
+        "Parse Subito listings.\n\n"
+        "## Context\n\n"
+        "- `src/scrapers/subito.py`.\n\n"
+        "## Steps\n\n"
+        "- [x] Done.\n\n"
+        "## Verification\n\n"
+        "- `pytest tests/test_subito.py` passes.\n\n"
+        "## Progress\n\n"
+        "- 2026-10-17: done.\n\n"
+        "## Result\n\n"
+        "Merged.\n",
+        encoding="utf-8",
+    )
+
+    # 6. Use case with legacy 2026-10-17 'status: verified' instead of 'approval: approved'
+    (tasks_dir / "use-cases" / "UC001-search-cars.md").write_text(
+        "# UC001: Search cars across portals\n\n"
+        "- id: UC001\n"
+        "- status: verified\n"
+        "- priority: P0\n"
+        "- verification-type: e2e-test\n"
+        "- linked-tasks: T001, T002\n\n"
+        "## Actor\n\n"
+        "Buyer searching for used cars.\n\n"
+        "## Goal\n\n"
+        "Find matching cars.\n\n"
+        "## Preconditions\n\n"
+        "- Scrapers configured.\n\n"
+        "## Main Flow\n\n"
+        "1. Run search.\n\n"
+        "## Acceptance Criteria\n\n"
+        "- Results returned.\n\n"
+        "## Verification Spec\n\n"
+        "- `pytest`.\n\n"
+        "## Evidence Log\n\n"
+        "- 2026-10-17: verified.\n",
+        encoding="utf-8",
+    )
+
+    return proj
+
+
+def create_updated_project_fixture(
+    project_dir: pathlib.Path,
+    home: pathlib.Path | None = None,
+    global_config: pathlib.Path | None = None,
+) -> pathlib.Path:
+    """Create a fully up-to-date project fixture that passes `ai-orch doctor` with zero findings."""
+    h = (home or get_home_dir()).resolve()
+    proj = pathlib.Path(project_dir).resolve()
+    tasks_dir = proj / "tasks"
+    (tasks_dir / "scrapers").mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
+
+    oc = _load_orchestration_config()
+    te = _load_tasks_engine()
+    reg = _load_orchestration_registry()
+
+    gpath = (
+        pathlib.Path(global_config).resolve()
+        if global_config is not None
+        else (get_config_dir(h) / "orchestration.toml")
+    )
+    if oc is not None and not gpath.is_file():
+        gpath.parent.mkdir(parents=True, exist_ok=True)
+        oc.write_file_atomic(gpath, oc.dump_toml(oc.DEFAULT_GLOBAL_CONFIG))
+
+    # 1. Valid emergent task in current schema
+    (tasks_dir / "scrapers" / "T001-autoscout-adapter.md").write_text(
+        "# T001: AutoScout24 adapter\n\n"
+        "- id: T001\n"
+        "- title: AutoScout24 adapter\n"
+        "- category: scrapers\n"
+        "- priority: P0\n"
+        "- priority-reason: Core portal scraper\n"
+        "- next-up: yes\n"
+        "- state: in progress\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: src/scrapers/autoscout.py\n"
+        "- handoff: -\n"
+        "- short: AutoScout24 adapter\n\n"
+        "## Goal\n\n"
+        "Implement the AutoScout24 scraper adapter.\n\n"
+        "## Context\n\n"
+        "- Read `src/scrapers/autoscout.py`.\n\n"
+        "## Steps\n\n"
+        "- [ ] Implement parser.\n\n"
+        "## Verification\n\n"
+        "- `pytest tests/test_autoscout.py` passes.\n\n"
+        "## Progress\n\n"
+        "- 2026-10-29: in progress.\n",
+        encoding="utf-8",
+    )
+
+    # 2. Initialize project config & register workspace
+    if reg is not None:
+        cdir = get_config_dir(h)
+        plan = reg.plan_workspace_register(proj, title=proj.name, config_dir=cdir)
+        reg.apply_workspace_register(plan, expect_hash=plan["plan_hash"], config_dir=cdir)
+
+    if oc is not None:
+        ppath = oc.find_project_config_path(proj, gpath if gpath.is_file() else None, for_write=True)
+        existing_pdata = oc.load_toml_file(ppath) if ppath.is_file() else {}
+        pdata = oc.deep_merge(
+            {
+                "project": {
+                    "name": proj.name,
+                    "primary_orchestrator": "claude",
+                },
+                "routing": {
+                    "default_executor": "kilo",
+                },
+                "verification": {
+                    "default_mode": "cross-agent",
+                },
+            },
+            existing_pdata,
+        )
+        oc.write_file_atomic(ppath, oc.dump_toml(pdata))
+
+        # 3. Render root AGENTS.md with current block and preserved custom header/footer
+        cfg, _ = oc.resolve_config(gpath if gpath.is_file() else None, proj)
+        block = oc.render_agents_md_block(cfg, proj, gpath if gpath.is_file() else None)
+        agents_text = (
+            "# ricerca_auto — Project Architecture & Notes\n\n"
+            "Project-specific domain rules and scraper notes that must remain intact.\n\n"
+            + block.rstrip()
+            + "\n\n## Project Database Notes\n\n"
+            "PostgreSQL port 5432; keep this footer byte-for-byte.\n"
+        )
+        (proj / "AGENTS.md").write_text(agents_text, encoding="utf-8")
+
+    # 4. Upgrade tasks/ tree (writes tasks/AGENTS.md, .gitignore, .gitattributes, convention_version, 00-INDEX.md)
+    if te is not None:
+        te.upgrade_tasks_tree(tasks_dir, dry_run=False)
+
+    return proj
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """CLI handler for `ai-orch doctor [--project PATH] [--json]` and `ai-orch env doctor`."""
+    target = getattr(args, "target", None)
+    if target in ("ack", "unack"):
+        f_key = getattr(args, "finding_key", None)
+        if not f_key:
+            print(f"[error] 'doctor {target}' requires a finding_key argument", file=sys.stderr)
+            return 2
+        ws_arg = getattr(args, "project", None) or getattr(args, "workspace", None)
+        args.workspace = ws_arg
+        if target == "ack":
+            return cmd_ack(args)
+        return cmd_unack(args)
+
+    proj_arg = getattr(args, "project", None) or getattr(args, "workspace", None) or target or "."
+    ws = pathlib.Path(proj_arg).resolve()
+    gcfg = getattr(args, "global_config", None)
+    res = inspect_project_doctor(
+        workspace=ws,
+        home=args.home,
+        global_config=pathlib.Path(gcfg).resolve() if gcfg else None,
+    )
+
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        conv_cur = res.get("convention_version") or "unrecorded"
+        conv_tool = res.get("tool_convention_version", CONVENTION_VERSION)
+        print(f"=== Project Doctor: {ws} ===")
+        print(f"Convention version: project={conv_cur} | tool={conv_tool}")
+        sm = res["summary"]
+        print(
+            f"Summary: {sm['total']} finding(s) "
+            f"(error={sm['error']}, warning={sm['warning']}, info={sm['info']}, acknowledged={sm['acknowledged']})"
+        )
+        if not res["findings"]:
+            print("  [ok] No convention or environment drift detected.")
+        else:
+            for fg in res["findings"]:
+                sev_tag = fg["severity"].upper()
+                ack_tag = " [ACKNOWLEDGED]" if fg.get("acknowledged") else ""
+                print(f"  [{sev_tag}]{ack_tag} ({fg['kind']}) {fg['group_key']}: {fg['message']}")
+                if fg.get("fix_command"):
+                    print(f"    Fix: {fg['fix_command']}")
+
+    if getattr(args, "check", False) and res.get("drifted"):
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--home", type=pathlib.Path, default=None, help="Override home directory (for testing/sandboxing)")
@@ -7651,6 +9210,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_st.add_argument("--workspace", default=None, help="Optional project workspace to inspect project-scope installs")
     p_st.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
     p_st.set_defaults(func=cmd_status)
+
+    p_doc = sub.add_parser("doctor", help="Inspect project and global convention drift with severity and fix commands")
+    p_doc.add_argument("target", nargs="?", default=None, help="Optional project path or 'ack'/'unack'")
+    p_doc.add_argument("finding_key", nargs="?", default=None, help="Finding key when target is 'ack' or 'unack'")
+    p_doc.add_argument("--project", default=None, help="Project path to inspect (defaults to current working directory)")
+    p_doc.add_argument("--workspace", default=None, help="Alias for --project")
+    p_doc.add_argument("--home", dest="sub_home", type=pathlib.Path, default=None, help="Override home directory")
+    p_doc.add_argument("--global-config", default=None, help="Optional global orchestration.toml path")
+    p_doc.add_argument("--note", default="", help="Optional note when acknowledging a finding")
+    p_doc.add_argument("--check", action="store_true", default=False, help="Exit with code 1 if unacknowledged drift is found")
+    p_doc.add_argument("--dry-run", action="store_true", default=False, help="Dry-run for ack/unack")
+    p_doc.add_argument("--expect-plan-hash", default=None, help="Expected plan hash for ack/unack")
+    p_doc.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
+    p_doc.set_defaults(func=cmd_doctor)
 
     p_il = sub.add_parser("install-launcher", help="Preview or install the version-free ~/.local/bin/ai-orch launcher")
     p_il.add_argument("--path", default=None, help="Custom launcher destination path (default: <home>/.local/bin/ai-orch)")
@@ -7737,6 +9310,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ack.add_argument("finding_key", help="Finding key or group key to acknowledge")
     p_ack.add_argument("--note", default="", help="Optional note explaining why the finding is acknowledged")
     p_ack.add_argument("--workspace", default=None)
+    p_ack.add_argument("--project", dest="workspace", default=None, help="Alias for --workspace")
+    p_ack.add_argument("--home", dest="sub_home", type=pathlib.Path, default=None, help="Override home directory")
     p_ack.add_argument("--dry-run", action="store_true", default=False, help="Compute and display acknowledge plan without executing")
     p_ack.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
     p_ack.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
@@ -7745,6 +9320,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_unack = sub.add_parser("unack", help="Remove persistent acknowledgment for a doctor finding")
     p_unack.add_argument("finding_key", help="Finding key or group key to un-acknowledge")
     p_unack.add_argument("--workspace", default=None)
+    p_unack.add_argument("--project", dest="workspace", default=None, help="Alias for --workspace")
+    p_unack.add_argument("--home", dest="sub_home", type=pathlib.Path, default=None, help="Override home directory")
     p_unack.add_argument("--dry-run", action="store_true", default=False, help="Compute and display unacknowledge plan without executing")
     p_unack.add_argument("--expect-plan-hash", default=None, help="Refuse execution if recomputed plan hash does not match")
     p_unack.add_argument("--json", dest="sub_json", action="store_true", default=False, help="Output structured JSON on stdout")
@@ -7756,6 +9333,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     ap = build_parser()
     args = ap.parse_args()
+    if getattr(args, "sub_home", None) is not None and getattr(args, "home", None) is None:
+        args.home = args.sub_home
     args.json = bool(getattr(args, "parent_json", False) or getattr(args, "sub_json", False))
     args.dry_run = bool(getattr(args, "parent_dry_run", False) or getattr(args, "dry_run", False))
     if not getattr(args, "expect_plan_hash", None) and getattr(args, "parent_expect_plan_hash", None):

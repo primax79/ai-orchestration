@@ -10,6 +10,7 @@ Dispatches:
   - `ai-orch events <subcommand> [args...]` -> `orchestration_events.py`
   - `ai-orch sessions <subcommand> [args...]` -> `orchestration_sessions.py`
   - `ai-orch triggers <subcommand> [args...]` -> `orchestration_triggers.py`
+  - `ai-orch doctor [--project <dir>] [--json]` -> `orchestration_env.py doctor`
   - `ai-orch render-agents-md [args...]`    -> `orchestration_config.py render-agents-md`
   - `ai-orch describe [--json]`             -> machine-readable command & schema catalog
 """
@@ -779,8 +780,81 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 },
             },
         },
+        "doctor": {
+            "script": str(ORCH_ENV_SCRIPT.relative_to(REPO_ROOT)),
+            "usage": "ai-orch doctor [--project <dir>] [--workspace <dir>] [--check] [--json]",
+            "description": (
+                "Inspect project and global convention drift (missing config, unregistered workspace, "
+                "index without markers, stale/duplicated AGENTS.md, legacy task headers, convention_version, "
+                "and global skill/config version drift) with severity and fix commands."
+            ),
+            "subcommands": {
+                "ack": {
+                    "usage": "ai-orch doctor ack <finding_key> [--project <dir>] [--note <text>] [--dry-run] [--expect-plan-hash <hash>] [--json]",
+                    "description": "Acknowledge a doctor finding until its content changes.",
+                },
+                "unack": {
+                    "usage": "ai-orch doctor unack <finding_key> [--project <dir>] [--dry-run] [--expect-plan-hash <hash>] [--json]",
+                    "description": "Remove persistent acknowledgment for a doctor finding.",
+                },
+            },
+        },
     },
 }
+
+
+def _extract_flag_value(args: list[str], flags: tuple[str, ...]) -> str | None:
+    for idx, arg in enumerate(args):
+        if arg in flags and idx + 1 < len(args):
+            return args[idx + 1]
+        for fl in flags:
+            if arg.startswith(fl + "="):
+                return arg.split("=", 1)[1]
+    return None
+
+
+def _maybe_warn_project_drift(group: str, rest: list[str], raw_argv: list[str]) -> None:
+    """Emit a single-line stderr warning if the command runs in a project with convention drift."""
+    if group in ("doctor", "describe", "mcp", "broker", "install-launcher"):
+        return
+    if group == "env" and rest and rest[0] in ("doctor", "ack", "unack"):
+        return
+    if any(h in rest for h in ("-h", "--help", "help")):
+        return
+
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_orch_env_drift_mod", ORCH_ENV_SCRIPT)
+        if spec is None or spec.loader is None:
+            return
+        env_mod = importlib.util.module_from_spec(spec)
+        sys.modules["_orch_env_drift_mod"] = env_mod
+        spec.loader.exec_module(env_mod)
+
+        ws_val = _extract_flag_value(rest, ("--project", "--workspace", "--root"))
+        if ws_val is None:
+            td_val = _extract_flag_value(rest, ("--tasks-dir",))
+            if td_val is not None:
+                td_p = pathlib.Path(td_val).resolve()
+                ws_val = str(td_p.parent if td_p.name == "tasks" else td_p)
+        ws_path = pathlib.Path(ws_val).resolve() if ws_val else pathlib.Path.cwd()
+
+        home_val = _extract_flag_value(rest, ("--home",)) or os.environ.get("AI_ORCH_HOME")
+        home_path = pathlib.Path(home_val).resolve() if home_val else None
+
+        gcfg_val = _extract_flag_value(rest, ("--global-config",))
+        gcfg_path = pathlib.Path(gcfg_val).resolve() if gcfg_val else None
+
+        env_mod.maybe_emit_drift_warning(
+            workspace=ws_path,
+            home=home_path,
+            global_config=gcfg_path,
+            argv=raw_argv,
+            stream=sys.stderr,
+        )
+    except Exception:
+        pass
 
 
 def _resolve_ui_broker_root() -> pathlib.Path | None:
@@ -824,7 +898,8 @@ def print_help() -> None:
 
 def main() -> int:
     os.environ.setdefault("AI_ORCH_BIN", str(pathlib.Path(__file__).resolve()))
-    argv = sys.argv[1:]
+    raw_argv = list(sys.argv[1:])
+    argv = [a for a in raw_argv if a not in ("--no-drift-warning", "--quiet-drift")]
     if not argv or argv[0] in ("-h", "--help", "help"):
         print_help()
         return 0
@@ -846,6 +921,12 @@ def main() -> int:
     if group == "describe":
         print(json.dumps(CLI_DESCRIPTION, indent=2))
         return 0
+
+    if group == "doctor":
+        proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), "doctor", *rest], check=False)
+        return proc.returncode
+
+    _maybe_warn_project_drift(group, rest, raw_argv)
 
     if group == "install-launcher":
         proc = subprocess.run([sys.executable, str(ORCH_ENV_SCRIPT), "install-launcher", *rest], check=False)
