@@ -582,6 +582,236 @@ def skill_has_precedence_section(skill_path: pathlib.Path | str) -> bool:
         return False
 
 
+def _strip_yaml_scalar_quotes(val: str) -> str:
+    """Strip matching outer single or double quotes from a YAML scalar."""
+    if len(val) >= 2 and ((val[0] == '"' and val[-1] == '"') or (val[0] == "'" and val[-1] == "'")):
+        return val[1:-1]
+    return val
+
+
+def _apply_yaml_chomping(text: str, chomp: str) -> str:
+    """Apply YAML block scalar chomping indicator ('-' strip, '+' keep, '' clip)."""
+    if chomp == "-":
+        return text.rstrip("\n")
+    if chomp == "+":
+        return text
+    stripped = text.rstrip("\n")
+    if not stripped:
+        return ""
+    return stripped + ("\n" if text.endswith("\n") else "")
+
+
+def _fold_yaml_block_lines(lines: list[str]) -> str:
+    """Fold lines according to YAML '>' folded block scalar rules."""
+    if not lines:
+        return ""
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if line == "":
+            empty_count = 0
+            while i < n and lines[i] == "":
+                empty_count += 1
+                i += 1
+            out.append("\n" * empty_count)
+            continue
+        is_more_indented = line.startswith(" ") or line.startswith("\t")
+        out.append(line)
+        i += 1
+        if i < n:
+            next_line = lines[i]
+            if next_line == "":
+                continue
+            next_more_indented = next_line.startswith(" ") or next_line.startswith("\t")
+            if is_more_indented or next_more_indented:
+                out.append("\n")
+            else:
+                out.append(" ")
+    return "".join(out)
+
+
+def _stdlib_parse_yaml_frontmatter(fm_raw: str) -> dict[str, Any]:
+    """Indentation-aware stdlib YAML subset parser for SKILL.md frontmatter.
+
+    Supports arbitrary nesting of mappings and sequences, literal ('|', '|-', '|+')
+    and folded ('>', '>-', '>+') block scalars, and multiline plain scalars.
+    Raises ValueError on unsupported or ambiguous YAML constructs (anchors, tags,
+    complex flow collections, tab indentation) so callers can fail closed.
+    """
+    raw_lines = fm_raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    tokens: list[tuple[int, str, int]] = []
+    i = 0
+    n = len(raw_lines)
+
+    while i < n:
+        line = raw_lines[i]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        if "\t" in line[: len(line) - len(line.lstrip(" \t"))]:
+            raise ValueError("Tab indentation is not supported in YAML")
+        indent = len(line) - len(line.lstrip(" "))
+
+        m_block = re.match(r"^([^:#]+?):\s*([>|])([+-]?)\s*(?:#.*)?$", stripped)
+        if m_block and not stripped.startswith("- "):
+            key = m_block.group(1).strip()
+            style = m_block.group(2)
+            chomp = m_block.group(3)
+            i += 1
+            block_raw: list[tuple[int, str]] = []
+            block_indent: int | None = None
+            while i < n:
+                bline = raw_lines[i]
+                bstripped = bline.strip()
+                if bstripped == "":
+                    block_raw.append((0, ""))
+                    i += 1
+                    continue
+                if "\t" in bline[: len(bline) - len(bline.lstrip(" \t"))]:
+                    raise ValueError("Tab indentation in block scalar")
+                bindent = len(bline) - len(bline.lstrip(" "))
+                if bindent <= indent:
+                    break
+                if block_indent is None:
+                    block_indent = bindent
+                elif bindent < block_indent:
+                    raise ValueError("Inconsistent indentation in block scalar")
+                block_raw.append((bindent, bline[block_indent:]))
+                i += 1
+
+            if block_indent is None:
+                scalar_val = ""
+            else:
+                content_lines = [text for _, text in block_raw]
+                if style == "|":
+                    joined = "\n".join(content_lines) + "\n"
+                else:
+                    joined = _fold_yaml_block_lines(content_lines) + "\n"
+                scalar_val = _apply_yaml_chomping(joined, chomp)
+            tokens.append((indent, f"__BLOCK__:{key}:{json.dumps(scalar_val)}", i))
+            continue
+
+        tokens.append((indent, stripped, i))
+        i += 1
+
+    def _parse_scalar_token(val_raw: str) -> str:
+        val_s = val_raw.strip()
+        if not val_s:
+            return ""
+        if val_s[0] in ("&", "*", "!"):
+            raise ValueError(f"Unsupported YAML token: {val_s}")
+        if val_s[0] in ("[", "{"):
+            raise ValueError(f"Unsupported YAML flow collection: {val_s}")
+        if val_s[0] not in ('"', "'") and " #" in val_s:
+            val_s = val_s.split(" #", 1)[0].rstrip()
+        return _strip_yaml_scalar_quotes(val_s)
+
+    def _parse_node(idx: int, expected_indent: int) -> tuple[Any, int]:
+        if idx >= len(tokens):
+            return {}, idx
+        first_indent, first_text, _ = tokens[idx]
+        if first_indent < expected_indent:
+            return "", idx
+        if first_text.startswith("- ") or first_text == "-":
+            return _parse_seq(idx, first_indent)
+        return _parse_map(idx, first_indent)
+
+    def _parse_seq(idx: int, seq_indent: int) -> tuple[list[Any], int]:
+        items: list[Any] = []
+        while idx < len(tokens):
+            indent, text, _ = tokens[idx]
+            if indent < seq_indent:
+                break
+            if indent != seq_indent or not (text.startswith("- ") or text == "-"):
+                raise ValueError(f"Unexpected token in sequence at indent {indent}: {text}")
+            item_rest = text[1:].strip()
+            idx += 1
+            if item_rest == "":
+                if idx < len(tokens) and tokens[idx][0] > seq_indent:
+                    child_val, idx = _parse_node(idx, tokens[idx][0])
+                    items.append(child_val)
+                else:
+                    items.append("")
+            elif ":" in item_rest and not item_rest.startswith(('"', "'")):
+                k_part, v_part = item_rest.split(":", 1)
+                k_clean = _strip_yaml_scalar_quotes(k_part.strip())
+                v_clean = v_part.strip()
+                item_dict: dict[str, Any] = {}
+                if v_clean == "":
+                    if idx < len(tokens) and tokens[idx][0] > seq_indent:
+                        sub_val, idx = _parse_node(idx, tokens[idx][0])
+                        item_dict[k_clean] = sub_val
+                    else:
+                        item_dict[k_clean] = ""
+                else:
+                    item_dict[k_clean] = _parse_scalar_token(v_clean)
+                if idx < len(tokens) and tokens[idx][0] > seq_indent:
+                    extra_indent = tokens[idx][0]
+                    extra_map, idx = _parse_map(idx, extra_indent)
+                    item_dict.update(extra_map)
+                items.append(item_dict)
+            else:
+                if idx < len(tokens) and tokens[idx][0] > seq_indent:
+                    raise ValueError(f"Unexpected nested block under scalar list item: {item_rest}")
+                items.append(_parse_scalar_token(item_rest))
+        return items, idx
+
+    def _parse_map(idx: int, map_indent: int) -> tuple[dict[str, Any], int]:
+        mapping: dict[str, Any] = {}
+        while idx < len(tokens):
+            indent, text, _ = tokens[idx]
+            if indent < map_indent:
+                break
+            if indent != map_indent:
+                raise ValueError(f"Inconsistent indentation in mapping: expected {map_indent}, got {indent}")
+            if text.startswith("__BLOCK__:"):
+                _, rest = text.split("__BLOCK__:", 1)
+                k_raw, json_val = rest.split(":", 1)
+                key = _strip_yaml_scalar_quotes(k_raw.strip())
+                mapping[key] = json.loads(json_val)
+                idx += 1
+                continue
+            if text.startswith("- ") or text == "-" or ":" not in text:
+                raise ValueError(f"Expected mapping key:value at indent {indent}, got: {text}")
+            k_raw, v_raw = text.split(":", 1)
+            key = _strip_yaml_scalar_quotes(k_raw.strip())
+            if not key:
+                raise ValueError("Empty mapping key")
+            val_str = v_raw.strip()
+            idx += 1
+            if val_str == "":
+                if idx < len(tokens) and tokens[idx][0] > map_indent:
+                    child_val, idx = _parse_node(idx, tokens[idx][0])
+                    mapping[key] = child_val
+                else:
+                    mapping[key] = ""
+            else:
+                scalar_val = _parse_scalar_token(val_str)
+                cont_parts = [scalar_val]
+                while idx < len(tokens) and tokens[idx][0] > map_indent:
+                    c_indent, c_text, _ = tokens[idx]
+                    if c_text.startswith("__BLOCK__:") or c_text.startswith("- ") or c_text == "-":
+                        raise ValueError(f"Invalid continuation under scalar key {key}: {c_text}")
+                    if ":" in c_text and not v_raw.strip().startswith(('"', "'")):
+                        raise ValueError(f"Ambiguous colon in multiline plain scalar under {key}: {c_text}")
+                    cont_parts.append(_strip_yaml_scalar_quotes(c_text))
+                    idx += 1
+                mapping[key] = " ".join(p for p in cont_parts if p != "")
+        return mapping, idx
+
+    if not tokens:
+        return {}
+    if tokens[0][0] != 0:
+        raise ValueError("Top-level frontmatter keys must not be indented")
+    result, next_idx = _parse_map(0, 0)
+    if next_idx != len(tokens):
+        raise ValueError("Unconsumed tokens in YAML frontmatter")
+    return result
+
+
 def parse_frontmatter_and_body(content: str) -> tuple[dict[str, Any] | None, str]:
     """Parse YAML-ish frontmatter and body from a Markdown document (e.g. SKILL.md)."""
     content = content.lstrip("\ufeff")
@@ -590,64 +820,27 @@ def parse_frontmatter_and_body(content: str) -> tuple[dict[str, Any] | None, str
         return None, content
     fm_raw = m.group(1)
     body = m.group(2) or ""
-    try:
-        if yaml is not None:
+    if yaml is not None:
+        try:
             data = yaml.safe_load(fm_raw)
             if isinstance(data, dict):
                 return data, body
             return None, body
+        except Exception:
+            return None, body
+    try:
+        return _stdlib_parse_yaml_frontmatter(fm_raw), body
     except Exception:
-        pass
-    parsed: dict[str, Any] = {}
-    current_key: str | None = None
-    current_mode: str = "scalar"
-    for line in fm_raw.splitlines():
-        line_s = line.strip()
-        if not line_s or line_s.startswith("#"):
-            continue
-        if ":" in line_s and not line.startswith(" ") and not line.startswith("\t"):
-            k, v = line_s.split(":", 1)
-            current_key = k.strip()
-            val_raw = v.strip()
-            if val_raw in (">", ">-", ">+", "|", "|-", "|+"):
-                parsed[current_key] = ""
-                current_mode = "block_scalar"
-            elif val_raw == "":
-                parsed[current_key] = ""
-                current_mode = "nested_or_scalar"
-            else:
-                parsed[current_key] = val_raw.strip("\"'")
-                current_mode = "scalar"
-        elif current_key and (line.startswith(" ") or line.startswith("\t")):
-            if current_mode in ("block_scalar", "scalar"):
-                if isinstance(parsed[current_key], str):
-                    parsed[current_key] = (parsed[current_key] + " " + line_s).strip()
-            elif current_mode == "nested_or_scalar":
-                if line_s.startswith("- ") or line_s == "-":
-                    if parsed[current_key] == "":
-                        parsed[current_key] = []
-                    if isinstance(parsed[current_key], list):
-                        parsed[current_key].append(line_s[1:].strip().strip("\"'"))
-                elif ":" in line_s:
-                    if parsed[current_key] == "":
-                        parsed[current_key] = {}
-                    if isinstance(parsed[current_key], dict):
-                        sub_k, sub_v = line_s.split(":", 1)
-                        parsed[current_key][sub_k.strip()] = sub_v.strip().strip("\"'")
-                    elif isinstance(parsed[current_key], str):
-                        parsed[current_key] = (parsed[current_key] + " " + line_s).strip()
-                else:
-                    current_mode = "scalar"
-                    if isinstance(parsed[current_key], str):
-                        parsed[current_key] = (parsed[current_key] + " " + line_s).strip()
-    return parsed, body
+        return None, body
 
 
 def normalize_frontmatter(fm: dict[str, Any] | None) -> dict[str, Any]:
     """Normalize frontmatter dictionary:
     - Merges flattened vs nested `metadata` maps
     - Drops empty values (None, empty string, empty dict/list)
-    - Normalizes string whitespace (including multiline/folded description)
+    - Normalizes string whitespace on `description` only when it contains no internal newlines
+      (so folded `>-` and single-line quoted descriptions normalize equal, while literal `|`
+      multiline descriptions preserve their line breaks)
     - Normalizes scalar representations
     """
     if not isinstance(fm, dict):
@@ -662,23 +855,25 @@ def normalize_frontmatter(fm: dict[str, Any] | None) -> dict[str, Any]:
 
     def _clean_val(key: str, val: Any) -> Any:
         if isinstance(val, str):
-            val_s = val.strip()
-            if key == "description":
-                val_s = re.sub(r"\s+", " ", val_s)
+            val_s = val.replace("\r\n", "\n").replace("\r", "\n").strip()
+            if key == "description" and "\n" not in val_s:
+                val_s = re.sub(r"[ \t]+", " ", val_s)
             return val_s
         elif isinstance(val, (int, float, bool)):
             return str(val)
         elif isinstance(val, dict):
             res = {}
             for sub_k, sub_v in val.items():
-                if not _is_empty(sub_v):
-                    res[sub_k] = _clean_val(sub_k, sub_v)
+                cleaned_sub = _clean_val(sub_k, sub_v)
+                if not _is_empty(cleaned_sub):
+                    res[sub_k] = cleaned_sub
             return res
         elif isinstance(val, list):
             res = []
             for item in val:
-                if not _is_empty(item):
-                    res.append(_clean_val(key, item))
+                cleaned_item = _clean_val(key, item)
+                if not _is_empty(cleaned_item):
+                    res.append(cleaned_item)
             return res
         return val
 
@@ -686,14 +881,19 @@ def normalize_frontmatter(fm: dict[str, Any] | None) -> dict[str, Any]:
     for k, v in fm.items():
         if k == "metadata" or _is_empty(v):
             continue
-        result[k] = _clean_val(k, v)
+        cleaned = _clean_val(k, v)
+        if not _is_empty(cleaned):
+            result[k] = cleaned
 
     # 2. Merge metadata subkeys into top-level
     for k, v in meta_dict.items():
         if _is_empty(v):
             continue
+        cleaned = _clean_val(k, v)
+        if _is_empty(cleaned):
+            continue
         if k not in result or _is_empty(result[k]):
-            result[k] = _clean_val(k, v)
+            result[k] = cleaned
 
     return {k: v for k, v in result.items() if not _is_empty(v)}
 
@@ -705,12 +905,31 @@ def normalize_body(body: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _has_frontmatter_fence(text: str) -> bool:
+    """Return True if text starts with a YAML frontmatter fence ('---')."""
+    return bool(re.match(r"^\ufeff?\s*---\r?\n", text))
+
+
 def compare_skill_md(text_a: str, text_b: str) -> tuple[bool, list[str], bool]:
     """Compare two SKILL.md contents using normalized frontmatter and normalized body.
     Returns (is_equal, changed_fm_keys, body_differs).
+    Fails closed (is_equal=False) when either document has unparseable or unsupported YAML frontmatter.
     """
     fm_a_raw, body_a = parse_frontmatter_and_body(text_a)
     fm_b_raw, body_b = parse_frontmatter_and_body(text_b)
+
+    norm_body_a = normalize_body(body_a)
+    norm_body_b = normalize_body(body_b)
+    body_differs = (norm_body_a != norm_body_b)
+
+    if (fm_a_raw is None and _has_frontmatter_fence(text_a)) or (
+        fm_b_raw is None and _has_frontmatter_fence(text_b)
+    ):
+        return False, ["<unparsed-frontmatter>"], body_differs
+
+    if (fm_a_raw is None) != (fm_b_raw is None):
+        norm_only = normalize_frontmatter(fm_a_raw if fm_a_raw is not None else fm_b_raw)
+        return False, sorted(norm_only.keys()) or ["<frontmatter>"], body_differs
 
     norm_fm_a = normalize_frontmatter(fm_a_raw)
     norm_fm_b = normalize_frontmatter(fm_b_raw)
@@ -719,10 +938,6 @@ def compare_skill_md(text_a: str, text_b: str) -> tuple[bool, list[str], bool]:
         k for k in (set(norm_fm_a.keys()) | set(norm_fm_b.keys()))
         if norm_fm_a.get(k) != norm_fm_b.get(k)
     )
-
-    norm_body_a = normalize_body(body_a)
-    norm_body_b = normalize_body(body_b)
-    body_differs = (norm_body_a != norm_body_b)
 
     is_equal = (len(changed_fm_keys) == 0 and not body_differs)
     return is_equal, changed_fm_keys, body_differs
