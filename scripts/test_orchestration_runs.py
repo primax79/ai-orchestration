@@ -6449,7 +6449,7 @@ def test_19_7_run_start_refuses_missing_preflight_binary_and_starts_when_ok(
         encoding="utf-8",
     )
 
-    # Preview includes the timeout in the generated prompt and warns about preflight failure
+    # Preview includes the timeout in the generated prompt and lists configured preflight checks without executing them
     cmd_prev = [
         str(BIN_AI_ORCH),
         "run",
@@ -6470,7 +6470,12 @@ def test_19_7_run_start_refuses_missing_preflight_binary_and_starts_when_ok(
     assert "## Command Timeouts" in data_prev["prompt"]
     assert "600s" in data_prev["prompt"] and "600000ms" in data_prev["prompt"]
     assert "900s" in data_prev["prompt"] and "900000ms" in data_prev["prompt"]
-    assert any("missing-bun-19-7" in w for w in data_prev["warnings"])
+    assert data_prev["preflight"]["configured"] is True
+    assert data_prev["preflight"]["executed"] is False
+    assert any(
+        c["kind"] == "tool" and c["name"] == "missing-bun-19-7" and c["min_version"] == "1.0.0"
+        for c in data_prev["preflight_checks"]
+    )
 
     # `run start` refuses with reason `preflight-failed` and names the missing binary
     cmd_start = [
@@ -6515,4 +6520,279 @@ def test_19_7_run_start_refuses_missing_preflight_binary_and_starts_when_ok(
     prompt_text = prompt_file.read_text(encoding="utf-8")
     assert "## Command Timeouts" in prompt_text
     assert "600s" in prompt_text and "600000ms" in prompt_text
+
+
+def test_19_7_preview_batch_and_triage_do_not_execute_preflight_commands(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+):
+    """B1 regression test: `run preview` (single task, batch, and triage) must never
+    execute preflight checks (including `shell=True` commands); it only lists the
+    configured checks. Preflight is executed only on `run start` or explicit `ai-orch preflight`.
+    """
+    tasks_dir = sample_workspace / "tasks"
+    create_microtask(sample_workspace, "T021", "Batch microtask 21", state="open")
+    create_microtask(sample_workspace, "T022", "Batch microtask 22", state="open")
+    subprocess.run(["git", "add", "."], cwd=str(sample_workspace), check=True)
+    subprocess.run(["git", "commit", "-m", "add batch microtasks"], cwd=str(sample_workspace), check=True)
+
+    res_note = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "tasks",
+            "inbox",
+            "add",
+            "--title",
+            "Preflight triage note",
+            "--kind",
+            "bug",
+            "--body",
+            "Verify triage preview has no preflight side effects.",
+            "--status",
+            "ready",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    note_id = json.loads(res_note.stdout)["id"]
+
+    marker_file = tmp_path / "preflight_preview_side_effect.marker"
+    assert not marker_file.exists()
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    marker_cmd = (
+        f"{sys.executable} -c \"import pathlib; pathlib.Path(r'{marker_file}').write_text('executed', encoding='utf-8')\""
+    )
+    proj_cfg.write_text(
+        orig_cfg
+        + '\n[project.preflight]\n'
+        + 'free_ports = [54321]\n'
+        + 'min_disk_mb = 10\n'
+        + f'commands = [{json.dumps(marker_cmd)}]\n'
+        + '\n[project.preflight.tools]\n"missing-bun-19-7" = ">=1.0.0"\n'
+        + '\n[project.preflight.services]\n"dummy-svc" = 54322\n',
+        encoding="utf-8",
+    )
+
+    preview_invocations = [
+        # 1. Single task preview
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        # 2. Batch preview
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--batch",
+            "T021,T022",
+            "--allow-dirty-base",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        # 3. Triage preview
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--note",
+            note_id,
+            "--mode",
+            "triage",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+    ]
+
+    for cmd in preview_invocations:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        payload = json.loads(res.stdout)
+        assert payload["ok"] is True
+        assert not marker_file.exists(), f"Preflight command executed during preview: {cmd}"
+        assert payload["preflight"]["configured"] is True
+        assert payload["preflight"]["executed"] is False
+        kinds = {c["kind"] for c in payload["preflight_checks"]}
+        assert kinds == {"tool", "free_port", "service", "disk", "command"}
+
+    # Explicit `ai-orch preflight` command DOES execute the preflight checks (and creates the marker file)
+    res_pf = subprocess.run(
+        [str(BIN_AI_ORCH), "preflight", "--workspace", str(sample_workspace), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_pf.returncode == 1  # missing-bun-19-7 and dummy-svc fail, but command check runs
+    pf_payload = json.loads(res_pf.stdout)
+    assert pf_payload["executed"] is True
+    assert marker_file.exists()
+
+
+def test_19_7_run_start_integration_all_check_types_and_no_preflight(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """B2 integration test: verify through `ai-orch run start` all preflight check types
+    (tool/version, free_port, service, disk, command) as well as the no-preflight case.
+    """
+    import socket
+
+    proj_cfg = sample_workspace / ".ai-orchestration.local.toml"
+    orig_cfg = proj_cfg.read_text(encoding="utf-8")
+    stub_path_str = str(STUB_AGENT)
+    base_stub_cfg = (
+        orig_cfg
+        + f'\n[tools.kilo.headless]\nargv = ["{sys.executable}", "{stub_path_str}", "--lines", "2", "--exit-code", "0"]\n'
+    )
+
+    def _reset_t007_open() -> None:
+        t_path = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+        txt = t_path.read_text(encoding="utf-8")
+        t_path.write_text(txt.replace("- state: in progress", "- state: open"), encoding="utf-8")
+        runs_dir = sample_workspace / ".ai-orchestration" / "runs"
+        if runs_dir.exists():
+            shutil.rmtree(runs_dir)
+
+    cmd_start = [
+        str(BIN_AI_ORCH),
+        "run",
+        "start",
+        "--task",
+        "T007",
+        "--mode",
+        "execute",
+        "--isolation",
+        "none",
+        "--workspace",
+        str(sample_workspace),
+        "--json",
+    ]
+
+    # 1. No-preflight case: preview reports configured=False and `run start` succeeds
+    proj_cfg.write_text(base_stub_cfg, encoding="utf-8")
+    res_prev_none = subprocess.run(
+        [
+            str(BIN_AI_ORCH),
+            "run",
+            "preview",
+            "--task",
+            "T007",
+            "--mode",
+            "execute",
+            "--isolation",
+            "none",
+            "--workspace",
+            str(sample_workspace),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    prev_none = json.loads(res_prev_none.stdout)
+    assert prev_none["preflight"]["configured"] is False
+    assert prev_none["preflight_checks"] == []
+
+    res_start_none = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+    run_id_none = json.loads(res_start_none.stdout)["run_id"]
+    rec_none = wait_for_terminal(sample_workspace, run_id_none)
+    assert rec_none["status"] == "succeeded"
+    _reset_t007_open()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        busy_port = srv.getsockname()[1]
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tmp_sock:
+            tmp_sock.bind(("127.0.0.1", 0))
+            free_port = tmp_sock.getsockname()[1]
+
+        # 2. Free port check failure through `run start`
+        proj_cfg.write_text(
+            base_stub_cfg + f"\n[project.preflight]\nfree_ports = [{busy_port}]\n",
+            encoding="utf-8",
+        )
+        res_busy = subprocess.run(cmd_start, capture_output=True, text=True, check=False)
+        assert res_busy.returncode != 0
+        data_busy = json.loads(res_busy.stdout)
+        assert data_busy["reason"] == "preflight-failed"
+        assert str(busy_port) in data_busy["error"]
+
+        # 3. Active service check failure through `run start`
+        proj_cfg.write_text(
+            base_stub_cfg + f'\n[project.preflight.services]\n"dead-svc-19-7" = {{ port = {free_port} }}\n',
+            encoding="utf-8",
+        )
+        res_svc = subprocess.run(cmd_start, capture_output=True, text=True, check=False)
+        assert res_svc.returncode != 0
+        data_svc = json.loads(res_svc.stdout)
+        assert data_svc["reason"] == "preflight-failed"
+        assert "dead-svc-19-7" in data_svc["error"]
+
+        # 4. Disk space check failure through `run start`
+        proj_cfg.write_text(
+            base_stub_cfg + "\n[project.preflight]\nmin_disk_gb = 999999999\n",
+            encoding="utf-8",
+        )
+        res_disk = subprocess.run(cmd_start, capture_output=True, text=True, check=False)
+        assert res_disk.returncode != 0
+        data_disk = json.loads(res_disk.stdout)
+        assert data_disk["reason"] == "preflight-failed"
+        assert "disk space" in data_disk["error"].lower()
+
+        # 5. Custom command check failure through `run start`
+        fail_cmd = f"{sys.executable} -c \"import sys; sys.stderr.write('CUSTOM_PF_ERR\\n'); sys.exit(2)\""
+        proj_cfg.write_text(
+            base_stub_cfg + f"\n[project.preflight]\ncommands = [{json.dumps(fail_cmd)}]\n",
+            encoding="utf-8",
+        )
+        res_cmd_fail = subprocess.run(cmd_start, capture_output=True, text=True, check=False)
+        assert res_cmd_fail.returncode != 0
+        data_cmd_fail = json.loads(res_cmd_fail.stdout)
+        assert data_cmd_fail["reason"] == "preflight-failed"
+        assert "CUSTOM_PF_ERR" in data_cmd_fail["error"]
+
+        # 6. All check types (tool+version, free_port, service, disk, command) passing together through `run start`
+        extra_bin = tmp_path / "all-checks-bin"
+        extra_bin.mkdir()
+        tool_exe = extra_bin / "tool-all-19-7"
+        tool_exe.write_text("#!/bin/sh\necho '2.4.0'\nexit 0\n", encoding="utf-8")
+        tool_exe.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{extra_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+        start_marker = tmp_path / "start_executed.marker"
+        ok_cmd = (
+            f"{sys.executable} -c \"import pathlib; pathlib.Path(r'{start_marker}').write_text('ok', encoding='utf-8')\""
+        )
+        proj_cfg.write_text(
+            base_stub_cfg
+            + f"\n[project.preflight]\nfree_ports = [{free_port}]\nmin_disk_mb = 1\ncommands = [{json.dumps(ok_cmd)}]\n"
+            + '\n[project.preflight.tools]\n"tool-all-19-7" = ">=2.0.0"\n'
+            + f'\n[project.preflight.services]\n"live-svc-19-7" = {{ port = {busy_port} }}\n',
+            encoding="utf-8",
+        )
+        res_all_ok = subprocess.run(cmd_start, capture_output=True, text=True, check=True)
+        data_all_ok = json.loads(res_all_ok.stdout)
+        assert data_all_ok["ok"] is True
+        assert start_marker.exists()
+        rec_all = wait_for_terminal(sample_workspace, data_all_ok["run_id"])
+        assert rec_all["status"] == "succeeded"
 
