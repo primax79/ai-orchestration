@@ -2522,6 +2522,15 @@ def test_19_4_host_id_resolution_and_normalization(tmp_path: pathlib.Path, monke
     assert oc.resolve_host_id(global_path=gpath, hostname="MacBook-Pro.local") == "alf_ubuntu"
     assert oc.get_host_id({"host": {"id": "mac"}}, global_path=gpath) == "mac"
 
+    # Host config in project config goes through 19.1's unified lookup (canonical and legacy positions)
+    ws = tmp_path / "proj_host_lookup"
+    (ws / ".ai-orchestration").mkdir(parents=True)
+    (ws / ".ai-orchestration" / "orchestration.toml").write_text(
+        '[hosts.mac]\nssh_target = "mac.lan"\nrole = "client"\n',
+        encoding="utf-8",
+    )
+    assert oc.get_declared_hosts(global_path=gpath, workspace=ws) == {"alf_ubuntu", "mac"}
+
 
 def test_19_4_hosts_table_and_validation() -> None:
     """Task 19.4: [host] and [hosts.<id>] table (ssh target, agent user, role hub/client) validation."""
@@ -2565,4 +2574,371 @@ def test_19_4_hosts_table_and_validation() -> None:
     assert any("[hosts.mac].role" in e for e in bad_errors)
     assert any("[hosts.mac].ssh_target" in e for e in bad_errors)
     assert any("unknown key 'unknown_field'" in e for e in bad_errors)
+
+
+def test_19_1_unified_config_lookup_across_all_subsystems_and_legacy_positions(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1: Every canonical and legacy project config location is read identically by
+    orchestration_config, tasks_engine, and orchestration_triggers; legacy locations
+    emit a read-only deprecation warning and are never written to."""
+    tasks_scripts = REPO_ROOT / "plugins" / "architect-side" / "skills" / "task-pipeline" / "scripts"
+    root_scripts = REPO_ROOT / "scripts"
+    for p in (tasks_scripts, root_scripts):
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+
+    import tasks_engine as te  # type: ignore
+    import orchestration_triggers as ot  # type: ignore
+
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    global_cfg_dir = fake_home / ".config" / "ai-orchestration"
+    global_cfg_path = global_cfg_dir / "orchestration.toml"
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(global_cfg_path))
+    monkeypatch.setenv("AI_ORCH_HOME", str(fake_home))
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
+
+    sample_toml = (
+        '[routing]\n'
+        'default_orchestrator = "codex"\n'
+        'default_executor = "kilo"\n\n'
+        '[tasks]\n'
+        'language = "it"\n'
+        'extension_fields = ["area", "subsystem"]\n\n'
+        '[[triggers]]\n'
+        'name = "legacy-pos-rule"\n'
+        'on = "task.transitioned"\n'
+        'when = { to = "delivered" }\n'
+        'action = "notify"\n'
+    )
+
+    positions = [
+        ("local_dot", lambda ws: ws / ".ai-orchestration.local.toml", False),
+        ("external_projects", lambda ws: global_cfg_dir / "projects" / ws.name / "orchestration.toml", False),
+        ("legacy_root", lambda ws: ws / "orchestration.toml", True),
+        ("legacy_dot_dir", lambda ws: ws / ".ai-orchestration" / "orchestration.toml", True),
+        ("legacy_tasks_dir", lambda ws: ws / "tasks" / "orchestration.toml", True),
+        ("legacy_dot_toml", lambda ws: ws / ".ai-orchestration.toml", True),
+    ]
+
+    for pos_name, path_fn, expect_legacy in positions:
+        ws = tmp_path / f"proj_{pos_name}"
+        tasks_dir = ws / "tasks"
+        tasks_dir.mkdir(parents=True)
+
+        cfg_file = path_fn(ws)
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(sample_toml, encoding="utf-8")
+
+        # 1. orchestration_config reads routing, tasks, triggers and reports expected path + legacy status
+        merged, meta = oc.resolve_config(global_cfg_path, ws)
+        assert pathlib.Path(meta["project_config_path"]).resolve() == cfg_file.resolve(), pos_name
+        assert meta["project_config_exists"] is True, pos_name
+        assert meta["project_config_legacy"] is expect_legacy, pos_name
+        assert merged["routing"]["default_orchestrator"] == "codex", pos_name
+        assert merged["tasks"]["extension_fields"] == ["area", "subsystem"], pos_name
+        if expect_legacy:
+            assert any("legacy project config path" in w and "read-only" in w for w in meta["warnings"]), pos_name
+        else:
+            assert meta["warnings"] == [], pos_name
+
+        # 2. tasks_engine reads extension_fields and languages from the exact same location
+        ext_fields = te.get_project_extension_fields(tasks_dir)
+        assert ext_fields == ("area", "subsystem"), pos_name
+        lang_info = te.resolve_project_languages(tasks_dir)
+        assert lang_info["tasks"] == "it", pos_name
+        if expect_legacy:
+            assert any("legacy project config path" in w and "read-only" in w for w in lang_info["warnings"]), pos_name
+
+        # 3. orchestration_triggers reads trigger rule from the exact same location
+        trig_meta, rules, trig_errs = ot.load_triggers_config(ws)
+        assert not trig_errs, f"{pos_name}: {trig_errs}"
+        assert len(rules) == 1 and rules[0]["name"] == "legacy-pos-rule", pos_name
+        assert pathlib.Path(trig_meta["project_config_path"]).resolve() == cfg_file.resolve(), pos_name
+        assert trig_meta["project_config_legacy"] is expect_legacy, pos_name
+        if expect_legacy:
+            assert any("legacy project config path" in w and "read-only" in w for w in trig_meta["warnings"]), pos_name
+
+        # 4. Write target is always canonical (legacy file stays untouched / read-only)
+        write_target = oc.find_project_config_path(ws, global_cfg_path, for_write=True)
+        if expect_legacy:
+            expected_canonical = global_cfg_dir / "projects" / ws.name / "orchestration.toml"
+            assert write_target.resolve() == expected_canonical.resolve(), pos_name
+            before_legacy = cfg_file.read_text(encoding="utf-8")
+            res_set = run_cli(
+                "--global-config",
+                str(global_cfg_path),
+                "set-routing",
+                "--scope",
+                "project",
+                "--workspace",
+                str(ws),
+                "--orchestrator",
+                "claude",
+                "--json",
+            )
+            assert res_set.returncode == 0, res_set.stdout + res_set.stderr
+            assert cfg_file.read_text(encoding="utf-8") == before_legacy, pos_name
+            assert expected_canonical.is_file(), pos_name
+
+
+def test_19_1_precedence_order_and_tasks_config_matches_env_status(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.1: Precedence order is enforced, and `ai-orch tasks config` and `ai-orch env status`
+    report the exact same `project_config_path`."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    global_cfg_dir = fake_home / ".config" / "ai-orchestration"
+    global_cfg_path = global_cfg_dir / "orchestration.toml"
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(global_cfg_path))
+    monkeypatch.setenv("AI_ORCH_HOME", str(fake_home))
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
+
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    ws = tmp_path / "sample_repo"
+    (ws / "tasks").mkdir(parents=True)
+
+    def _assert_same_path(expected: pathlib.Path, expect_exists: bool) -> None:
+        res_tasks = subprocess.run(
+            [sys.executable, str(bin_ai_orch), "tasks", "config", "--tasks-dir", str(ws / "tasks"), "--json"],
+            cwd=str(ws),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        res_env = subprocess.run(
+            [sys.executable, str(bin_ai_orch), "env", "status", "--workspace", str(ws), "--json"],
+            cwd=str(ws),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        tasks_data = json.loads(res_tasks.stdout)
+        env_data = json.loads(res_env.stdout)
+        assert tasks_data["project_config_path"] == env_data["project_config_path"]
+        assert pathlib.Path(tasks_data["project_config_path"]).resolve() == expected.resolve()
+        assert tasks_data["project_config_exists"] is expect_exists
+        assert env_data["project_config_exists"] is expect_exists
+
+    # 0. Unconfigured -> both report external canonical path with exists=False
+    ext_cfg = global_cfg_dir / "projects" / ws.name / "orchestration.toml"
+    _assert_same_path(ext_cfg, expect_exists=False)
+
+    # Walk from lowest precedence to highest precedence, verifying each newly added file wins
+    ordered_files = [
+        ws / ".ai-orchestration.toml",
+        ws / "tasks" / "orchestration.toml",
+        ws / ".ai-orchestration" / "orchestration.toml",
+        ws / "orchestration.toml",
+        ext_cfg,
+        ws / ".ai-orchestration.local.toml",
+    ]
+    for fpath in ordered_files:
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        fpath.write_text('[routing]\ndefault_executor = "kilo"\n', encoding="utf-8")
+        _assert_same_path(fpath, expect_exists=True)
+
+
+def test_19_1_no_tasks_orchestration_toml_in_docs_or_skill_templates() -> None:
+    """19.1: `grep -rn "tasks/orchestration.toml" docs plugins/*/skills/*/SKILL.template.md`
+    finds no instructions to write to tasks/orchestration.toml."""
+    search_targets: list[pathlib.Path] = list((REPO_ROOT / "docs").rglob("*.md"))
+    search_targets.extend((REPO_ROOT / "plugins").glob("*/skills/*/SKILL.template.md"))
+    search_targets.append(REPO_ROOT / "plugins" / "shared" / "skills" / "orchestration-setup" / "SKILL.md")
+
+    offending: list[str] = []
+    for path in search_targets:
+        if not path.is_file():
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if "tasks/orchestration.toml" in line:
+                offending.append(f"{path.relative_to(REPO_ROOT)}:{lineno}: {line}")
+
+    assert offending == [], f"Found forbidden tasks/orchestration.toml references:\n" + "\n".join(offending)
+
+
+def test_19_7_preflight_tools_versions_ports_services_disk(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """19.7: `[project.preflight]` validates tools with minimum version, free ports,
+    active services, and disk space, and is runnable via `ai-orch preflight`."""
+    import os
+    import socket
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_tool = fake_bin / "fake-bun"
+    fake_tool.write_text(
+        "#!/bin/sh\necho 'bun 1.5.2'\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    # 1. Missing binary -> fails naming the binary
+    cfg_missing = {
+        "project": {
+            "preflight": {
+                "tools": {
+                    "nonexistent-bin-t205": "1.0.0",
+                }
+            }
+        }
+    }
+    res_missing = oc.run_project_preflight(cfg_missing, workspace=ws)
+    assert res_missing["ok"] is False
+    assert any("nonexistent-bin-t205" in f for f in res_missing["failures"])
+
+    # 2. Version below minimum -> fails naming the binary and versions
+    cfg_old_ver = {
+        "project": {
+            "preflight": {
+                "tools": {
+                    "fake-bun": ">=2.0.0",
+                }
+            }
+        }
+    }
+    res_old = oc.run_project_preflight(cfg_old_ver, workspace=ws)
+    assert res_old["ok"] is False
+    assert any("fake-bun" in f and "1.5.2" in f and "2.0.0" in f for f in res_old["failures"])
+
+    # 3. Free port occupied vs free, and active service on TCP port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        busy_port = srv.getsockname()[1]
+
+        # Find an unused port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tmp_sock:
+            tmp_sock.bind(("127.0.0.1", 0))
+            free_port = tmp_sock.getsockname()[1]
+
+        # Busy port in free_ports -> fails
+        cfg_busy_port = {
+            "project": {
+                "preflight": {
+                    "free_ports": [busy_port],
+                }
+            }
+        }
+        res_busy = oc.run_project_preflight(cfg_busy_port, workspace=ws)
+        assert res_busy["ok"] is False
+        assert any(str(busy_port) in f for f in res_busy["failures"])
+
+        # Inactive service on free_port -> fails
+        cfg_dead_svc = {
+            "project": {
+                "preflight": {
+                    "services": {
+                        "test-db": {"port": free_port},
+                    }
+                }
+            }
+        }
+        res_dead_svc = oc.run_project_preflight(cfg_dead_svc, workspace=ws)
+        assert res_dead_svc["ok"] is False
+        assert any("test-db" in f for f in res_dead_svc["failures"])
+
+        # Impossible disk requirement -> fails
+        cfg_low_disk = {
+            "project": {
+                "preflight": {
+                    "min_disk_gb": 999999999,
+                }
+            }
+        }
+        res_low_disk = oc.run_project_preflight(cfg_low_disk, workspace=ws)
+        assert res_low_disk["ok"] is False
+        assert any("disk space" in f.lower() for f in res_low_disk["failures"])
+
+        # All checks passing (tool >= 1.2.0, free_port unused, service listening on busy_port, disk >= 1 MB)
+        cfg_all_ok = {
+            "project": {
+                "preflight": {
+                    "tools": {"fake-bun": ">=1.2.0"},
+                    "free_ports": [free_port],
+                    "services": {"active-srv": {"port": busy_port}},
+                    "min_disk_mb": 1,
+                }
+            }
+        }
+        res_ok = oc.run_project_preflight(cfg_all_ok, workspace=ws)
+        assert res_ok["ok"] is True, res_ok["failures"]
+        assert len(res_ok["checks"]) == 4
+
+
+def test_19_7_ai_orch_verify_checks_execution_and_timeouts(tmp_path: pathlib.Path) -> None:
+    """19.7: `[project.verification_checks]` is executable via `ai-orch verify-checks`
+    and respects per-project and per-check timeouts."""
+    bin_ai_orch = REPO_ROOT / "bin" / "ai-orch"
+    ws = tmp_path / "verify_ws"
+    ws.mkdir()
+
+    proj_cfg = ws / ".ai-orchestration.local.toml"
+    proj_cfg.write_text(
+        '[project]\nname = "verify-demo"\ncommand_timeout_seconds = 45\n\n'
+        '[project.verification_checks.unit]\n'
+        'description = "Fast unit check"\n'
+        f'commands = ["{sys.executable} -c \\"print(\'UNIT_OK\')\\""]\n\n'
+        '[project.verification_checks.broken]\n'
+        'description = "Failing check"\n'
+        f'commands = ["{sys.executable} -c \\"import sys; sys.stderr.write(\'BROKEN_ERR\\\\n\'); sys.exit(3)\\""]\n\n'
+        '[project.verification_checks.slow]\n'
+        'description = "Slow check that exceeds timeout"\n'
+        'timeout_seconds = 0.3\n'
+        f'commands = ["{sys.executable} -c \\"import time; time.sleep(5)\\""]\n',
+        encoding="utf-8",
+    )
+
+    # 1. Run passing check only
+    res_pass = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "verify-checks", "unit", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_pass.returncode == 0, res_pass.stdout + res_pass.stderr
+    data_pass = json.loads(res_pass.stdout)
+    assert data_pass["ok"] is True
+    assert data_pass["passed_count"] == 1
+    assert data_pass["failed_count"] == 0
+    assert data_pass["timeout_seconds"] == 45.0
+    assert data_pass["checks"][0]["commands"][0]["stdout"] == "UNIT_OK"
+
+    # 2. Run failing check
+    res_fail = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "verify-checks", "--check", "broken", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_fail.returncode == 1
+    data_fail = json.loads(res_fail.stdout)
+    assert data_fail["ok"] is False
+    assert data_fail["failed_count"] == 1
+    assert data_fail["checks"][0]["commands"][0]["exit_code"] == 3
+    assert "BROKEN_ERR" in data_fail["checks"][0]["commands"][0]["stderr"]
+
+    # 3. Run slow check -> times out
+    res_slow = subprocess.run(
+        [sys.executable, str(bin_ai_orch), "verify-checks", "slow", "--workspace", str(ws), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_slow.returncode == 1
+    data_slow = json.loads(res_slow.stdout)
+    assert data_slow["ok"] is False
+    assert data_slow["checks"][0]["commands"][0]["timed_out"] is True
+
 

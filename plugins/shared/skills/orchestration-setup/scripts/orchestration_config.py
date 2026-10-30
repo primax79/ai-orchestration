@@ -24,10 +24,13 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import threading
+import time
+import urllib.request
 import uuid
 from typing import Any, Iterator
 
@@ -373,43 +376,173 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
 
 def default_global_config_path() -> pathlib.Path:
     env_path = os.environ.get("AI_ORCHESTRATION_CONFIG")
-    if env_path:
+    if env_path and env_path.strip():
         p = pathlib.Path(env_path).expanduser().resolve()
         if p.is_dir():
             return p / "orchestration.toml"
         return p
+    env_dir = os.environ.get("AI_ORCH_CONFIG_DIR")
+    if env_dir and env_dir.strip():
+        return pathlib.Path(env_dir).expanduser().resolve() / "orchestration.toml"
+    env_home = os.environ.get("AI_ORCH_HOME")
+    if env_home and env_home.strip():
+        return pathlib.Path(env_home).expanduser().resolve() / ".config" / "ai-orchestration" / "orchestration.toml"
     return pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml"
 
 
 def global_config_dir() -> pathlib.Path:
     """Return the directory containing global orchestration configuration."""
     env_path = os.environ.get("AI_ORCHESTRATION_CONFIG")
-    if env_path:
+    if env_path and env_path.strip():
         p = pathlib.Path(env_path).expanduser().resolve()
         if p.is_file() or p.suffix == ".toml" or p.name.endswith(".toml"):
             return p.parent
         return p
+    env_dir = os.environ.get("AI_ORCH_CONFIG_DIR")
+    if env_dir and env_dir.strip():
+        return pathlib.Path(env_dir).expanduser().resolve()
+    env_home = os.environ.get("AI_ORCH_HOME")
+    if env_home and env_home.strip():
+        return pathlib.Path(env_home).expanduser().resolve() / ".config" / "ai-orchestration"
     return pathlib.Path.home() / ".config" / "ai-orchestration"
 
 
+def project_config_candidates(
+    workspace: pathlib.Path | str,
+    global_path: pathlib.Path | str | None = None,
+) -> list[tuple[pathlib.Path, str, bool]]:
+    """Return ordered (path, label, is_legacy) candidates for a project's configuration.
+
+    Documented precedence order:
+      1. `<workspace>/.ai-orchestration.local.toml` (canonical, local unversioned, read-write)
+      2. `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` (canonical, external, read-write)
+      3. `<workspace>/orchestration.toml` (legacy, read-only with warning)
+      4. `<workspace>/.ai-orchestration/orchestration.toml` (legacy, read-only with warning)
+      5. `<workspace>/tasks/orchestration.toml` (legacy, read-only with warning)
+      6. `<workspace>/.ai-orchestration.toml` (legacy, read-only with warning)
+    """
+    ws = pathlib.Path(workspace)
+    ws_resolved = ws.resolve()
+    if global_path is not None:
+        gp = pathlib.Path(global_path).expanduser().resolve()
+        gpath = gp / "orchestration.toml" if gp.is_dir() else gp
+    else:
+        gpath = default_global_config_path()
+    projects_root = gpath.parent / "projects"
+    ext_path = projects_root / ws_resolved.name / "orchestration.toml"
+    ext_label = f"~/.config/ai-orchestration/projects/{ws_resolved.name}/orchestration.toml"
+
+    return [
+        (ws / ".ai-orchestration.local.toml", ".ai-orchestration.local.toml", False),
+        (ext_path, ext_label, False),
+        (ws / "orchestration.toml", "orchestration.toml", True),
+        (ws / ".ai-orchestration" / "orchestration.toml", ".ai-orchestration/orchestration.toml", True),
+        (ws / "tasks" / "orchestration.toml", "tasks/orchestration.toml", True),
+        (ws / ".ai-orchestration.toml", ".ai-orchestration.toml", True),
+    ]
+
+
+def inspect_project_config(
+    workspace: pathlib.Path | str,
+    global_path: pathlib.Path | str | None = None,
+) -> dict[str, Any]:
+    """Inspect all canonical and legacy project configuration candidates for `workspace`.
+
+    Returns a dict with:
+      - `path`: pathlib.Path — active config path for reading (first existing candidate, or canonical external default)
+      - `write_path`: pathlib.Path — canonical config path for writing (never a legacy location)
+      - `exists`: bool — whether `path` exists on disk
+      - `is_legacy`: bool — True when `path` is one of the read-only legacy paths
+      - `label`: str — short display label of `path`
+      - `candidates`: list[dict] — all existing candidate files in precedence order
+      - `legacy_paths`: list[pathlib.Path] — all existing legacy config files on disk
+      - `warnings`: list[str] — deprecation warnings for any legacy config files found on disk
+    """
+    cands = project_config_candidates(workspace, global_path)
+    local_dot_path = cands[0][0]
+    default_ext_path, default_ext_label, _ = cands[1]
+
+    write_path = local_dot_path if local_dot_path.is_file() else default_ext_path
+
+    existing: list[dict[str, Any]] = []
+    seen_resolved: set[pathlib.Path] = set()
+    for p, lbl, is_leg in cands:
+        if not p.is_file():
+            continue
+        try:
+            rp = p.resolve()
+        except Exception:
+            rp = p
+        if rp in seen_resolved:
+            continue
+        seen_resolved.add(rp)
+        existing.append({"path": p, "label": lbl, "is_legacy": is_leg})
+
+    if existing:
+        active = existing[0]
+        active_path: pathlib.Path = active["path"]
+        active_label: str = active["label"]
+        active_legacy: bool = bool(active["is_legacy"])
+        active_exists = True
+    else:
+        active_path = default_ext_path
+        active_label = default_ext_label
+        active_legacy = False
+        active_exists = False
+
+    legacy_paths: list[pathlib.Path] = [c["path"] for c in existing if c["is_legacy"]]
+    warnings: list[str] = []
+    for c in existing:
+        if c["is_legacy"]:
+            c_path = c["path"]
+            c_lbl = c["label"]
+            if c_path == active_path:
+                warnings.append(
+                    f"{c_lbl}: legacy project config path '{c_path}' is deprecated and read-only; "
+                    f"move it to '{write_path}' (or '{local_dot_path}')."
+                )
+            else:
+                warnings.append(
+                    f"{c_lbl}: legacy project config path '{c_path}' is deprecated (read-only) and shadowed by '{active_path}'; "
+                    f"move or merge it into '{write_path}'."
+                )
+
+    return {
+        "path": active_path,
+        "write_path": write_path,
+        "exists": active_exists,
+        "is_legacy": active_legacy,
+        "label": active_label,
+        "candidates": existing,
+        "legacy_paths": legacy_paths,
+        "warnings": warnings,
+    }
+
+
 def find_project_config_path(
-    workspace: pathlib.Path,
-    global_path: pathlib.Path | None = None,
+    workspace: pathlib.Path | str,
+    global_path: pathlib.Path | str | None = None,
+    *,
+    for_write: bool = False,
 ) -> pathlib.Path:
-    """Return the UNVERSIONED local project agent configuration path.
+    """Return the project configuration path for `workspace`.
 
     Agent/model/tool choices are local to the developer's machine and must NOT
     be committed to the repository's versioned `tasks/` tree.
-    Precedence:
-      1. `<workspace>/.ai-orchestration.local.toml` (if already present locally, gitignored)
-      2. `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` (outside repo)
+    Precedence when reading (`for_write=False`, default):
+      1. `<workspace>/.ai-orchestration.local.toml` (canonical, local gitignored)
+      2. `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` (canonical, external)
+      3. `<workspace>/orchestration.toml` (legacy, read-only with warning)
+      4. `<workspace>/.ai-orchestration/orchestration.toml` (legacy, read-only with warning)
+      5. `<workspace>/tasks/orchestration.toml` (legacy, read-only with warning)
+      6. `<workspace>/.ai-orchestration.toml` (legacy, read-only with warning)
+    If none exist on disk, returns (2).
+
+    When writing (`for_write=True`), legacy locations (3–6) are ignored so they remain
+    strictly read-only: returns (1) if it already exists, otherwise (2).
     """
-    local_dot = workspace / ".ai-orchestration.local.toml"
-    if local_dot.exists():
-        return local_dot
-    gpath = global_path or default_global_config_path()
-    projects_root = gpath.parent / "projects"
-    return projects_root / workspace.resolve().name / "orchestration.toml"
+    info = inspect_project_config(workspace, global_path)
+    return info["write_path"] if for_write else info["path"]
 
 
 def format_diff_path(
@@ -903,8 +1036,9 @@ def resolve_host_id(
     cfg: dict[str, Any] | None = None,
     global_path: pathlib.Path | None = None,
     hostname: str | None = None,
+    workspace: pathlib.Path | str | None = None,
 ) -> str:
-    """Resolve the canonical host id (`[host] id` in global config, fallback to normalized hostname)."""
+    """Resolve the canonical host id (`[host] id` in global/project config, fallback to normalized hostname)."""
     if isinstance(cfg, dict):
         host_sec = cfg.get("host")
         if isinstance(host_sec, dict):
@@ -913,7 +1047,13 @@ def resolve_host_id(
                 return raw_id.strip()
 
     if cfg is None or not isinstance(cfg.get("host"), dict) or not cfg.get("host", {}).get("id"):
-        gpath = global_path or default_global_config_path()
+        gpath = (
+            pathlib.Path(global_path).expanduser().resolve()
+            if global_path is not None
+            else default_global_config_path()
+        )
+        if gpath.is_dir():
+            gpath = gpath / "orchestration.toml"
         if gpath.exists():
             try:
                 gcfg = load_toml_file(gpath)
@@ -924,6 +1064,20 @@ def resolve_host_id(
                         return raw_id.strip()
             except Exception:
                 pass
+        if workspace is not None:
+            proj_info = inspect_project_config(workspace, gpath)
+            for cand in proj_info.get("candidates", []):
+                c_path = cand["path"]
+                if c_path.exists():
+                    try:
+                        pcfg = load_toml_file(c_path)
+                        host_sec = pcfg.get("host")
+                        if isinstance(host_sec, dict):
+                            raw_id = host_sec.get("id")
+                            if isinstance(raw_id, str) and raw_id.strip():
+                                return raw_id.strip()
+                    except Exception:
+                        pass
 
     if hostname is None:
         env_hid = os.environ.get("AI_ORCH_HOST_ID")
@@ -940,11 +1094,12 @@ get_host_id = resolve_host_id
 def resolve_hosts_table(
     cfg: dict[str, Any] | None = None,
     global_path: pathlib.Path | None = None,
+    workspace: pathlib.Path | str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Return normalized `[hosts.<id>]` table with canonical keys (`id`, `ssh_target`, `agent_user`, `role`)."""
     if cfg is None:
-        gpath = global_path or default_global_config_path()
-        cfg = load_toml_file(gpath) if gpath.exists() else {}
+        ws_path = pathlib.Path(workspace) if workspace is not None else None
+        cfg, _ = resolve_config(global_path, ws_path)
     raw_hosts = cfg.get("hosts")
     if not isinstance(raw_hosts, dict):
         return {}
@@ -969,27 +1124,55 @@ def resolve_hosts_table(
 def get_declared_hosts(
     cfg: dict[str, Any] | None = None,
     global_path: pathlib.Path | None = None,
-    workspace: pathlib.Path | None = None,
+    workspace: pathlib.Path | str | None = None,
 ) -> set[str]:
-    """Return the set of declared host IDs from `[host] id` and `[hosts.<id>]`."""
-    if cfg is None:
-        cfg, _ = resolve_config(global_path, workspace)
+    """Return the set of declared host IDs from `[host] id`, `[hosts.<id>]`, and `[tasks] hosts`."""
     declared: set[str] = set()
-    host_sec = cfg.get("host")
-    if isinstance(host_sec, dict):
-        hid = host_sec.get("id")
-        if isinstance(hid, str) and hid.strip():
-            declared.add(hid.strip())
-    hosts_sec = cfg.get("hosts")
-    if isinstance(hosts_sec, dict):
-        for hk, hv in hosts_sec.items():
-            if isinstance(hk, str) and hk.strip() and isinstance(hv, dict):
-                declared.add(hk.strip())
-    tasks_sec = cfg.get("tasks")
-    if isinstance(tasks_sec, dict) and isinstance(tasks_sec.get("hosts"), (list, tuple)):
-        for h in tasks_sec["hosts"]:
-            if isinstance(h, str) and h.strip():
-                declared.add(h.strip())
+
+    def _collect(data: dict[str, Any]) -> None:
+        host_sec = data.get("host")
+        if isinstance(host_sec, dict):
+            hid = host_sec.get("id")
+            if isinstance(hid, str) and is_valid_host_id(hid.strip()):
+                declared.add(hid.strip())
+        hosts_sec = data.get("hosts")
+        if isinstance(hosts_sec, dict):
+            for hk, hv in hosts_sec.items():
+                if isinstance(hk, str) and isinstance(hv, dict) and is_valid_host_id(hk.strip()):
+                    declared.add(hk.strip())
+        tasks_sec = data.get("tasks")
+        if isinstance(tasks_sec, dict) and isinstance(tasks_sec.get("hosts"), (list, tuple)):
+            for h in tasks_sec["hosts"]:
+                if isinstance(h, str) and is_valid_host_id(h.strip()):
+                    declared.add(h.strip())
+
+    if cfg is not None:
+        _collect(cfg)
+        return declared
+
+    ws_path = pathlib.Path(workspace).resolve() if workspace is not None else None
+    gpath = (
+        pathlib.Path(global_path).expanduser().resolve()
+        if global_path is not None
+        else default_global_config_path()
+    )
+    if gpath.is_dir():
+        gpath = gpath / "orchestration.toml"
+    if gpath.exists():
+        try:
+            _collect(load_toml_file(gpath))
+        except Exception:
+            pass
+    if ws_path is not None:
+        for check_ws in ([ws_path, ws_path.parent] if ws_path.parent != ws_path else [ws_path]):
+            proj_info = inspect_project_config(check_ws, gpath)
+            for cand in proj_info.get("candidates", []):
+                c_path = cand["path"]
+                if c_path.exists():
+                    try:
+                        _collect(load_toml_file(c_path))
+                    except Exception:
+                        pass
     return declared
 
 
@@ -1002,10 +1185,15 @@ def resolve_config(
 
     project_cfg: dict[str, Any] = {}
     ppath: pathlib.Path | None = None
+    proj_info: dict[str, Any] | None = None
     if workspace is not None:
-        ppath = find_project_config_path(workspace, gpath)
-        if ppath.exists():
-            project_cfg = load_toml_file(ppath)
+        proj_info = inspect_project_config(workspace, gpath)
+        ppath = proj_info["path"]
+        # Merge existing candidates from lowest precedence to highest precedence
+        for cand in reversed(proj_info["candidates"]):
+            c_path = cand["path"]
+            if c_path.exists():
+                project_cfg = deep_merge(project_cfg, load_toml_file(c_path))
 
     merged = deep_merge(DEFAULT_GLOBAL_CONFIG, global_cfg)
     if project_cfg:
@@ -1016,7 +1204,10 @@ def resolve_config(
         "global_config_exists": gpath.exists(),
         "project_config_path": str(ppath) if ppath else None,
         "project_config_exists": bool(ppath and ppath.exists()),
-        "host_id": resolve_host_id(merged, gpath),
+        "project_config_write_path": str(proj_info["write_path"]) if proj_info else None,
+        "project_config_legacy": bool(proj_info and proj_info["is_legacy"]),
+        "warnings": list(proj_info["warnings"]) if proj_info else [],
+        "host_id": resolve_host_id(merged, gpath, workspace=workspace),
     }
     return merged, meta
 
@@ -1317,7 +1508,1059 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
                             f"[hosts.{hid}].port = {pval!r} must be an integer between 1 and 65535."
                         )
 
+    proj_cfg = cfg.get("project")
+    if isinstance(proj_cfg, dict):
+        pf_cfg = proj_cfg.get("preflight")
+        if pf_cfg is not None:
+            if not isinstance(pf_cfg, dict):
+                errors.append("[project.preflight] must be a table.")
+            else:
+                for pkey in ("free_ports", "ports"):
+                    if pkey in pf_cfg:
+                        pval = pf_cfg[pkey]
+                        if not isinstance(pval, list):
+                            errors.append(f"[project.preflight].{pkey} must be a list.")
+                        else:
+                            for p_item in pval:
+                                if isinstance(p_item, bool):
+                                    errors.append(f"[project.preflight].{pkey} contains invalid port {p_item!r}.")
+                                elif isinstance(p_item, int):
+                                    if not (1 <= p_item <= 65535):
+                                        errors.append(
+                                            f"[project.preflight].{pkey} port {p_item} must be in 1..65535."
+                                        )
+                                elif isinstance(p_item, dict):
+                                    pnum = p_item.get("port")
+                                    if isinstance(pnum, bool) or not isinstance(pnum, int) or not (1 <= pnum <= 65535):
+                                        errors.append(
+                                            f"[project.preflight].{pkey} entry {p_item!r} must have 'port' in 1..65535."
+                                        )
+                for dkey in ("min_disk_mb", "min_disk_gb", "disk_free_mb", "disk_free_gb", "min_free_mb", "min_free_gb"):
+                    if dkey in pf_cfg:
+                        dval = pf_cfg[dkey]
+                        if isinstance(dval, bool) or not isinstance(dval, (int, float)) or dval < 0:
+                            errors.append(f"[project.preflight].{dkey} must be a non-negative number.")
+
+        for t_table_key in ("timeouts", "command_timeouts"):
+            if t_table_key in proj_cfg:
+                t_table = proj_cfg[t_table_key]
+                if not isinstance(t_table, dict):
+                    errors.append(f"[project.{t_table_key}] must be a table.")
+                else:
+                    for tk, tv in t_table.items():
+                        if isinstance(tv, bool) or not isinstance(tv, (int, float)) or tv <= 0:
+                            errors.append(
+                                f"[project.{t_table_key}].{tk} must be a positive number (seconds)."
+                            )
+
     return errors, warnings
+
+
+# ---------------------------------------------------------------------------
+# Project Preflight, Command Timeouts & Verification Checks (Task 19.7)
+# ---------------------------------------------------------------------------
+
+_PREFLIGHT_RESERVED_KEYS = {
+    "enabled",
+    "tools",
+    "binaries",
+    "required_tools",
+    "executables",
+    "free_ports",
+    "ports",
+    "services",
+    "active_services",
+    "required_services",
+    "min_disk_mb",
+    "min_disk_gb",
+    "disk_free_mb",
+    "disk_free_gb",
+    "min_free_mb",
+    "min_free_gb",
+    "disk_space_mb",
+    "disk_space_gb",
+    "disk",
+    "commands",
+    "checks",
+    "timeout",
+    "timeout_seconds",
+    "command_timeout",
+    "command_timeout_seconds",
+    "default_command_timeout",
+    "test_timeout_seconds",
+    "timeouts",
+    "command_timeouts",
+}
+
+
+def parse_version_tuple(version_str: str | int | float | None) -> tuple[int, ...] | None:
+    """Extract numeric version tuple (major, minor, ...) from a version string."""
+    if version_str is None or isinstance(version_str, bool):
+        return None
+    s = str(version_str).strip()
+    if not s or s in ("*", "any", "latest"):
+        return None
+    m = re.search(r"(\d+(?:\.\d+)*)", s)
+    if not m:
+        return None
+    try:
+        return tuple(int(part) for part in m.group(1).split("."))
+    except ValueError:
+        return None
+
+
+def compare_versions(actual: tuple[int, ...], minimum: tuple[int, ...]) -> bool:
+    """Return True if actual >= minimum (padding shorter tuple with trailing zeros)."""
+    max_len = max(len(actual), len(minimum))
+    act_padded = actual + (0,) * (max_len - len(actual))
+    min_padded = minimum + (0,) * (max_len - len(minimum))
+    return act_padded >= min_padded
+
+
+def resolve_project_command_timeouts(cfg: dict[str, Any] | None) -> dict[str, int]:
+    """Resolve per-project command timeouts (in seconds) from merged/project config.
+
+    Supports:
+      - `[project]` scalars: `command_timeout_seconds`, `command_timeout`,
+        `default_command_timeout`, `timeout_seconds`, `timeout`, `test_timeout_seconds`
+      - `[project.timeouts]` / `[project.command_timeouts]` tables (e.g. `default = 600`, `test = 900`)
+      - `[project.preflight]` scalars and `[project.preflight.timeouts]` / `[project.preflight.command_timeouts]`
+      - Top-level `[timeouts]` / `[command_timeouts]`
+      - Per-check `timeout` / `timeout_seconds` under `[project.verification_checks.<name>]`
+    """
+    if not cfg or not isinstance(cfg, dict):
+        return {}
+
+    result: dict[str, int] = {}
+
+    def _add_timeout(key: str, val: Any) -> None:
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            return
+        if val <= 0:
+            return
+        norm_key = key
+        if key in (
+            "command_timeout_seconds",
+            "command_timeout",
+            "default_command_timeout",
+            "default_seconds",
+            "command_seconds",
+            "command",
+            "timeout_seconds",
+            "timeout",
+        ):
+            norm_key = "default"
+        elif key in ("test_timeout_seconds", "test_timeout", "tests_timeout"):
+            norm_key = "test"
+        result[norm_key] = int(val)
+
+    def _scan_table(tbl: Any) -> None:
+        if not isinstance(tbl, dict):
+            return
+        for k, v in tbl.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                _add_timeout(k, v)
+
+    # 1. Top-level fallback tables
+    _scan_table(cfg.get("timeouts"))
+    _scan_table(cfg.get("command_timeouts"))
+
+    # 2. [project] and [project.preflight]
+    proj = cfg.get("project")
+    if isinstance(proj, dict):
+        for scalar_k in (
+            "command_timeout_seconds",
+            "command_timeout",
+            "default_command_timeout",
+            "timeout_seconds",
+            "timeout",
+            "test_timeout_seconds",
+        ):
+            if scalar_k in proj:
+                _add_timeout(scalar_k, proj[scalar_k])
+
+        _scan_table(proj.get("timeouts"))
+        _scan_table(proj.get("command_timeouts"))
+
+        pf = proj.get("preflight")
+        if isinstance(pf, dict):
+            for scalar_k in (
+                "command_timeout_seconds",
+                "command_timeout",
+                "default_command_timeout",
+                "timeout_seconds",
+                "timeout",
+                "test_timeout_seconds",
+            ):
+                if scalar_k in pf:
+                    _add_timeout(scalar_k, pf[scalar_k])
+            _scan_table(pf.get("timeouts"))
+            _scan_table(pf.get("command_timeouts"))
+
+        v_checks = proj.get("verification_checks")
+        if isinstance(v_checks, dict):
+            for comp_name, comp_cfg in v_checks.items():
+                if isinstance(comp_cfg, dict):
+                    t_val = comp_cfg.get("timeout_seconds") or comp_cfg.get("timeout")
+                    if isinstance(t_val, (int, float)) and not isinstance(t_val, bool) and t_val > 0:
+                        result.setdefault(f"verification_checks.{comp_name}", int(t_val))
+
+    # 3. Top-level [preflight] fallback
+    pf_top = cfg.get("preflight")
+    if isinstance(pf_top, dict):
+        for scalar_k in (
+            "command_timeout_seconds",
+            "command_timeout",
+            "default_command_timeout",
+            "timeout_seconds",
+            "timeout",
+            "test_timeout_seconds",
+        ):
+            if scalar_k in pf_top:
+                _add_timeout(scalar_k, pf_top[scalar_k])
+        _scan_table(pf_top.get("timeouts"))
+        _scan_table(pf_top.get("command_timeouts"))
+
+    return result
+
+
+def format_command_timeouts_prompt_block(
+    cfg: dict[str, Any] | None = None,
+    timeouts: dict[str, Any] | int | float | None = None,
+) -> list[str]:
+    """Build the `## Command Timeouts` Markdown block for executor/verifier prompts.
+
+    Returns an empty list when no command timeouts are configured so existing
+    projects without timeouts produce identical prompts and plan hashes.
+    """
+    resolved = resolve_project_command_timeouts(cfg) if cfg else {}
+    if isinstance(timeouts, (int, float)) and not isinstance(timeouts, bool) and timeouts > 0:
+        resolved["default"] = int(timeouts)
+    elif isinstance(timeouts, dict):
+        for k, v in timeouts.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                resolved[str(k)] = int(v)
+
+    if not resolved:
+        return []
+
+    default_sec = resolved.get("default") or resolved.get("test") or max(resolved.values())
+    default_ms = default_sec * 1000
+    lines: list[str] = [
+        "## Command Timeouts",
+        "",
+        f"- Per-project command timeout: `{default_sec}s` (`{default_ms}ms`). Pass `timeout={default_ms}` (ms) or `{default_sec}s` to shell/bash tool calls for test suites and builds instead of the default 120s timeout.",
+    ]
+    for k, sec in sorted(resolved.items()):
+        lines.append(f"- **{k}**: `{sec}s` (`{sec * 1000}ms`)")
+    lines.append("")
+    return lines
+
+
+def _is_tcp_port_listening(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Return True if a TCP listener accepts connections on (host, port)."""
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _probe_tool_version(exe: str, version_flag: str = "--version", timeout: float = 5.0) -> str | None:
+    """Run executable with version flag(s) and return first line containing a version number."""
+    flags_to_try = [version_flag]
+    for fallback_flag in ("--version", "-v", "-V", "version"):
+        if fallback_flag not in flags_to_try:
+            flags_to_try.append(fallback_flag)
+
+    first_nonempty: str | None = None
+    for flag in flags_to_try:
+        try:
+            argv = [exe, *flag.split()] if flag else [exe]
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            combined = f"{proc.stdout or ''}\n{proc.stderr or ''}".strip()
+            if not combined:
+                continue
+            for line in combined.splitlines():
+                line_s = line.strip()
+                if not line_s:
+                    continue
+                if first_nonempty is None:
+                    first_nonempty = line_s
+                if parse_version_tuple(line_s) is not None:
+                    return line_s
+        except Exception:
+            continue
+    return first_nonempty
+
+
+def _normalize_preflight_tool_entries(preflight_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract normalized tool requirement dicts from `[project.preflight]`."""
+    entries: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+
+    def _add_entry(
+        name: str,
+        min_version: str | None = None,
+        path: str | None = None,
+        version_flag: str = "--version",
+    ) -> None:
+        clean_name = name.strip()
+        if not clean_name:
+            return
+        min_v = str(min_version).strip() if min_version is not None else None
+        if min_v in ("", "*", "any", "latest", "True", "true"):
+            min_v = None
+        if min_v is not None:
+            min_v = re.sub(r"^(?:>=|>|==|=|v|V)\s*", "", min_v).strip() or None
+        if clean_name in seen_names:
+            for existing in entries:
+                if existing["name"] == clean_name:
+                    if min_v is not None:
+                        existing["min_version"] = min_v
+                    if path is not None:
+                        existing["path"] = path
+                    break
+            return
+        seen_names.add(clean_name)
+        entries.append(
+            {
+                "name": clean_name,
+                "min_version": min_v,
+                "path": path,
+                "version_flag": version_flag,
+            }
+        )
+
+    def _parse_tool_spec(spec: Any, key_name: str | None = None) -> None:
+        if isinstance(spec, bool):
+            if spec and key_name:
+                _add_entry(key_name, None)
+            return
+        if isinstance(spec, (int, float)):
+            if key_name:
+                _add_entry(key_name, str(spec))
+            return
+        if isinstance(spec, str):
+            s = spec.strip()
+            if not s:
+                if key_name:
+                    _add_entry(key_name, None)
+                return
+            if key_name:
+                _add_entry(key_name, s)
+            else:
+                # String in a list: e.g. "bun", "bun >= 1.0.0", "node>=18.0", "python3 3.11"
+                m = re.match(r"^([^\s><=]+)\s*(?:(?:>=|>|==|=)\s*|\s+)(v?\d+(?:\.\d+)*)$", s)
+                if m:
+                    _add_entry(m.group(1), m.group(2))
+                else:
+                    _add_entry(s, None)
+            return
+        if isinstance(spec, dict):
+            if spec.get("enabled") is False or spec.get("required") is False:
+                return
+            t_name = (
+                spec.get("name")
+                or spec.get("tool")
+                or spec.get("binary")
+                or spec.get("cmd")
+                or spec.get("command")
+                or key_name
+            )
+            if not t_name:
+                return
+            min_v = spec.get("min_version")
+            if min_v is None:
+                min_v = spec.get("version")
+            t_path = spec.get("path")
+            v_flag = spec.get("version_flag", "--version")
+            _add_entry(str(t_name), str(min_v) if min_v is not None and not isinstance(min_v, bool) else None, t_path, v_flag)
+
+    for key in ("tools", "binaries", "required_tools", "executables"):
+        raw = preflight_cfg.get(key)
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                _parse_tool_spec(v, key_name=str(k))
+        elif isinstance(raw, list):
+            for item in raw:
+                _parse_tool_spec(item)
+        elif isinstance(raw, str):
+            _parse_tool_spec(raw)
+
+    # Also support direct tool keys under [project.preflight], e.g. `bun = "1.0.0"`
+    for k, v in preflight_cfg.items():
+        if k in _PREFLIGHT_RESERVED_KEYS:
+            continue
+        if isinstance(v, (str, bool, int, float, dict)):
+            _parse_tool_spec(v, key_name=str(k))
+
+    return entries
+
+
+def _resolve_tool_executable(
+    name: str,
+    explicit_path: str | None,
+    base_dirs: list[pathlib.Path],
+) -> str | None:
+    """Locate a tool binary in explicit_path, relative to base_dirs, or in PATH."""
+    candidates_to_check = [explicit_path, name] if explicit_path else [name]
+    for cand in candidates_to_check:
+        if not cand:
+            continue
+        if "/" in cand or cand.startswith("."):
+            p = pathlib.Path(cand).expanduser()
+            if p.is_absolute():
+                if p.is_file() and os.access(p, os.X_OK):
+                    return str(p)
+            else:
+                for bdir in base_dirs:
+                    rp = (bdir / p).resolve()
+                    if rp.is_file() and os.access(rp, os.X_OK):
+                        return str(rp)
+        found = shutil.which(cand)
+        if found:
+            return found
+        for bdir in base_dirs:
+            rp = (bdir / cand).resolve()
+            if rp.is_file() and os.access(rp, os.X_OK):
+                return str(rp)
+    return None
+
+
+def _run_shell_command_with_timeout(
+    command: str,
+    cwd: pathlib.Path,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """Run a shell command in its own process group with a wall-clock timeout."""
+    t0 = time.monotonic()
+    timed_out = False
+    stdout_str = ""
+    stderr_str = ""
+    exit_code: int | None = None
+
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout_str, stderr_str = proc.communicate(timeout=timeout_seconds)
+        exit_code = proc.returncode
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            stdout_str, stderr_str = proc.communicate(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            stdout_str, stderr_str = proc.communicate()
+        exit_code = proc.returncode if proc.returncode is not None else -1
+
+    duration = round(time.monotonic() - t0, 3)
+    ok = (not timed_out) and (exit_code == 0)
+    return {
+        "command": command,
+        "ok": ok,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "duration_seconds": duration,
+        "stdout": (stdout_str or "").strip(),
+        "stderr": (stderr_str or "").strip(),
+    }
+
+
+def run_project_preflight(
+    cfg: dict[str, Any] | None,
+    workspace: pathlib.Path | str | None = None,
+    target_repo: pathlib.Path | str | None = None,
+) -> dict[str, Any]:
+    """Execute `[project.preflight]` checks on the current host (Task 19.7).
+
+    Checks:
+      1. Required tools/binaries and optional minimum versions (`tools` / `binaries`)
+      2. Free TCP ports (`free_ports` / `ports`)
+      3. Active services (`services` / `active_services`: TCP port, HTTP URL, command, or systemd/process)
+      4. Available disk space (`min_disk_mb` / `min_disk_gb` / `disk`)
+      5. Custom preflight shell commands (`commands`)
+    """
+    ws = pathlib.Path(workspace or ".").resolve()
+    repo = pathlib.Path(target_repo).resolve() if target_repo else ws
+    base_dirs: list[pathlib.Path] = [repo]
+    if ws != repo:
+        base_dirs.append(ws)
+
+    if not cfg or not isinstance(cfg, dict):
+        return {"ok": True, "configured": False, "checks": [], "failures": []}
+
+    proj = cfg.get("project", {}) if isinstance(cfg.get("project"), dict) else {}
+    pf_cfg = proj.get("preflight")
+    if pf_cfg is None:
+        pf_cfg = cfg.get("preflight")
+
+    if not pf_cfg or not isinstance(pf_cfg, dict) or pf_cfg.get("enabled") is False:
+        return {"ok": True, "configured": False, "checks": [], "failures": []}
+
+    checks: list[dict[str, Any]] = []
+    failures: list[str] = []
+
+    # 1. Tools / binaries
+    for t_entry in _normalize_preflight_tool_entries(pf_cfg):
+        t_name = t_entry["name"]
+        min_ver = t_entry.get("min_version")
+        t_path = t_entry.get("path")
+        v_flag = t_entry.get("version_flag") or "--version"
+
+        exe = _resolve_tool_executable(t_name, t_path, base_dirs)
+        if not exe:
+            msg = f"Required tool '{t_name}' not found on host"
+            checks.append(
+                {
+                    "kind": "tool",
+                    "name": t_name,
+                    "ok": False,
+                    "path": None,
+                    "version": None,
+                    "min_version": min_ver,
+                    "message": msg,
+                }
+            )
+            failures.append(msg)
+            continue
+
+        if min_ver:
+            raw_ver = _probe_tool_version(exe, version_flag=v_flag)
+            actual_tuple = parse_version_tuple(raw_ver)
+            min_tuple = parse_version_tuple(min_ver)
+            if min_tuple is not None and (actual_tuple is None or not compare_versions(actual_tuple, min_tuple)):
+                detected_str = ".".join(str(x) for x in actual_tuple) if actual_tuple else (raw_ver or "unknown")
+                msg = (
+                    f"Required tool '{t_name}' version '{detected_str}' is below minimum required version '{min_ver}'"
+                )
+                checks.append(
+                    {
+                        "kind": "tool",
+                        "name": t_name,
+                        "ok": False,
+                        "path": exe,
+                        "version": detected_str,
+                        "min_version": min_ver,
+                        "message": msg,
+                    }
+                )
+                failures.append(msg)
+                continue
+            detected_str = ".".join(str(x) for x in actual_tuple) if actual_tuple else (raw_ver or "ok")
+            checks.append(
+                {
+                    "kind": "tool",
+                    "name": t_name,
+                    "ok": True,
+                    "path": exe,
+                    "version": detected_str,
+                    "min_version": min_ver,
+                    "message": f"Tool '{t_name}' found at {exe} (version {detected_str} >= {min_ver})",
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "kind": "tool",
+                    "name": t_name,
+                    "ok": True,
+                    "path": exe,
+                    "version": None,
+                    "min_version": None,
+                    "message": f"Tool '{t_name}' found at {exe}",
+                }
+            )
+
+    # 2. Free TCP ports
+    raw_ports: list[Any] = []
+    for pkey in ("free_ports", "ports"):
+        pval = pf_cfg.get(pkey)
+        if isinstance(pval, list):
+            raw_ports.extend(pval)
+        elif isinstance(pval, (int, str)) and not isinstance(pval, bool):
+            raw_ports.append(pval)
+
+    for p_item in raw_ports:
+        host = "127.0.0.1"
+        port_num: int | None = None
+        if isinstance(p_item, int) and not isinstance(p_item, bool):
+            port_num = p_item
+        elif isinstance(p_item, str):
+            s = p_item.strip()
+            if ":" in s:
+                h_part, p_part = s.rsplit(":", 1)
+                host = h_part.strip() or "127.0.0.1"
+                try:
+                    port_num = int(p_part.strip())
+                except ValueError:
+                    port_num = None
+            else:
+                try:
+                    port_num = int(s)
+                except ValueError:
+                    port_num = None
+        elif isinstance(p_item, dict):
+            host = str(p_item.get("host") or "127.0.0.1")
+            try:
+                port_num = int(p_item["port"])
+            except (KeyError, TypeError, ValueError):
+                port_num = None
+
+        if port_num is None or not (1 <= port_num <= 65535):
+            msg = f"Invalid free_ports entry {p_item!r}"
+            checks.append({"kind": "free_port", "name": str(p_item), "ok": False, "message": msg})
+            failures.append(msg)
+            continue
+
+        in_use = _is_tcp_port_listening(host, port_num)
+        if in_use:
+            msg = f"Required free port {port_num} ({host}:{port_num}) is already in use"
+            checks.append(
+                {
+                    "kind": "free_port",
+                    "name": f"{host}:{port_num}",
+                    "port": port_num,
+                    "host": host,
+                    "ok": False,
+                    "message": msg,
+                }
+            )
+            failures.append(msg)
+        else:
+            checks.append(
+                {
+                    "kind": "free_port",
+                    "name": f"{host}:{port_num}",
+                    "port": port_num,
+                    "host": host,
+                    "ok": True,
+                    "message": f"Port {port_num} ({host}:{port_num}) is free",
+                }
+            )
+
+    # 3. Active services
+    svc_items: list[tuple[str, Any]] = []
+    for skey in ("services", "active_services", "required_services"):
+        sval = pf_cfg.get(skey)
+        if isinstance(sval, dict):
+            for k, v in sval.items():
+                svc_items.append((str(k), v))
+        elif isinstance(sval, list):
+            for item in sval:
+                if isinstance(item, dict):
+                    sname = str(item.get("name") or item.get("service") or item.get("unit") or item.get("port") or "service")
+                    svc_items.append((sname, item))
+                elif isinstance(item, (str, int)) and not isinstance(item, bool):
+                    svc_items.append((str(item), item))
+
+    for svc_name, svc_spec in svc_items:
+        if isinstance(svc_spec, bool):
+            if not svc_spec:
+                continue
+            svc_spec = svc_name
+
+        svc_ok = False
+        svc_detail = ""
+
+        if isinstance(svc_spec, int):
+            svc_ok = _is_tcp_port_listening("127.0.0.1", svc_spec, timeout=1.0)
+            svc_detail = f"127.0.0.1:{svc_spec}"
+        elif isinstance(svc_spec, str):
+            s = svc_spec.strip()
+            if s.startswith(("http://", "https://")):
+                svc_detail = s
+                try:
+                    req = urllib.request.Request(s, method="GET")
+                    with urllib.request.urlopen(req, timeout=2.0) as resp:
+                        svc_ok = 200 <= resp.status < 400
+                except Exception as exc:
+                    svc_ok = False
+                    svc_detail = f"{s} ({exc})"
+            elif re.match(r"^(?:[A-Za-z0-9._-]+)?:?\d+$", s) and (":" in s or s.isdigit()):
+                if ":" in s:
+                    h_part, p_part = s.rsplit(":", 1)
+                    h_str = h_part.strip() or "127.0.0.1"
+                    p_int = int(p_part.strip())
+                else:
+                    h_str = "127.0.0.1"
+                    p_int = int(s)
+                svc_ok = _is_tcp_port_listening(h_str, p_int, timeout=1.0)
+                svc_detail = f"{h_str}:{p_int}"
+            else:
+                unit = svc_name if s in ("active", "running", "true", "True", "*") else s
+                svc_detail = unit
+                systemctl_bin = shutil.which("systemctl")
+                if systemctl_bin:
+                    r_sys = subprocess.run(
+                        [systemctl_bin, "is-active", "--quiet", unit],
+                        capture_output=True,
+                        timeout=3.0,
+                        check=False,
+                    )
+                    if r_sys.returncode == 0:
+                        svc_ok = True
+                    else:
+                        r_usr = subprocess.run(
+                            [systemctl_bin, "--user", "is-active", "--quiet", unit],
+                            capture_output=True,
+                            timeout=3.0,
+                            check=False,
+                        )
+                        if r_usr.returncode == 0:
+                            svc_ok = True
+                if not svc_ok and shutil.which("pgrep"):
+                    r_pg = subprocess.run(
+                        ["pgrep", "-x", unit],
+                        capture_output=True,
+                        timeout=3.0,
+                        check=False,
+                    )
+                    if r_pg.returncode == 0:
+                        svc_ok = True
+        elif isinstance(svc_spec, dict):
+            if svc_spec.get("enabled") is False or svc_spec.get("required") is False:
+                continue
+            if "port" in svc_spec:
+                h_str = str(svc_spec.get("host") or "127.0.0.1")
+                p_int = int(svc_spec["port"])
+                svc_ok = _is_tcp_port_listening(h_str, p_int, timeout=1.0)
+                svc_detail = f"{h_str}:{p_int}"
+            elif "url" in svc_spec:
+                u_str = str(svc_spec["url"])
+                svc_detail = u_str
+                try:
+                    req = urllib.request.Request(u_str, method="GET")
+                    with urllib.request.urlopen(req, timeout=2.0) as resp:
+                        svc_ok = 200 <= resp.status < 400
+                except Exception as exc:
+                    svc_ok = False
+                    svc_detail = f"{u_str} ({exc})"
+            elif "command" in svc_spec or "cmd" in svc_spec:
+                cmd_str = str(svc_spec.get("command") or svc_spec.get("cmd"))
+                svc_detail = cmd_str
+                cmd_res = _run_shell_command_with_timeout(cmd_str, repo, timeout_seconds=5.0)
+                svc_ok = cmd_res["ok"]
+            else:
+                unit = str(svc_spec.get("systemd") or svc_spec.get("unit") or svc_spec.get("service") or svc_name)
+                svc_detail = unit
+                systemctl_bin = shutil.which("systemctl")
+                if systemctl_bin:
+                    r_sys = subprocess.run(
+                        [systemctl_bin, "is-active", "--quiet", unit],
+                        capture_output=True,
+                        timeout=3.0,
+                        check=False,
+                    )
+                    if r_sys.returncode == 0:
+                        svc_ok = True
+                    else:
+                        r_usr = subprocess.run(
+                            [systemctl_bin, "--user", "is-active", "--quiet", unit],
+                            capture_output=True,
+                            timeout=3.0,
+                            check=False,
+                        )
+                        if r_usr.returncode == 0:
+                            svc_ok = True
+                if not svc_ok and shutil.which("pgrep"):
+                    r_pg = subprocess.run(
+                        ["pgrep", "-x", unit],
+                        capture_output=True,
+                        timeout=3.0,
+                        check=False,
+                    )
+                    if r_pg.returncode == 0:
+                        svc_ok = True
+
+        if svc_ok:
+            checks.append(
+                {
+                    "kind": "service",
+                    "name": svc_name,
+                    "ok": True,
+                    "message": f"Service '{svc_name}' is active ({svc_detail})",
+                }
+            )
+        else:
+            msg = f"Required service '{svc_name}' is not active ({svc_detail})"
+            checks.append(
+                {
+                    "kind": "service",
+                    "name": svc_name,
+                    "ok": False,
+                    "message": msg,
+                }
+            )
+            failures.append(msg)
+
+    # 4. Disk space
+    req_disk_bytes: int | None = None
+    disk_check_path = repo
+    for mb_key in ("min_disk_mb", "disk_free_mb", "min_free_mb", "disk_space_mb"):
+        val = pf_cfg.get(mb_key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+            req_disk_bytes = max(req_disk_bytes or 0, int(float(val) * 1024 * 1024))
+    for gb_key in ("min_disk_gb", "disk_free_gb", "min_free_gb", "disk_space_gb"):
+        val = pf_cfg.get(gb_key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+            req_disk_bytes = max(req_disk_bytes or 0, int(float(val) * (1024 ** 3)))
+
+    disk_sub = pf_cfg.get("disk")
+    if isinstance(disk_sub, (int, float)) and not isinstance(disk_sub, bool) and disk_sub > 0:
+        req_disk_bytes = max(req_disk_bytes or 0, int(float(disk_sub) * 1024 * 1024))
+    elif isinstance(disk_sub, dict):
+        if disk_sub.get("path"):
+            p_cand = pathlib.Path(str(disk_sub["path"])).expanduser()
+            disk_check_path = p_cand if p_cand.is_absolute() else (repo / p_cand).resolve()
+        for mb_key in ("min_mb", "min_disk_mb", "free_mb", "min_free_mb", "mb"):
+            val = disk_sub.get(mb_key)
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+                req_disk_bytes = max(req_disk_bytes or 0, int(float(val) * 1024 * 1024))
+        for gb_key in ("min_gb", "min_disk_gb", "free_gb", "min_free_gb", "gb"):
+            val = disk_sub.get(gb_key)
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+                req_disk_bytes = max(req_disk_bytes or 0, int(float(val) * (1024 ** 3)))
+
+    if req_disk_bytes is not None and req_disk_bytes > 0:
+        target_for_du = disk_check_path if disk_check_path.exists() else ws
+        usage = shutil.disk_usage(str(target_for_du))
+        free_mb = usage.free / (1024 * 1024)
+        req_mb = req_disk_bytes / (1024 * 1024)
+        if usage.free < req_disk_bytes:
+            msg = (
+                f"Insufficient disk space on '{target_for_du}': "
+                f"{free_mb:.1f} MB free, minimum required is {req_mb:.1f} MB"
+            )
+            checks.append(
+                {
+                    "kind": "disk",
+                    "name": "disk_space",
+                    "ok": False,
+                    "free_bytes": usage.free,
+                    "required_bytes": req_disk_bytes,
+                    "message": msg,
+                }
+            )
+            failures.append(msg)
+        else:
+            checks.append(
+                {
+                    "kind": "disk",
+                    "name": "disk_space",
+                    "ok": True,
+                    "free_bytes": usage.free,
+                    "required_bytes": req_disk_bytes,
+                    "message": f"Disk space ok ({free_mb:.1f} MB free >= {req_mb:.1f} MB required)",
+                }
+            )
+
+    # 5. Custom preflight commands
+    raw_cmds = pf_cfg.get("commands")
+    if isinstance(raw_cmds, str):
+        raw_cmds = [raw_cmds]
+    if isinstance(raw_cmds, list):
+        timeouts_map = resolve_project_command_timeouts(cfg)
+        cmd_timeout = float(timeouts_map.get("default") or 30.0)
+        for cmd_item in raw_cmds:
+            if not isinstance(cmd_item, str) or not cmd_item.strip():
+                continue
+            c_res = _run_shell_command_with_timeout(cmd_item.strip(), repo, timeout_seconds=cmd_timeout)
+            if c_res["ok"]:
+                checks.append(
+                    {
+                        "kind": "command",
+                        "name": cmd_item.strip(),
+                        "ok": True,
+                        "exit_code": 0,
+                        "message": f"Preflight command succeeded: {cmd_item.strip()}",
+                    }
+                )
+            else:
+                detail = c_res["stderr"] or c_res["stdout"] or f"exit code {c_res['exit_code']}"
+                if c_res["timed_out"]:
+                    detail = f"timed out after {cmd_timeout}s"
+                msg = f"Preflight command '{cmd_item.strip()}' failed ({detail})"
+                checks.append(
+                    {
+                        "kind": "command",
+                        "name": cmd_item.strip(),
+                        "ok": False,
+                        "exit_code": c_res["exit_code"],
+                        "message": msg,
+                    }
+                )
+                failures.append(msg)
+
+    return {
+        "ok": len(failures) == 0,
+        "configured": True,
+        "checks": checks,
+        "failures": failures,
+    }
+
+
+def run_verification_checks(
+    cfg: dict[str, Any] | None,
+    workspace: pathlib.Path | str | None = None,
+    *,
+    selected_checks: list[str] | None = None,
+    timeout_override: float | None = None,
+    fail_fast: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Execute `[project.verification_checks]` commands (Task 19.7 `ai-orch verify-checks`)."""
+    ws = pathlib.Path(workspace or ".").resolve()
+    proj = cfg.get("project", {}) if (cfg and isinstance(cfg.get("project"), dict)) else {}
+    v_checks = proj.get("verification_checks")
+    if v_checks is None and isinstance(cfg, dict):
+        v_checks = cfg.get("verification_checks")
+    if not isinstance(v_checks, dict):
+        v_checks = {}
+
+    timeouts_map = resolve_project_command_timeouts(cfg)
+    default_timeout = float(
+        timeout_override
+        if (timeout_override is not None and timeout_override > 0)
+        else (timeouts_map.get("verification") or timeouts_map.get("test") or timeouts_map.get("default") or 120.0)
+    )
+
+    failures: list[str] = []
+    check_results: list[dict[str, Any]] = []
+
+    if selected_checks:
+        wanted: list[str] = []
+        for s in selected_checks:
+            for part in str(s).split(","):
+                p = part.strip()
+                if p and p not in wanted:
+                    wanted.append(p)
+        missing = [name for name in wanted if name not in v_checks]
+        if missing:
+            for m in missing:
+                failures.append(f"Verification check '{m}' not found in [project.verification_checks]")
+            return {
+                "ok": False,
+                "workspace": str(ws),
+                "timeout_seconds": default_timeout,
+                "passed_count": 0,
+                "failed_count": len(missing),
+                "checks": [],
+                "failures": failures,
+            }
+        items_to_run = [(name, v_checks[name]) for name in wanted]
+    else:
+        items_to_run = list(v_checks.items())
+
+    passed_count = 0
+    failed_count = 0
+
+    for comp_name, comp_cfg in items_to_run:
+        desc = ""
+        cmds: list[str] = []
+        chk_timeout = default_timeout
+        chk_cwd = ws
+
+        if isinstance(comp_cfg, dict):
+            desc = str(comp_cfg.get("description") or "")
+            raw_cmds = comp_cfg.get("commands")
+            if raw_cmds is None and "command" in comp_cfg:
+                raw_cmds = comp_cfg.get("command")
+            if isinstance(raw_cmds, str):
+                cmds = [raw_cmds]
+            elif isinstance(raw_cmds, list):
+                cmds = [str(c) for c in raw_cmds if str(c).strip()]
+            if timeout_override is None:
+                c_to = comp_cfg.get("timeout_seconds") or comp_cfg.get("timeout")
+                if isinstance(c_to, (int, float)) and not isinstance(c_to, bool) and c_to > 0:
+                    chk_timeout = float(c_to)
+            if comp_cfg.get("cwd"):
+                cand_cwd = pathlib.Path(str(comp_cfg["cwd"])).expanduser()
+                chk_cwd = cand_cwd if cand_cwd.is_absolute() else (ws / cand_cwd).resolve()
+        elif isinstance(comp_cfg, list):
+            cmds = [str(c) for c in comp_cfg if str(c).strip()]
+        elif isinstance(comp_cfg, str) and comp_cfg.strip():
+            cmds = [comp_cfg.strip()]
+
+        cmd_outcomes: list[dict[str, Any]] = []
+        comp_ok = True
+
+        for cmd_str in cmds:
+            if dry_run:
+                cmd_outcomes.append(
+                    {
+                        "command": cmd_str,
+                        "ok": True,
+                        "dry_run": True,
+                        "exit_code": 0,
+                        "timed_out": False,
+                        "duration_seconds": 0.0,
+                        "stdout": "",
+                        "stderr": "",
+                    }
+                )
+                continue
+
+            res = _run_shell_command_with_timeout(cmd_str, chk_cwd, timeout_seconds=chk_timeout)
+            cmd_outcomes.append(res)
+            if not res["ok"]:
+                comp_ok = False
+                if res["timed_out"]:
+                    failures.append(f"[{comp_name}] Command timed out after {chk_timeout}s: {cmd_str}")
+                else:
+                    err_snip = res["stderr"] or res["stdout"] or f"exit {res['exit_code']}"
+                    failures.append(f"[{comp_name}] Command failed (exit {res['exit_code']}): {cmd_str} — {err_snip}")
+                if fail_fast:
+                    break
+
+        if comp_ok:
+            passed_count += 1
+        else:
+            failed_count += 1
+
+        check_results.append(
+            {
+                "name": comp_name,
+                "description": desc,
+                "ok": comp_ok,
+                "timeout_seconds": chk_timeout,
+                "cwd": str(chk_cwd),
+                "commands": cmd_outcomes,
+            }
+        )
+
+        if not comp_ok and fail_fast:
+            break
+
+    return {
+        "ok": failed_count == 0 and len(failures) == 0,
+        "workspace": str(ws),
+        "timeout_seconds": default_timeout,
+        "passed_count": passed_count,
+        "failed_count": failed_count,
+        "checks": check_results,
+        "failures": failures,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1396,7 +2639,7 @@ def render_agents_md_block(
     tools = cfg.get("tools", {})
 
     ws = workspace or pathlib.Path(".")
-    proj_cfg_path = find_project_config_path(ws, global_path)
+    proj_cfg_path = find_project_config_path(ws, global_path, for_write=True)
     gpath = global_path or default_global_config_path()
 
     orchestrator_id = proj.get("primary_orchestrator") or routing.get("default_orchestrator", "kilo")
@@ -1713,6 +2956,112 @@ def inject_or_replace_agents_block(existing_text: str, new_block: str) -> str:
     return existing_text.rstrip() + "\n\n" + new_block.rstrip() + "\n"
 
 
+ORCHESTRATION_HEADING_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^#\s+Agent Orchestration\s*&\s*Development Guidelines\b", re.IGNORECASE),
+    re.compile(r"^##\s+(?:\d+\.\s+)?Required Skills\b", re.IGNORECASE),
+    re.compile(r"^##\s+(?:\d+\.\s+)?Core Operating Rules\b", re.IGNORECASE),
+    re.compile(
+        r"^###\s+Rule\s+1:\s+(?:Keep the Main Session Free|Focus the Main Session on Architecture)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^###\s+Rule\s+2:\s+Define Execution Tasks Before Delegating\b", re.IGNORECASE),
+    re.compile(r"^###\s+Rule\s+3:\s+Delegate Maximum Work\b", re.IGNORECASE),
+    re.compile(r"^###\s+Rule\s+4:\s+Select the Right Model\b", re.IGNORECASE),
+    re.compile(r"^##\s+(?:\d+\.\s+)?Orchestration Lifecycle\b", re.IGNORECASE),
+)
+
+
+def _is_orchestration_heading(line: str) -> tuple[bool, int]:
+    stripped = line.strip()
+    m = re.match(r"^(#{1,6})\s+", stripped)
+    if not m:
+        return (False, 0)
+    level = len(m.group(1))
+    for pat in ORCHESTRATION_HEADING_PATTERNS:
+        if pat.match(stripped):
+            return (True, level)
+    return (False, 0)
+
+
+def _strip_orchestration_sections_from_segment(segment: str) -> tuple[str, list[str]]:
+    """Strip hand-written orchestration sections from a text segment outside managed markers,
+    preserving all non-orchestration sections byte-for-byte."""
+    lines = segment.splitlines(keepends=True)
+    kept: list[str] = []
+    removed_headings: list[str] = []
+    in_fenced = False
+    skipping_level: int | None = None
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fenced = not in_fenced
+        if not in_fenced:
+            is_orch, orch_level = _is_orchestration_heading(line)
+            if is_orch:
+                removed_headings.append(stripped)
+                if skipping_level is None or orch_level < skipping_level:
+                    skipping_level = orch_level
+                continue
+            m_h = re.match(r"^(#{1,6})\s+", stripped)
+            if m_h and skipping_level is not None:
+                cur_level = len(m_h.group(1))
+                # If we entered via `# Agent Orchestration & Development Guidelines` (level 1),
+                # any subsequent non-orchestration `# ` or `## ` exits the skipped header block
+                # unless it's another orchestration heading (handled above).
+                if skipping_level == 1 or cur_level <= skipping_level:
+                    skipping_level = None
+            if skipping_level is not None and stripped == "---":
+                continue
+
+        if skipping_level is None:
+            kept.append(line)
+
+    return ("".join(kept), removed_headings)
+
+
+def strip_duplicated_handwritten_agents_sections(existing_text: str) -> tuple[str, list[str]]:
+    """Detect and strip duplicated hand-written orchestration sections outside
+    <!-- BEGIN ai-orchestration --> ... <!-- END ai-orchestration --> markers,
+    while preserving non-duplicated blocks outside markers byte-for-byte."""
+    block_re = re.compile(
+        re.escape(BEGIN_MARKER) + r".*?" + re.escape(END_MARKER) + r"\n?",
+        re.DOTALL,
+    )
+    matches = list(block_re.finditer(existing_text))
+    removed: list[str] = []
+
+    if not matches:
+        cleaned, rem = _strip_orchestration_sections_from_segment(existing_text)
+        return (cleaned, rem)
+
+    first = matches[0]
+    before = existing_text[: first.start()]
+    managed = existing_text[first.start() : first.end()]
+    after = existing_text[first.end() :]
+
+    if len(matches) > 1:
+        for extra in matches[1:]:
+            removed.append("duplicate <!-- BEGIN ai-orchestration --> block")
+        after = block_re.sub("", after)
+
+    cleaned_before, rem_before = _strip_orchestration_sections_from_segment(before)
+    cleaned_after, rem_after = _strip_orchestration_sections_from_segment(after)
+    removed.extend(rem_before)
+    removed.extend(rem_after)
+
+    if not removed:
+        return (existing_text, [])
+
+    return (cleaned_before + managed + cleaned_after, removed)
+
+
+def find_duplicated_handwritten_agents_sections(existing_text: str) -> list[str]:
+    """Return list of duplicated hand-written orchestration section headings outside markers."""
+    _, removed = strip_duplicated_handwritten_agents_sections(existing_text)
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
@@ -1721,7 +3070,8 @@ def cmd_show(args: argparse.Namespace) -> int:
     ws_arg = getattr(args, "workspace", None) or "."
     ws = pathlib.Path(ws_arg).resolve()
     cfg, meta = resolve_config(getattr(args, "global_config", None), ws)
-    errors, warnings = validate_config(cfg)
+    errors, val_warnings = validate_config(cfg)
+    warnings = list(meta.get("warnings", [])) + [w for w in val_warnings if w not in meta.get("warnings", [])]
     payload = {
         "meta": meta,
         "valid": len(errors) == 0,
@@ -1734,6 +3084,8 @@ def cmd_show(args: argparse.Namespace) -> int:
     else:
         print(f"Global config : {meta['global_config_path']} (exists={meta['global_config_exists']})")
         print(f"Project config: {meta['project_config_path']} (exists={meta['project_config_exists']})")
+        for w in meta.get("warnings", []):
+            print(f"[WARN] {w}")
         print(f"Orchestrator  : {cfg.get('routing', {}).get('default_orchestrator')}")
         print(f"Executor      : {cfg.get('routing', {}).get('default_executor')}")
         print(f"Verify mode   : {cfg.get('verification', {}).get('default_mode')}")
@@ -1760,7 +3112,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     ws = pathlib.Path(args.workspace).resolve() if args.workspace else None
     cfg, meta = resolve_config(args.global_config, ws)
-    errors, warnings = validate_config(cfg)
+    errors, val_warnings = validate_config(cfg)
+    warnings = list(meta.get("warnings", [])) + [w for w in val_warnings if w not in meta.get("warnings", [])]
     ok = kit_ok and (len(errors) == 0)
 
     if args.json:
@@ -1838,7 +3191,7 @@ def cmd_set_profile(args: argparse.Namespace) -> int:
     gpath = getattr(args, "global_config", None)
     if args.scope == "project":
         ws = pathlib.Path(args.workspace or ".").resolve()
-        target_path = find_project_config_path(ws, gpath)
+        target_path = find_project_config_path(ws, gpath, for_write=True)
     else:
         ws = pathlib.Path(args.workspace).resolve() if getattr(args, "workspace", None) else None
         target_path = gpath or default_global_config_path()
@@ -2032,7 +3385,7 @@ def cmd_set_routing(args: argparse.Namespace) -> int:
 
     if args.scope == "project":
         project_ws = ws or pathlib.Path(".").resolve()
-        target_path = find_project_config_path(project_ws, gpath)
+        target_path = find_project_config_path(project_ws, gpath, for_write=True)
     else:
         target_path = gpath or default_global_config_path()
 
@@ -2177,7 +3530,7 @@ def cmd_set_routing(args: argparse.Namespace) -> int:
 
 def cmd_init_project(args: argparse.Namespace) -> int:
     ws = pathlib.Path(args.workspace or ".").resolve()
-    ppath = find_project_config_path(ws, args.global_config)
+    ppath = find_project_config_path(ws, args.global_config, for_write=True)
     with config_lock(ppath):
         if ppath.exists() and not args.force:
             if args.json:
@@ -2243,7 +3596,7 @@ def cmd_render_agents_md(args: argparse.Namespace) -> int:
     v_mode = ver.get("default_mode", "cross-agent")
     routing_desc = f"orchestrator='{orchestrator_id}', executor='{executor_id}', verification_mode='{v_mode}'"
 
-    warnings: list[str] = []
+    warnings: list[str] = list(meta.get("warnings", []))
     if not has_project_config:
         routing_warning = (
             f"Workspace has no project config; using global routing ({routing_desc}). "
@@ -2572,7 +3925,7 @@ def build_setup_plan(
     if scope == "project-local":
         target_path = ws / ".ai-orchestration.local.toml"
     elif scope == "project":
-        target_path = find_project_config_path(ws, gpath)
+        target_path = find_project_config_path(ws, gpath, for_write=True)
     else:
         target_path = gpath
 
@@ -2853,6 +4206,79 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_preflight(args: argparse.Namespace) -> int:
+    ws_arg = getattr(args, "workspace", None) or getattr(args, "project", None) or "."
+    ws = pathlib.Path(ws_arg).resolve()
+    gpath = getattr(args, "global_config", None)
+    cfg, _ = resolve_config(gpath, ws)
+    res = run_project_preflight(cfg, workspace=ws)
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if not res["configured"]:
+            print(f"[ok] No [project.preflight] checks configured for {ws}")
+        else:
+            for c in res["checks"]:
+                status_tag = "[ok]" if c["ok"] else "[FAIL]"
+                print(f"{status_tag} {c['message']}", file=sys.stdout if c["ok"] else sys.stderr)
+            if res["ok"]:
+                print(f"[ok] All {len(res['checks'])} preflight check(s) passed.")
+            else:
+                print(f"[FAIL] {len(res['failures'])} preflight check(s) failed.", file=sys.stderr)
+    return 0 if res["ok"] else 1
+
+
+def cmd_verify_checks(args: argparse.Namespace) -> int:
+    ws_arg = getattr(args, "workspace", None) or getattr(args, "project", None) or "."
+    ws = pathlib.Path(ws_arg).resolve()
+    gpath = getattr(args, "global_config", None)
+    cfg, _ = resolve_config(gpath, ws)
+
+    selected: list[str] = []
+    if getattr(args, "check", None):
+        selected.extend(args.check)
+    if getattr(args, "checks", None):
+        selected.extend(args.checks)
+
+    res = run_verification_checks(
+        cfg,
+        workspace=ws,
+        selected_checks=selected if selected else None,
+        timeout_override=getattr(args, "timeout", None),
+        fail_fast=bool(getattr(args, "fail_fast", False)),
+        dry_run=bool(getattr(args, "dry_run", False)),
+    )
+
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2))
+    else:
+        if not res["checks"] and res["ok"]:
+            print(f"[ok] No [project.verification_checks] configured for {ws}")
+        else:
+            for chk in res["checks"]:
+                tag = "[ok]" if chk["ok"] else "[FAIL]"
+                desc_part = f" — {chk['description']}" if chk.get("description") else ""
+                print(f"{tag} {chk['name']}{desc_part}")
+                for cmd_out in chk.get("commands", []):
+                    c_tag = "PASS" if cmd_out["ok"] else ("TIMEOUT" if cmd_out.get("timed_out") else "FAIL")
+                    print(f"  [{c_tag}] {cmd_out['command']} (exit={cmd_out['exit_code']}, {cmd_out['duration_seconds']}s)")
+                    if not cmd_out["ok"]:
+                        err_text = cmd_out.get("stderr") or cmd_out.get("stdout")
+                        if err_text:
+                            print(f"    {err_text}", file=sys.stderr)
+            for f_msg in res["failures"]:
+                if not res["checks"]:
+                    print(f"[FAIL] {f_msg}", file=sys.stderr)
+            if res["ok"]:
+                print(f"[ok] Verification checks passed ({res['passed_count']} passed, 0 failed).")
+            else:
+                print(
+                    f"[FAIL] Verification checks failed ({res['passed_count']} passed, {res['failed_count']} failed).",
+                    file=sys.stderr,
+                )
+    return 0 if res["ok"] else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--global-config", type=pathlib.Path, default=None, help="Override path to global orchestration.toml")
@@ -2964,6 +4390,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup.add_argument("--non-interactive", action="store_true", default=False, help="Never prompt for confirmation")
     p_setup.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_setup.set_defaults(func=cmd_setup)
+
+    p_pf = sub.add_parser("preflight", help="Run [project.preflight] checks on the current host")
+    p_pf.add_argument("--workspace", "--project", dest="workspace", default=".", help="Project workspace root")
+    p_pf.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+    p_pf.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_pf.set_defaults(func=cmd_preflight)
+
+    p_vc = sub.add_parser("verify-checks", help="Execute [project.verification_checks] commands")
+    p_vc.add_argument("checks", nargs="*", default=[], help="Optional subsystem check name(s) to run")
+    p_vc.add_argument("--check", "--only", dest="check", action="append", default=[], help="Filter by subsystem check name")
+    p_vc.add_argument("--workspace", "--project", dest="workspace", default=".", help="Project workspace root")
+    p_vc.add_argument("--timeout", type=float, default=None, help="Override command timeout in seconds")
+    p_vc.add_argument("--fail-fast", action="store_true", default=False, help="Stop on first failing command")
+    p_vc.add_argument("--dry-run", action="store_true", default=False, help="List checks and commands without executing")
+    p_vc.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS)
+    p_vc.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_vc.set_defaults(func=cmd_verify_checks)
 
     return ap
 

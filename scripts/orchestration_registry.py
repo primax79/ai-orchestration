@@ -83,13 +83,25 @@ try:
     )
 except ImportError:
     # Standalone fallbacks if orchestration_config cannot be imported directly
-    def find_project_config_path(ws: pathlib.Path, global_path: pathlib.Path | None = None) -> pathlib.Path:
+    def find_project_config_path(
+        ws: pathlib.Path,
+        global_path: pathlib.Path | None = None,
+        *,
+        for_write: bool = False,
+    ) -> pathlib.Path:
         local_dot = ws / ".ai-orchestration.local.toml"
         if local_dot.exists():
             return local_dot
         gpath = global_path or (get_global_config_dir() / "orchestration.toml")
         projects_root = gpath.parent / "projects"
-        return projects_root / ws.resolve().name / "orchestration.toml"
+        ext_path = projects_root / ws.resolve().name / "orchestration.toml"
+        if for_write or ext_path.exists():
+            return ext_path
+        for rel in ("orchestration.toml", ".ai-orchestration/orchestration.toml", "tasks/orchestration.toml", ".ai-orchestration.toml"):
+            cand = ws / rel
+            if cand.is_file():
+                return cand
+        return ext_path
 
     @contextlib.contextmanager
     def config_lock(target_path: pathlib.Path | str) -> Iterator[pathlib.Path]:
@@ -673,8 +685,10 @@ def plan_workspace_register(
     dev, ino = check_device_inode(raw_path)
 
     # Inspect project config
-    cfg_path = find_project_config_path(canonical)
-    existing_cfg = load_toml_file(cfg_path) if cfg_path.exists() else {}
+    _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
+    read_cfg_path = find_project_config_path(canonical, _gpath)
+    cfg_path = find_project_config_path(canonical, _gpath, for_write=True)
+    existing_cfg = load_toml_file(read_cfg_path) if read_cfg_path.exists() else {}
     ws_cfg = existing_cfg.get("workspace", {})
 
     ws_uuid = ws_cfg.get("uuid") or deterministic_uuid4(f"workspace:{canonical}")
@@ -947,7 +961,8 @@ def apply_workspace_unregister(
                 # If outer workspace existed, re-sync outer workspace projects from its config
                 if outer_ws:
                     outer_path = pathlib.Path(outer_ws["canonical_path"])
-                    outer_cfg_path = find_project_config_path(outer_path)
+                    _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
+                    outer_cfg_path = find_project_config_path(outer_path, _gpath)
                     if outer_cfg_path.exists():
                         cfg = load_toml_file(outer_cfg_path)
                         for p in cfg.get("workspace", {}).get("projects", []):
@@ -992,7 +1007,8 @@ def list_workspaces(config_dir: pathlib.Path | str | None = None) -> list[dict[s
                     cur_st = os.stat(cpath)
                     if cur_st.st_dev != d["device"] or cur_st.st_ino != d["inode"]:
                         stale = True
-                    cfg_path = find_project_config_path(cpath)
+                    _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
+                    cfg_path = find_project_config_path(cpath, _gpath)
                     if not cfg_path.exists():
                         stale = True
                     else:
@@ -1034,7 +1050,8 @@ def show_workspace(
                 cur_st = os.stat(cpath)
                 if cur_st.st_dev != ws_data["device"] or cur_st.st_ino != ws_data["inode"]:
                     stale = True
-                cfg_path = find_project_config_path(cpath)
+                _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
+                cfg_path = find_project_config_path(cpath, _gpath)
                 if not cfg_path.exists():
                     stale = True
                 else:
@@ -1192,8 +1209,10 @@ def plan_projects_discover(
                     is_registered = False
                     ws_path = cwd
 
-        cfg_path = find_project_config_path(ws_path)
-        existing_cfg = load_toml_file(cfg_path) if cfg_path.exists() else {}
+        _gpath = (pathlib.Path(config_dir).resolve() / "orchestration.toml") if config_dir is not None else None
+        read_cfg_path = find_project_config_path(ws_path, _gpath)
+        cfg_path = find_project_config_path(ws_path, _gpath, for_write=True)
+        existing_cfg = load_toml_file(read_cfg_path) if read_cfg_path.exists() else {}
         ws_cfg = existing_cfg.get("workspace", {})
 
         if is_registered and ws is not None:

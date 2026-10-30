@@ -60,6 +60,92 @@ except ImportError:
     except ImportError:
         orchestration_registry = None  # type: ignore
 
+try:
+    import orchestration_config
+except ImportError:
+    _repo_root_cfg = pathlib.Path(__file__).resolve().parents[5]
+    _setup_scripts_dir = _repo_root_cfg / "plugins" / "shared" / "skills" / "orchestration-setup" / "scripts"
+    if _setup_scripts_dir.is_dir() and str(_setup_scripts_dir) not in sys.path:
+        sys.path.insert(0, str(_setup_scripts_dir))
+    try:
+        import orchestration_config
+    except ImportError:
+        orchestration_config = None  # type: ignore
+
+
+def _inspect_project_config(
+    workspace: pathlib.Path | str,
+    global_path: pathlib.Path | str | None = None,
+) -> dict[str, Any]:
+    """Unified project config lookup delegating to orchestration_config.inspect_project_config."""
+    if orchestration_config is not None and hasattr(orchestration_config, "inspect_project_config"):
+        return orchestration_config.inspect_project_config(workspace, global_path)
+    ws = pathlib.Path(workspace)
+    ws_resolved = ws.resolve()
+    env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
+    if global_path is not None:
+        gp = pathlib.Path(global_path).expanduser().resolve()
+        gpath = gp / "orchestration.toml" if gp.is_dir() else gp
+    elif env_cfg and env_cfg.strip():
+        gp = pathlib.Path(env_cfg).expanduser().resolve()
+        gpath = gp / "orchestration.toml" if gp.is_dir() else gp
+    elif os.environ.get("AI_ORCH_CONFIG_DIR", "").strip():
+        gpath = pathlib.Path(os.environ["AI_ORCH_CONFIG_DIR"]).expanduser().resolve() / "orchestration.toml"
+    elif os.environ.get("AI_ORCH_HOME", "").strip():
+        gpath = pathlib.Path(os.environ["AI_ORCH_HOME"]).expanduser().resolve() / ".config" / "ai-orchestration" / "orchestration.toml"
+    else:
+        gpath = pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml"
+    ext_path = gpath.parent / "projects" / ws_resolved.name / "orchestration.toml"
+    ext_label = f"~/.config/ai-orchestration/projects/{ws_resolved.name}/orchestration.toml"
+    local_dot = ws / ".ai-orchestration.local.toml"
+    cands = [
+        (local_dot, ".ai-orchestration.local.toml", False),
+        (ext_path, ext_label, False),
+        (ws / "orchestration.toml", "orchestration.toml", True),
+        (ws / ".ai-orchestration" / "orchestration.toml", ".ai-orchestration/orchestration.toml", True),
+        (ws / "tasks" / "orchestration.toml", "tasks/orchestration.toml", True),
+        (ws / ".ai-orchestration.toml", ".ai-orchestration.toml", True),
+    ]
+    write_path = local_dot if local_dot.is_file() else ext_path
+    existing: list[dict[str, Any]] = []
+    seen_resolved: set[pathlib.Path] = set()
+    for p, lbl, is_leg in cands:
+        if not p.is_file():
+            continue
+        rp = p.resolve()
+        if rp in seen_resolved:
+            continue
+        seen_resolved.add(rp)
+        existing.append({"path": p, "label": lbl, "is_legacy": is_leg})
+    if existing:
+        active = existing[0]
+        active_path, active_label, active_legacy, active_exists = active["path"], active["label"], bool(active["is_legacy"]), True
+    else:
+        active_path, active_label, active_legacy, active_exists = ext_path, ext_label, False, False
+    warnings: list[str] = []
+    for c in existing:
+        if c["is_legacy"]:
+            if c["path"] == active_path:
+                warnings.append(
+                    f"{c['label']}: legacy project config path '{c['path']}' is deprecated and read-only; "
+                    f"move it to '{write_path}' (or '{local_dot}')."
+                )
+            else:
+                warnings.append(
+                    f"{c['label']}: legacy project config path '{c['path']}' is deprecated (read-only) and shadowed by '{active_path}'; "
+                    f"move or merge it into '{write_path}'."
+                )
+    return {
+        "path": active_path,
+        "write_path": write_path,
+        "exists": active_exists,
+        "is_legacy": active_legacy,
+        "label": active_label,
+        "candidates": existing,
+        "legacy_paths": [c["path"] for c in existing if c["is_legacy"]],
+        "warnings": warnings,
+    }
+
 CORE_HEADER_FIELDS: tuple[str, ...] = (
     "id",
     "title",
@@ -321,6 +407,53 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 
 MANAGED_AGENTS_BEGIN = "<!-- ai-orch:managed begin -->"
 MANAGED_AGENTS_END = "<!-- ai-orch:managed end -->"
+
+CONVENTION_VERSION = "1.1.0"
+CONVENTION_VERSION_FILENAME = "convention_version"
+LEGACY_CONVENTION_VERSION_FILENAMES = (".convention-version", ".convention_version")
+
+
+def read_convention_version(tasks_dir: pathlib.Path) -> str | None:
+    """Read the recorded per-project convention_version from tasks/convention_version (or legacy fallbacks)."""
+    t_dir = pathlib.Path(tasks_dir).resolve()
+    for fname in (CONVENTION_VERSION_FILENAME, *LEGACY_CONVENTION_VERSION_FILENAMES):
+        cand = t_dir / fname
+        if cand.is_file():
+            try:
+                raw = cand.read_text(encoding="utf-8").strip()
+            except Exception:
+                continue
+            if not raw:
+                continue
+            if raw.startswith("{"):
+                try:
+                    data = json.loads(raw)
+                    val = data.get("convention_version") or data.get("version")
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+                except Exception:
+                    pass
+            for line in raw.splitlines():
+                stripped = line.split("#", 1)[0].strip()
+                if not stripped:
+                    continue
+                m = re.match(r"^(?:convention_version|version)\s*=\s*['\"]?([^'\"]+)['\"]?$", stripped)
+                if m:
+                    return m.group(1).strip()
+                return stripped
+    return None
+
+
+def write_convention_version(
+    tasks_dir: pathlib.Path,
+    version: str = CONVENTION_VERSION,
+) -> pathlib.Path:
+    """Write tasks/convention_version atomically with the given convention version."""
+    t_dir = pathlib.Path(tasks_dir).resolve()
+    t_dir.mkdir(parents=True, exist_ok=True)
+    target = t_dir / CONVENTION_VERSION_FILENAME
+    write_file_atomic(target, f"{version.strip()}\n")
+    return target
 _MANAGED_AGENTS_BODY = "\n".join(CANONICAL_TASKS_AGENTS_MD.strip().splitlines()[1:]).strip()
 MANAGED_TASKS_AGENTS_BLOCK = f"{MANAGED_AGENTS_BEGIN}\n## task-pipeline managed convention\n\n{_MANAGED_AGENTS_BODY}\n{MANAGED_AGENTS_END}\n"
 
@@ -417,18 +550,18 @@ def resolve_project_languages(
                         elif current_sec == "use_cases":
                             raw_use_cases = (val_parsed, f"{agents_src_label} [use_cases].language")
 
-    # 2. Check legacy T065 keys in orchestration.toml / .ai-orchestration.local.toml
+    # 2. Check project config files via unified project config lookup
     legacy_lang: tuple[str, str, str] | None = None  # (val, file_name, key_name)
     if t_dir is not None:
         ws_root = t_dir.parent if t_dir.name == "tasks" else t_dir
-        cand_legacy = [
-            (ws_root / "orchestration.toml", "orchestration.toml"),
-            (ws_root / ".ai-orchestration" / "orchestration.toml", ".ai-orchestration/orchestration.toml"),
-            (ws_root / ".ai-orchestration.local.toml", ".ai-orchestration.local.toml"),
-            (t_dir / "orchestration.toml", "tasks/orchestration.toml"),
-        ]
+        cfg_info = _inspect_project_config(ws_root)
+        for w in cfg_info.get("warnings", []):
+            if w not in warnings:
+                warnings.append(w)
         seen_paths: set[pathlib.Path] = set()
-        for cfg_path, cfg_label in cand_legacy:
+        for cand_entry in cfg_info.get("candidates", []):
+            cfg_path = cand_entry["path"]
+            cfg_label = cand_entry["label"]
             resolved_cfg = cfg_path.resolve()
             if resolved_cfg in seen_paths or not cfg_path.is_file():
                 continue
@@ -623,23 +756,21 @@ def get_project_extension_fields(tasks_dir: pathlib.Path) -> tuple[str, ...]:
                     ):
                         found.append(k)
 
-    # 1. Check TOML config files
+    # 1. Check TOML config files via unified project config lookup
     proj_root = tasks_dir.parent if tasks_dir.name == "tasks" else tasks_dir
-    cand_tomls: list[pathlib.Path] = [
-        tasks_dir / "orchestration.toml",
-        proj_root / ".ai-orchestration.local.toml",
-        proj_root / "orchestration.toml",
-    ]
+    proj_cfg_info = _inspect_project_config(proj_root)
+    cand_tomls: list[pathlib.Path] = [c["path"] for c in proj_cfg_info.get("candidates", [])]
     if proj_root.parent != proj_root:
-        cand_tomls.extend([
-            proj_root.parent / ".ai-orchestration.local.toml",
-            proj_root.parent / "orchestration.toml",
-        ])
-    env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
-    gdir = pathlib.Path(env_cfg).expanduser().resolve() if env_cfg else (pathlib.Path.home() / ".config" / "ai-orchestration")
-    if gdir.is_file() or gdir.suffix == ".toml":
-        gdir = gdir.parent
-    cand_tomls.append(gdir / "projects" / proj_root.name / "orchestration.toml")
+        for rel in (
+            ".ai-orchestration.local.toml",
+            "orchestration.toml",
+            ".ai-orchestration/orchestration.toml",
+            "tasks/orchestration.toml",
+            ".ai-orchestration.toml",
+        ):
+            p_cand = proj_root.parent / rel
+            if p_cand.is_file() and p_cand not in cand_tomls:
+                cand_tomls.append(p_cand)
 
     for cfg_file in cand_tomls:
         if cfg_file.is_file() and tomllib is not None:
@@ -727,24 +858,31 @@ def resolve_host_id(
     hostname: str | None = None,
 ) -> str:
     """Resolve canonical host id from global/project config `[host] id`, falling back to normalized hostname."""
+    proj_root: pathlib.Path | None = None
+    if tasks_dir is not None:
+        tdir = pathlib.Path(tasks_dir).resolve()
+        proj_root = tdir.parent if tdir.name == "tasks" else tdir
+
+    if orchestration_config is not None and hasattr(orchestration_config, "resolve_host_id"):
+        return orchestration_config.resolve_host_id(
+            global_path=global_config,
+            hostname=hostname,
+            workspace=proj_root,
+        )
+
     cand_tomls: list[pathlib.Path] = []
     if global_config is not None:
-        cand_tomls.append(pathlib.Path(global_config).expanduser().resolve())
-    env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
-    if env_cfg:
-        p = pathlib.Path(env_cfg).expanduser().resolve()
+        gp = pathlib.Path(global_config).expanduser().resolve()
+        cand_tomls.append((gp / "orchestration.toml") if gp.is_dir() else gp)
+    elif os.environ.get("AI_ORCHESTRATION_CONFIG", "").strip():
+        p = pathlib.Path(os.environ["AI_ORCHESTRATION_CONFIG"]).expanduser().resolve()
         cand_tomls.append((p / "orchestration.toml") if p.is_dir() else p)
     else:
         cand_tomls.append(pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml")
 
-    if tasks_dir is not None:
-        tdir = pathlib.Path(tasks_dir).resolve()
-        proj_root = tdir.parent if tdir.name == "tasks" else tdir
-        cand_tomls.extend([
-            proj_root / ".ai-orchestration.local.toml",
-            proj_root / "orchestration.toml",
-            tdir / "orchestration.toml",
-        ])
+    if proj_root is not None:
+        for cand in _inspect_project_config(proj_root, global_config).get("candidates", []):
+            cand_tomls.append(cand["path"])
 
     for cfg_file in cand_tomls:
         if cfg_file.is_file() and tomllib is not None:
@@ -771,7 +909,7 @@ def get_declared_hosts(
     tasks_dir: pathlib.Path,
     global_config: pathlib.Path | None = None,
 ) -> set[str]:
-    """Discover declared host IDs from `[host] id`, `[hosts.<id>]`, and `[tasks] hosts`."""
+    """Discover declared host IDs from `[host] id`, `[hosts.<id>]`, and `[tasks] hosts` via unified config lookup."""
     tasks_dir = pathlib.Path(tasks_dir).resolve()
     declared: set[str] = set()
 
@@ -793,39 +931,37 @@ def get_declared_hosts(
                     declared.add(item.strip())
 
     proj_root = tasks_dir.parent if tasks_dir.name == "tasks" else tasks_dir
-    cand_tomls: list[pathlib.Path] = []
-    if global_config is not None:
-        cand_tomls.append(pathlib.Path(global_config).expanduser().resolve())
-    env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
-    if env_cfg:
-        p = pathlib.Path(env_cfg).expanduser().resolve()
-        gfile = (p / "orchestration.toml") if p.is_dir() else p
-        gdir = gfile.parent
-        cand_tomls.append(gfile)
+    if orchestration_config is not None and hasattr(orchestration_config, "get_declared_hosts"):
+        declared.update(
+            orchestration_config.get_declared_hosts(
+                global_path=global_config,
+                workspace=proj_root,
+            )
+        )
     else:
-        gdir = pathlib.Path.home() / ".config" / "ai-orchestration"
-        cand_tomls.append(gdir / "orchestration.toml")
+        cand_tomls: list[pathlib.Path] = []
+        if global_config is not None:
+            gp = pathlib.Path(global_config).expanduser().resolve()
+            cand_tomls.append((gp / "orchestration.toml") if gp.is_dir() else gp)
+        elif os.environ.get("AI_ORCHESTRATION_CONFIG", "").strip():
+            p = pathlib.Path(os.environ["AI_ORCHESTRATION_CONFIG"]).expanduser().resolve()
+            cand_tomls.append((p / "orchestration.toml") if p.is_dir() else p)
+        else:
+            cand_tomls.append(pathlib.Path.home() / ".config" / "ai-orchestration" / "orchestration.toml")
 
-    cand_tomls.extend([
-        tasks_dir / "orchestration.toml",
-        proj_root / ".ai-orchestration.local.toml",
-        proj_root / "orchestration.toml",
-        gdir / "projects" / proj_root.name / "orchestration.toml",
-    ])
-    if proj_root.parent != proj_root:
-        cand_tomls.extend([
-            proj_root.parent / ".ai-orchestration.local.toml",
-            proj_root.parent / "orchestration.toml",
-        ])
+        for check_ws in ([proj_root, proj_root.parent] if proj_root.parent != proj_root else [proj_root]):
+            for cand in _inspect_project_config(check_ws, global_config).get("candidates", []):
+                if cand["path"] not in cand_tomls:
+                    cand_tomls.append(cand["path"])
 
-    for cfg_file in cand_tomls:
-        if cfg_file.is_file() and tomllib is not None:
-            try:
-                data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    _collect_from_dict(data)
-            except Exception:
-                pass
+        for cfg_file in cand_tomls:
+            if cfg_file.is_file() and tomllib is not None:
+                try:
+                    data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        _collect_from_dict(data)
+                except Exception:
+                    pass
 
     agents_md = tasks_dir / "AGENTS.md"
     if agents_md.is_file() and tomllib is not None:
@@ -1187,11 +1323,24 @@ def resolve_project_tasks_dir(project_slug: str, context_tasks_dir: pathlib.Path
         except Exception:
             pass
 
-    # 2. Try looking for orchestration.toml or .ai-orchestration.local.toml in workspace root or parents
+    # 2. Try looking for project config in workspace root or parents via unified lookup
     curr: pathlib.Path | None = context_tasks_dir.parent
     while curr and curr != curr.parent:
-        for cfg_name in (".ai-orchestration.local.toml", "orchestration.toml"):
-            cfg_file = curr / cfg_name
+        cands = (
+            [c["path"] for c in _inspect_project_config(curr).get("candidates", [])]
+            if curr == context_tasks_dir.parent
+            else [
+                curr / rel
+                for rel in (
+                    ".ai-orchestration.local.toml",
+                    "orchestration.toml",
+                    ".ai-orchestration/orchestration.toml",
+                    "tasks/orchestration.toml",
+                    ".ai-orchestration.toml",
+                )
+            ]
+        )
+        for cfg_file in cands:
             if cfg_file.is_file():
                 try:
                     import tomllib
@@ -1231,11 +1380,24 @@ def is_workspace_task_tree(tasks_dir: pathlib.Path) -> tuple[bool, list[dict[str
         except Exception:
             pass
 
-    # 2. Check orchestration.toml / .ai-orchestration.local.toml
+    # 2. Check project config via unified lookup
     curr: pathlib.Path | None = tasks_dir.parent
     while curr and curr != curr.parent:
-        for cfg_name in (".ai-orchestration.local.toml", "orchestration.toml"):
-            cfg_file = curr / cfg_name
+        cands = (
+            [c["path"] for c in _inspect_project_config(curr).get("candidates", [])]
+            if curr == tasks_dir.parent
+            else [
+                curr / rel
+                for rel in (
+                    ".ai-orchestration.local.toml",
+                    "orchestration.toml",
+                    ".ai-orchestration/orchestration.toml",
+                    "tasks/orchestration.toml",
+                    ".ai-orchestration.toml",
+                )
+            ]
+        )
+        for cfg_file in cands:
             if cfg_file.is_file():
                 try:
                     import tomllib
@@ -16486,7 +16648,7 @@ def render_synced_index(
             if not line_s.startswith("|"):
                 continue
             cells = [c.strip() for c in line_s.strip("|").split("|")]
-            if not cells or cells[0] in ("Key", "Task", "Task / Initiative", "---") or cells[0].startswith("---"):
+            if not cells or cells[0] in ("Id", "Key", "Task", "Task / Initiative", "---") or cells[0].startswith("---"):
                 continue
             if cells[0] != "-":
                 existing_dec_rows.append((cells[0], cells))
@@ -17673,9 +17835,9 @@ def resolve_workspace_and_projects(
         except Exception:
             pass
 
-    # 2. Check orchestration.toml or .ai-orchestration.local.toml at ws_root
-    for cfg_name in (".ai-orchestration.local.toml", "orchestration.toml"):
-        cfg_file = ws_root / cfg_name
+    # 2. Check project config at ws_root via unified lookup
+    for cand in _inspect_project_config(ws_root).get("candidates", []):
+        cfg_file = cand["path"]
         if cfg_file.is_file() and tomllib is not None:
             try:
                 cfg_dict = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
@@ -20588,6 +20750,519 @@ def cmd_merge_index(args: argparse.Namespace) -> int:
         return 1
 
 
+LEGACY_TASK_HEADER_ALIASES: dict[str, str] = {
+    "status": "state",
+    "priority_reason": "priority-reason",
+    "reason": "priority-reason",
+    "next_up": "next-up",
+    "depends_on": "depends-on",
+    "depends": "depends-on",
+    "verification_mode": "verification-mode",
+    "verify_by": "verify-by",
+    "run_id": "run-id",
+    "run-ref": "run-id",
+    "use_cases": "use-cases",
+    "waiting_on": "waiting-on",
+    "moved_to": "moved-to",
+    "file": "paths",
+    "files": "paths",
+    "path": "paths",
+    "agent": "executor",
+    "assignee": "executor",
+    "owner": "executor",
+    "type": "kind",
+}
+
+CANONICAL_OPTIONAL_EXTENSION_ORDER: tuple[str, ...] = (
+    "profile",
+    "verification-mode",
+    "verifier",
+    "verify-by",
+    "size",
+    "kind",
+    "labels",
+    "branch",
+    "worktree",
+    "run-id",
+    "use-cases",
+    "coordinates",
+    "moved-to",
+    "conditions",
+    "waiting-on",
+    "short",
+)
+
+CANONICAL_MICRO_OPTIONAL_ORDER: tuple[str, ...] = (
+    "size",
+    "labels",
+    "use-cases",
+    "conditions",
+    "waiting-on",
+    "short",
+)
+
+
+def _normalize_legacy_verification_type(raw_vtype: str) -> str:
+    v = (raw_vtype or "").strip().lower()
+    if v in USE_CASE_VERIFICATION_TYPES:
+        return v
+    if "e2e" in v or v in ("end-to-end", "browser", "playwright", "ui", "ui-test"):
+        return "e2e"
+    if "api" in v or "http" in v or "rest" in v:
+        return "api-probe"
+    if "audit" in v or "code" in v or "review" in v or "static" in v:
+        return "code-audit"
+    return "automated-probe"
+
+
+def _migrate_use_case_file_text(
+    text: str,
+    file_path: pathlib.Path | None = None,
+) -> tuple[str, list[str]]:
+    """Migrate legacy use-case header fields (status -> approval, backfill last-verdict,
+    normalize verification-type/priority/short) while keeping body sections byte-for-byte."""
+    changes: list[str] = []
+    updated, lc_info = _rewrite_use_case_lifecycle_in_text(text)
+    if lc_info.get("ok") and lc_info.get("changed"):
+        old_st = lc_info.get("old_status") or "-"
+        new_app = lc_info.get("new_approval") or "proposed"
+        changes.append(f"status '{old_st}' -> approval '{new_app}'")
+        if lc_info.get("verdict_updated"):
+            changes.append(f"last-verdict -> '{lc_info.get('new_last_verdict')}'")
+    else:
+        updated = text
+
+    lines = updated.splitlines(keepends=True)
+    h1_seen = False
+    in_header = False
+    for idx, line in enumerate(lines):
+        clean = line.rstrip("\r\n")
+        ending = line[len(clean):] or "\n"
+        if not h1_seen:
+            if clean.startswith("# "):
+                h1_seen = True
+            continue
+        if clean.startswith("## "):
+            break
+        m = re.match(r"^(\s*-\s+)([a-zA-Z0-9_-]+)(:\s*)(.*)$", clean)
+        if m:
+            in_header = True
+            pref, raw_k, sep, raw_v = m.group(1), m.group(2), m.group(3), m.group(4).strip()
+            k_low = raw_k.strip().lower()
+            if k_low in ("verification-type", "verification_type"):
+                norm_vt = _normalize_legacy_verification_type(raw_v)
+                if raw_v != norm_vt or raw_k != "verification-type":
+                    lines[idx] = f"{pref}verification-type: {norm_vt}{ending}"
+                    changes.append(f"verification-type '{raw_v}' -> '{norm_vt}'")
+            elif k_low == "priority":
+                if raw_v and raw_v.upper() in PRIORITIES and raw_v != raw_v.upper():
+                    lines[idx] = f"{pref}priority: {raw_v.upper()}{ending}"
+                    changes.append(f"priority '{raw_v}' -> '{raw_v.upper()}'")
+                elif raw_v not in PRIORITIES:
+                    lines[idx] = f"{pref}priority: P1{ending}"
+                    changes.append(f"priority '{raw_v}' -> 'P1'")
+            elif k_low == "short" and raw_v and raw_v != "-":
+                if validate_short_title(raw_v):
+                    norm_s = derive_short_title(raw_v)
+                    lines[idx] = f"{pref}short: {norm_s}{ending}"
+                    changes.append(f"short '{raw_v}' -> '{norm_s}'")
+        elif in_header and not clean.strip():
+            break
+
+    final_text = "".join(lines)
+    return (final_text, changes) if final_text != text else (text, [])
+
+
+def _migrate_emergent_task_file_text(
+    text: str,
+    file_path: pathlib.Path,
+    tasks_dir: pathlib.Path,
+    *,
+    in_done: bool = False,
+    adopted_uc_map: dict[str, list[str]] | None = None,
+) -> tuple[str, list[str]]:
+    """Migrate an emergent task file's header block to current schema & ordering,
+    adopt any use-case links, and strip residual 'verification pending:' lines on non-delivered tasks,
+    preserving all Markdown body sections byte-for-byte."""
+    lines = text.splitlines(keepends=True)
+    scanned_lines, _ = scan_markdown_blocks(text)
+
+    h1_idx: int | None = None
+    h1_text = ""
+    for idx, sline in enumerate(scanned_lines):
+        if not sline.is_fenced and sline.text.startswith("# "):
+            h1_idx = idx
+            h1_text = sline.text[2:].strip()
+            break
+    if h1_idx is None:
+        return (text, [])
+
+    idx = h1_idx + 1
+    while idx < len(scanned_lines) and not scanned_lines[idx].text.strip():
+        idx += 1
+    header_start = idx
+    raw_pairs: list[tuple[str, str]] = []
+    while idx < len(scanned_lines):
+        sline = scanned_lines[idx]
+        if sline.is_fenced:
+            break
+        m = HEADER_LINE_RE.match(sline.text)
+        if not m:
+            break
+        raw_pairs.append((m.group(1).strip(), m.group(2).strip()))
+        idx += 1
+    header_end = idx
+    if not raw_pairs:
+        return (text, [])
+
+    # Check for residual `verification pending:` line immediately after header
+    vp_line_idx: int | None = None
+    scan_idx = header_end
+    while scan_idx < len(scanned_lines) and not scanned_lines[scan_idx].text.strip():
+        scan_idx += 1
+    if (
+        scan_idx < len(scanned_lines)
+        and not scanned_lines[scan_idx].is_fenced
+        and scanned_lines[scan_idx].text.strip().lower().startswith("verification pending:")
+    ):
+        vp_line_idx = scan_idx
+
+    parts = file_path.relative_to(tasks_dir).parts if file_path.is_relative_to(tasks_dir) else ()
+    if in_done:
+        folder_category = parts[1] if len(parts) >= 3 else ""
+    else:
+        folder_category = parts[0] if len(parts) >= 2 else ""
+
+    raw_dict: dict[str, str] = {}
+    raw_keys: list[str] = []
+    for k, v in raw_pairs:
+        raw_keys.append(k)
+        raw_dict[k] = v
+
+    is_pointer = (
+        normalize_state(raw_dict.get("state") or raw_dict.get("status") or "") == "moved"
+        or "moved-to" in raw_dict
+        or "moved_to" in raw_dict
+    )
+    if is_pointer:
+        return (text, [])
+
+    sections = parse_markdown_sections(text, heading_prefix="## ")
+    found_headings = {sec.heading for sec in sections if sec.heading}
+    is_micro = (folder_category == "micro") or (raw_dict.get("category") == "micro")
+    is_full_format = ("handoff" in raw_keys and "category" in raw_keys and "## Goal" in found_headings)
+
+    project_ext_fields = get_project_extension_fields(tasks_dir)
+
+    # Determine task_id and title fallback
+    task_root = file_path.parent if file_path.name == "README.md" else file_path
+    m_fid = re.match(r"^(T\d{3,})", task_root.name)
+    derived_id = m_fid.group(1) if m_fid else ""
+    task_id = raw_dict.get("id") or derived_id
+    clean_h1_title = re.sub(r"^T\d{3,}\s*[:—–-]\s*", "", h1_text).strip() or h1_text
+
+    # Map aliases into canonical dictionary
+    canon_dict: dict[str, str] = {}
+    changes: list[str] = []
+    for k, v in raw_pairs:
+        k_low = k.lower()
+        target_k = LEGACY_TASK_HEADER_ALIASES.get(k_low, k_low)
+        if target_k != k:
+            changes.append(f"field '{k}' -> '{target_k}'")
+        if target_k not in canon_dict or not canon_dict[target_k] or canon_dict[target_k] == "-":
+            canon_dict[target_k] = v
+
+    # Merge adopted use cases if any
+    adopted_for_task = (adopted_uc_map or {}).get(task_id, [])
+    existing_ucs = parse_use_cases_field(canon_dict.get("use-cases"))
+    merged_ucs = sorted(set(existing_ucs) | set(adopted_for_task), key=_natural_sort_key)
+    if merged_ucs != existing_ucs:
+        canon_dict["use-cases"] = ", ".join(merged_ucs) if merged_ucs else "-"
+        changes.append(f"use-cases -> '{canon_dict['use-cases']}'")
+
+    default_ending = "\n"
+    if header_start < len(lines):
+        sample_clean = lines[header_start].rstrip("\r\n")
+        default_ending = lines[header_start][len(sample_clean):] or "\n"
+
+    new_header_lines: list[str] = []
+
+    if is_micro and not is_full_format:
+        eff_micro_opt = list(CANONICAL_MICRO_OPTIONAL_ORDER) + [
+            k for k in project_ext_fields
+            if k not in MICRO_MANDATORY_HEADER_FIELDS and k not in CANONICAL_MICRO_OPTIONAL_ORDER
+        ]
+        allowed_micro = set(MICRO_MANDATORY_HEADER_FIELDS) | set(eff_micro_opt)
+        for k in raw_keys:
+            if k not in allowed_micro and LEGACY_TASK_HEADER_ALIASES.get(k.lower(), k.lower()) not in allowed_micro:
+                changes.append(f"drop unknown field '{k}'")
+
+        m_id = canon_dict.get("id") or task_id
+        m_title = canon_dict.get("title") or clean_h1_title
+        m_kind = (canon_dict.get("kind") or "chore").strip().lower()
+        if m_kind not in VALID_KINDS:
+            m_kind = "chore"
+        m_prio = (canon_dict.get("priority") or "P2").strip().upper()
+        if m_prio not in PRIORITIES:
+            m_prio = "P2"
+        raw_st = canon_dict.get("state") or ("done" if in_done else "open")
+        m_state = normalize_state(raw_st)
+        if not is_valid_state(m_state):
+            m_state = "done" if in_done else "open"
+        if in_done and m_state not in TERMINAL_STATES:
+            m_state = "done"
+        m_exec = canon_dict.get("executor") or "kilo"
+        m_paths = canon_dict.get("paths") or "-"
+        m_deps = canon_dict.get("depends-on") or "-"
+
+        core_vals = {
+            "id": m_id,
+            "title": m_title,
+            "kind": m_kind,
+            "priority": m_prio,
+            "state": m_state,
+            "executor": m_exec,
+            "paths": m_paths,
+            "depends-on": m_deps,
+        }
+        for ck in MICRO_MANDATORY_HEADER_FIELDS:
+            if ck not in raw_dict:
+                changes.append(f"add mandatory field '{ck}'")
+            new_header_lines.append(f"- {ck}: {core_vals[ck]}{default_ending}")
+
+        for ok in eff_micro_opt:
+            if ok in canon_dict and canon_dict[ok] != "":
+                oval = canon_dict[ok]
+                if ok == "size" and oval != "-":
+                    oval = oval.upper() if oval.upper() in VALID_SIZES else "XS"
+                elif ok == "short" and oval != "-" and validate_short_title(oval):
+                    oval = derive_short_title(oval)
+                new_header_lines.append(f"- {ok}: {oval}{default_ending}")
+        final_state = m_state
+    else:
+        eff_opt_order = list(CANONICAL_OPTIONAL_EXTENSION_ORDER) + [
+            k for k in project_ext_fields
+            if k not in CORE_HEADER_FIELDS and k not in CANONICAL_OPTIONAL_EXTENSION_ORDER
+        ]
+        allowed_full = set(CORE_HEADER_FIELDS) | set(eff_opt_order)
+        for k in raw_keys:
+            if k not in allowed_full and LEGACY_TASK_HEADER_ALIASES.get(k.lower(), k.lower()) not in allowed_full:
+                changes.append(f"drop unknown field '{k}'")
+
+        f_id = canon_dict.get("id") or task_id
+        f_title = canon_dict.get("title") or clean_h1_title
+        f_cat = folder_category or canon_dict.get("category") or "general"
+        if canon_dict.get("category") and folder_category and canon_dict["category"] != folder_category:
+            changes.append(f"category '{canon_dict['category']}' -> '{folder_category}'")
+        f_prio = (canon_dict.get("priority") or "P2").strip().upper()
+        if f_prio not in PRIORITIES:
+            f_prio = "P2"
+            changes.append("normalize priority -> 'P2'")
+        f_preason = canon_dict.get("priority-reason", "").strip()
+        if not f_preason or f_preason == "-":
+            f_preason = f"Core {f_cat} task"
+            changes.append(f"backfill priority-reason -> '{f_preason}'")
+        f_next = canon_dict.get("next-up", "").strip().lower()
+        if f_next not in NEXT_UP_VALUES:
+            f_next = "yes" if (f_prio == "P0" and not in_done) else "no"
+            changes.append(f"backfill next-up -> '{f_next}'")
+
+        raw_st = canon_dict.get("state") or ("done" if in_done else "open")
+        f_state = normalize_state(raw_st)
+        if not is_valid_state(f_state):
+            f_state = "done" if in_done else "open"
+        if in_done and f_state not in TERMINAL_STATES:
+            f_state = "done"
+        if raw_st != f_state and not raw_st.lower().startswith("done with a caveat"):
+            changes.append(f"state '{raw_st}' -> '{f_state}'")
+        elif raw_st.lower().startswith("done with a caveat"):
+            f_state = raw_st
+
+        f_exec = canon_dict.get("executor") or "kilo"
+        f_deps = canon_dict.get("depends-on") or "-"
+        f_dec = canon_dict.get("decider") or "-"
+        f_srcs = canon_dict.get("sources") or "-"
+        f_paths = canon_dict.get("paths") or "-"
+        f_handoff = canon_dict.get("handoff") or "-"
+
+        core_vals = {
+            "id": f_id,
+            "title": f_title,
+            "category": f_cat,
+            "priority": f_prio,
+            "priority-reason": f_preason,
+            "next-up": f_next,
+            "state": f_state,
+            "executor": f_exec,
+            "depends-on": f_deps,
+            "decider": f_dec,
+            "sources": f_srcs,
+            "paths": f_paths,
+            "handoff": f_handoff,
+        }
+        for ck in CORE_HEADER_FIELDS:
+            if ck not in raw_dict:
+                changes.append(f"add mandatory field '{ck}'")
+            new_header_lines.append(f"- {ck}: {core_vals[ck]}{default_ending}")
+
+        for ok in eff_opt_order:
+            if ok in canon_dict and canon_dict[ok] != "":
+                oval = canon_dict[ok]
+                if ok == "profile" and oval != "-" and oval not in PROFILES:
+                    continue
+                if ok == "verification-mode" and oval != "-" and oval not in VERIFICATION_MODES:
+                    continue
+                if ok == "size" and oval != "-":
+                    oval = oval.upper() if oval.upper() in VALID_SIZES else "M"
+                if ok == "kind" and oval != "-":
+                    oval = oval.lower() if oval.lower() in VALID_KINDS else "feature"
+                if ok == "short" and oval != "-" and validate_short_title(oval):
+                    oval = derive_short_title(oval)
+                new_header_lines.append(f"- {ok}: {oval}{default_ending}")
+        final_state = normalize_state(f_state)
+
+    old_header_lines = lines[header_start:header_end]
+    if new_header_lines != old_header_lines and not changes:
+        changes.append("reorder header fields to canonical sequence")
+
+    remove_vp = vp_line_idx is not None and final_state != "delivered"
+    if remove_vp:
+        changes.append("remove residual 'verification pending:' line")
+
+    if not changes and new_header_lines == old_header_lines and not remove_vp:
+        return (text, [])
+
+    out_lines = list(lines[:header_start]) + new_header_lines
+    tail_lines = list(lines[header_end:])
+    if remove_vp and vp_line_idx is not None:
+        rel_vp = vp_line_idx - header_end
+        if 0 <= rel_vp < len(tail_lines):
+            del tail_lines[rel_vp]
+    out_lines.extend(tail_lines)
+    new_text = "".join(out_lines)
+    return (new_text, changes) if new_text != text else (text, [])
+
+
+def plan_migrate_task_and_usecase_headers(tasks_dir: pathlib.Path) -> list[dict[str, Any]]:
+    """Inspect all use-case and emergent task files in `tasks_dir` and return a deterministic list of
+    planned file migrations: `[{path, rel_path, before_hash, old_text, new_text, summary, changes}]`."""
+    tasks_dir = pathlib.Path(tasks_dir).resolve()
+    if not tasks_dir.is_dir():
+        return []
+
+    records: list[dict[str, Any]] = []
+    adopted_uc_map: dict[str, list[str]] = {}
+
+    # 1. Inspect use-cases/
+    uc_dir = tasks_dir / "use-cases"
+    if uc_dir.is_dir():
+        for uc_entry in sorted(uc_dir.iterdir()):
+            if uc_entry.name.startswith(".") or not uc_entry.is_file() or uc_entry.suffix != ".md":
+                continue
+            try:
+                old_uc_text = uc_entry.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            new_uc_text, uc_changes = _migrate_use_case_file_text(old_uc_text, uc_entry)
+            try:
+                parsed_uc = parse_use_case_file(uc_entry, tasks_dir)
+                uc_id = parsed_uc.get("id", "")
+                if uc_id:
+                    for ltid in parsed_uc.get("linked_tasks", []):
+                        adopted_uc_map.setdefault(ltid, [])
+                        if uc_id not in adopted_uc_map[ltid]:
+                            adopted_uc_map[ltid].append(uc_id)
+            except Exception:
+                pass
+            if new_uc_text != old_uc_text:
+                rel_p = uc_entry.relative_to(tasks_dir).as_posix()
+                records.append({
+                    "path": uc_entry,
+                    "rel_path": rel_p,
+                    "before_hash": _file_sha256(uc_entry),
+                    "old_text": old_uc_text,
+                    "new_text": new_uc_text,
+                    "changes": uc_changes,
+                    "summary": f"migrate use-case headers ({'; '.join(uc_changes[:3])})",
+                })
+
+    # 2. Inspect emergent tasks (active + done/)
+    emergent = discover_emergent_tasks(tasks_dir)
+    for em in sorted(emergent, key=lambda item: item.get("rel_path", "")):
+        fpath = pathlib.Path(em["file_path"]).resolve()
+        if not fpath.is_file():
+            continue
+        try:
+            old_t_text = fpath.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        new_t_text, t_changes = _migrate_emergent_task_file_text(
+            old_t_text,
+            fpath,
+            tasks_dir,
+            in_done=bool(em.get("in_done")),
+            adopted_uc_map=adopted_uc_map,
+        )
+        if new_t_text != old_t_text:
+            rel_p = fpath.relative_to(tasks_dir).as_posix() if fpath.is_relative_to(tasks_dir) else em["rel_path"]
+            records.append({
+                "path": fpath,
+                "rel_path": rel_p,
+                "before_hash": _file_sha256(fpath),
+                "old_text": old_t_text,
+                "new_text": new_t_text,
+                "changes": t_changes,
+                "summary": f"migrate task headers ({'; '.join(t_changes[:3])})",
+            })
+
+    return records
+
+
+def _render_synced_index_with_overlay(
+    tasks_dir: pathlib.Path,
+    existing_idx: str,
+    pending_writes: list[tuple[pathlib.Path, str]],
+    pending_copies: list[tuple[pathlib.Path, pathlib.Path]],
+    *,
+    adopt: bool = True,
+) -> str:
+    """Render `00-INDEX.md` against `tasks_dir` with `pending_writes` and `pending_copies` applied
+    in an isolated temporary overlay so preview and apply produce identical index output."""
+    has_overlay_affecting_index = bool(pending_copies) or any(
+        p.resolve() != (tasks_dir / "00-INDEX.md").resolve()
+        and p.resolve() != (tasks_dir / ".gitignore").resolve()
+        and p.resolve() != (tasks_dir / ".gitattributes").resolve()
+        and p.resolve() != (tasks_dir / CONVENTION_VERSION_FILENAME).resolve()
+        for p, _ in pending_writes
+    )
+    if not has_overlay_affecting_index:
+        return render_synced_index(tasks_dir, existing_idx, adopt=adopt)
+
+    with tempfile.TemporaryDirectory() as tmp_root:
+        tmp_tasks = pathlib.Path(tmp_root) / "tasks"
+        if tasks_dir.is_dir():
+            shutil.copytree(tasks_dir, tmp_tasks, symlinks=True)
+        else:
+            tmp_tasks.mkdir(parents=True, exist_ok=True)
+        for src_item, dst_item in pending_copies:
+            try:
+                rel = dst_item.resolve().relative_to(tasks_dir.resolve())
+                target_dst = tmp_tasks / rel
+                target_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_item, target_dst)
+            except Exception:
+                pass
+        for p, content in pending_writes:
+            try:
+                rel = p.resolve().relative_to(tasks_dir.resolve())
+                target_p = tmp_tasks / rel
+                target_p.parent.mkdir(parents=True, exist_ok=True)
+                target_p.write_text(content, encoding="utf-8")
+            except Exception:
+                pass
+        return render_synced_index(tmp_tasks, existing_idx, adopt=adopt)
+
+
 def upgrade_tasks_tree(
     tasks_dir: pathlib.Path,
     dry_run: bool = False,
@@ -20596,6 +21271,7 @@ def upgrade_tasks_tree(
     apply: bool | None = None,
     expect_plan_hash: str | None = None,
     skip_git_config: bool = False,
+    migrate_headers: bool = False,
 ) -> dict[str, Any]:
     """Upgrade a tasks/ directory to the latest task-pipeline v0.3.0 convention:
       1. Updates tasks/AGENTS.md with a managed block between markers (never replacing existing rules).
@@ -20645,6 +21321,23 @@ def upgrade_tasks_tree(
             operations: list[dict[str, Any]] = []
             pending_writes: list[tuple[pathlib.Path, str]] = []
             pending_copies: list[tuple[pathlib.Path, pathlib.Path]] = []
+
+            # 0. Migrate task and use-case headers if requested
+            header_migrations: list[dict[str, Any]] = []
+            if migrate_headers:
+                header_migrations = plan_migrate_task_and_usecase_headers(tasks_dir)
+                for hrec in header_migrations:
+                    hpath: pathlib.Path = hrec["path"]
+                    updated.append(str(hpath))
+                    upgraded_files.append(str(hpath))
+                    operations.append({
+                        "action": "modify",
+                        "path": hrec["rel_path"],
+                        "before_hash": hrec["before_hash"],
+                        "summary": hrec["summary"],
+                        "changes": hrec["changes"],
+                    })
+                    pending_writes.append((hpath, hrec["new_text"]))
 
             # 1. Update tasks/AGENTS.md (managed block, never overwrite project rules)
             agents_md = tasks_dir / "AGENTS.md"
@@ -20733,6 +21426,31 @@ def upgrade_tasks_tree(
                     })
                     new_ga = existing_ga + ("\n" if existing_ga and not existing_ga.endswith("\n") else "") + f"{rule_line}\n"
                     pending_writes.append((gitattributes_path, new_ga))
+
+            # 2.55. Ensure tasks/convention_version records CONVENTION_VERSION
+            conv_version_path = tasks_dir / CONVENTION_VERSION_FILENAME
+            expected_conv_text = f"{CONVENTION_VERSION}\n"
+            current_conv = read_convention_version(tasks_dir)
+            if not conv_version_path.is_file():
+                created.append(str(conv_version_path))
+                upgraded_files.append(str(conv_version_path))
+                operations.append({
+                    "action": "create",
+                    "path": CONVENTION_VERSION_FILENAME,
+                    "before_hash": "",
+                    "summary": f"convention_version={CONVENTION_VERSION}",
+                })
+                pending_writes.append((conv_version_path, expected_conv_text))
+            elif current_conv != CONVENTION_VERSION:
+                updated.append(str(conv_version_path))
+                upgraded_files.append(str(conv_version_path))
+                operations.append({
+                    "action": "modify",
+                    "path": CONVENTION_VERSION_FILENAME,
+                    "before_hash": _file_sha256(conv_version_path),
+                    "summary": f"convention_version={current_conv or 'none'}->{CONVENTION_VERSION}",
+                })
+                pending_writes.append((conv_version_path, expected_conv_text))
 
             # 2.6. Register git merge driver in repository's local git config
             pending_git_config: tuple[str, str] | None = None
@@ -20920,7 +21638,13 @@ def upgrade_tasks_tree(
                 (tasks_dir / "_inbox" / "to-analyze").mkdir(parents=True, exist_ok=True)
                 (tasks_dir / "_inbox" / "analyzed").mkdir(parents=True, exist_ok=True)
 
-            rendered_idx = render_synced_index(tasks_dir, existing_idx, adopt=True)
+            rendered_idx = _render_synced_index_with_overlay(
+                tasks_dir,
+                existing_idx,
+                pending_writes,
+                pending_copies,
+                adopt=True,
+            )
             idx_summary = summarize_index_changes(existing_idx, rendered_idx)
             if existing_idx.strip() != rendered_idx.strip():
                 if not idx_path.is_file():
@@ -27279,11 +28003,21 @@ def cmd_labels(args: argparse.Namespace) -> int:
 
 def cmd_config(args: argparse.Namespace) -> int:
     tasks_dir = pathlib.Path(getattr(args, "tasks_dir", "tasks")).resolve()
+    ws_root = tasks_dir.parent if tasks_dir.name == "tasks" else tasks_dir
+    cfg_info = _inspect_project_config(ws_root)
     lang_info = resolve_project_languages(tasks_dir)
     ext_fields = list(get_project_extension_fields(tasks_dir))
+    warnings = list(lang_info["warnings"])
+    for w in cfg_info.get("warnings", []):
+        if w not in warnings:
+            warnings.append(w)
     payload = {
         "ok": True,
         "tasks_dir": str(tasks_dir),
+        "project_config_path": str(cfg_info["path"]),
+        "project_config_exists": bool(cfg_info["exists"]),
+        "project_config_write_path": str(cfg_info["write_path"]),
+        "project_config_legacy": bool(cfg_info["is_legacy"]),
         "languages": {
             "tasks": lang_info["tasks"],
             "questions": lang_info["questions"],
@@ -27292,19 +28026,20 @@ def cmd_config(args: argparse.Namespace) -> int:
         "language_sources": lang_info["sources"],
         "declared": lang_info["declared"],
         "extension_fields": ext_fields,
-        "warnings": lang_info["warnings"],
+        "warnings": warnings,
     }
     args._last_result = payload
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
     else:
         print(f"Tasks directory : {tasks_dir}")
+        print(f"Project config  : {cfg_info['path']} (exists={cfg_info['exists']})")
         print("Languages:")
         print(f"  tasks     : {lang_info['tasks']} (source: {lang_info['sources']['tasks']})")
         print(f"  questions : {lang_info['questions']} (source: {lang_info['sources']['questions']})")
         print(f"  use_cases : {lang_info['use_cases']} (source: {lang_info['sources']['use_cases']})")
         print(f"Extension fields: {', '.join(ext_fields) if ext_fields else '-'}")
-        for w in lang_info["warnings"]:
+        for w in warnings:
             print(f"[WARN] {w}")
     return 0
 

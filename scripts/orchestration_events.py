@@ -57,12 +57,29 @@ def _normalize_host_id(raw: str | None = None) -> str:
     return s if (s and re.match(r"^[a-z0-9][a-z0-9_-]{0,62}$", s)) else "localhost"
 
 
-def _resolve_current_host_id() -> str:
+def _resolve_current_host_id(workspace: pathlib.Path | str | None = None) -> str:
     try:
         import orchestration_config
-        return orchestration_config.resolve_host_id()
-    except Exception:
-        pass
+    except ImportError:
+        _setup_dir = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "plugins"
+            / "shared"
+            / "skills"
+            / "orchestration-setup"
+            / "scripts"
+        )
+        if _setup_dir.is_dir() and str(_setup_dir) not in sys.path:
+            sys.path.insert(0, str(_setup_dir))
+        try:
+            import orchestration_config
+        except ImportError:
+            orchestration_config = None  # type: ignore
+    if orchestration_config is not None:
+        try:
+            return orchestration_config.resolve_host_id(workspace=workspace)
+        except Exception:
+            pass
     env_cfg = os.environ.get("AI_ORCHESTRATION_CONFIG")
     if env_cfg:
         p = pathlib.Path(env_cfg).expanduser().resolve()

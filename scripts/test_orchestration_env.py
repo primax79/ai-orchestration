@@ -4148,6 +4148,870 @@ def test_n063_identical_per_assistant_skill_copies_not_flagged_as_duplicates(tmp
     assert not any(g["group_key"] == f"duplicate-name:{sname}" for g in st["finding_groups"])
 
 
+def test_parse_frontmatter_and_compare_without_pyyaml(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T088: Stdlib fallback parser in parse_frontmatter_and_body normalizes nested metadata and folded block scalars when PyYAML is absent."""
+    import orchestration_env as oe
+
+    monkeypatch.setattr(oe, "yaml", None)
+
+    nested_md = (
+        "---\n"
+        "name: gcube-component-release\n"
+        "description: \"Release gcube components\"\n"
+        "metadata:\n"
+        "  author: Alfredo Oliviero\n"
+        "  version: 1.0.0\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    flat_md = (
+        "---\n"
+        "name: gcube-component-release\n"
+        "description: \"Release gcube components\"\n"
+        "metadata: \"\"\n"
+        "author: Alfredo Oliviero\n"
+        "version: 1.0.0\n"
+        "---\n\n"
+        "# Body\n"
+    )
+    eq1, changed1, body_diff1 = oe.compare_skill_md(nested_md, flat_md)
+    assert eq1 is True
+    assert changed1 == []
+    assert body_diff1 is False
+
+    folded_md = (
+        "---\n"
+        "name: demo-folded-skill\n"
+        "description: >-\n"
+        "  Create distinctive: frontend interfaces\n"
+        "  with high design quality.\n"
+        "license: Apache-2.0\n"
+        "---\n\n"
+        "# Body line\n"
+    )
+    quoted_md = (
+        "---\r\n"
+        "name: demo-folded-skill\r\n"
+        "description: \"Create distinctive: frontend interfaces with high design quality.\"\r\n"
+        "license: Apache-2.0   \r\n"
+        "---\r\n\r\n"
+        "# Body line  \r\n"
+    )
+    eq2, changed2, body_diff2 = oe.compare_skill_md(folded_md, quoted_md)
+    assert eq2 is True
+    assert changed2 == []
+    assert body_diff2 is False
+
+
+# ---------------------------------------------------------------------------
+# Task 19.2: Project Doctor (`ai-orch doctor`) & Convention Drift Detection
+# ---------------------------------------------------------------------------
+
+AI_ORCH_BIN = SCRIPT.parent.parent / "bin" / "ai-orch"
+
+
+def test_19_2_project_doctor_2026_10_17_fixture_reports_all_expected_findings_with_severity(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Fixture with a '2026-10-17 style' project (reconstructed from N078) reports all expected findings with severity and fix commands."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "ricerca_auto_2026_10_17"
+    oe.create_2026_10_17_fixture(proj_dir)
+
+    res = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    report = json.loads(res.stdout)
+
+    assert report["ok"] is False
+    assert report["drifted"] is True
+    assert report["convention_version"] is None
+    assert report["tool_convention_version"] == oe.CONVENTION_VERSION
+
+    findings = report["findings"]
+    kinds = {f["kind"] for f in findings}
+    expected_kinds = {
+        "missing-project-config",
+        "unregistered-workspace",
+        "index-missing-markers",
+        "stale-agents-md",
+        "legacy-task-headers",
+        "convention-version-drift",
+    }
+    assert expected_kinds.issubset(kinds)
+
+    for f in findings:
+        assert f["severity"] in ("error", "warning")
+        assert f["fix_command"] and isinstance(f["fix_command"], str)
+        assert f["fix"] == f["fix_command"]
+        assert f["message"] and isinstance(f["message"], str)
+
+    # Check specific AGENTS.md duplicated hand-written block detection
+    agents_finding = next(f for f in findings if f["group_key"] == "project-drift:stale-agents-md")
+    assert agents_finding["duplicated_blocks"] is True
+    assert agents_finding["stale_rendered"] is True
+    assert any("Required Skills" in h for h in agents_finding["duplicated_sections"])
+    assert any("Core Operating Rules" in h for h in agents_finding["duplicated_sections"])
+
+    # Check legacy task headers details
+    hdr_finding = next(f for f in findings if f["kind"] == "legacy-task-headers")
+    assert hdr_finding["severity"] == "error"
+    assert hdr_finding["error_count"] > 0
+    assert any("status" in issue or "header field" in issue for issue in hdr_finding["issues"])
+    assert any("verification pending:" in issue for issue in hdr_finding["issues"])
+    assert any("missing 'approval' header field" in issue for issue in hdr_finding["issues"])
+
+
+def test_19_2_project_doctor_updated_project_reports_zero_findings(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Updated project reports zero findings and records convention_version in tasks/convention_version."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "ricerca_auto_updated"
+    oe.create_updated_project_fixture(proj_dir, home=fake_home)
+
+    # Verify versioned tasks/convention_version file exists on disk
+    conv_file = proj_dir / "tasks" / "convention_version"
+    assert conv_file.is_file()
+    assert conv_file.read_text(encoding="utf-8").strip() == oe.CONVENTION_VERSION
+
+    res = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    report = json.loads(res.stdout)
+
+    assert report["ok"] is True
+    assert report["drifted"] is False
+    assert report["convention_version"] == oe.CONVENTION_VERSION
+    assert report["tool_convention_version"] == oe.CONVENTION_VERSION
+    assert report["findings"] == []
+    assert report["summary"]["total"] == 0
+    assert report["summary"]["error"] == 0
+    assert report["summary"]["warning"] == 0
+
+
+def test_19_2_project_doctor_json_stability_and_ack_unack(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`ai-orch doctor --json` is deterministic across runs and supports ack/unack on project drift findings."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "proj_json_stable"
+    oe.create_2026_10_17_fixture(proj_dir)
+
+    r1 = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    r2 = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert r1.stdout == r2.stdout
+    j1 = json.loads(r1.stdout)
+    expected_keys = {
+        "ok",
+        "drifted",
+        "project",
+        "project_path",
+        "workspace",
+        "tasks_dir",
+        "convention_version",
+        "tool_convention_version",
+        "convention_version_info",
+        "findings",
+        "finding_groups",
+        "groups",
+        "summary",
+        "severity_counts",
+        "checks",
+    }
+    assert expected_keys.issubset(set(j1.keys()))
+
+    # Test ack and unack of a project drift finding via `ai-orch doctor ack` / `unack`
+    ack_res = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "doctor",
+            "ack",
+            "project-drift:missing-project-config",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--note",
+            "defer config init",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    ack_payload = json.loads(ack_res.stdout)
+    assert ack_payload["ok"] is True
+    assert ack_payload["acknowledged"] is True
+
+    r_after_ack = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    j_ack = json.loads(r_after_ack.stdout)
+    cfg_f = next(f for f in j_ack["findings"] if f["group_key"] == "project-drift:missing-project-config")
+    assert cfg_f["acknowledged"] is True
+    assert cfg_f["severity"] == "info"
+    assert j_ack["summary"]["acknowledged"] == 1
+
+    unack_res = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "doctor",
+            "unack",
+            "project-drift:missing-project-config",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(unack_res.stdout)["unacknowledged"] is True
+
+
+def test_19_2_global_skill_drift_detected_with_two_fake_installed_versions(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Global skill drift is detected when two fake installed versions are present across global skill roots."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "proj_clean"
+    oe.create_updated_project_fixture(proj_dir, home=fake_home)
+
+    # Install two fake skill versions in global scope (e.g. v0.9.0 in Claude and v1.0.0 in Kilo)
+    claude_skill_dir = fake_home / ".claude" / "skills" / "task-pipeline"
+    claude_skill_dir.mkdir(parents=True)
+    (claude_skill_dir / "SKILL.md").write_text(
+        "---\nname: task-pipeline\ndescription: Fake v0.9.0\nversion: 0.9.0\n---\n# Fake 0.9.0\n",
+        encoding="utf-8",
+    )
+    (claude_skill_dir / ".ai-orch-source.json").write_text(
+        json.dumps({
+            "repo": "ai-orchestration",
+            "plugin": "architect-side",
+            "name": "task-pipeline",
+            "version": "0.9.0",
+            "source_hash": "fake_hash_090",
+            "mode": "copy",
+        }),
+        encoding="utf-8",
+    )
+
+    kilo_skill_dir = fake_home / ".kilo" / "skills" / "task-pipeline"
+    kilo_skill_dir.mkdir(parents=True)
+    (kilo_skill_dir / "SKILL.md").write_text(
+        "---\nname: task-pipeline\ndescription: Fake v1.0.0\nversion: 1.0.0\n---\n# Fake 1.0.0\n",
+        encoding="utf-8",
+    )
+    (kilo_skill_dir / ".ai-orch-source.json").write_text(
+        json.dumps({
+            "repo": "ai-orchestration",
+            "plugin": "architect-side",
+            "name": "task-pipeline",
+            "version": "1.0.0",
+            "source_hash": "fake_hash_100",
+            "mode": "copy",
+        }),
+        encoding="utf-8",
+    )
+
+    res = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "doctor", "--project", str(proj_dir), "--home", str(fake_home), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    report = json.loads(res.stdout)
+
+    assert report["ok"] is False
+    assert report["drifted"] is True
+    assert len(report["findings"]) == 1
+    sk_finding = report["findings"][0]
+    assert sk_finding["kind"] == "global-skill-drift"
+    assert sk_finding["severity"] == "warning"
+    assert "task-pipeline" in sk_finding["names"]
+    assert set(sk_finding["versions_found"]) == {"0.9.0", "1.0.0"}
+    assert "install-skills" in sk_finding["fix_command"]
+
+
+def test_19_2_one_line_drift_warning_on_ai_orch_commands_and_disable_mechanisms(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Running any ai-orch command in a project with drift emits a single-line warning on stderr (disablable)."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    drifted_proj = tmp_path / "drifted_proj"
+    oe.create_2026_10_17_fixture(drifted_proj)
+
+    env_base = os.environ.copy()
+    env_base["AI_ORCH_HOME"] = str(fake_home)
+    env_base.pop("AI_ORCH_NO_DRIFT_WARNING", None)
+    env_base.pop("AI_ORCH_DRIFT_WARNING", None)
+
+    # 1. Running `ai-orch tasks list --json` in the drifted project emits 1-line warning on stderr,
+    #    while stdout remains valid JSON.
+    res_warn = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "tasks", "list", "--tasks-dir", str(drifted_proj / "tasks"), "--json"],
+        cwd=str(drifted_proj),
+        env=env_base,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    parsed_stdout = json.loads(res_warn.stdout)
+    assert isinstance(parsed_stdout, dict)
+    stderr_lines = [ln for ln in res_warn.stderr.splitlines() if ln.strip()]
+    assert len(stderr_lines) == 1
+    assert "[ai-orch] warning: project 'drifted_proj' has convention drift" in stderr_lines[0]
+    assert "ai-orch doctor" in stderr_lines[0]
+
+    # 2. Disable via AI_ORCH_NO_DRIFT_WARNING=1
+    env_disabled = dict(env_base)
+    env_disabled["AI_ORCH_NO_DRIFT_WARNING"] = "1"
+    res_no_warn_env = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "tasks", "list", "--tasks-dir", str(drifted_proj / "tasks"), "--json"],
+        cwd=str(drifted_proj),
+        env=env_disabled,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "[ai-orch] warning:" not in res_no_warn_env.stderr
+
+    # 3. Disable via CLI flag --no-drift-warning
+    res_no_warn_flag = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "--no-drift-warning",
+            "tasks",
+            "list",
+            "--tasks-dir",
+            str(drifted_proj / "tasks"),
+            "--json",
+        ],
+        cwd=str(drifted_proj),
+        env=env_base,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "[ai-orch] warning:" not in res_no_warn_flag.stderr
+
+    # 4. Disable via [doctor] drift_warning = false in project config
+    (drifted_proj / ".ai-orchestration.local.toml").write_text(
+        "[doctor]\ndrift_warning = false\n",
+        encoding="utf-8",
+    )
+    res_no_warn_cfg = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "tasks", "list", "--tasks-dir", str(drifted_proj / "tasks"), "--json"],
+        cwd=str(drifted_proj),
+        env=env_base,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "[ai-orch] warning:" not in res_no_warn_cfg.stderr
+
+    # 5. Updated project emits zero warning even with warnings enabled
+    clean_proj = tmp_path / "clean_proj"
+    oe.create_updated_project_fixture(clean_proj, home=fake_home)
+    res_clean = subprocess.run(
+        [sys.executable, str(AI_ORCH_BIN), "tasks", "list", "--tasks-dir", str(clean_proj / "tasks"), "--json"],
+        cwd=str(clean_proj),
+        env=env_base,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "[ai-orch] warning:" not in res_clean.stderr
+
+
+# ===========================================================================
+# Task 19.3: `ai-orch upgrade` di progetto
+# ===========================================================================
+
+
+def test_19_3_project_upgrade_on_2026_10_17_fixture_preview_apply_doctor_validate_and_idempotence(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Task 19.3 Verification:
+    On the 19.2 fixture: preview -> apply -> `ai-orch doctor` with zero findings and `tasks validate`
+    with zero errors; second apply = no modifications.
+    """
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True)
+    proj_dir = tmp_path / "ricerca_auto"
+    oe.create_2026_10_17_fixture(proj_dir)
+
+    env = os.environ.copy()
+    env["AI_ORCH_HOME"] = str(fake_home)
+
+    # Snapshot all files in proj_dir before preview
+    before_preview_snapshot = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+
+    # 1. Preview by default via CLI (`ai-orch upgrade --project ... --json`)
+    res_prev = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "upgrade",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    prev_data = json.loads(res_prev.stdout)
+    assert prev_data["ok"] is True
+    assert prev_data["applied"] is False
+    assert prev_data["dry_run"] is True
+    assert prev_data["changed"] is True
+    plan_hash = prev_data["plan_hash"]
+    assert len(plan_hash) == 64
+    plan_steps = {op["step"] for op in prev_data["plan"]}
+    assert "project-config" in plan_steps
+    assert "workspace-register" in plan_steps
+    assert "agents-md" in plan_steps
+    assert "task-headers" in plan_steps
+    assert "tasks-agents-md" in plan_steps
+    assert "convention-version" in plan_steps
+    assert "index-adopt-sync" in plan_steps
+
+    # Verify preview did not touch any file on disk
+    after_preview_snapshot = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+    assert after_preview_snapshot == before_preview_snapshot
+
+    # 2. Apply without --expect-hash is refused
+    res_no_hash = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "upgrade",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--apply",
+            "--json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_no_hash.returncode != 0
+    no_hash_data = json.loads(res_no_hash.stdout)
+    assert no_hash_data["ok"] is False
+    assert no_hash_data["applied"] is False
+
+    # 3. Apply with wrong hash is refused
+    res_wrong_hash = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "upgrade",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--apply",
+            "--expect-hash",
+            "0123456789abcdef" * 4,
+            "--json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_wrong_hash.returncode != 0
+    wrong_hash_data = json.loads(res_wrong_hash.stdout)
+    assert wrong_hash_data["ok"] is False
+    assert "mismatch" in wrong_hash_data["error"].lower()
+
+    # 4. Apply with matching --expect-hash succeeds
+    res_apply = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "upgrade",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--apply",
+            "--expect-hash",
+            plan_hash,
+            "--json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    apply_data = json.loads(res_apply.stdout)
+    assert apply_data["ok"] is True
+    assert apply_data["applied"] is True
+    assert apply_data["changed"] is True
+    assert (proj_dir / "tasks" / "convention_version").read_text(encoding="utf-8").strip() == oe.CONVENTION_VERSION
+
+    # 5. `ai-orch doctor` after apply -> 0 findings, drifted is False, --check exits 0
+    res_doc = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "doctor",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--check",
+            "--json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    doc_data = json.loads(res_doc.stdout)
+    assert doc_data["ok"] is True
+    assert doc_data["drifted"] is False
+    assert doc_data["findings"] == []
+    assert doc_data["summary"]["total"] == 0
+    assert doc_data["summary"]["error"] == 0
+    assert doc_data["summary"]["warning"] == 0
+
+    # 6. `ai-orch tasks validate` after apply -> 0 errors, 0 warnings
+    res_val = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "tasks",
+            "validate",
+            "--tasks-dir",
+            str(proj_dir / "tasks"),
+            "--json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    val_data = json.loads(res_val.stdout)
+    assert val_data["ok"] is True
+    assert val_data["errors"] == []
+    assert val_data["warnings"] == []
+
+    # 7. Second preview and second apply -> no modifications ("secondo apply = nessuna modifica")
+    after_apply1_snapshot = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+
+    res_prev2 = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "upgrade",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    prev2_data = json.loads(res_prev2.stdout)
+    assert prev2_data["ok"] is True
+    assert prev2_data["changed"] is False
+    assert prev2_data["plan"] == []
+    assert prev2_data["upgraded_files"] == []
+
+    # Second apply with new empty plan_hash
+    res_apply2 = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "upgrade",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--apply",
+            "--expect-hash",
+            prev2_data["plan_hash"],
+            "--json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    apply2_data = json.loads(res_apply2.stdout)
+    assert apply2_data["ok"] is True
+    assert apply2_data["applied"] is True
+    assert apply2_data["changed"] is False
+    assert apply2_data["upgraded_files"] == []
+
+    # Second apply repeating original plan_hash is also a clean no-op
+    res_apply2_repeat = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "upgrade",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--apply",
+            "--expect-hash",
+            plan_hash,
+            "--json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    apply2_repeat_data = json.loads(res_apply2_repeat.stdout)
+    assert apply2_repeat_data["ok"] is True
+    assert apply2_repeat_data["applied"] is True
+    assert apply2_repeat_data["changed"] is False
+    assert apply2_repeat_data["upgraded_files"] == []
+
+    after_apply2_snapshot = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+    assert after_apply2_snapshot == after_apply1_snapshot
+
+
+def test_19_3_agents_md_blocks_outside_markers_preserved_byte_for_byte(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Task 19.3 Verification:
+    Duplicated hand-written orchestration sections outside markers are removed, while custom project
+    blocks in AGENTS.md outside markers remain byte-for-byte identical.
+    """
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True)
+    proj_dir = tmp_path / "ricerca_auto"
+    oe.create_2026_10_17_fixture(proj_dir)
+
+    expected_intro_bytes = (
+        "# ricerca_auto — Project Architecture & Notes\n\n"
+        " Project-specific domain rules and scraper notes that must remain intact.\n\n"
+    ).encode("utf-8")
+    expected_footer_bytes = (
+        "\n## Project Database Notes\n\n"
+        "PostgreSQL port 5432; keep this footer byte-for-byte.\n"
+    ).encode("utf-8")
+
+    prev = oe.upgrade_project(proj_dir, home=fake_home)
+    app = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=prev["plan_hash"])
+    assert app["ok"] is True
+    assert app["applied"] is True
+    assert len(app["removed_duplicated_sections"]) == 5
+
+    raw_bytes = (proj_dir / "AGENTS.md").read_bytes()
+    begin_marker = b"<!-- BEGIN ai-orchestration -->\n"
+    end_marker = b"<!-- END ai-orchestration -->\n"
+    assert begin_marker in raw_bytes
+    assert end_marker in raw_bytes
+
+    b_idx = raw_bytes.index(begin_marker)
+    e_idx = raw_bytes.index(end_marker) + len(end_marker)
+
+    actual_intro_bytes = raw_bytes[:b_idx]
+    actual_footer_bytes = raw_bytes[e_idx:]
+
+    assert actual_intro_bytes == expected_intro_bytes
+    assert actual_footer_bytes == expected_footer_bytes
+    assert b"Old hand-written table from 2026-10-17" not in raw_bytes
+    assert b"Hand-written Rule 1 before markers were introduced." not in raw_bytes
+
+
+def test_19_3_project_upgrade_refuses_when_active_executor_worktree_exists(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Task 19.3 Verification:
+    With an active executor worktree of the project, `ai-orch upgrade` refuses with a clear reason.
+    """
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True)
+    proj_dir = tmp_path / "ricerca_auto"
+    oe.create_2026_10_17_fixture(proj_dir)
+
+    # Case 1: Real git linked worktree
+    subprocess.run(["git", "-C", str(proj_dir), "init", "-b", "main"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(proj_dir), "config", "user.email", "test@example.com"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(proj_dir), "config", "user.name", "Test User"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(proj_dir), "add", "AGENTS.md"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(proj_dir), "commit", "-m", "initial"], check=True, capture_output=True)
+
+    wt_dir = tmp_path / "wt-exec-T001"
+    subprocess.run(
+        ["git", "-C", str(proj_dir), "worktree", "add", str(wt_dir), "-b", "exec/T001"],
+        check=True,
+        capture_output=True,
+    )
+
+    # Both preview and apply refuse via CLI and API
+    res_refuse = oe.upgrade_project(proj_dir, home=fake_home)
+    assert res_refuse["ok"] is False
+    assert res_refuse["applied"] is False
+    assert res_refuse["error_code"] == "active-executor-worktrees"
+    assert any(pathlib.Path(w["path"]) == wt_dir.resolve() for w in res_refuse["active_worktrees"])
+    assert "active executor worktree" in res_refuse["message"].lower()
+
+    res_cli_refuse = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "upgrade",
+            "--project",
+            str(proj_dir),
+            "--home",
+            str(fake_home),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_cli_refuse.returncode != 0
+    cli_refuse_data = json.loads(res_cli_refuse.stdout)
+    assert cli_refuse_data["ok"] is False
+    assert cli_refuse_data["error_code"] == "active-executor-worktrees"
+    assert str(wt_dir.resolve()) in cli_refuse_data["error"]
+
+    # Remove the linked git worktree
+    subprocess.run(
+        ["git", "-C", str(proj_dir), "worktree", "remove", "--force", str(wt_dir)],
+        check=True,
+        capture_output=True,
+    )
+
+    # Case 2: Sibling .worktrees/<proj>/run-active directory
+    sibling_wt = tmp_path / ".worktrees" / proj_dir.name / "run-active"
+    sibling_wt.mkdir(parents=True)
+    res_refuse_sibling = oe.upgrade_project(proj_dir, home=fake_home)
+    assert res_refuse_sibling["ok"] is False
+    assert res_refuse_sibling["error_code"] == "active-executor-worktrees"
+    assert any(pathlib.Path(w["path"]) == sibling_wt.resolve() for w in res_refuse_sibling["active_worktrees"])
+    shutil.rmtree(tmp_path / ".worktrees")
+
+    # Once active worktrees are gone, upgrade succeeds
+    prev = oe.upgrade_project(proj_dir, home=fake_home)
+    assert prev["ok"] is True
+    app = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=prev["plan_hash"])
+    assert app["ok"] is True
+    assert app["applied"] is True
+    doc = oe.inspect_project_doctor(proj_dir, home=fake_home)
+    assert doc["drifted"] is False
+    assert doc["findings"] == []
+
+
+def test_19_3_project_upgrade_migrates_legacy_project_config(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Task 19.3: Legacy project config at `tasks/orchestration.toml` is merged into canonical config
+    and archived so `ai-orch doctor` reports zero findings."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True)
+    proj_dir = tmp_path / "ricerca_auto"
+    oe.create_2026_10_17_fixture(proj_dir)
+
+    legacy_cfg = proj_dir / "tasks" / "orchestration.toml"
+    legacy_cfg.write_text(
+        '[project]\nname = "ricerca_auto"\nprimary_orchestrator = "claude"\nextension_fields = ["portal-target"]\n',
+        encoding="utf-8",
+    )
+
+    prev = oe.upgrade_project(proj_dir, home=fake_home)
+    assert prev["ok"] is True
+    assert any(op["step"] == "legacy-project-config" for op in prev["plan"])
+
+    app = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=prev["plan_hash"])
+    assert app["ok"] is True
+    assert not legacy_cfg.exists()
+
+    canon_cfg_path = fake_home / ".config" / "ai-orchestration" / "projects" / "ricerca_auto" / "orchestration.toml"
+    assert canon_cfg_path.is_file()
+    assert "portal-target" in canon_cfg_path.read_text(encoding="utf-8")
+
+    doc = oe.inspect_project_doctor(proj_dir, home=fake_home)
+    assert doc["drifted"] is False
+    assert doc["findings"] == []
+
+
+
+
+
 
 
 
