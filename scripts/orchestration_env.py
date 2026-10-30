@@ -1494,6 +1494,10 @@ def check_source_repo_stale(
     }
 
 
+def _write_trash_manifest(manifest_file: pathlib.Path, manifest: list[dict[str, str]]) -> None:
+    manifest_file.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
 def trash_path(
     path: pathlib.Path,
     assistant: str | None = None,
@@ -1503,10 +1507,15 @@ def trash_path(
     workspace: pathlib.Path | None = None,
     home: pathlib.Path | None = None,
     timestamp: str | None = None,
+    before_move: Any = None,
 ) -> pathlib.Path:
     """Move a file, directory, or symlink into
     <home>/.config/ai-orchestration/trash/<assistant>/<scope-segment>/<UTC ts>/<kind>/<name>
     and write manifest.json in the <ts> dir.
+
+    Writes manifest.json before moving the source, invokes `before_move(path, dest)` before
+    any mutation so transactional callers can record the item ahead of time, and cleans up
+    if writing the manifest or moving the path fails.
     """
     if not (path.exists() or path.is_symlink()):
         return path
@@ -1546,14 +1555,16 @@ def trash_path(
         dest = kind_dir / f"{path.name}_{counter}"
         counter += 1
 
-    orig_str = str(path)
-    shutil.move(str(path), str(dest))
+    if callable(before_move):
+        before_move(path, dest)
 
+    orig_str = str(path)
     manifest_file = ts_dir / "manifest.json"
+    old_manifest_bytes = manifest_file.read_bytes() if manifest_file.is_file() else None
     manifest: list[dict[str, str]] = []
-    if manifest_file.is_file():
+    if old_manifest_bytes is not None:
         try:
-            loaded = json.loads(manifest_file.read_text(encoding="utf-8"))
+            loaded = json.loads(old_manifest_bytes.decode("utf-8"))
             if isinstance(loaded, list):
                 manifest = loaded
         except Exception:
@@ -1564,7 +1575,32 @@ def trash_path(
         "trashed_path": str(dest),
         "reason": reason,
     })
-    manifest_file.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    try:
+        _write_trash_manifest(manifest_file, manifest)
+        shutil.move(str(path), str(dest))
+    except Exception:
+        try:
+            if (dest.exists() or dest.is_symlink()) and not (path.exists() or path.is_symlink()):
+                shutil.move(str(dest), str(path))
+        except OSError:
+            pass
+        try:
+            if old_manifest_bytes is None:
+                if manifest_file.is_file() or manifest_file.is_symlink():
+                    manifest_file.unlink()
+            else:
+                manifest_file.write_bytes(old_manifest_bytes)
+        except OSError:
+            pass
+        try:
+            if kind_dir.is_dir() and not any(kind_dir.iterdir()):
+                kind_dir.rmdir()
+            if ts_dir.is_dir() and not any(ts_dir.iterdir()):
+                ts_dir.rmdir()
+        except OSError:
+            pass
+        raise
     return dest
 
 
@@ -8828,10 +8864,14 @@ def inspect_project_doctor(
                 agents_stale_rendered = True
             else:
                 existing_agents_text = agents_md_path.read_text(encoding="utf-8", errors="replace")
-                agents_dup_sections = oc.find_duplicated_handwritten_agents_sections(existing_agents_text)
+                agents_dup_sections = oc.find_duplicated_handwritten_agents_sections(
+                    existing_agents_text,
+                    current_block=expected_block,
+                )
                 if hasattr(oc, "find_preserved_manual_review_agents_sections"):
                     agents_manual_review_sections = oc.find_preserved_manual_review_agents_sections(
-                        existing_agents_text
+                        existing_agents_text,
+                        current_block=expected_block,
                     )
                 has_begin_end = (
                     oc.BEGIN_MARKER in existing_agents_text and oc.END_MARKER in existing_agents_text
@@ -8839,9 +8879,15 @@ def inspect_project_doctor(
                 if not has_begin_end:
                     agents_stale_rendered = True
                 else:
-                    replaced = oc.inject_or_replace_agents_block(existing_agents_text, expected_block)
-                    if replaced != existing_agents_text:
+                    try:
+                        replaced = oc.inject_or_replace_agents_block(existing_agents_text, expected_block)
+                        if replaced != existing_agents_text:
+                            agents_stale_rendered = True
+                    except getattr(oc, "AgentsMdManagedBlockModifiedError", ValueError):
                         agents_stale_rendered = True
+                        canon_label = "canonical <!-- BEGIN ai-orchestration --> block"
+                        if canon_label not in agents_manual_review_sections:
+                            agents_manual_review_sections.insert(0, canon_label)
         except Exception as exc:
             agents_check_failed = True
             _emit_check_failed("agents-md", agents_md_path, exc, f"ai-orch config validate --workspace {ws}")
@@ -9623,7 +9669,11 @@ def upgrade_project(
             upgraded_files: list[str] = []
             warnings: list[str] = []
 
-            def _prevalidation_error(err_msg: str, err_code: str) -> dict[str, Any]:
+            def _prevalidation_error(
+                err_msg: str,
+                err_code: str,
+                manual_review: list[str] | None = None,
+            ) -> dict[str, Any]:
                 return {
                     "ok": False,
                     "applied": False,
@@ -9643,7 +9693,7 @@ def upgrade_project(
                     "updated": [],
                     "steps": steps_summary,
                     "removed_duplicated_sections": [],
-                    "manual_review_sections": [],
+                    "manual_review_sections": list(manual_review or []),
                     "convention_version": CONVENTION_VERSION,
                     "errors": [err_msg],
                     "warnings": warnings,
@@ -9833,9 +9883,15 @@ def upgrade_project(
                     effective_cfg = oc.deep_merge(oc.DEFAULT_GLOBAL_CONFIG, raw_gcfg)
                     effective_cfg = oc.deep_merge(effective_cfg, target_pdata)
                     expected_block = oc.render_agents_md_block(effective_cfg, ws, gpath)
-                    cleaned_agents, removed_dup_sections = oc.strip_duplicated_handwritten_agents_sections(existing_agents_text)
+                    cleaned_agents, removed_dup_sections = oc.strip_duplicated_handwritten_agents_sections(
+                        existing_agents_text,
+                        current_block=expected_block,
+                    )
                     if hasattr(oc, "find_preserved_manual_review_agents_sections"):
-                        manual_review_sections = oc.find_preserved_manual_review_agents_sections(existing_agents_text)
+                        manual_review_sections = oc.find_preserved_manual_review_agents_sections(
+                            existing_agents_text,
+                            current_block=expected_block,
+                        )
                     if manual_review_sections:
                         warnings.append(
                             f"AGENTS.md: preserved {len(manual_review_sections)} section(s) not positively matched "
@@ -9844,10 +9900,23 @@ def upgrade_project(
                         )
                     new_agents_text = oc.inject_or_replace_agents_block(cleaned_agents, expected_block)
                     needs_agents_write = (new_agents_text != existing_agents_text) or (not agents_md_path.is_file())
+                except getattr(oc, "AgentsMdManagedBlockModifiedError", ValueError) as exc:
+                    canon_label = "canonical <!-- BEGIN ai-orchestration --> block"
+                    if canon_label not in manual_review_sections:
+                        manual_review_sections.insert(0, canon_label)
+                    warnings.append(
+                        f"AGENTS.md: {exc} ({', '.join(manual_review_sections)})"
+                    )
+                    return _prevalidation_error(
+                        f"AGENTS.md managed block modification detected in {ws}: {exc}",
+                        "agents-md-managed-block-modified",
+                        manual_review=manual_review_sections,
+                    )
                 except Exception as exc:
                     return _prevalidation_error(
                         f"AGENTS.md rendering prevalidation failed for {ws}: {exc}",
                         "agents-md-failed",
+                        manual_review=manual_review_sections,
                     )
 
                 if needs_agents_write:
@@ -10103,10 +10172,14 @@ def upgrade_project(
             trashed_items: list[tuple[pathlib.Path, pathlib.Path]] = []
 
             def _rollback() -> None:
-                for _orig_p, trashed_dest in reversed(trashed_items):
+                for orig_p, trashed_dest in reversed(trashed_items):
                     try:
                         if trashed_dest.exists() or trashed_dest.is_symlink():
-                            trashed_dest.unlink()
+                            if not (orig_p.exists() or orig_p.is_symlink()):
+                                orig_p.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.move(str(trashed_dest), str(orig_p))
+                            else:
+                                trashed_dest.unlink()
                         ts_dir = trashed_dest.parent.parent
                         manifest_f = ts_dir / "manifest.json"
                         if manifest_f.is_file():
@@ -10178,15 +10251,15 @@ def upgrade_project(
                 if oc is not None:
                     for leg_p in legacy_paths:
                         if leg_p.is_file() and leg_p != write_path:
-                            trashed_dest = trash_path(
+                            trash_path(
                                 leg_p,
                                 scope="project",
                                 kind="config",
                                 reason=f"migrated legacy project config to {write_path}",
                                 workspace=ws,
                                 home=h,
+                                before_move=lambda src, dst: trashed_items.append((src, dst)),
                             )
-                            trashed_items.append((leg_p, trashed_dest))
             except Exception as exc:
                 _rollback()
                 err_msg = str(exc) or "upgrade apply failed"

@@ -3277,13 +3277,27 @@ Track every task through explicit states (`open` → `in progress` → `delivere
 """
 
 
+class AgentsMdManagedBlockModifiedError(ValueError):
+    """Raised when the canonical <!-- BEGIN ai-orchestration --> block in AGENTS.md
+    contains user edits (does not match current or historical renderings) and cannot be replaced."""
+
+
 def inject_or_replace_agents_block(existing_text: str, new_block: str) -> str:
     pattern = re.compile(
         re.escape(BEGIN_MARKER) + r".*?" + re.escape(END_MARKER) + r"\n?",
         re.DOTALL,
     )
-    if pattern.search(existing_text):
-        return pattern.sub(new_block.rstrip() + "\n", existing_text)
+    matches = list(pattern.finditer(existing_text))
+    if matches:
+        first = matches[0]
+        if not _managed_block_matches_known_rendering(first.group(0), current_block=new_block):
+            raise AgentsMdManagedBlockModifiedError(
+                "Refusing to replace canonical <!-- BEGIN ai-orchestration --> block in AGENTS.md: "
+                "block content does not match the current or any known historical rendering "
+                "(user edits detected; manual review required)."
+            )
+        replacement = new_block.rstrip() + "\n"
+        return existing_text[: first.start()] + replacement + existing_text[first.end() :]
     if not existing_text.strip():
         return new_block.rstrip() + "\n"
     return existing_text.rstrip() + "\n\n" + new_block.rstrip() + "\n"
@@ -3779,6 +3793,64 @@ Track every task through explicit states (`open` → `in progress` → `delivere
 )
 
 _HISTORICAL_SECTIONS_CACHE: dict[str, list[str]] | None = None
+_HISTORICAL_MANAGED_BLOCKS_CACHE: list[str] | None = None
+
+
+def _extract_managed_block_inner(block_text: str) -> str:
+    txt = block_text.strip()
+    if txt.startswith(BEGIN_MARKER):
+        txt = txt[len(BEGIN_MARKER) :]
+    if txt.endswith(END_MARKER):
+        txt = txt[: -len(END_MARKER)]
+    return txt
+
+
+def _collect_known_rendered_blocks() -> list[str]:
+    raw_blocks: list[str] = list(EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS)
+
+    # Load any checked-in historical rendering fixtures if present in the repo tree
+    try:
+        repo_root = pathlib.Path(__file__).resolve().parents[5]
+        fixtures_dir = repo_root / "scripts" / "fixtures" / "historical_agents_md"
+        if fixtures_dir.is_dir():
+            for fpath in sorted(fixtures_dir.glob("*.md")):
+                raw_blocks.append(fpath.read_text(encoding="utf-8"))
+    except OSError:
+        pass
+
+    # Include current renderer outputs across standard topology and strict_main_session combinations
+    try:
+        for orch_id in ("claude", "kilo", "codex"):
+            for exec_id in ("kilo", "claude", "codex"):
+                for v_mode in ("cross-agent", "independent-session"):
+                    for strict_flag in (False, True):
+                        v_cfg = copy.deepcopy(DEFAULT_GLOBAL_CONFIG)
+                        v_cfg.setdefault("routing", {})["default_orchestrator"] = orch_id
+                        v_cfg["routing"]["default_executor"] = exec_id
+                        v_cfg.setdefault("verification", {})["default_mode"] = v_mode
+                        if strict_flag:
+                            v_cfg["agents_md"] = {"strict_main_session": True}
+                        raw_blocks.append(render_agents_md_block(v_cfg))
+    except Exception:
+        pass
+
+    return raw_blocks
+
+
+def _get_historical_managed_blocks() -> list[str]:
+    """Load and cache whitespace-normalized whole managed blocks from known historical and current renderings."""
+    global _HISTORICAL_MANAGED_BLOCKS_CACHE
+    if _HISTORICAL_MANAGED_BLOCKS_CACHE is not None:
+        return _HISTORICAL_MANAGED_BLOCKS_CACHE
+
+    blocks: list[str] = []
+    for raw_b in _collect_known_rendered_blocks():
+        norm_b = _normalize_legacy_orchestration_section(_extract_managed_block_inner(raw_b))
+        if norm_b and norm_b not in blocks:
+            blocks.append(norm_b)
+
+    _HISTORICAL_MANAGED_BLOCKS_CACHE = blocks
+    return blocks
 
 
 def _classify_legacy_orchestration_heading(heading: str) -> str | None:
@@ -3845,29 +3917,10 @@ def _get_historical_orchestration_sections() -> dict[str, list[str]]:
         "lifecycle": [],
     }
 
-    raw_blocks: list[str] = list(EMBEDDED_HISTORICAL_AGENTS_MD_BLOCKS)
-
-    # Also load any checked-in historical rendering fixtures if present in the repo tree
-    try:
-        repo_root = pathlib.Path(__file__).resolve().parents[5]
-        fixtures_dir = repo_root / "scripts" / "fixtures" / "historical_agents_md"
-        if fixtures_dir.is_dir():
-            for fpath in sorted(fixtures_dir.glob("*.md")):
-                raw_blocks.append(fpath.read_text(encoding="utf-8"))
-    except OSError:
-        pass
-
-    # Also include the current renderer output (default and strict_main_session)
-    try:
-        raw_blocks.append(render_agents_md_block(DEFAULT_GLOBAL_CONFIG))
-        strict_cfg = copy.deepcopy(DEFAULT_GLOBAL_CONFIG)
-        strict_cfg["agents_md"] = {"strict_main_session": True}
-        raw_blocks.append(render_agents_md_block(strict_cfg))
-    except Exception:
-        pass
+    raw_blocks = _collect_known_rendered_blocks()
 
     for block in raw_blocks:
-        inner = block.replace(BEGIN_MARKER, "").replace(END_MARKER, "")
+        inner = _extract_managed_block_inner(block)
         for start_pos, end_pos, heading_str in _split_markdown_top_sections(inner):
             cat = _classify_legacy_orchestration_heading(heading_str)
             if cat is None:
@@ -3881,6 +3934,91 @@ def _get_historical_orchestration_sections() -> dict[str, list[str]]:
 
     _HISTORICAL_SECTIONS_CACHE = by_category
     return by_category
+
+
+def _managed_block_matches_known_rendering(
+    block_text: str,
+    current_block: str | None = None,
+) -> bool:
+    """Return True if and only if a managed (`<!-- BEGIN ai-orchestration -->`) block's content
+    is an exact match (after whitespace normalization) to what the renderer produces now or to
+    a known historical rendering. Any user edit inside the block causes this to return False.
+    """
+    inner = _extract_managed_block_inner(block_text)
+    norm_cand = _normalize_legacy_orchestration_section(inner)
+    if not norm_cand:
+        return False
+
+    if current_block is not None:
+        norm_curr = _normalize_legacy_orchestration_section(_extract_managed_block_inner(current_block))
+        if norm_cand == norm_curr:
+            return True
+
+    if norm_cand in _get_historical_managed_blocks():
+        return True
+
+    # Also support exact section-by-section match for a full 4-section block previously rendered
+    # by `render_agents_md_block` for this same workspace's config paths.
+    bounds = _split_markdown_top_sections(inner)
+    if len(bounds) != 4 or inner[: bounds[0][0]].strip() != "":
+        return False
+
+    expected_order = ["intro", "required_skills", "core_rules", "lifecycle"]
+    actual_order = [_classify_legacy_orchestration_heading(h) for _, _, h in bounds]
+    if actual_order != expected_order:
+        return False
+
+    hist_by_cat = _get_historical_orchestration_sections()
+    extra_by_cat: dict[str, set[str]] = {cat: set() for cat in expected_order}
+
+    if current_block is not None:
+        curr_inner = _extract_managed_block_inner(current_block)
+        for s_pos, e_pos, h_str in _split_markdown_top_sections(curr_inner):
+            c_cat = _classify_legacy_orchestration_heading(h_str)
+            if c_cat in extra_by_cat:
+                raw_s = curr_inner[s_pos:e_pos]
+                base_s = re.sub(r"\n+---\s*\Z", "", raw_s.rstrip())
+                for v_s in (raw_s, base_s, base_s + "\n\n---"):
+                    extra_by_cat[c_cat].add(_normalize_legacy_orchestration_section(v_s))
+
+        edit_m = re.search(
+            r"^>\s*Edit\s+`([^`]+)`\s+\(project\)\s+or\s+`([^`]+)`\s+\(global\)\s+and\s+re-run\s+`render-agents-md\s+--apply`\s+to\s+update\.$",
+            curr_inner,
+            re.MULTILINE,
+        )
+        if edit_m:
+            p_path_str, g_path_str = edit_m.group(1), edit_m.group(2)
+            strict_phrase = (
+                "acts strictly as the **Architect & Orchestrator** "
+                "(discovery, task specification, parallel dispatch, verification, and integration), "
+                "delegating implementation and heavy exploration to isolated **Worktree sessions** and **Subagents**."
+            )
+            soft_phrase = (
+                "typically acts as the **Architect & Orchestrator** "
+                "(discovery, task specification, parallel dispatch, verification, and integration), "
+                "delegating larger or parallel implementation work and heavy exploration to isolated "
+                "**Worktree sessions** and **Subagents**."
+            )
+            for orch_id in ("claude", "kilo", "codex"):
+                for exec_id in ("kilo", "claude", "codex"):
+                    for v_mode in ("cross-agent", "independent-session", "human", "panel"):
+                        for role_phrase in (strict_phrase, soft_phrase):
+                            intro_txt = (
+                                "# Agent Orchestration & Development Guidelines (`AGENTS.md`)\n\n"
+                                "> **Managed by `ai-orchestration` (`orchestration_config.py render-agents-md`).**\n"
+                                f"> Edit `{p_path_str}` (project) or `{g_path_str}` (global) and re-run `render-agents-md --apply` to update.\n\n"
+                                f'This repository uses an **Architect / Executor** development workflow (`primary_orchestrator = "{orch_id}"`, `default_executor = "{exec_id}"`, `verification_mode = "{v_mode}"`). The **main session** {role_phrase}\n\n'
+                                "---"
+                            )
+                            extra_by_cat["intro"].add(_normalize_legacy_orchestration_section(intro_txt))
+
+    for (s_pos, e_pos, _), cat in zip(bounds, expected_order):
+        assert cat is not None
+        norm_sec = _normalize_legacy_orchestration_section(inner[s_pos:e_pos])
+        if norm_sec not in hist_by_cat.get(cat, []) and norm_sec not in extra_by_cat[cat]:
+            return False
+
+    return True
 
 
 def _section_matches_legacy_orchestration(heading: str, section_text: str) -> tuple[bool, list[str]]:
@@ -3982,9 +4120,13 @@ def _analyze_legacy_orchestration_segment(segment: str) -> tuple[list[tuple[int,
     return (spans, matched_headings)
 
 
-def find_preserved_manual_review_agents_sections(existing_text: str) -> list[str]:
-    """Return headings of sections outside markers that use orchestration-like headings
-    but are NOT positively matched to a known legacy rendering (and are preserved for manual review)."""
+def find_preserved_manual_review_agents_sections(
+    existing_text: str,
+    current_block: str | None = None,
+) -> list[str]:
+    """Return headings of sections outside markers (plus any duplicate marked blocks)
+    that are NOT positively matched to the current or a known historical rendering
+    and are therefore preserved byte-for-byte for manual review."""
     block_re = re.compile(
         re.escape(BEGIN_MARKER) + r".*?" + re.escape(END_MARKER) + r"\n?",
         re.DOTALL,
@@ -3995,18 +4137,30 @@ def find_preserved_manual_review_agents_sections(existing_text: str) -> list[str
         return review
 
     first = matches[0]
-    before = existing_text[: first.start()]
-    after = block_re.sub("", existing_text[first.end() :])
-    _, _, rev_before = _analyze_legacy_orchestration_segment_with_review(before)
-    _, _, rev_after = _analyze_legacy_orchestration_segment_with_review(after)
-    return rev_before + rev_after
+    _, _, review_out = _analyze_legacy_orchestration_segment_with_review(existing_text[: first.start()])
+
+    for idx in range(1, len(matches)):
+        seg_between = existing_text[matches[idx - 1].end() : matches[idx].start()]
+        _, _, rev_between = _analyze_legacy_orchestration_segment_with_review(seg_between)
+        review_out.extend(rev_between)
+        dup_text = existing_text[matches[idx].start() : matches[idx].end()]
+        if not _managed_block_matches_known_rendering(dup_text, current_block=current_block):
+            review_out.append("duplicate <!-- BEGIN ai-orchestration --> block")
+
+    _, _, rev_tail = _analyze_legacy_orchestration_segment_with_review(existing_text[matches[-1].end() :])
+    review_out.extend(rev_tail)
+    return review_out
 
 
-def find_duplicated_handwritten_agents_sections(existing_text: str) -> list[str]:
-    """Return list of duplicated hand-written orchestration section headings outside markers.
+def find_duplicated_handwritten_agents_sections(
+    existing_text: str,
+    current_block: str | None = None,
+) -> list[str]:
+    """Return list of duplicated hand-written orchestration section headings outside markers
+    and duplicate marked blocks that match the current or a historical rendering.
 
-    Pure read-only predicate using positive signature/similarity matching; never invokes
-    destructive stripping.
+    Pure read-only predicate using exact whole-section and managed-block matching after
+    whitespace normalization; never invokes destructive stripping.
     """
     block_re = re.compile(
         re.escape(BEGIN_MARKER) + r".*?" + re.escape(END_MARKER) + r"\n?",
@@ -4020,17 +4174,18 @@ def find_duplicated_handwritten_agents_sections(existing_text: str) -> list[str]
         return headings
 
     first = matches[0]
-    before = existing_text[: first.start()]
-    after = existing_text[first.end() :]
-
-    if len(matches) > 1:
-        for _ in matches[1:]:
-            found.append("duplicate <!-- BEGIN ai-orchestration --> block")
-        after = block_re.sub("", after)
-
-    _, headings_before = _analyze_legacy_orchestration_segment(before)
-    _, headings_after = _analyze_legacy_orchestration_segment(after)
+    _, headings_before = _analyze_legacy_orchestration_segment(existing_text[: first.start()])
     found.extend(headings_before)
+
+    for idx in range(1, len(matches)):
+        seg_between = existing_text[matches[idx - 1].end() : matches[idx].start()]
+        _, headings_between = _analyze_legacy_orchestration_segment(seg_between)
+        found.extend(headings_between)
+        dup_text = existing_text[matches[idx].start() : matches[idx].end()]
+        if _managed_block_matches_known_rendering(dup_text, current_block=current_block):
+            found.append("duplicate <!-- BEGIN ai-orchestration --> block")
+
+    _, headings_after = _analyze_legacy_orchestration_segment(existing_text[matches[-1].end() :])
     found.extend(headings_after)
     return found
 
@@ -4049,10 +4204,14 @@ def _remove_spans_from_segment(segment: str, spans: list[tuple[int, int]]) -> st
     return "".join(out)
 
 
-def strip_duplicated_handwritten_agents_sections(existing_text: str) -> tuple[str, list[str]]:
+def strip_duplicated_handwritten_agents_sections(
+    existing_text: str,
+    current_block: str | None = None,
+) -> tuple[str, list[str]]:
     """Strip positively matched legacy orchestration sections outside
-    <!-- BEGIN ai-orchestration --> ... <!-- END ai-orchestration --> markers,
-    while preserving all user-authored sections outside markers byte-for-byte."""
+    <!-- BEGIN ai-orchestration --> ... <!-- END ai-orchestration --> markers and duplicate
+    marked blocks that match the current or a historical rendering, while preserving all
+    user-authored or modified sections/blocks byte-for-byte."""
     block_re = re.compile(
         re.escape(BEGIN_MARKER) + r".*?" + re.escape(END_MARKER) + r"\n?",
         re.DOTALL,
@@ -4069,24 +4228,32 @@ def strip_duplicated_handwritten_agents_sections(existing_text: str) -> tuple[st
     first = matches[0]
     before = existing_text[: first.start()]
     managed = existing_text[first.start() : first.end()]
-    after = existing_text[first.end() :]
-
-    if len(matches) > 1:
-        for _ in matches[1:]:
-            removed.append("duplicate <!-- BEGIN ai-orchestration --> block")
-        after = block_re.sub("", after)
 
     spans_before, rem_before = _analyze_legacy_orchestration_segment(before)
-    spans_after, rem_after = _analyze_legacy_orchestration_segment(after)
     removed.extend(rem_before)
-    removed.extend(rem_after)
+    parts: list[str] = [_remove_spans_from_segment(before, spans_before), managed]
+
+    for idx in range(1, len(matches)):
+        seg_between = existing_text[matches[idx - 1].end() : matches[idx].start()]
+        spans_between, rem_between = _analyze_legacy_orchestration_segment(seg_between)
+        removed.extend(rem_between)
+        parts.append(_remove_spans_from_segment(seg_between, spans_between))
+
+        dup_text = existing_text[matches[idx].start() : matches[idx].end()]
+        if _managed_block_matches_known_rendering(dup_text, current_block=current_block):
+            removed.append("duplicate <!-- BEGIN ai-orchestration --> block")
+        else:
+            parts.append(dup_text)
+
+    seg_tail = existing_text[matches[-1].end() :]
+    spans_tail, rem_tail = _analyze_legacy_orchestration_segment(seg_tail)
+    removed.extend(rem_tail)
+    parts.append(_remove_spans_from_segment(seg_tail, spans_tail))
 
     if not removed:
         return (existing_text, [])
 
-    cleaned_before = _remove_spans_from_segment(before, spans_before)
-    cleaned_after = _remove_spans_from_segment(after, spans_after)
-    return (cleaned_before + managed + cleaned_after, removed)
+    return ("".join(parts), removed)
 
 
 # ---------------------------------------------------------------------------
@@ -4670,7 +4837,86 @@ def cmd_render_agents_md(args: argparse.Namespace) -> int:
         current_hash = hashlib.sha256(b"").hexdigest()
         existing = ""
 
-    updated = inject_or_replace_agents_block(existing, block)
+    if getattr(args, "expect_hash", None) is not None and not getattr(args, "apply", False):
+        msg = "--expect-hash requires --apply"
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": msg}))
+        else:
+            print(f"[FAIL] {msg}", file=sys.stderr)
+        return 2
+
+    if not getattr(args, "diff", False) and not getattr(args, "check", False) and not getattr(args, "apply", False):
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": True, "applied": False, "path": str(agents_md_path), "rendered_block": block, "warnings": warnings}))
+        else:
+            for w in warnings:
+                print(f"[WARN] {w}", file=sys.stderr)
+            sys.stdout.write(block)
+        return 0
+
+    if getattr(args, "apply", False) and getattr(args, "expect_hash", None) is not None:
+        with config_lock(agents_md_path):
+            disk_bytes = agents_md_path.read_bytes() if agents_md_path.exists() else b""
+            actual_hash = hashlib.sha256(disk_bytes).hexdigest()
+            if actual_hash.lower() != args.expect_hash.strip().lower():
+                msg = f"hash mismatch for {agents_md_path}: expected {args.expect_hash}, found {actual_hash}"
+                if getattr(args, "json", False):
+                    print(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "error": msg,
+                                "expected_hash": args.expect_hash,
+                                "actual_hash": actual_hash,
+                                "path": str(agents_md_path),
+                            }
+                        )
+                    )
+                else:
+                    print(f"[FAIL] {msg}", file=sys.stderr)
+                return 2
+
+    try:
+        updated = inject_or_replace_agents_block(existing, block)
+    except AgentsMdManagedBlockModifiedError as exc:
+        err_msg = str(exc)
+        manual_rev = ["canonical <!-- BEGIN ai-orchestration --> block"]
+        warnings.append(err_msg)
+        if getattr(args, "check", False):
+            if getattr(args, "json", False):
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "path": str(agents_md_path),
+                            "error": err_msg,
+                            "manual_review_sections": manual_rev,
+                            "warnings": warnings,
+                        }
+                    )
+                )
+            else:
+                for w in warnings:
+                    print(f"[WARN] {w}", file=sys.stderr)
+                print(f"[FAIL] {agents_md_path} orchestration block is out of sync ({err_msg})")
+            return 1
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "applied": False,
+                        "path": str(agents_md_path),
+                        "error": err_msg,
+                        "error_code": "agents-md-managed-block-modified",
+                        "manual_review_sections": manual_rev,
+                        "warnings": warnings,
+                    }
+                )
+            )
+        else:
+            print(f"[FAIL] {err_msg}", file=sys.stderr)
+        return 2
 
     if getattr(args, "diff", False):
         diff_str = "".join(
@@ -4715,14 +4961,6 @@ def cmd_render_agents_md(args: argparse.Namespace) -> int:
         else:
             print(f"[ok] {agents_md_path} orchestration block is in sync")
         return 0 if in_sync else 1
-
-    if getattr(args, "expect_hash", None) is not None and not getattr(args, "apply", False):
-        msg = "--expect-hash requires --apply"
-        if getattr(args, "json", False):
-            print(json.dumps({"ok": False, "error": msg}))
-        else:
-            print(f"[FAIL] {msg}", file=sys.stderr)
-        return 2
 
     if getattr(args, "apply", False):
         with config_lock(agents_md_path):

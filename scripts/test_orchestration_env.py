@@ -5718,11 +5718,8 @@ def test_19_2_b1_ordinary_user_sections_not_treated_as_duplicated_orchestration_
     assert doc["checks"]["agents_md"]["duplicated_sections"] == []
 
     # 2. Even if managed block is stale and upgrade runs, user sections remain byte-for-byte intact
-    stale_managed = (
-        "<!-- BEGIN ai-orchestration -->\n"
-        "# Agent Orchestration & Development Guidelines\n"
-        "Stale managed content.\n"
-        "<!-- END ai-orchestration -->\n"
+    stale_managed = (FIXTURES_DIR / "historical_agents_md" / "2026-10-17_0eef7a8_default.md").read_text(
+        encoding="utf-8"
     )
     (proj_dir / "AGENTS.md").write_text(user_header + stale_managed + user_footer, encoding="utf-8")
 
@@ -6315,11 +6312,8 @@ def test_19_3_b3_agents_md_removes_only_positively_matched_legacy_sections_and_r
     life_start = hist_default.index("## 3. Orchestration Lifecycle")
     legacy_duplicated = hist_default[req_start:life_start]
     stale_managed = (
-        "<!-- BEGIN ai-orchestration -->\n"
-        "# Agent Orchestration & Development Guidelines\n"
-        "Stale 2026-10-17 block.\n"
-        "<!-- END ai-orchestration -->\n"
-    )
+        SCRIPT.parent / "fixtures" / "historical_agents_md" / "2026-10-17_0eef7a8_default.md"
+    ).read_text(encoding="utf-8")
     user_suffix = (
         "\n## Orchestration Lifecycle\n\n"
         "Airflow DAGs trigger nightly at 02:00 UTC.\n"
@@ -6508,6 +6502,293 @@ def test_19_3_b5_upgrade_apply_is_transactional_and_rolls_back_all_mutations_on_
     assert res_ok["changed"] is True
     assert canon_cfg.is_file()
     assert not legacy_cfg.exists()
+
+
+# ===========================================================================
+# Task 19.3 Bounce 2 Regression Tests (B3 & B5)
+# ===========================================================================
+
+
+def test_19_3_bounce2_b3_duplicate_marked_block_and_canonical_managed_block_user_edits(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Bounce 2 B3:
+    1. A duplicate managed (marked) block is removed ONLY if its content matches what the renderer
+       produces now or a historical rendering (exact match after whitespace normalization).
+    2. A duplicate managed (marked) block with user edits inside it is kept byte-for-byte (not
+       removed by `strip_duplicated_handwritten_agents_sections` and not overwritten by
+       `inject_or_replace_agents_block`) and reported in `manual_review_sections` and `warnings`.
+    3. Replacing the single canonical managed block is allowed ONLY if its content matches the
+       current or a historical rendering; if the canonical managed block contains user edits,
+       `upgrade_project` and `render-agents-md` refuse and report it for manual review without
+       modifying `AGENTS.md`.
+    """
+    import orchestration_env as oe
+
+    oc = oe._load_orchestration_config()
+    assert oc is not None
+
+    hist_2026_10_15 = (
+        SCRIPT.parent / "fixtures" / "historical_agents_md" / "2026-10-15_927244a_default.md"
+    ).read_text(encoding="utf-8")
+    hist_2026_10_17 = (
+        SCRIPT.parent / "fixtures" / "historical_agents_md" / "2026-10-17_0eef7a8_default.md"
+    ).read_text(encoding="utf-8")
+
+    user_intro = "# Project Notes\n\nCustom intro outside markers.\n\n"
+    user_outro = "\n## Custom Footer\n\nCustom footer outside markers.\n"
+
+    # --- Case 1: Duplicate marked block matching a historical rendering (with whitespace variation) is removed ---
+    fake_home_1 = tmp_path / "home1"
+    fake_home_1.mkdir()
+    proj_1 = tmp_path / "proj_dup_hist"
+    create_2026_10_17_fixture(proj_1)
+
+    dup_hist_ws_varied = "\r\n".join(
+        line.replace("  ", "   \t ") + "  "
+        for line in hist_2026_10_15.splitlines()
+    ) + "\r\n"
+    (proj_1 / "AGENTS.md").write_text(
+        user_intro + hist_2026_10_17 + "\n" + dup_hist_ws_varied + user_outro,
+        encoding="utf-8",
+    )
+
+    prev_1 = oe.upgrade_project(proj_1, home=fake_home_1)
+    assert prev_1["ok"] is True
+    assert prev_1["removed_duplicated_sections"] == ["duplicate <!-- BEGIN ai-orchestration --> block"]
+    assert prev_1["manual_review_sections"] == []
+
+    app_1 = oe.upgrade_project(proj_1, home=fake_home_1, apply=True, expect_hash=prev_1["plan_hash"])
+    assert app_1["ok"] is True
+    assert app_1["applied"] is True
+    upgraded_1 = (proj_1 / "AGENTS.md").read_text(encoding="utf-8")
+    assert upgraded_1.count(oc.BEGIN_MARKER) == 1
+    assert upgraded_1.count(oc.END_MARKER) == 1
+    assert upgraded_1.startswith(user_intro)
+    assert upgraded_1.endswith(user_outro)
+
+    # --- Case 2: Duplicate marked block with user edits inside it is kept byte-for-byte and reported ---
+    fake_home_2 = tmp_path / "home2"
+    fake_home_2.mkdir()
+    proj_2 = tmp_path / "proj_dup_edited"
+    create_2026_10_17_fixture(proj_2)
+
+    dup_edited_block = hist_2026_10_15.replace(
+        "## 1. Required Skills\n",
+        "## 1. Required Skills\n\n- **`custom-team-skill`** — Team-specific custom rule added inside duplicate managed block.\n",
+    )
+    middle_sep = "\n\n## Middle Notes\n\nBetween the two marked blocks.\n\n"
+    (proj_2 / "AGENTS.md").write_text(
+        user_intro + hist_2026_10_17 + middle_sep + dup_edited_block + user_outro,
+        encoding="utf-8",
+    )
+
+    doc_2 = oe.inspect_project_doctor(proj_2, home=fake_home_2)
+    assert doc_2["checks"]["agents_md"]["duplicated_sections"] == []
+    assert doc_2["checks"]["agents_md"]["manual_review_sections"] == [
+        "duplicate <!-- BEGIN ai-orchestration --> block"
+    ]
+
+    prev_2 = oe.upgrade_project(proj_2, home=fake_home_2)
+    assert prev_2["ok"] is True
+    assert prev_2["removed_duplicated_sections"] == []
+    assert prev_2["manual_review_sections"] == ["duplicate <!-- BEGIN ai-orchestration --> block"]
+    assert any("duplicate <!-- BEGIN ai-orchestration --> block" in w for w in prev_2["warnings"])
+
+    app_2 = oe.upgrade_project(proj_2, home=fake_home_2, apply=True, expect_hash=prev_2["plan_hash"])
+    assert app_2["ok"] is True
+    assert app_2["applied"] is True
+    assert app_2["manual_review_sections"] == ["duplicate <!-- BEGIN ai-orchestration --> block"]
+
+    upgraded_2_bytes = (proj_2 / "AGENTS.md").read_bytes()
+    first_begin = upgraded_2_bytes.index(b"<!-- BEGIN ai-orchestration -->\n")
+    first_end = upgraded_2_bytes.index(b"<!-- END ai-orchestration -->\n") + len(b"<!-- END ai-orchestration -->\n")
+    assert upgraded_2_bytes[:first_begin] == user_intro.encode("utf-8")
+    # Everything after the canonical block (middle_sep + dup_edited_block + user_outro) is preserved byte-for-byte!
+    assert upgraded_2_bytes[first_end:] == (middle_sep + dup_edited_block + user_outro).encode("utf-8")
+
+    # --- Case 3: User edits inside the single canonical managed block -> refuse and report ---
+    fake_home_3 = tmp_path / "home3"
+    fake_home_3.mkdir()
+    proj_3 = tmp_path / "proj_canonical_edited"
+    create_2026_10_17_fixture(proj_3)
+
+    canonical_edited_block = hist_2026_10_17.replace(
+        "### Rule 2: Define Execution Tasks Before Delegating\n",
+        "### Rule 2: Define Execution Tasks Before Delegating\n\n- **Team Custom Addition:** Always attach a schema migration dry-run log.\n",
+    )
+    canonical_edited_full = user_intro + canonical_edited_block + user_outro
+    (proj_3 / "AGENTS.md").write_text(canonical_edited_full, encoding="utf-8")
+    before_3_bytes = (proj_3 / "AGENTS.md").read_bytes()
+
+    # Doctor reports canonical block for manual review without crashing
+    doc_3 = oe.inspect_project_doctor(proj_3, home=fake_home_3)
+    assert "canonical <!-- BEGIN ai-orchestration --> block" in doc_3["checks"]["agents_md"]["manual_review_sections"]
+
+    # Upgrade preview refuses and reports canonical block for manual review
+    prev_3 = oe.upgrade_project(proj_3, home=fake_home_3)
+    assert prev_3["ok"] is False
+    assert prev_3["applied"] is False
+    assert prev_3["changed"] is False
+    assert prev_3["error_code"] == "agents-md-managed-block-modified"
+    assert "canonical <!-- BEGIN ai-orchestration --> block" in prev_3["manual_review_sections"]
+    assert any("manual review" in w.lower() for w in prev_3["warnings"])
+    assert (proj_3 / "AGENTS.md").read_bytes() == before_3_bytes
+
+    # Upgrade apply also refuses and leaves AGENTS.md byte-for-byte untouched
+    app_3 = oe.upgrade_project(proj_3, home=fake_home_3, apply=True, expect_hash="0" * 64)
+    assert app_3["ok"] is False
+    assert app_3["applied"] is False
+    assert app_3["error_code"] == "agents-md-managed-block-modified"
+    assert "canonical <!-- BEGIN ai-orchestration --> block" in app_3["manual_review_sections"]
+    assert (proj_3 / "AGENTS.md").read_bytes() == before_3_bytes
+
+    # CLI `ai-orch config render-agents-md --apply` also refuses and reports
+    res_render_cli = subprocess.run(
+        [
+            sys.executable,
+            str(AI_ORCH_BIN),
+            "config",
+            "--json",
+            "render-agents-md",
+            "--workspace",
+            str(proj_3),
+            "--allow-global-routing",
+            "--allow-unknown-models",
+            "--apply",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_render_cli.returncode != 0
+    render_cli_payload = json.loads(res_render_cli.stdout)
+    assert render_cli_payload["ok"] is False
+    assert render_cli_payload["error_code"] == "agents-md-managed-block-modified"
+    assert "canonical <!-- BEGIN ai-orchestration --> block" in render_cli_payload["manual_review_sections"]
+    assert (proj_3 / "AGENTS.md").read_bytes() == before_3_bytes
+
+
+def test_19_3_bounce2_b5_manifest_write_failure_in_trash_path_leaves_no_orphan_and_rolls_back(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounce 2 B5:
+    If writing `manifest.json` fails during `trash_path` (either in direct `trash_path` or at the end
+    of `upgrade_project(..., apply=True)`), the item is recorded before the move, no orphaned trashed
+    copy is left behind in `<home>/.config/ai-orchestration/trash`, the legacy config remains intact at
+    its original path, and `upgrade_project` rolls back all earlier mutations.
+    """
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "ricerca_auto"
+    create_2026_10_17_fixture(proj_dir)
+
+    legacy_cfg = proj_dir / "tasks" / "orchestration.toml"
+    legacy_bytes = b'[project]\nname = "ricerca_auto"\nprimary_orchestrator = "claude"\n'
+    legacy_cfg.write_bytes(legacy_bytes)
+
+    prev = oe.upgrade_project(proj_dir, home=fake_home)
+    assert prev["ok"] is True
+    plan_hash = prev["plan_hash"]
+
+    before_proj_snapshot = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+    canon_cfg = fake_home / ".config" / "ai-orchestration" / "projects" / "ricerca_auto" / "orchestration.toml"
+    trash_root = fake_home / ".config" / "ai-orchestration" / "trash"
+    reg = oe._load_orchestration_registry()
+
+    # 1. Inject failure directly on `manifest.json` write via `Path.write_text`
+    orig_write_text = pathlib.Path.write_text
+    manifest_write_attempts: list[pathlib.Path] = []
+
+    def _failing_manifest_write_text(
+        self_path: pathlib.Path,
+        data: str,
+        *args: object,
+        **kwargs: object,
+    ) -> int:
+        if self_path.name == "manifest.json":
+            manifest_write_attempts.append(self_path)
+            raise OSError("simulated disk error writing trash manifest.json")
+        return orig_write_text(self_path, data, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as mp:
+        mp.setattr(pathlib.Path, "write_text", _failing_manifest_write_text)
+        res_fail = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=plan_hash)
+
+    assert len(manifest_write_attempts) == 1
+    assert res_fail["ok"] is False
+    assert res_fail["applied"] is False
+    assert res_fail["changed"] is False
+    assert "manifest.json" in res_fail["error"]
+
+    # Verify legacy config is still at its original path with identical bytes and NO orphaned file exists in trash
+    assert legacy_cfg.is_file()
+    assert legacy_cfg.read_bytes() == legacy_bytes
+    if trash_root.exists():
+        orphaned_files = [p for p in trash_root.rglob("*") if p.is_file() or p.is_symlink()]
+        assert orphaned_files == [], f"Found orphaned files in trash after manifest write failure: {orphaned_files}"
+
+    # Verify all earlier apply steps were rolled back completely
+    after_fail_snapshot = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+    assert after_fail_snapshot == before_proj_snapshot
+    assert not canon_cfg.exists()
+    nearest_ws, _ = reg.resolve_workspace_for_path(proj_dir, config_dir=oe.get_config_dir(fake_home))
+    assert nearest_ws is None
+
+    # 2. Also test if the source was already moved to `dest` when an exception happens (verifying `before_move`
+    #    pre-recording + `_rollback` restoration/cleanup)
+    recorded_before_move: list[tuple[pathlib.Path, pathlib.Path]] = []
+    real_trash_path = oe.trash_path
+
+    def _move_then_fail_manifest(
+        path: pathlib.Path,
+        *args: object,
+        **kwargs: object,
+    ) -> pathlib.Path:
+        orig_bm = kwargs.get("before_move")
+
+        def _wrapped_bm(src: pathlib.Path, dst: pathlib.Path) -> None:
+            recorded_before_move.append((src, dst))
+            if callable(orig_bm):
+                orig_bm(src, dst)
+            # Simulate source already moved to dst before manifest write fails
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            raise OSError("simulated failure after move before trash_path returns")
+
+        kwargs["before_move"] = _wrapped_bm
+        return real_trash_path(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as mp:
+        mp.setattr(oe, "trash_path", _move_then_fail_manifest)
+        res_fail_2 = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=plan_hash)
+
+    assert len(recorded_before_move) == 1
+    assert res_fail_2["ok"] is False
+    assert res_fail_2["applied"] is False
+    assert legacy_cfg.is_file()
+    assert legacy_cfg.read_bytes() == legacy_bytes
+    if trash_root.exists():
+        orphaned_files_2 = [p for p in trash_root.rglob("*") if p.is_file() or p.is_symlink()]
+        assert orphaned_files_2 == []
+    after_fail_2_snapshot = {
+        str(p.relative_to(proj_dir)): p.read_bytes()
+        for p in sorted(proj_dir.rglob("*"))
+        if p.is_file()
+    }
+    assert after_fail_2_snapshot == before_proj_snapshot
+
 
 
 
