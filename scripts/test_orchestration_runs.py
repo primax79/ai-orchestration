@@ -8229,3 +8229,282 @@ model = "google/gemini-3.8-flash"
         close_screen_session(expected_sess)
 
 
+@pytest.mark.skipif(shutil.which("screen") is None, reason="GNU screen not installed")
+@pytest.mark.parametrize(
+    ("sig", "expected_exit_code"),
+    [
+        (signal.SIGKILL, 128 + int(signal.SIGKILL)),
+        (signal.SIGTERM, 128 + int(signal.SIGTERM)),
+        (signal.SIGHUP, 128 + int(signal.SIGHUP)),
+    ],
+)
+def test_19_6_b1_screen_killed_agent_pid_records_failed_and_status_file(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    sig: signal.Signals,
+    expected_exit_code: int,
+):
+    """Task 19.6 Bounce B1: killing only the agent PID in a real screen run writes status.json atomically and marks the run failed (not lost) with the exit code derived from the signal."""
+    from orchestration_runs import close_screen_session
+
+    fake_tool = tmp_path / f"fake_screen_agent_sig_{int(sig)}.py"
+    fake_tool.write_text(
+        f"""#!{sys.executable}
+import signal, time
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+print("AGENT_READY_FOR_SIGNAL", flush=True)
+time.sleep(30)
+""",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+
+    proj_name = f"proj196b1s{int(sig)}p{os.getpid()}"
+    expected_sess = f"agent-{proj_name}-T007"
+    close_screen_session(expected_sess)
+
+    # Reset T007 to open so each parametrized run starts cleanly
+    t007_file = sample_workspace / "tasks" / "server" / "T007-verification-gate.md"
+    if t007_file.is_file():
+        t007_text = t007_file.read_text(encoding="utf-8")
+        t007_text = re.sub(r"^- state:.*$", "- state: open", t007_text, flags=re.MULTILINE)
+        t007_file.write_text(t007_text, encoding="utf-8")
+
+    cfg_path = sample_workspace / ".ai-orchestration.local.toml"
+    cfg_path.write_text(
+        f"""schema_version = 1
+
+[project]
+name = "{proj_name}"
+primary_orchestrator = "kilo"
+run_backend = "screen"
+
+[routing]
+default_orchestrator = "kilo"
+default_executor = "kilo"
+
+[tools.kilo]
+enabled = true
+binary = "{fake_tool}"
+
+[tools.kilo.headless]
+argv = ["{fake_tool}", "{{prompt_file}}"]
+prompt_via = "file"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        res_start = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "start",
+                "--task",
+                "T007",
+                "--mode",
+                "execute",
+                "--allow-dirty-base",
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        run_id = json.loads(res_start.stdout)["run_id"]
+        run_dir = sample_workspace / ".ai-orchestration" / "runs" / run_id
+
+        # Wait until the agent PID is recorded and running
+        deadline = time.monotonic() + 10.0
+        agent_pid: int | None = None
+        while time.monotonic() < deadline:
+            rec_live = load_run_record(sample_workspace, run_id)
+            if (
+                rec_live.get("status") == "running"
+                and isinstance(rec_live.get("agent"), dict)
+                and rec_live["agent"].get("pid")
+            ):
+                agent_pid = int(rec_live["agent"]["pid"])
+                break
+            time.sleep(0.03)
+
+        assert agent_pid is not None, "Expected agent PID to be recorded in run.json"
+        sup_pid = int(load_run_record(sample_workspace, run_id)["supervisor"]["pid"])
+        assert agent_pid != sup_pid
+
+        # Kill ONLY the agent PID with the signal
+        os.kill(agent_pid, sig)
+
+        # Wait for run completion
+        rec_final = wait_for_terminal(sample_workspace, run_id, timeout=15.0)
+        assert rec_final["status"] == "failed"
+        assert rec_final["state"] == "failed"
+        assert rec_final["exit_code"] == expected_exit_code
+        assert rec_final.get("signal") == int(sig)
+
+        # Verify status.json was written atomically with failed status and derived exit code
+        status_file = run_dir / "status.json"
+        assert status_file.is_file(), "status.json must be written when child dies from a signal"
+        status_data = json.loads(status_file.read_text(encoding="utf-8"))
+        assert status_data["status"] == "failed"
+        assert status_data["state"] == "failed"
+        assert status_data["outcome"] == "failed"
+        assert status_data["completed"] is False
+        assert status_data["exit_code"] == expected_exit_code
+        assert status_data["signal"] == int(sig)
+        assert status_data["ended_at"]
+
+        # Reconcile via `run show` must also report `failed` (never `lost`)
+        res_show = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "show",
+                run_id,
+                "--workspace",
+                str(sample_workspace),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        show_rec = json.loads(res_show.stdout)["run"]
+        assert show_rec["status"] == "failed"
+        assert show_rec["exit_code"] == expected_exit_code
+    finally:
+        close_screen_session(expected_sess)
+
+
+@pytest.mark.skipif(shutil.which("screen") is None, reason="GNU screen not installed")
+def test_19_6_b2_screenrc_constant_directives_adversarial_workspace_path(
+    tmp_path: pathlib.Path,
+):
+    """Task 19.6 Bounce B2: screenrc contains only constant directives (no interpolated logfile path), preventing directive injection from an adversarial workspace path containing newlines."""
+    from orchestration_runs import close_screen_session
+
+    injected_log = tmp_path / "injected_logfile.txt"
+    adv_ws = tmp_path / f"ws_19_6\nlogfile {injected_log}\nhardstatus alwayslastline"
+    adv_ws.mkdir(parents=True, exist_ok=True)
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(adv_ws), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(adv_ws), check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=str(adv_ws), check=True)
+
+    tasks_dir = adv_ws / "tasks" / "server"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "T007-adv.md").write_text(
+        "# T007 Adversarial Path Test\n\n"
+        "- id: T007\n"
+        "- title: Adversarial Path Test\n"
+        "- category: server\n"
+        "- priority: P1\n"
+        "- priority-reason: test\n"
+        "- next-up: yes\n"
+        "- state: open\n"
+        "- executor: kilo\n"
+        "- depends-on: -\n"
+        "- decider: -\n"
+        "- sources: -\n"
+        "- paths: -\n"
+        "- handoff: -\n\n"
+        "## Goal\nTest adversarial path.\n\n"
+        "## Steps\n- [ ] Step 1\n\n"
+        "## Verification\n- [ ] Check\n",
+        encoding="utf-8",
+    )
+
+    fake_tool = tmp_path / "fake_adv_screen_tool.py"
+    fake_tool.write_text(
+        f"""#!{sys.executable}
+import sys
+print("ADV_WORKSPACE_LOG_OK", flush=True)
+print("## Final Report\\n- **Outcome:** delivered\\n", flush=True)
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+
+    proj_name = f"proj196b2adv{os.getpid()}"
+    expected_sess = f"agent-{proj_name}-T007"
+    close_screen_session(expected_sess)
+
+    (adv_ws / ".ai-orchestration.local.toml").write_text(
+        f"""schema_version = 1
+
+[project]
+name = "{proj_name}"
+primary_orchestrator = "kilo"
+run_backend = "screen"
+
+[routing]
+default_orchestrator = "kilo"
+default_executor = "kilo"
+
+[tools.kilo]
+enabled = true
+binary = "{fake_tool}"
+
+[tools.kilo.headless]
+argv = ["{fake_tool}", "{{prompt_file}}"]
+prompt_via = "file"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+""",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=str(adv_ws), check=True)
+    subprocess.run(["git", "commit", "-m", "init adv ws"], cwd=str(adv_ws), check=True, capture_output=True)
+
+    try:
+        res_start = subprocess.run(
+            [
+                str(BIN_AI_ORCH),
+                "run",
+                "start",
+                "--task",
+                "T007",
+                "--mode",
+                "execute",
+                "--isolation",
+                "none",
+                "--allow-dirty-base",
+                "--workspace",
+                str(adv_ws),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        run_id = json.loads(res_start.stdout)["run_id"]
+        run_dir = adv_ws / ".ai-orchestration" / "runs" / run_id
+
+        screenrc_file = run_dir / "screenrc"
+        assert screenrc_file.is_file()
+        screenrc_text = screenrc_file.read_text(encoding="utf-8")
+        assert screenrc_text == "logfile flush 1\ndeflog on\n"
+        assert str(adv_ws) not in screenrc_text
+        assert "injected_logfile" not in screenrc_text
+
+        rec = wait_for_terminal(adv_ws, run_id, timeout=15.0)
+        assert rec["status"] == "succeeded"
+        assert rec["exit_code"] == 0
+        assert not injected_log.exists(), "Injected logfile directive must never be executed"
+
+        session_log = run_dir / "session.log"
+        assert session_log.is_file()
+        assert "ADV_WORKSPACE_LOG_OK" in session_log.read_text(encoding="utf-8", errors="replace")
+    finally:
+        close_screen_session(expected_sess)
+
+
+
