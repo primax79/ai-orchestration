@@ -4,7 +4,7 @@
 - title: ai-orch describe elenca solo una parte dei sottocomandi di run
 - kind: fix
 - priority: P3
-- state: in progress
+- state: verified
 - executor: kilo
 - paths: bin/ai-orch
 - depends-on: -
@@ -16,4 +16,6 @@
 
 ## Log (newest first)
 
+- 2026-10-30, codex: state `delivered` -> `verified` — OK: verifica Codex PASS (tasks/micro/notes/T087-verification-codex.md); su integration/19, non ancora su main
+- 2026-10-30, kilo: state `in progress` -> `delivered` — commit a98f17f, unito in integration/19
 - 2026-10-29, orchestrator: state `open` -> `in progress` — kilo (gemini-3.8-flash) in screen su alf_ubuntu

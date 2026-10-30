@@ -13,6 +13,7 @@
 - sources: -
 - paths: scripts/orchestration_env.py, scripts/orchestration_invoke.py, scripts/orchestration_orchestrator.py, scripts/test_orchestration_*.py
 - handoff: Read tasks/engine/T088-quattro-test-rossi-su-main-duplicati-skill-non-fix.md, do the open steps, run the Verification, update the task and the registry.
+- verifier: codex
 - kind: fix
 - short: Test rossi su main
 
@@ -34,4 +35,7 @@ Riportare verde la suite completa. Baseline 2026-10-29 su alf_ubuntu (uvx pytest
 
 ## Log (newest first)
 
+- 2026-10-30, orchestrator: state `bounced` -> `in progress` — rinviato allo stesso executor su alf_ubuntu con i rilievi
+- 2026-10-30, codex: state `delivered` -> `bounced` — Verifica Codex NON OK: vedi tasks/engine/notes/T088-verification-codex.md
+- 2026-10-30, kilo: state `in progress` -> `delivered` — commit su kilo/<slug>, unito in integration/19 dalla chain (test verdi a parte la baseline)
 - 2026-10-29, orchestrator: state `open` -> `in progress` — kilo (gemini-4-argon) in screen su alf_ubuntu

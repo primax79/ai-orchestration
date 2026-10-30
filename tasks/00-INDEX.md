@@ -24,7 +24,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
 | 17 | 17 | [Gli use case guidano i task](done/17-use-cases-drive-tasks/plan.md) | done | - | M |
-| 19 | 19 | [Sviluppo multi-macchina: hub, executor su ogni host, console centrale](19-multi-machine-development/plan.md) | in progress (running: 19.1, 19.4) | - | M |
+| 19 | 19 | [Sviluppo multi-macchina: hub, executor su ogni host, console centrale](19-multi-machine-development/plan.md) | in progress (running: 19.1–19.4, 19.7) | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -145,6 +145,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T079 (Workspace da sottocartella) | P2 | [I comandi lanciati da una sottocartella risolvono il workspace che la contiene](engine/T079-i-comandi-lanciati-da-una-sottocartella-risolvono.md) | open | kilo | - |
 | T081 (Branch e sblocco dipendenti) | P2 | [tasks_engine: list --branches, sblocco dei dipendenti e validate --branch](engine/T081-tasks-engine-list-branches-sblocco-dei-dipendenti.md) | open | kilo | - |
 | T083 (Rinomina sessione per provider) | P3 | [L'id del provider identifica la sessione: un nome nuovo rinomina il record invece di crearne un altro](engine/T083-l-id-del-provider-identifica-la-sessione-un-nome-n.md) | open | kilo | - |
+| T088 (Test rossi su main) | P1 | [Quattro test rossi su main: duplicati skill non fixable, kill dei discendenti su Linux, runaway stub lento](engine/T088-quattro-test-rossi-su-main-duplicati-skill-non-fix.md) | in progress | kilo | - |
 
 ### methodology
 
@@ -172,7 +173,7 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T087 (describe run incompleto) | P3 | [ai-orch describe elenca solo una parte dei sottocomandi di run](micro/T087-describe-run-incompleto.md) | in progress | kilo | - |
+| T087 (describe run incompleto) | P3 | [ai-orch describe elenca solo una parte dei sottocomandi di run](micro/T087-describe-run-incompleto.md) | verified | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting

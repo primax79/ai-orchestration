@@ -23,19 +23,19 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.1 - Lookup unico della configurazione di progetto
 
-- **Status:** `in progress` (2026-10-29; kilo (gemini-4-argon) in screen su alf_ubuntu, worktree ../.worktrees/ai-orchestration/19.1-config-lookup) · **Short:** Lookup config unico · **Size:** M · **Kind:** fix · **Depends on:** - · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-29; Verifica Codex NON OK: vedi tasks/19-multi-machine-development/notes/19.1-verification-codex.md; 2026-10-30; rinviato allo stesso executor su alf_ubuntu con i rilievi) · **Short:** Lookup config unico · **Size:** M · **Kind:** fix · **Depends on:** - · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
 - **Goal:** una sola funzione decide dove sta la configurazione di progetto e tutti la usano: oggi `orchestration_config.find_project_config_path` (`.ai-orchestration.local.toml`, poi `~/.config/ai-orchestration/projects/<dir>/orchestration.toml`), `tasks_engine` (`tasks/orchestration.toml`, `<proj>/orchestration.toml`, `tasks/AGENTS.md`: `tasks_engine.py:425`, `:596-685`) e i trigger (`orchestration_triggers.py:305-311`) leggono percorsi diversi. Fissare l'ordine (documentato), mantenere i percorsi legacy in sola lettura con un avviso, correggere `docs/00-QUICKSTART-AND-PLAYBOOK.md:117-149`, `plugins/shared/skills/orchestration-setup/SKILL.md:68,138` (template, non il generato) e `specs/orchestration-config-and-agents-md.md` §3.
 - **Verification:** test che per ogni posizione legacy lo stesso valore (es. `extension_fields`, una regola di trigger) viene letto da tutti e tre i sottosistemi; `ai-orch tasks config` e `ai-orch env status` riportano lo stesso percorso; `grep -rn "tasks/orchestration.toml" docs plugins/*/skills/*/SKILL.template.md` non trova istruzioni a scriverci; suite completa verde.
 
 ### 19.2 - `ai-orch doctor` di progetto: rilevare il drift
 
-- **Status:** `open` · **Short:** Doctor di progetto · **Size:** M · **Kind:** feature · **Depends on:** 19.1 · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; Verifica Codex NON OK: vedi tasks/19-multi-machine-development/notes/19.2-verification-codex.md; 2026-10-30; rinviato allo stesso executor su alf_ubuntu con i rilievi) · **Short:** Doctor di progetto · **Size:** M · **Kind:** feature · **Depends on:** 19.1 · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
 - **Goal:** N078 punti 1, 2, 4. Comando `ai-orch doctor [--project PATH] [--json]` costruito sul doctor di `env` esistente (`orchestration_env.py:410-500`, ack/unack) e sui controlli di `tasks upgrade`: config mancante, workspace non registrato, indice senza marker, AGENTS.md renderizzato vecchio o con blocchi scritti a mano duplicati, campi header di schemi vecchi, skill/config globali di versione diversa da quella del tool. Ogni rilievo ha severità e il comando che lo corregge. Registrare per progetto la versione di convenzione (`convention_version`, file versionato in `tasks/`). Avviso di una riga da ogni comando `ai-orch` lanciato in un progetto con drift (disattivabile).
 - **Verification:** fixture con un progetto "stile 2026-10-17" (ricostruito sullo stato descritto in N078) → tutti i rilievi attesi con severità; progetto aggiornato → nessun rilievo; `--json` stabile; il drift di skill globali è rilevato con due versioni installate finte.
 
 ### 19.3 - `ai-orch upgrade` di progetto
 
-- **Status:** `open` · **Short:** Upgrade di progetto · **Size:** M · **Kind:** feature · **Depends on:** 19.2 · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; Verifica Codex NON OK: vedi tasks/19-multi-machine-development/notes/19.3-verification-codex.md; 2026-10-30; rinviato allo stesso executor su alf_ubuntu con i rilievi) · **Short:** Upgrade di progetto · **Size:** M · **Kind:** feature · **Depends on:** 19.2 · **Use cases:** UC038 · **Repo:** `ai-orchestration/`
 - **Goal:** N078 punto 3. `ai-orch upgrade` (preview di default, plan hash, `--apply --expect-hash`) che compone i passi esistenti (`tasks upgrade`, adozione dei marker dell'indice, scrittura della config, registrazione del workspace, re-render di AGENTS.md rimuovendo i duplicati scritti a mano, migrazione dei campi header) e aggiorna `convention_version`. Rifiuta con motivo chiaro se ci sono worktree di executor attivi del progetto.
 - **Verification:** sulla fixture di 19.2: preview → apply → `ai-orch doctor` senza rilievi e `tasks validate` senza errori; secondo apply = nessuna modifica; con un worktree attivo il comando rifiuta; i blocchi di AGENTS.md fuori dai marker restano byte per byte.
 
@@ -59,7 +59,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.7 - Preflight eseguibile e timeout per progetto
 
-- **Status:** `open` · **Short:** Preflight per host · **Size:** M · **Kind:** feature · **Depends on:** 19.1 · **Use cases:** UC040 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; Verifica Codex NON OK: vedi tasks/19-multi-machine-development/notes/19.7-verification-codex.md; 2026-10-30; rinviato allo stesso executor su alf_ubuntu con i rilievi) · **Short:** Preflight per host · **Size:** M · **Kind:** feature · **Depends on:** 19.1 · **Use cases:** UC040 · **Repo:** `ai-orchestration/`
 - **Goal:** `[project.preflight]` (strumenti con versione minima, porte libere, servizi attivi, spazio disco) eseguito sull'host di destinazione prima di ogni `run start`; se fallisce il dispatch è bloccato con il motivo (caso reale: T205 di ricerca_auto senza `bun`). Timeout dei comandi per progetto, passati all'executor nel prompt. `verification_checks` diventa eseguibile con `ai-orch verify-checks`.
 - **Verification:** test con un preflight che chiede un binario inesistente → `run start` rifiuta con il nome del binario; preflight ok → run parte; timeout presente nel prompt generato.
 
