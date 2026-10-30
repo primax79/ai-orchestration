@@ -5767,6 +5767,97 @@ def test_19_2_b1_ordinary_user_sections_not_treated_as_duplicated_orchestration_
         assert upgraded_bytes[e_idx2:] == user_footer.encode("utf-8")
 
 
+def test_19_2_b1_historical_rendering_plus_user_subsection_preserved_and_reported_not_deleted(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Bounce 3 B1: A historical `Required Skills` section plus a user subsection
+    (`### Team-specific interpretation`) is NOT treated as a duplicate, is preserved byte-for-byte
+    on `ai-orch upgrade`, and is reported for manual review in both `doctor` and `upgrade`."""
+    import orchestration_env as oe
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    proj_dir = tmp_path / "hist_plus_user_sub_proj"
+    create_updated_project_fixture(proj_dir, home=fake_home)
+
+    existing_agents = (proj_dir / "AGENTS.md").read_text(encoding="utf-8")
+    begin_idx = existing_agents.index("<!-- BEGIN ai-orchestration -->")
+    end_marker = "<!-- END ai-orchestration -->\n"
+    end_idx = existing_agents.index(end_marker) + len(end_marker)
+    managed_block = existing_agents[begin_idx:end_idx]
+
+    hist_text = (FIXTURES_DIR / "historical_agents_md" / "2026-10-15_927244a_default.md").read_text(encoding="utf-8")
+    req_start = hist_text.index("## 1. Required Skills")
+    core_start = hist_text.index("## 2. Core Operating Rules")
+    hist_req = hist_text[req_start:core_start].rstrip().removesuffix("---").rstrip() + "\n"
+    user_subsection = (
+        "\n### Team-specific interpretation\n\n"
+        "In this repository, scrapers under `backend/scrapers/` must always run inside a disposable SQLite "
+        "fixture before reporting `delivered`. Never invoke live portal endpoints from unit tests; capture "
+        "HTML snapshots under `tests/fixtures/portals/` and validate schema extraction deterministically.\n\n"
+    )
+    hist_req_with_user_sub = hist_req + user_subsection + "---\n\n"
+    hist_core_and_life = (
+        hist_text[core_start:]
+        .replace("<!-- BEGIN ai-orchestration -->\n", "")
+        .replace("<!-- END ai-orchestration -->\n", "")
+    )
+    user_footer = "\n## Custom Project Footer\n\nKeep this footer verbatim.\n"
+
+    (proj_dir / "AGENTS.md").write_text(
+        hist_req_with_user_sub + hist_core_and_life + managed_block + user_footer,
+        encoding="utf-8",
+    )
+
+    # 1. Doctor flags only the unmodified historical sections (Core Operating Rules & Lifecycle) as duplicates
+    #    and reports `## 1. Required Skills` under `manual_review_sections`.
+    doc = oe.inspect_project_doctor(proj_dir, home=fake_home)
+    assert doc["drifted"] is True
+    assert "## 1. Required Skills" not in doc["checks"]["agents_md"]["duplicated_sections"]
+    assert "## 2. Core Operating Rules" in doc["checks"]["agents_md"]["duplicated_sections"]
+    assert "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate" in doc["checks"]["agents_md"]["duplicated_sections"]
+    assert doc["checks"]["agents_md"]["manual_review_sections"] == ["## 1. Required Skills"]
+
+    # 2. Upgrade preview and apply remove ONLY the exact historical duplicates and preserve `## 1. Required Skills`
+    #    + `### Team-specific interpretation` byte-for-byte while reporting it in `manual_review_sections` and `warnings`.
+    prev = oe.upgrade_project(proj_dir, home=fake_home)
+    assert prev["ok"] is True
+    assert "## 1. Required Skills" not in prev["removed_duplicated_sections"]
+    assert "## 2. Core Operating Rules" in prev["removed_duplicated_sections"]
+    assert "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate" in prev["removed_duplicated_sections"]
+    assert prev["manual_review_sections"] == ["## 1. Required Skills"]
+    assert any("manual review" in w and "## 1. Required Skills" in w for w in prev["warnings"])
+
+    app = oe.upgrade_project(proj_dir, home=fake_home, apply=True, expect_hash=prev["plan_hash"])
+    assert app["ok"] is True
+    assert app["applied"] is True
+    assert app["manual_review_sections"] == ["## 1. Required Skills"]
+    assert any("manual review" in w and "## 1. Required Skills" in w for w in app["warnings"])
+
+    after_bytes = (proj_dir / "AGENTS.md").read_bytes()
+    b_pos = after_bytes.index(b"<!-- BEGIN ai-orchestration -->\n")
+    e_pos = after_bytes.index(b"<!-- END ai-orchestration -->\n") + len(b"<!-- END ai-orchestration -->\n")
+    assert after_bytes[:b_pos] == hist_req_with_user_sub.encode("utf-8")
+    assert after_bytes[e_pos:] == user_footer.encode("utf-8")
+
+    # 3. After upgrade, doctor and a subsequent upgrade still report `## 1. Required Skills` for manual review
+    #    and never delete it.
+    doc_after = oe.inspect_project_doctor(proj_dir, home=fake_home)
+    assert doc_after["ok"] is True
+    assert doc_after["drifted"] is False
+    assert doc_after["checks"]["agents_md"]["duplicated_blocks"] is False
+    assert doc_after["checks"]["agents_md"]["duplicated_sections"] == []
+    assert doc_after["checks"]["agents_md"]["manual_review_sections"] == ["## 1. Required Skills"]
+
+    prev2 = oe.upgrade_project(proj_dir, home=fake_home)
+    assert prev2["changed"] is False
+    assert prev2["removed_duplicated_sections"] == []
+    assert prev2["manual_review_sections"] == ["## 1. Required Skills"]
+    assert any("manual review" in w and "## 1. Required Skills" in w for w in prev2["warnings"])
+
+
+
+
 def test_19_2_b2_unrelated_third_party_versioned_global_skills_ignored(
     tmp_path: pathlib.Path,
 ) -> None:

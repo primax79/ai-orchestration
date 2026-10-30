@@ -3302,6 +3302,64 @@ def test_19_2_b1_find_and_strip_duplicated_handwritten_agents_sections_positive_
         assert removed_mixed == found_mixed
         assert cleaned_mixed == user_prefix + managed_part + user_suffix
 
+    # 4. Whitespace normalization only (collapse runs of spaces/tabs, normalize CRLF, trim trailing spaces)
+    assert not hasattr(oc, "HISTORICAL_SECTION_MIN_SIMILARITY")
+    req_start = hist_2026_10_15.index("## 1. Required Skills")
+    core_start = hist_2026_10_15.index("## 2. Core Operating Rules")
+    hist_req_exact = hist_2026_10_15[req_start:core_start]
+    ws_varied_req = "\r\n".join(
+        line.replace("  ", "    \t ") + "   \t"
+        for line in hist_req_exact.splitlines()
+    ) + "\r\n\r\n"
+    ws_doc = (
+        ws_varied_req
+        + "<!-- BEGIN ai-orchestration -->\nManaged block.\n<!-- END ai-orchestration -->\n"
+    )
+    assert oc.find_duplicated_handwritten_agents_sections(ws_doc) == ["## 1. Required Skills"]
+    assert oc.find_preserved_manual_review_agents_sections(ws_doc) == []
+    cleaned_ws, removed_ws = oc.strip_duplicated_handwritten_agents_sections(ws_doc)
+    assert removed_ws == ["## 1. Required Skills"]
+    assert cleaned_ws == "<!-- BEGIN ai-orchestration -->\nManaged block.\n<!-- END ai-orchestration -->\n"
+
+    # 5. Historical `Required Skills` rendering plus a 393-character user subsection (`### Team-specific interpretation`)
+    #    must NOT match as a duplicate, must be reported for manual review, and must NEVER be deleted.
+    user_subsection = (
+        "\n### Team-specific interpretation\n\n"
+        "In this repository, scrapers under `backend/scrapers/` must always run inside a disposable SQLite "
+        "fixture before reporting `delivered`. Never invoke live portal endpoints from unit tests; capture "
+        "HTML snapshots under `tests/fixtures/portals/` and validate schema extraction deterministically.\n\n"
+    )
+    assert len(user_subsection.strip()) >= 300
+    hist_req_without_hr = hist_req_exact.rstrip().removesuffix("---").rstrip() + "\n"
+    hist_req_with_user_sub = hist_req_without_hr + user_subsection + "---\n\n"
+    hist_rest = (
+        hist_2026_10_15[core_start:]
+        .replace("<!-- BEGIN ai-orchestration -->\n", "")
+        .replace("<!-- END ai-orchestration -->\n", "")
+    )
+    managed_block = (
+        "<!-- BEGIN ai-orchestration -->\n"
+        "Current managed block.\n"
+        "<!-- END ai-orchestration -->\n"
+    )
+    doc_with_user_sub = hist_req_with_user_sub + hist_rest + managed_block
+
+    dup_with_sub = oc.find_duplicated_handwritten_agents_sections(doc_with_user_sub)
+    assert "## 1. Required Skills" not in dup_with_sub
+    assert "## 2. Core Operating Rules" in dup_with_sub
+    assert "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate" in dup_with_sub
+
+    review_with_sub = oc.find_preserved_manual_review_agents_sections(doc_with_user_sub)
+    assert review_with_sub == ["## 1. Required Skills"]
+
+    cleaned_sub, removed_sub = oc.strip_duplicated_handwritten_agents_sections(doc_with_user_sub)
+    assert "## 1. Required Skills" not in removed_sub
+    assert "## 2. Core Operating Rules" in removed_sub
+    assert "## 3. Orchestration Lifecycle & Cross-Agent Verification Gate" in removed_sub
+    assert "### Team-specific interpretation" in cleaned_sub
+    assert cleaned_sub == hist_req_with_user_sub + managed_block
+
+
 
 
 
