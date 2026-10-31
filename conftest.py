@@ -172,26 +172,19 @@ def _snapshot_works_orchestration_configs(
         except OSError:
             pass
 
-    def _is_ancestor_of_excluded(dir_path: str) -> bool:
-        norm = dir_path.rstrip(os.sep) + os.sep
-        return any(ex.startswith(norm) for ex in ex_set)
-
-    def _walk_full_dir(top: str, skip_runtime_subdirs: bool = False) -> None:
-        if not skip_runtime_subdirs:
-            _stat_into(top)
+    def _walk_full_dir(top: str) -> None:
+        _stat_into(top)
         try:
             with os.scandir(top) as it:
                 for entry in it:
-                    if skip_runtime_subdirs and entry.name in ("events", "runs", "sessions"):
-                        continue
                     p = entry.path
                     _stat_into(p)
                     if entry.is_dir(follow_symlinks=False):
-                        _walk_full_dir(p, skip_runtime_subdirs=False)
+                        _walk_full_dir(p)
         except OSError:
             pass
 
-    def _walk_projects(top: str, depth: int = 0, max_depth: int = 4) -> None:
+    def _walk_projects(top: str) -> None:
         if _is_path_excluded(top, ex_set):
             return
         try:
@@ -205,22 +198,20 @@ def _snapshot_works_orchestration_configs(
                         _stat_into(p)
                     elif name == ".ai-orchestration":
                         if entry.is_dir(follow_symlinks=False):
-                            _walk_full_dir(p, skip_runtime_subdirs=_is_ancestor_of_excluded(top))
+                            _walk_full_dir(p)
                         else:
                             _stat_into(p)
                     elif name == "tasks" and entry.is_dir(follow_symlinks=False):
                         tasks_cfg = os.path.join(p, "orchestration.toml")
                         if os.path.lexists(tasks_cfg) and not _is_path_excluded(tasks_cfg, ex_set):
                             _stat_into(tasks_cfg)
-                        if depth < max_depth:
-                            _walk_projects(p, depth + 1, max_depth)
+                        _walk_projects(p)
                     elif (
-                        depth < max_depth
-                        and entry.is_dir(follow_symlinks=False)
+                        entry.is_dir(follow_symlinks=False)
                         and name not in _WORKS_SKIP_DIRS
                         and not (name.startswith(".") and name != ".worktrees")
                     ):
-                        _walk_projects(p, depth + 1, max_depth)
+                        _walk_projects(p)
         except OSError:
             pass
 

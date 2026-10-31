@@ -307,3 +307,40 @@ def test_19_18_session_guard_ignores_live_broker_runtime_state_and_guards_config
     assert str(new_proj_dir.resolve()) in after_config_leak
     assert after_config_leak[str(hub_reg_json.resolve())] != before[str(hub_reg_json.resolve())]
 
+
+def test_19_18_bounce_b3_works_guard_unbounded_depth_and_ancestor_ai_orchestration_guarded(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Task 19.18 Bounce B3: `_snapshot_works_orchestration_configs` must guard
+    `.ai-orchestration/{events,runs,sessions}` on an ancestor of the excluded repo
+    (never hiding ancestor runtime directories) and traverse deeper than depth 4."""
+    fake_works = tmp_path / "works"
+    parent_ws = fake_works / "ai-coding-tools"
+    repo_under_test = parent_ws / "ai-orchestration"
+    repo_under_test.mkdir(parents=True)
+
+    # 1. `.ai-orchestration/{events,runs,sessions}` on an ancestor of the excluded repo MUST be guarded
+    ancestor_ai_orch = parent_ws / ".ai-orchestration"
+    ancestor_events = ancestor_ai_orch / "events" / "leaked.jsonl"
+    ancestor_runs = ancestor_ai_orch / "runs" / "r1" / "run.json"
+    ancestor_sessions = ancestor_ai_orch / "sessions" / "s1.json"
+    for p in (ancestor_events, ancestor_runs, ancestor_sessions):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}\n", encoding="utf-8")
+
+    # 2. Config leak deeper than depth 4 under `~/works` MUST be guarded (unbounded traversal)
+    deep_proj = fake_works / "d1" / "d2" / "d3" / "d4" / "d5" / "d6" / "deep_proj"
+    deep_proj.mkdir(parents=True)
+    deep_cfg = deep_proj / "orchestration.toml"
+    deep_tasks_cfg = deep_proj / "tasks" / "orchestration.toml"
+    deep_tasks_cfg.parent.mkdir(parents=True)
+    deep_cfg.write_text('[project]\nname = "deep"\n', encoding="utf-8")
+    deep_tasks_cfg.write_text('[tasks]\nlanguage = "it"\n', encoding="utf-8")
+
+    fake_excluded = {str(repo_under_test.resolve())}
+    snap = conftest._snapshot_works_orchestration_configs(fake_works, excluded_prefixes=fake_excluded)
+
+    for expected in (ancestor_ai_orch, ancestor_events, ancestor_runs, ancestor_sessions, deep_cfg, deep_tasks_cfg):
+        assert str(expected.resolve()) in snap, f"Expected {expected} to be guarded in snapshot"
+
+

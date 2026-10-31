@@ -3051,10 +3051,13 @@ def detect_screen_version(screen_bin: str = "screen") -> tuple[int, ...] | None:
 
 
 def screen_supports_logfile_flag(screen_bin: str = "screen") -> bool:
-    """Return True if GNU screen supports `-Logfile <path>` (added in GNU screen 4.06)."""
+    """Return True if GNU screen supports `-Logfile <path>` (added in GNU screen 4.06).
+
+    Falls back conservatively to False (legacy `-L` mode) when version detection fails.
+    """
     ver = detect_screen_version(screen_bin)
     if ver is None:
-        return True
+        return False
     return ver >= (4, 6)
 
 
@@ -6591,7 +6594,12 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         child_proc: subprocess.Popen[bytes] | None = None
         child_pgid: int | None = None
         scr_name = record.get("screen_session") or record.get("session_name")
+        scr_info = record.get("screen") if isinstance(record.get("screen"), dict) else {}
+        screen_daemon_pid: int | None = (
+            int(scr_info["pid"]) if scr_info.get("pid") else get_screen_session_pid(scr_name)
+        )
         screen_teardown_signalled = False
+        consecutive_screen_ls_misses = 0
 
         def _kill_child_on_teardown() -> None:
             if child_proc is not None and child_proc.poll() is None:
@@ -6607,6 +6615,33 @@ def cmd_supervise(args: argparse.Namespace) -> int:
                 except OSError:
                     pass
 
+        def _is_screen_teardown_confirmed(poll_tick: bool = False) -> bool:
+            nonlocal screen_daemon_pid, consecutive_screen_ls_misses
+            if screen_teardown_signalled:
+                return True
+            if screen_daemon_pid is not None and not is_process_alive(screen_daemon_pid):
+                return True
+            alive = is_screen_session_alive(scr_name, expected_pid=screen_daemon_pid)
+            if alive:
+                consecutive_screen_ls_misses = 0
+                if screen_daemon_pid is None:
+                    screen_daemon_pid = get_screen_session_pid(scr_name)
+                return False
+            if screen_daemon_pid is not None and is_process_alive(screen_daemon_pid):
+                # Screen daemon PID is still alive; only confirm teardown after repeated `screen -ls` misses
+                consecutive_screen_ls_misses += 1
+                return consecutive_screen_ls_misses >= 3
+            if poll_tick:
+                consecutive_screen_ls_misses += 1
+                return consecutive_screen_ls_misses >= 3
+            # Confirm with a second check before concluding teardown when screen_daemon_pid is unknown
+            time.sleep(0.03)
+            if is_screen_session_alive(scr_name):
+                consecutive_screen_ls_misses = 0
+                screen_daemon_pid = get_screen_session_pid(scr_name)
+                return False
+            return True
+
         def _on_screen_signal(signum: int, _frame: Any) -> None:
             nonlocal screen_teardown_signalled
             screen_teardown_signalled = True
@@ -6616,7 +6651,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         signal.signal(signal.SIGHUP, _on_screen_signal)
         signal.signal(signal.SIGTERM, _on_screen_signal)
 
-        if screen_teardown_signalled or not is_screen_session_alive(scr_name):
+        if _is_screen_teardown_confirmed(poll_tick=False):
             os._exit(1)
 
         clean_env = {k: v for k, v in os.environ.items() if k != "ORCHESTRATION_SUBAGENT"}
@@ -6688,7 +6723,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             rc = child_proc.poll()
             if rc is not None:
                 break
-            if screen_teardown_signalled or not is_screen_session_alive(scr_name):
+            if _is_screen_teardown_confirmed(poll_tick=True):
                 _kill_child_on_teardown()
                 os._exit(1)
             if timeout_val is not None and (time.monotonic() - start_mono) > float(timeout_val):
@@ -6709,10 +6744,8 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         signalled_num: int | None = (-raw_rc) if raw_rc < 0 else None
         exit_code = (128 + signalled_num) if signalled_num is not None else raw_rc
 
-        if not timed_out and exit_code != 0:
-            time.sleep(0.05)
-            if screen_teardown_signalled or not is_screen_session_alive(scr_name):
-                os._exit(exit_code)
+        if not timed_out and screen_teardown_signalled:
+            os._exit(exit_code)
 
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         if signalled_num is not None:

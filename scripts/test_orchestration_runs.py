@@ -8544,6 +8544,25 @@ def test_19_18_screen_version_detection_and_legacy_vs_modern_launch(
     assert oruns.screen_supports_logfile_flag(fake_new_screen) is True
     assert len([c for c in version_calls if c[0] == fake_new_screen]) == 1
 
+    # Bounce B1: when version detection fails (unparseable output or subprocess error),
+    # detect_screen_version returns None and screen_supports_logfile_flag falls back conservatively to False (legacy -L)
+    fake_unknown_screen = "/fake/unknown/screen-unparseable"
+    fake_error_screen = "/fake/unknown/screen-oserror"
+
+    def _fake_run_version_with_failures(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        version_calls.append(list(argv))
+        if argv[0] == fake_unknown_screen:
+            return subprocess.CompletedProcess(argv, 0, stdout="screen: unknown custom build without digits\n", stderr="")
+        if argv[0] == fake_error_screen:
+            raise OSError("cannot execute binary")
+        return subprocess.CompletedProcess(argv, 0, stdout="Screen version 4.09.01 (GNU) 20-Aug-23\n", stderr="")
+
+    monkeypatch.setattr(oruns.subprocess, "run", _fake_run_version_with_failures)
+    assert oruns.detect_screen_version(fake_unknown_screen) is None
+    assert oruns.screen_supports_logfile_flag(fake_unknown_screen) is False
+    assert oruns.detect_screen_version(fake_error_screen) is None
+    assert oruns.screen_supports_logfile_flag(fake_error_screen) is False
+
     # Verify _launch_run_backend on legacy screen (< 4.06) vs modern screen (>= 4.06)
     launched: list[tuple[list[str], str]] = []
 
@@ -8592,6 +8611,107 @@ def test_19_18_screen_version_detection_and_legacy_vs_modern_launch(
     assert str(run_dir_new / "session.log") in argv_new
     assert cwd_new == str(ws)
     assert (run_dir_new / "screenrc").read_text(encoding="utf-8") == "logfile flush 1\ndeflog on\n"
+
+
+def test_19_18_bounce_b2_transient_screen_ls_miss_does_not_kill_child_or_skip_status_json(
+    sample_workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 19.18 Bounce B2: a single transient `screen -ls` failure during `cmd_supervise`
+    must not kill the child or exit without writing `status.json`, and a signalled child
+    still finalizes `status.json` even if `is_screen_session_alive` transiently returns False."""
+    import argparse
+    import orchestration_runs as oruns
+
+    fake_tool = tmp_path / "fake_transient_agent.py"
+    fake_tool.write_text(
+        f"""#!{sys.executable}
+import os, signal, time
+time.sleep(0.15)
+os.kill(os.getpid(), signal.SIGTERM)
+""",
+        encoding="utf-8",
+    )
+    fake_tool.chmod(0o755)
+
+    run_id = oruns.generate_run_id("T007", "kilo")
+    run_dir = sample_workspace / ".ai-orchestration" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "prompt.md").write_text("Test prompt\n", encoding="utf-8")
+
+    cfg_path = sample_workspace / ".ai-orchestration.local.toml"
+    cfg_path.write_text(
+        f"""schema_version = 1
+
+[project]
+name = "proj_b2_transient"
+primary_orchestrator = "kilo"
+run_backend = "screen"
+
+[routing]
+default_orchestrator = "kilo"
+default_executor = "kilo"
+
+[tools.kilo]
+enabled = true
+binary = "{fake_tool}"
+
+[tools.kilo.headless]
+argv = ["{fake_tool}", "{{prompt_file}}"]
+prompt_via = "file"
+
+[tools.kilo.profiles.bulk-execution]
+model = "google/gemini-3.8-flash"
+""",
+        encoding="utf-8",
+    )
+
+    rec = {
+        "run_id": run_id,
+        "task_id": "T007",
+        "mode": "execute",
+        "tool": "kilo",
+        "model": "google/gemini-3.8-flash",
+        "backend": "screen",
+        "screen_session": "agent-proj_b2_transient-T007",
+        "session_name": "agent-proj_b2_transient-T007",
+        "screen": {
+            "session_name": "agent-proj_b2_transient-T007",
+            "pid": os.getpid(),
+            "start_time": oruns.get_process_start_time(os.getpid()),
+        },
+        "workspace": str(sample_workspace),
+        "cwd": str(sample_workspace),
+        "status": "starting",
+        "started_at": "2026-10-31T03:00:00+00:00",
+    }
+    (run_dir / "run.json").write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+
+    # Simulate transient `is_screen_session_alive` failures (e.g. a single false mid-poll and false after child exit)
+    alive_Master = [True, False, True, False, False]
+    call_idx = {"i": 0}
+
+    def _flaky_screen_alive(_name: str | None, expected_pid: int | None = None) -> bool:
+        idx = call_idx["i"]
+        call_idx["i"] += 1
+        if idx < len(alive_Master):
+            return alive_Master[idx]
+        return True
+
+    monkeypatch.setattr(oruns, "is_screen_session_alive", _flaky_screen_alive)
+    monkeypatch.setattr(oruns, "get_screen_session_pid", lambda _name: os.getpid())
+
+    rc = oruns.cmd_supervise(argparse.Namespace(run_dir=str(run_dir), timeout=10, global_config=None, current_host=None))
+    assert rc == 0
+
+    status_file = run_dir / "status.json"
+    assert status_file.is_file(), "status.json must be written even when screen -ls transiently fails"
+    status_data = json.loads(status_file.read_text(encoding="utf-8"))
+    assert status_data["status"] == "failed"
+    assert status_data["exit_code"] == 128 + int(signal.SIGTERM)
+    assert status_data["signal"] == int(signal.SIGTERM)
+
 
 
 

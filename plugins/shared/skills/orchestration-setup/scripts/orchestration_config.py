@@ -5324,7 +5324,7 @@ def build_setup_plan(
         )
     )
 
-    plan_hash = hashlib.sha256(f"{existing_hash}:{new_text}".encode("utf-8")).hexdigest()
+    plan_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
 
     return {
         "ok": True,
