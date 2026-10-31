@@ -948,39 +948,23 @@ def _tasks_agents_managed_block_matches_known_rendering(
     existing_agents: str | None = None,
 ) -> bool:
     """Reuse orchestration_config._managed_block_matches_known_rendering to verify that
-    a tasks/AGENTS.md managed block matches the current rendering or a historical one."""
+    a tasks/AGENTS.md managed block matches the current rendering or a historical one.
+    When orchestration_config is unavailable (standalone tasks_engine.py), return False
+    so the existing block is preserved byte-for-byte and reported for manual review."""
+    if orchestration_config is None or not hasattr(orchestration_config, "_managed_block_matches_known_rendering"):
+        return False
     known_blocks = _collect_known_tasks_agents_managed_blocks(
         tasks_dir=tasks_dir,
         existing_agents=existing_agents,
         candidate_block=block_text,
     )
-    if orchestration_config is not None and hasattr(orchestration_config, "_managed_block_matches_known_rendering"):
-        return bool(
-            orchestration_config._managed_block_matches_known_rendering(
-                block_text,
-                current_block=current_block,
-                historical_blocks=known_blocks,
-            )
+    return bool(
+        orchestration_config._managed_block_matches_known_rendering(
+            block_text,
+            current_block=current_block,
+            historical_blocks=known_blocks,
         )
-    # Fallback when running tasks_engine.py standalone without orchestration_config available
-    def _norm(txt: str) -> str:
-        s = txt.strip()
-        m_b = re.match(
-            r"^<!--\s*ai-orch:managed\s+begin\s*-->(.*)<!--\s*ai-orch:managed\s+end\s*-->\Z",
-            s,
-            flags=re.DOTALL,
-        )
-        if m_b:
-            s = m_b.group(1)
-        s = s.replace("\r\n", "\n").replace("\r", "\n")
-        return "\n".join(re.sub(r"[ \t]+", " ", line).rstrip(" \t") for line in s.split("\n")).strip()
-
-    norm_cand = _norm(block_text)
-    if not norm_cand:
-        return False
-    if norm_cand == _norm(current_block):
-        return True
-    return any(norm_cand == _norm(kb) for kb in known_blocks)
+    )
 
 
 def build_managed_tasks_agents_block(

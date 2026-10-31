@@ -18508,6 +18508,103 @@ def test_t090_tasks_agents_md_managed_block_protects_user_edits_and_updates_unmo
     assert agents_path.read_bytes() == before_bytes
 
 
+def test_t090_standalone_without_orchestration_config_keeps_agents_md_and_upgrades_other_files(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T090 B1: When orchestration_config cannot be imported (standalone tasks upgrade),
+    there is no local fallback matcher: tasks/AGENTS.md is kept byte-for-byte and reported
+    for manual review, while the other files (.gitignore, .gitattributes) are still upgraded.
+    Verified both via monkeypatching `te.orchestration_config = None` and via an isolated
+    copied `tasks_engine.py` where `orchestration_config` is genuinely not importable."""
+    import importlib.util
+
+    # Case A: Isolated copy of tasks_engine.py in a standalone directory where orchestration_config cannot be imported
+    isolated_dir = tmp_path / "isolated_skill" / "scripts"
+    isolated_dir.mkdir(parents=True)
+    isolated_engine_path = isolated_dir / "tasks_engine.py"
+    shutil.copy2(pathlib.Path(te.__file__), isolated_engine_path)
+
+    # Load isolated tasks_engine with orchestration_config blocked in sys.modules and sys.path
+    saved_mod = sys.modules.get("orchestration_config", ...)
+    saved_path = list(sys.path)
+    try:
+        sys.modules["orchestration_config"] = None  # type: ignore[assignment]
+        sys.path = [p for p in sys.path if "orchestration-setup" not in p]
+        spec = importlib.util.spec_from_file_location("isolated_tasks_engine_t090", isolated_engine_path)
+        assert spec is not None and spec.loader is not None
+        isolated_te = importlib.util.module_from_spec(spec)
+        sys.modules["isolated_tasks_engine_t090"] = isolated_te
+        spec.loader.exec_module(isolated_te)
+    finally:
+        sys.modules.pop("isolated_tasks_engine_t090", None)
+        sys.path = saved_path
+        if saved_mod is ...:
+            sys.modules.pop("orchestration_config", None)
+        else:
+            sys.modules["orchestration_config"] = saved_mod
+
+    assert isolated_te.orchestration_config is None
+
+    tasks_dir = tmp_path / "project" / "tasks"
+    tasks_dir.mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # Even with an unmodified historical or current managed block, when orchestration_config
+    # is not importable the block is kept byte-for-byte and reported for manual review.
+    hist_body_t050 = isolated_te.HISTORICAL_MANAGED_TASKS_AGENTS_BODIES[9]
+    existing_agents_content = (
+        "# tasks/ - Standalone Project\n\n"
+        f"{isolated_te.MANAGED_AGENTS_BEGIN}\n"
+        "## task-pipeline managed convention\n\n"
+        f"{hist_body_t050}\n"
+        f"{isolated_te.MANAGED_AGENTS_END}\n"
+    )
+    agents_path = tasks_dir / "AGENTS.md"
+    agents_path.write_text(existing_agents_content, encoding="utf-8")
+    before_bytes = agents_path.read_bytes()
+
+    with pytest.raises(isolated_te.TasksAgentsMdManagedBlockModifiedError):
+        isolated_te.render_upgraded_agents_md(existing_agents_content, tasks_dir=tasks_dir)
+
+    prev = isolated_te.upgrade_tasks_tree(tasks_dir, dry_run=True, skip_git_config=True)
+    assert prev["ok"] is True
+    assert str(agents_path) not in prev["updated"]
+    assert str(agents_path) not in prev["upgraded_files"]
+    assert not any(op["path"] == "AGENTS.md" for op in prev["plan"])
+    assert prev["manual_review_sections"] == ["tasks/AGENTS.md <!-- ai-orch:managed begin --> block"]
+    assert any("manual review" in w.lower() for w in prev["warnings"])
+    assert {".gitignore", ".gitattributes", "00-INDEX.md", "convention_version"} <= {
+        op["path"] for op in prev["plan"]
+    }
+    assert agents_path.read_bytes() == before_bytes
+
+    app = isolated_te.upgrade_tasks_tree(
+        tasks_dir,
+        dry_run=False,
+        apply=True,
+        expect_plan_hash=prev["plan_hash"],
+        skip_git_config=True,
+    )
+    assert app["ok"] is True
+    assert app["applied"] is True
+    assert app["manual_review_sections"] == ["tasks/AGENTS.md <!-- ai-orch:managed begin --> block"]
+    assert any("manual review" in w.lower() for w in app["warnings"])
+    assert (tasks_dir / ".gitignore").is_file()
+    assert (tasks_dir / ".gitattributes").is_file()
+    assert agents_path.read_bytes() == before_bytes
+
+    # Case B: Also verify via monkeypatch on te.orchestration_config = None
+    monkeypatch.setattr(te, "orchestration_config", None)
+    (tasks_dir / ".gitignore").unlink()
+    prev_mp = te.upgrade_tasks_tree(tasks_dir, dry_run=True, skip_git_config=True)
+    assert prev_mp["ok"] is True
+    assert [op["path"] for op in prev_mp["plan"]] == [".gitignore"]
+    assert prev_mp["manual_review_sections"] == ["tasks/AGENTS.md <!-- ai-orch:managed begin --> block"]
+    assert agents_path.read_bytes() == before_bytes
+
+
+
 
 
 
