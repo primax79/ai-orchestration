@@ -153,7 +153,7 @@ Tasks in `methodology`. Owner session: unassigned ([README](methodology/README.m
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T073 (Studio pannello orchestratori) | P1 | [Studio: pannello di controllo degli orchestratori di tutti i workspace, handoff e coerenza dei registri](methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md) | in progress | kilo | - |
+| T073 (Studio pannello orchestratori) | P1 | [Studio: pannello di controllo degli orchestratori di tutti i workspace, handoff e coerenza dei registri](methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md) | waiting (question:Q026, question:Q028) | kilo | - |
 | T074 (Chat contestuale per elemento) | P1 | [Chat contestuale con l'IA su un singolo use case, task o domanda](methodology/T074-chat-contestuale-con-l-ia-su-un-singolo-use-case-t.md) | open | kilo | T073 |
 | T076 (Studio interazioni UI) | P1 | [Studio delle interazioni del proprietario con task, use case e domande dalla UI](methodology/T076-studio-delle-interazioni-del-proprietario-con-task.md) | waiting (question:Q020) | kilo | - |
 | T080 (Contratto esecutore robusto) | P1 | [executor-contract: commit a ogni passo verde, nessun segreto nei log, shell portabile su macOS/zsh](methodology/T080-executor-contract-commit-a-ogni-passo-verde-nessun.md) | open | kilo | - |
@@ -184,6 +184,8 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 | Key | Question | Blocks | Decider | Recommended |
 | --- | --- | --- | --- | --- |
 | [Q020](questions/Q020-un-azione-di-gruppo-deve-riuscire-tutta-o-niente.md) | Un'azione di gruppo deve riuscire tutta o niente? | T076 | owner | A |
+| [Q026](questions/Q026-come-scopriamo-i-workspace-non-ancora-registrati.md) | Come scopriamo i workspace non ancora registrati? | T073 | owner | A |
+| [Q028](questions/Q028-quello-che-si-scopre-dagli-archivi-e-dai-processi.md) | Quello che si scopre dagli archivi e dai processi può decidere presenza o subentri? | T073 | owner | A |
 | [Q032](questions/Q032-l-interlocutore-di-un-progetto-pu-modificare-il-co.md) | L'interlocutore di un progetto può modificare il codice di prodotto, o solo conversare e smistare il lavoro? | - | owner | B |
 <!-- /ai-orch:generated decisions -->
 

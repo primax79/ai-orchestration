@@ -113,7 +113,7 @@ Slice 0 (19.1–19.3) e slice 1 (19.4–19.8) sono indipendenti dall'hub: valgon
 
 ### 19.18 - Compatibilità macOS dell'iniziativa 19
 
-- **Status:** `in progress` (2026-10-30; kilo (gemini-4-argon) sul Mac via kilo-mcp, worktree isolato) · **Short:** Compatibilità macOS · **Size:** M · **Kind:** fix · **Depends on:** 19.6, 19.7, T089 · **Use cases:** UC039, UC040 · **Repo:** `ai-orchestration/`
+- **Status:** `in progress` (2026-10-30; Verifica Codex NON OK (nota in notes/); 2026-10-31; rinviato come kilo su alf_ubuntu) · **Short:** Compatibilità macOS · **Size:** M · **Kind:** fix · **Depends on:** 19.6, 19.7, T089 · **Use cases:** UC039, UC040 · **Repo:** `ai-orchestration/`
 - **Goal:** owner requirement: executors on the Mac too. After merging `integration/19` (green on Linux: 754 passed), the suite on the Mac (Python 3.12, `uvx --python 3.12`) gives 8 failed and 1 error, all in new code:
   - **(1) Screen backend:** macOS ships GNU screen 4.00.03 (`/usr/bin/screen`), which has no `-Logfile` (added in 4.06). The 7 screen tests fail at `run start`. Detect the screen version. On screen < 4.06, log with `-L` and a working directory set to the run dir (default `screenlog.0`, renamed or read as `session.log`), with no path in `screenrc`, which must keep only constant directives (19.6 B2). Alternatively, use an explicitly configured `screen` binary (e.g. Homebrew), and give a clear preflight message when none is suitable.
   - **(2) Preflight:** `test_19_7_run_start_integration_all_check_types_and_no_preflight` fails on the "all checks OK" case (`run start` exits 1): one of the check types (tool version, port, service, disk, command) behaves differently on macOS. Find which one and fix it.

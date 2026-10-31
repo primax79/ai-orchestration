@@ -27,4 +27,7 @@ Add a test with a user edit inside the block, and a test showing that an unmodif
 
 ## Log (newest first)
 
+- 2026-10-31, orchestrator: state `bounced` -> `in progress` — rinviato come kilo su alf_ubuntu
+- 2026-10-31, codex: state `delivered` -> `bounced` — Verifica Codex NON OK (nota in notes/)
+- 2026-10-31, kilo: state `in progress` -> `delivered` — commit unito in integration/19 (6e26b9b / 7fe887f)
 - 2026-10-30, orchestrator: state `open` -> `in progress` — kilo (gemini-4-argon) come utente kilo su alf_ubuntu, /srv/agents, base integration/19 — primo executor con utente agenti
