@@ -17,6 +17,7 @@ import contextlib
 import copy
 import datetime
 import difflib
+import errno
 import hashlib
 import json
 import logging
@@ -1915,8 +1916,27 @@ def _is_tcp_port_listening(host: str, port: int, timeout: float = 0.5) -> bool:
     try:
         with socket.create_connection((host, int(port)), timeout=timeout):
             return True
+    except ConnectionResetError:
+        # On macOS/BSD (XNU), a listening socket whose unaccepted backlog is full
+        # completes the SYN handshake and resets with ECONNRESET, whereas a port
+        # with no listener always refuses with ECONNREFUSED.
+        return True
     except OSError:
         return False
+
+
+def _is_tcp_port_in_use(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Return True if (host, port) is already bound or listening on the target interface."""
+    if host in ("127.0.0.1", "localhost", "0.0.0.0", "::1"):
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        bind_host = "127.0.0.1" if host == "localhost" else host
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                probe.bind((bind_host, int(port)))
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                return True
+    return _is_tcp_port_listening(host, port, timeout=timeout)
 
 
 def _probe_tool_version(exe: str, version_flag: str = "--version", timeout: float = 5.0) -> str | None:
@@ -2465,7 +2485,7 @@ def run_project_preflight(
             failures.append(msg)
             continue
 
-        in_use = _is_tcp_port_listening(host, port_num)
+        in_use = _is_tcp_port_in_use(host, port_num)
         if in_use:
             msg = f"Required free port {port_num} ({host}:{port_num}) is already in use"
             checks.append(
@@ -5289,7 +5309,7 @@ def build_setup_plan(
         )
     )
 
-    plan_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+    plan_hash = hashlib.sha256(f"{existing_hash}:{new_text}".encode("utf-8")).hexdigest()
 
     return {
         "ok": True,

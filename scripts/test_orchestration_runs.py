@@ -8507,4 +8507,91 @@ model = "google/gemini-3.8-flash"
         close_screen_session(expected_sess)
 
 
+def test_19_18_screen_version_detection_and_legacy_vs_modern_launch(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Task 19.18 (1): detect screen version once, use `-L` with `cwd=run_dir` and `screenlog.0 -> session.log` on screen < 4.06, and keep `-Logfile` on screen >= 4.06 while keeping `screenrc` constant."""
+    import orchestration_runs as oruns
+
+    monkeypatch.setattr(oruns, "_SCREEN_VERSION_CACHE", {})
+    version_calls: list[list[str]] = []
+
+    fake_old_screen = "/fake/macos/screen-4.00.03"
+    fake_new_screen = "/fake/linux/screen-4.09.01"
+
+    def _fake_which(cmd: str) -> str | None:
+        return cmd
+
+    monkeypatch.setattr(oruns.shutil, "which", _fake_which)
+
+    def _fake_run_version(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        version_calls.append(list(argv))
+        if argv[0] == fake_old_screen:
+            return subprocess.CompletedProcess(argv, 1, stdout="Screen version 4.00.03 (FAU) 23-Oct-06\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="Screen version 4.09.01 (GNU) 20-Aug-23\n", stderr="")
+
+    monkeypatch.setattr(oruns.subprocess, "run", _fake_run_version)
+
+    assert oruns.detect_screen_version(fake_old_screen) == (4, 0, 3)
+    assert oruns.detect_screen_version(fake_old_screen) == (4, 0, 3)
+    assert oruns.screen_supports_logfile_flag(fake_old_screen) is False
+    # Version detected only once for fake_old_screen due to cache
+    assert len([c for c in version_calls if c[0] == fake_old_screen]) == 1
+
+    assert oruns.detect_screen_version(fake_new_screen) == (4, 9, 1)
+    assert oruns.detect_screen_version(fake_new_screen) == (4, 9, 1)
+    assert oruns.screen_supports_logfile_flag(fake_new_screen) is True
+    assert len([c for c in version_calls if c[0] == fake_new_screen]) == 1
+
+    # Verify _launch_run_backend on legacy screen (< 4.06) vs modern screen (>= 4.06)
+    launched: list[tuple[list[str], str]] = []
+
+    def _fake_run_launch(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        launched.append((list(argv), str(kwargs.get("cwd"))))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(oruns.subprocess, "run", _fake_run_launch)
+    monkeypatch.setattr(oruns, "is_screen_session_alive", lambda _s, expected_pid=None: False)
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    # Case A: screen < 4.06 (macOS 4.00.03)
+    run_dir_old = tmp_path / "run_old"
+    run_dir_old.mkdir()
+    monkeypatch.setattr(oruns, "screen_supports_logfile_flag", lambda _b="screen": False)
+    rec_old = {"backend": "screen", "screen_session": "agent-proj-T001", "cwd": str(ws)}
+    ok_old, err_old = oruns._launch_run_backend(ws, run_dir_old, rec_old)
+    assert ok_old is True and err_old is None
+    argv_old, cwd_old = launched[-1]
+    assert "-Logfile" not in argv_old
+    assert "-L" in argv_old
+    assert cwd_old == str(run_dir_old)
+    assert (run_dir_old / "screenrc").read_text(encoding="utf-8") == "logfile flush 1\ndeflog on\n"
+    assert (run_dir_old / "screenlog.0").exists()
+
+    # Verify _sync_screen_session_log syncs standalone screenlog.0 into session.log
+    run_dir_sync = tmp_path / "run_sync"
+    run_dir_sync.mkdir()
+    (run_dir_sync / "screenlog.0").write_text("LEGACY_SCREENLOG_CONTENT\n", encoding="utf-8")
+    synced_log = oruns._sync_screen_session_log(run_dir_sync, remove_screenlog=True)
+    assert synced_log == run_dir_sync / "session.log"
+    assert synced_log.read_text(encoding="utf-8") == "LEGACY_SCREENLOG_CONTENT\n"
+    assert not (run_dir_sync / "screenlog.0").exists()
+
+    # Case B: screen >= 4.06 (Linux 4.09)
+    run_dir_new = tmp_path / "run_new"
+    run_dir_new.mkdir()
+    monkeypatch.setattr(oruns, "screen_supports_logfile_flag", lambda _b="screen": True)
+    rec_new = {"backend": "screen", "screen_session": "agent-proj-T002", "cwd": str(ws)}
+    ok_new, err_new = oruns._launch_run_backend(ws, run_dir_new, rec_new)
+    assert ok_new is True and err_new is None
+    argv_new, cwd_new = launched[-1]
+    assert "-Logfile" in argv_new
+    assert str(run_dir_new / "session.log") in argv_new
+    assert cwd_new == str(ws)
+    assert (run_dir_new / "screenrc").read_text(encoding="utf-8") == "logfile flush 1\ndeflog on\n"
+
+
 

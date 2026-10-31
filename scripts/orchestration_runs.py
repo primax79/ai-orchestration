@@ -643,8 +643,10 @@ def read_log_chunks(
         legacy = run_dir / "events.jsonl"
         if legacy.is_file():
             chunk_files = [legacy]
-        elif (run_dir / "session.log").is_file():
-            chunk_files = [run_dir / "session.log"]
+        else:
+            _sync_screen_session_log(run_dir)
+            if (run_dir / "session.log").is_file():
+                chunk_files = [run_dir / "session.log"]
 
     if not chunk_files:
         return 0, 0, b""
@@ -780,8 +782,10 @@ def parse_log_events(data_bytes: bytes) -> list[dict[str, Any]]:
 def read_all_log_events(run_dir: pathlib.Path) -> list[dict[str, Any]]:
     """Read all log events from events.*.jsonl chunks (or session.log fallback) in order."""
     chunks = sorted(run_dir.glob("events.*.jsonl"))
-    if not chunks and (run_dir / "session.log").is_file():
-        chunks = [run_dir / "session.log"]
+    if not chunks:
+        _sync_screen_session_log(run_dir)
+        if (run_dir / "session.log").is_file():
+            chunks = [run_dir / "session.log"]
     all_events: list[dict[str, Any]] = []
     for chunk in chunks:
         try:
@@ -815,8 +819,10 @@ def read_stream_objects(run_dir: pathlib.Path) -> list[dict[str, Any]]:
     chunks = sorted(run_dir.glob("events.*.jsonl"))
     if not chunks and (run_dir / "events.jsonl").is_file():
         chunks = [run_dir / "events.jsonl"]
-    if not chunks and (run_dir / "session.log").is_file():
-        chunks = [run_dir / "session.log"]
+    if not chunks:
+        _sync_screen_session_log(run_dir)
+        if (run_dir / "session.log").is_file():
+            chunks = [run_dir / "session.log"]
     for chunk in chunks:
         try:
             text = chunk.read_text(encoding="utf-8", errors="replace")
@@ -3010,6 +3016,126 @@ def build_screen_session_name(
     return name
 
 
+_SCREEN_VERSION_CACHE: dict[str, tuple[int, ...] | None] = {}
+
+
+def detect_screen_version(screen_bin: str = "screen") -> tuple[int, ...] | None:
+    """Detect and cache the GNU screen version tuple once per binary (e.g. (4, 0, 3) on macOS, (4, 9, 1) on Linux)."""
+    resolved = shutil.which(screen_bin) or screen_bin
+    if resolved in _SCREEN_VERSION_CACHE:
+        return _SCREEN_VERSION_CACHE[resolved]
+    ver: tuple[int, ...] | None = None
+    try:
+        res = subprocess.run(
+            [resolved, "-v"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        combined = f"{res.stdout or ''}\n{res.stderr or ''}"
+        m = re.search(r"Screen version\s+(\d+)\.(\d+)(?:\.(\d+))?", combined, re.IGNORECASE)
+        if not m:
+            m = re.search(r"\b(\d+)\.(\d+)(?:\.(\d+))?\b", combined)
+        if m:
+            parts = [int(m.group(1)), int(m.group(2))]
+            if m.group(3) is not None:
+                parts.append(int(m.group(3)))
+            ver = tuple(parts)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        ver = None
+    _SCREEN_VERSION_CACHE[resolved] = ver
+    return ver
+
+
+def screen_supports_logfile_flag(screen_bin: str = "screen") -> bool:
+    """Return True if GNU screen supports `-Logfile <path>` (added in GNU screen 4.06)."""
+    ver = detect_screen_version(screen_bin)
+    if ver is None:
+        return True
+    return ver >= (4, 6)
+
+
+def _sync_screen_session_log(
+    run_dir: pathlib.Path,
+    flush_session: str | None = None,
+    remove_screenlog: bool = False,
+) -> pathlib.Path:
+    """Ensure GNU screen < 4.06 default `screenlog.0` in `run_dir` is flushed/synced into `session.log`."""
+    session_log = run_dir / "session.log"
+    screenlog0 = run_dir / "screenlog.0"
+
+    if flush_session and shutil.which("screen"):
+        target_sess = os.environ.get("STY") or flush_session
+        clean_env = {k: v for k, v in os.environ.items() if k not in ("STY", "WINDOW")}
+        try:
+            subprocess.run(
+                ["screen", "-S", target_sess, "-X", "logfile", "flush", "0"],
+                env=clean_env,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+        deadline = time.monotonic() + 1.2
+        last_size = -1
+        stable_ticks = 0
+        while time.monotonic() < deadline:
+            cur_size = 0
+            try:
+                if screenlog0.is_file():
+                    cur_size = max(cur_size, screenlog0.stat().st_size)
+                if session_log.is_file():
+                    cur_size = max(cur_size, session_log.stat().st_size)
+            except OSError:
+                pass
+            if cur_size > 0:
+                if cur_size == last_size:
+                    stable_ticks += 1
+                    if stable_ticks >= 2:
+                        break
+                else:
+                    last_size = cur_size
+                    stable_ticks = 0
+            time.sleep(0.03)
+
+    if screenlog0.is_file():
+        try:
+            st0 = screenlog0.stat()
+            if not session_log.is_file():
+                if remove_screenlog:
+                    os.replace(screenlog0, session_log)
+                else:
+                    shutil.copyfile(screenlog0, session_log)
+                try:
+                    os.chmod(session_log, 0o600)
+                except OSError:
+                    pass
+            else:
+                st_sess = session_log.stat()
+                if st0.st_ino != st_sess.st_ino and st0.st_size > st_sess.st_size:
+                    if remove_screenlog:
+                        os.replace(screenlog0, session_log)
+                    else:
+                        shutil.copyfile(screenlog0, session_log)
+                    try:
+                        os.chmod(session_log, 0o600)
+                    except OSError:
+                        pass
+                elif remove_screenlog and st0.st_ino == st_sess.st_ino:
+                    try:
+                        screenlog0.unlink()
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    return session_log
+
+
 def list_screen_sessions() -> list[dict[str, Any]]:
     """List live GNU screen sessions reported by `screen -ls`."""
     if not shutil.which("screen"):
@@ -5153,25 +5279,48 @@ def _launch_run_backend(
     except OSError:
         pass
 
-    screen_cmd = [
-        "screen",
-        "-c",
-        str(screenrc_path),
-        "-L",
-        "-Logfile",
-        str(session_log_path),
-        "-dmS",
-        screen_session,
-        *sup_cmd,
-    ]
+    cwd_str = record.get("cwd") or str(workspace)
+    if screen_supports_logfile_flag("screen"):
+        screen_cmd = [
+            "screen",
+            "-c",
+            str(screenrc_path),
+            "-L",
+            "-Logfile",
+            str(session_log_path),
+            "-dmS",
+            screen_session,
+            *sup_cmd,
+        ]
+        launch_cwd = cwd_str if pathlib.Path(cwd_str).is_dir() else str(workspace)
+    else:
+        screenlog_path = run_dir / "screenlog.0"
+        if not screenlog_path.exists():
+            try:
+                os.link(session_log_path, screenlog_path)
+            except OSError:
+                try:
+                    os.symlink("session.log", screenlog_path)
+                except OSError:
+                    pass
+        screen_cmd = [
+            "screen",
+            "-c",
+            str(screenrc_path),
+            "-L",
+            "-dmS",
+            screen_session,
+            *sup_cmd,
+        ]
+        launch_cwd = str(run_dir)
+
     clean_env = {
         k: v for k, v in os.environ.items()
         if k not in ("STY", "WINDOW", "ORCHESTRATION_SUBAGENT")
     }
-    cwd_str = record.get("cwd") or str(workspace)
     res_scr = subprocess.run(
         screen_cmd,
-        cwd=cwd_str if pathlib.Path(cwd_str).is_dir() else str(workspace),
+        cwd=launch_cwd,
         env=clean_env,
         capture_output=True,
         text=True,
@@ -5964,6 +6113,9 @@ def _finalize_run_completion(
     record["exit_code"] = exit_code
     record["ended_at"] = now_iso
 
+    if record.get("backend") == "screen" or (run_dir / "screenlog.0").exists():
+        _sync_screen_session_log(run_dir)
+
     # Extract final report from logs
     report_text = extract_final_report_from_run(run_dir)
     if report_text:
@@ -6437,12 +6589,9 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         child_proc: subprocess.Popen[bytes] | None = None
         child_pgid: int | None = None
         scr_name = record.get("screen_session") or record.get("session_name")
-        had_live_screen = bool(isinstance(record.get("screen"), dict) or is_screen_session_alive(scr_name))
         screen_teardown_signalled = False
 
-        def _on_screen_signal(signum: int, _frame: Any) -> None:
-            nonlocal screen_teardown_signalled
-            screen_teardown_signalled = True
+        def _kill_child_on_teardown() -> None:
             if child_proc is not None and child_proc.poll() is None:
                 try:
                     if child_pgid:
@@ -6455,10 +6604,18 @@ def cmd_supervise(args: argparse.Namespace) -> int:
                     child_proc.kill()
                 except OSError:
                     pass
+
+        def _on_screen_signal(signum: int, _frame: Any) -> None:
+            nonlocal screen_teardown_signalled
+            screen_teardown_signalled = True
+            _kill_child_on_teardown()
             os._exit(128 + signum)
 
         signal.signal(signal.SIGHUP, _on_screen_signal)
         signal.signal(signal.SIGTERM, _on_screen_signal)
+
+        if screen_teardown_signalled or not is_screen_session_alive(scr_name):
+            os._exit(1)
 
         clean_env = {k: v for k, v in os.environ.items() if k != "ORCHESTRATION_SUBAGENT"}
         stdin_fh = None
@@ -6529,6 +6686,9 @@ def cmd_supervise(args: argparse.Namespace) -> int:
             rc = child_proc.poll()
             if rc is not None:
                 break
+            if screen_teardown_signalled or not is_screen_session_alive(scr_name):
+                _kill_child_on_teardown()
+                os._exit(1)
             if timeout_val is not None and (time.monotonic() - start_mono) > float(timeout_val):
                 timed_out = True
                 try:
@@ -6547,12 +6707,9 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         signalled_num: int | None = (-raw_rc) if raw_rc < 0 else None
         exit_code = (128 + signalled_num) if signalled_num is not None else raw_rc
 
-        if not timed_out and (
-            signalled_num in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL)
-            or exit_code in (128 + signal.SIGHUP, 128 + signal.SIGTERM, 128 + signal.SIGKILL)
-        ):
+        if not timed_out and exit_code != 0:
             time.sleep(0.05)
-            if screen_teardown_signalled or (had_live_screen and not is_screen_session_alive(scr_name)):
+            if screen_teardown_signalled or not is_screen_session_alive(scr_name):
                 os._exit(exit_code)
 
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -6576,6 +6733,8 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         except Exception:
             pass
         time.sleep(0.05)
+        if not screen_supports_logfile_flag("screen") or (run_dir / "screenlog.0").exists():
+            _sync_screen_session_log(run_dir, flush_session=scr_name, remove_screenlog=False)
 
         if timed_out:
             record["status"] = "failed"
