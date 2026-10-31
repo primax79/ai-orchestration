@@ -12,7 +12,7 @@ integration="${AIO_INTEGRATION:-integration}"
 wt="$wtroot/$slug"
 [ -d "$wt" ] || { echo "no worktree $wt" >&2; exit 1; }
 screen -ls | grep -q "agent-$name-$slug\b" && { echo "already running" >&2; exit 1; }
-n=$(ls "$dir/$slug".status* 2>/dev/null | wc -l)
+n=$( (ls "$dir/$slug".status* 2>/dev/null || true) | wc -l)
 [ -f "$dir/$slug.status" ] && mv "$dir/$slug.status" "$dir/$slug.status.$n"
 {
   cat "$dir/brief-common.md" "$dir/$brief"
