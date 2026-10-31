@@ -24,7 +24,7 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | 15 | 15 | [Specifiche guidate dai casi d'uso, definizione dei task e validazione del prodotto](done/15-use-case-driven-validation/plan.md) | done | 01, 11 | L |
 | 16 | 16 | [Broker di orchestrazione: un server MCP per utente, workspace, progetti, posta](16-orchestration-broker/plan.md) | in progress (done: 16.1–16.4, 16.6, 16.9; running: 16.5) | T026, T027, T028 | L |
 | 17 | 17 | [Gli use case guidano i task](done/17-use-cases-drive-tasks/plan.md) | done | - | M |
-| 19 | 19 | [Sviluppo multi-macchina: hub, executor su ogni host, console centrale](19-multi-machine-development/plan.md) | in progress (running: 19.1, 19.4) | - | M |
+| 19 | 19 | [Sviluppo multi-macchina: hub, executor su ogni host, console centrale](19-multi-machine-development/plan.md) | in progress (running: 19.18; to verify: 19.1–19.8, 19.16) | - | M |
 <!-- /ai-orch:generated initiatives -->
 ## Specs
 
@@ -120,9 +120,9 @@ Live registry of planned initiatives and emergent tasks for `ai-orchestration`. 
 | UC035 (Clean up executor debris) | P2 | [Architect cleans up merged worktrees and stale sessions safely](use-cases/UC035-architect-cleans-up-merged-worktrees-and-stale-sessions-safely.md) | untested (proposed) | Architect session | T012 |
 | UC036 (Sync Redmine tracker links) | P2 | [Architect links tasks to Redmine issues and synchronizes progress](use-cases/UC036-architect-links-tasks-to-redmine-issues-and-synchronizes-progress.md) | draft (proposed) | Architect session | - |
 | UC037 (Requester verifies task) | P1 | [Requester session validates a delivered task addressed to it](use-cases/UC037-requester-session-validates-a-delivered-task-addressed-to-its-workspace.md) | untested (proposed) | Requester session | T044, T047 |
-| UC038 (Project drift upgrade) | P1 | [Owner detects and upgrades a project that drifted from the current ai-orchestration conventions](use-cases/UC038-owner-detects-and-upgrades-a-project-that-drifted-from-the-current-ai-orchestration-conventions.md) | in development (proposed) | Owner | 19.1, 19.2, 19.3 |
-| UC039 (Multi-host console attach) | P1 | [Owner sees every run on every machine and attaches to its live terminal from one console](use-cases/UC039-owner-sees-every-run-on-every-machine-and-attaches-to-its-live-terminal-from-one-console.md) | in development (proposed) | Owner | 19.4, 19.5, 19.6, 19.8, 19.9, 19.15, 19.16 |
-| UC040 (Shared queue across hosts) | P1 | [Executors on the Mac and on the hub take tasks from one queue without double claims, and keep working when the hub is down](use-cases/UC040-executors-on-the-mac-and-on-the-hub-take-tasks-from-one-queue-without-double-claims-and-keep-working-when-the-hub-is-down.md) | in development (proposed) | Orchestrator | 19.4, 19.7, 19.10, 19.11, 19.12, 19.13, 19.17 |
+| UC038 (Project drift upgrade) | P1 | [Owner detects and upgrades a project that drifted from the current ai-orchestration conventions](use-cases/UC038-owner-detects-and-upgrades-a-project-that-drifted-from-the-current-ai-orchestration-conventions.md) | untested (proposed) | Owner | 19.1, 19.2, 19.3 |
+| UC039 (Multi-host console attach) | P1 | [Owner sees every run on every machine and attaches to its live terminal from one console](use-cases/UC039-owner-sees-every-run-on-every-machine-and-attaches-to-its-live-terminal-from-one-console.md) | in development (proposed) | Owner | 19.4, 19.5, 19.6, 19.8, 19.9, 19.15, 19.16, 19.18 |
+| UC040 (Shared queue across hosts) | P1 | [Executors on the Mac and on the hub take tasks from one queue without double claims, and keep working when the hub is down](use-cases/UC040-executors-on-the-mac-and-on-the-hub-take-tasks-from-one-queue-without-double-claims-and-keep-working-when-the-hub-is-down.md) | in development (proposed) | Orchestrator | 19.4, 19.7, 19.10, 19.11, 19.12, 19.13, 19.17, 19.18 |
 <!-- /ai-orch:generated use-cases -->
 
 ## Next up
@@ -145,6 +145,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T079 (Workspace da sottocartella) | P2 | [I comandi lanciati da una sottocartella risolvono il workspace che la contiene](engine/T079-i-comandi-lanciati-da-una-sottocartella-risolvono.md) | open | kilo | - |
 | T081 (Branch e sblocco dipendenti) | P2 | [tasks_engine: list --branches, sblocco dei dipendenti e validate --branch](engine/T081-tasks-engine-list-branches-sblocco-dei-dipendenti.md) | open | kilo | - |
 | T083 (Rinomina sessione per provider) | P3 | [L'id del provider identifica la sessione: un nome nuovo rinomina il record invece di crearne un altro](engine/T083-l-id-del-provider-identifica-la-sessione-un-nome-n.md) | open | kilo | - |
+| T088 (Test rossi su main) | P1 | [Quattro test rossi su main: duplicati skill non fixable, kill dei discendenti su Linux, runaway stub lento](engine/T088-quattro-test-rossi-su-main-duplicati-skill-non-fix.md) | verified | kilo | - |
 
 ### methodology
 
@@ -172,7 +173,9 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| T087 (describe run incompleto) | P3 | [ai-orch describe elenca solo una parte dei sottocomandi di run](micro/T087-describe-run-incompleto.md) | in progress | kilo | - |
+| T087 (describe run incompleto) | P3 | [ai-orch describe elenca solo una parte dei sottocomandi di run](micro/T087-describe-run-incompleto.md) | verified | kilo | - |
+| T089 (Test non isolati) | P1 | [I test scrivono nella config globale reale: serve isolamento automatico in conftest](micro/T089-test-non-isolati.md) | verified | kilo | - |
+| T090 (Protezione blocco tasks/AGENTS) | P2 | [tasks upgrade: proteggere le modifiche dell'utente nel blocco gestito di tasks/AGENTS.md](micro/T090-protezione-blocco-tasks-agents.md) | open | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting

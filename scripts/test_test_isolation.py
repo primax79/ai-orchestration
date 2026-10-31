@@ -253,3 +253,57 @@ def test_b3_reproduce_project_p_registration_and_fixture_creation_contained_unde
     assert len(created_p2_configs) == 1
     assert 'name = "p2"' in created_p2_configs[0].read_text(encoding="utf-8")
     assert str(conftest.REAL_CONFIG_DIR) not in str(created_p2_configs[0].resolve())
+
+
+def test_19_18_session_guard_ignores_live_broker_runtime_state_and_guards_configs_and_project_dirs(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Task 19.18 (3): `_snapshot_host_dir` ignores live broker runtime state (`*.sqlite`,
+    `*-wal`, `*-shm`, `*.lock`, `broker/` sockets/pids, `broker.json`) while covering
+    configuration files (`*.toml`, `*.json` configs) and new project directories."""
+    cfg_root = tmp_path / "ai-orchestration"
+    broker_dir = cfg_root / "broker"
+    projects_dir = cfg_root / "projects" / "existing_proj"
+    broker_dir.mkdir(parents=True)
+    projects_dir.mkdir(parents=True)
+
+    # Guarded config files
+    global_toml = cfg_root / "orchestration.toml"
+    proj_toml = projects_dir / "orchestration.toml"
+    hub_reg_json = broker_dir / "hub_registry.json"
+    global_toml.write_text("schema_version = 1\n", encoding="utf-8")
+    proj_toml.write_text('[project]\nname = "existing_proj"\n', encoding="utf-8")
+    hub_reg_json.write_text('{"projects": []}\n', encoding="utf-8")
+
+    # Initial runtime state files
+    (broker_dir / "registry.sqlite").write_bytes(b"sqlite-v1")
+    (broker_dir / "registry.sqlite-wal").write_bytes(b"wal-v1")
+    (broker_dir / "registry.sqlite-shm").write_bytes(b"shm-v1")
+    (broker_dir / "registry.lock").write_text("", encoding="utf-8")
+    (cfg_root / "broker.lock").write_text("", encoding="utf-8")
+    (cfg_root / "broker.json").write_text('{"pid": 1234}\n', encoding="utf-8")
+
+    before = conftest._snapshot_host_dir(cfg_root)
+
+    # Simulate live Mac broker mutating SQLite WAL/SHM, locks, pids, sockets during test run
+    (broker_dir / "registry.sqlite").write_bytes(b"sqlite-v2-modified")
+    (broker_dir / "registry.sqlite-wal").write_bytes(b"wal-v2-modified-longer")
+    (broker_dir / "registry.sqlite-shm").unlink()
+    (broker_dir / "broker.pid").write_text("9999\n", encoding="utf-8")
+    (broker_dir / "broker.sock").write_text("", encoding="utf-8")
+    (cfg_root / "env.lock").write_text("", encoding="utf-8")
+    (cfg_root / "broker.json").write_text('{"pid": 9999}\n', encoding="utf-8")
+
+    after_runtime_only = conftest._snapshot_host_dir(cfg_root)
+    assert after_runtime_only == before, "Live broker runtime state changes must not trigger session guard"
+
+    # Now mutate a config file and create a new project directory -> must be detected
+    hub_reg_json.write_text('{"projects": ["mutated"]}\n', encoding="utf-8")
+    new_proj_dir = cfg_root / "projects" / "leaked_proj"
+    new_proj_dir.mkdir(parents=True)
+
+    after_config_leak = conftest._snapshot_host_dir(cfg_root)
+    assert str(new_proj_dir.resolve()) not in before
+    assert str(new_proj_dir.resolve()) in after_config_leak
+    assert after_config_leak[str(hub_reg_json.resolve())] != before[str(hub_reg_json.resolve())]
+

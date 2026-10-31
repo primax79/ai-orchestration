@@ -3424,6 +3424,44 @@ def test_19_3_bounce2_b3_managed_block_predicate_and_docstring() -> None:
         oc.inject_or_replace_agents_block(canon_edited, current_rendered)
 
 
+def test_19_18_macos_preflight_listen_backlog_and_port_checks(tmp_path: pathlib.Path) -> None:
+    """Task 19.18 (2): `_is_tcp_port_in_use` and `_is_tcp_port_listening` succeed across
+    repeated preflight checks against a `listen(1)` socket on macOS without exhausting the
+    accept backlog or failing on ECONNRESET."""
+    import socket
+
+    ws = tmp_path / "ws_19_18"
+    ws.mkdir()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        busy_port = srv.getsockname()[1]
+
+        # Fill the listen(1) accept queue with an unaccepted connection
+        with socket.create_connection(("127.0.0.1", busy_port), timeout=0.5):
+            pass
+
+        # Even after a prior connection on a listen(1) socket, both port-in-use and
+        # active-service checks must still detect the listening socket on macOS
+        assert oc._is_tcp_port_in_use("127.0.0.1", busy_port) is True
+        assert oc._is_tcp_port_listening("127.0.0.1", busy_port) is True
+
+        res_pf = oc.run_project_preflight(
+            {
+                "project": {
+                    "preflight": {
+                        "services": {"svc-listen-1": {"port": busy_port}},
+                    }
+                }
+            },
+            workspace=ws,
+        )
+        assert res_pf["ok"] is True, res_pf["failures"]
+
+
+
 
 
 

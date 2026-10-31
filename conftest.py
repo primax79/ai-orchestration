@@ -11,6 +11,7 @@ config dir still override it with monkeypatch.
 
 import os
 import pathlib
+import stat
 import subprocess
 import pytest
 
@@ -85,10 +86,33 @@ def _is_path_excluded(path_str: str, excluded_prefixes: set[str]) -> bool:
     return False
 
 
+def _is_runtime_state_entry(path_str: str, is_dir: bool = False, mode: int | None = None) -> bool:
+    """Return True if an entry under ~/.config/ai-orchestration is live runtime state
+    (SQLite DB/WAL/SHM/journal, lock files, or broker sockets/PIDs) rather than configuration."""
+    if mode is not None and (stat.S_ISSOCK(mode) or stat.S_ISFIFO(mode)):
+        return True
+    name = os.path.basename(path_str)
+    if is_dir:
+        return name == "broker"
+    if (
+        name.endswith((".sqlite", ".sqlite3", "-wal", "-shm", "-journal", ".lock", ".pid", ".sock", ".socket"))
+        or ".sqlite-" in name
+        or ".sqlite3-" in name
+    ):
+        return True
+    parts = pathlib.Path(path_str).parts
+    if "broker" in parts and not name.endswith((".toml", ".json")):
+        return True
+    if name == "broker.json" or name.startswith("broker.json.tmp."):
+        return True
+    return False
+
+
 def _snapshot_host_dir(
     root: pathlib.Path, exclude: pathlib.Path | set[str] | None = None
 ) -> dict[str, tuple[int, int]]:
-    """Recursively snapshot every entry under `root` (used for ~/.config/ai-orchestration)."""
+    """Recursively snapshot configuration entries under `root` (used for ~/.config/ai-orchestration),
+    ignoring live broker/SQLite runtime state."""
     snap: dict[str, tuple[int, int]] = {}
     if not root.exists():
         return snap
@@ -109,11 +133,13 @@ def _snapshot_host_dir(
                     if _is_path_excluded(p, excluded_prefixes):
                         continue
                     try:
+                        is_dir = entry.is_dir(follow_symlinks=False)
                         st = entry.stat(follow_symlinks=False)
-                        snap[p] = (st.st_mtime_ns, st.st_size)
+                        if not _is_runtime_state_entry(p, is_dir=is_dir, mode=st.st_mode):
+                            snap[p] = (0, 0) if is_dir else (st.st_mtime_ns, st.st_size)
                     except OSError:
-                        pass
-                    if entry.is_dir(follow_symlinks=False):
+                        is_dir = False
+                    if is_dir:
                         _walk(p)
         except OSError:
             pass
@@ -146,19 +172,26 @@ def _snapshot_works_orchestration_configs(
         except OSError:
             pass
 
-    def _walk_full_dir(top: str) -> None:
-        _stat_into(top)
+    def _is_ancestor_of_excluded(dir_path: str) -> bool:
+        norm = dir_path.rstrip(os.sep) + os.sep
+        return any(ex.startswith(norm) for ex in ex_set)
+
+    def _walk_full_dir(top: str, skip_runtime_subdirs: bool = False) -> None:
+        if not skip_runtime_subdirs:
+            _stat_into(top)
         try:
             with os.scandir(top) as it:
                 for entry in it:
+                    if skip_runtime_subdirs and entry.name in ("events", "runs", "sessions"):
+                        continue
                     p = entry.path
                     _stat_into(p)
                     if entry.is_dir(follow_symlinks=False):
-                        _walk_full_dir(p)
+                        _walk_full_dir(p, skip_runtime_subdirs=False)
         except OSError:
             pass
 
-    def _walk_projects(top: str) -> None:
+    def _walk_projects(top: str, depth: int = 0, max_depth: int = 4) -> None:
         if _is_path_excluded(top, ex_set):
             return
         try:
@@ -172,20 +205,22 @@ def _snapshot_works_orchestration_configs(
                         _stat_into(p)
                     elif name == ".ai-orchestration":
                         if entry.is_dir(follow_symlinks=False):
-                            _walk_full_dir(p)
+                            _walk_full_dir(p, skip_runtime_subdirs=_is_ancestor_of_excluded(top))
                         else:
                             _stat_into(p)
                     elif name == "tasks" and entry.is_dir(follow_symlinks=False):
                         tasks_cfg = os.path.join(p, "orchestration.toml")
                         if os.path.lexists(tasks_cfg) and not _is_path_excluded(tasks_cfg, ex_set):
                             _stat_into(tasks_cfg)
-                        _walk_projects(p)
+                        if depth < max_depth:
+                            _walk_projects(p, depth + 1, max_depth)
                     elif (
-                        entry.is_dir(follow_symlinks=False)
+                        depth < max_depth
+                        and entry.is_dir(follow_symlinks=False)
                         and name not in _WORKS_SKIP_DIRS
                         and not (name.startswith(".") and name != ".worktrees")
                     ):
-                        _walk_projects(p)
+                        _walk_projects(p, depth + 1, max_depth)
         except OSError:
             pass
 
