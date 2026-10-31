@@ -11546,9 +11546,13 @@ def test_t050_agents_md_project_rules_survive_upgrade_and_idempotent(tmp_path: p
     assert upg2_payload["upgraded_files"] == []
     assert agents_path.read_text(encoding="utf-8") == upgraded_text
 
-    # 4. Modifying inside markers and re-running refreshes only the managed block
-    tampered = upgraded_text.replace("task-pipeline", "stale-skill-name")
-    agents_path.write_text(tampered, encoding="utf-8")
+    # 4. Outdated historical rendering inside markers is refreshed normally on upgrade
+    stale_hist_block = (
+        f"{te.MANAGED_AGENTS_BEGIN}\n## task-pipeline managed convention\n\n"
+        f"{te.HISTORICAL_MANAGED_TASKS_AGENTS_BODIES[0]}\n{te.MANAGED_AGENTS_END}\n"
+    )
+    stale_text = f"{custom_rules}\n{stale_hist_block}"
+    agents_path.write_text(stale_text, encoding="utf-8")
     res_prev3 = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
     assert res_prev3.returncode == 0
     prev3_data = json.loads(res_prev3.stdout)
@@ -11565,6 +11569,18 @@ def test_t050_agents_md_project_rules_survive_upgrade_and_idempotent(tmp_path: p
     )
     assert res_upg3.returncode == 0
     assert agents_path.read_text(encoding="utf-8") == upgraded_text
+
+    # 5. User edit inside markers is preserved (not replaced), reported for manual review, and not upgraded
+    user_edited = upgraded_text.replace("task-pipeline", "user-customized-convention")
+    agents_path.write_text(user_edited, encoding="utf-8")
+    res_prev4 = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_prev4.returncode == 0
+    prev4_data = json.loads(res_prev4.stdout)
+    assert prev4_data["ok"] is True
+    assert prev4_data["upgraded_files"] == []
+    assert "tasks/AGENTS.md <!-- ai-orch:managed begin --> block" in prev4_data["manual_review_sections"]
+    assert any("manual review" in w.lower() for w in prev4_data["warnings"])
+    assert agents_path.read_text(encoding="utf-8") == user_edited
 
 
 def test_t050_sync_index_preserves_owner_column_next_up_order_and_id_format(tmp_path: pathlib.Path) -> None:
@@ -18390,6 +18406,107 @@ def test_19_4_b1_shadowed_legacy_config_hosts_do_not_leak(
     )
     errs_leak, _, _, _ = te.validate_tasks_tree(tasks_dir)
     assert any("T002" in e and "undeclared host 'legacy_client'" in e for e in errs_leak)
+
+
+def test_t090_tasks_agents_md_managed_block_protects_user_edits_and_updates_unmodified_historical(
+    tmp_path: pathlib.Path,
+) -> None:
+    """T090:
+    1. An unmodified historical managed block in tasks/AGENTS.md (including whitespace variation)
+       is replaced and updated normally on `tasks upgrade` (reusing `_managed_block_matches_known_rendering`).
+    2. A managed block in tasks/AGENTS.md containing user edits does not match any known rendering:
+       `render_upgraded_agents_md` raises `TasksAgentsMdManagedBlockModifiedError`, and `tasks upgrade`
+       keeps the block byte-for-byte, reports it in `manual_review_sections` and `warnings`, and does
+       not apply the upgrade to that block.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    custom_header = (
+        "# tasks/ - Project Rules\n\n"
+        "- Custom project rule outside markers.\n\n"
+        "```toml\n"
+        "[tasks]\n"
+        'language = "it"\n'
+        "```\n\n"
+    )
+    custom_footer = "\n## Custom Footer\n\nKeep this footer intact.\n"
+
+    # 1. Historical managed block (from 2026-10-25 T050, with extra spaces/tabs) is updated normally
+    hist_body_t050 = te.HISTORICAL_MANAGED_TASKS_AGENTS_BODIES[9]
+    hist_block_ws = (
+        f"{te.MANAGED_AGENTS_BEGIN}\n"
+        "## task-pipeline   managed convention  \n\n"
+        + "\r\n".join(line + "   " for line in hist_body_t050.splitlines())
+        + f"\r\n{te.MANAGED_AGENTS_END}\n"
+    )
+    agents_path = tasks_dir / "AGENTS.md"
+    agents_path.write_text(custom_header + hist_block_ws + custom_footer, encoding="utf-8")
+
+    prev_1 = te.upgrade_tasks_tree(tasks_dir, dry_run=True, skip_git_config=True)
+    assert prev_1["ok"] is True
+    assert prev_1["manual_review_sections"] == []
+    assert str(agents_path) in prev_1["updated"]
+
+    app_1 = te.upgrade_tasks_tree(
+        tasks_dir,
+        dry_run=False,
+        apply=True,
+        expect_plan_hash=prev_1["plan_hash"],
+        skip_git_config=True,
+    )
+    assert app_1["ok"] is True
+    assert app_1["applied"] is True
+    assert app_1["manual_review_sections"] == []
+    assert str(agents_path) in app_1["updated"]
+
+    expected_managed = te.build_managed_tasks_agents_block(tasks_dir=tasks_dir, existing_agents=custom_header)
+    upgraded_text = agents_path.read_text(encoding="utf-8")
+    assert upgraded_text == custom_header + expected_managed + custom_footer
+    assert "Effective project content languages:" in upgraded_text
+
+    # 2. User edit inside the managed block -> kept byte-for-byte, reported for manual review, not upgraded
+    user_edited_text = upgraded_text.replace(
+        "## task-pipeline managed convention\n",
+        "## task-pipeline managed convention\n\n- **Team Custom Rule Inside Managed Block:** Never close tasks on Fridays.\n",
+    )
+    agents_path.write_text(user_edited_text, encoding="utf-8")
+    before_bytes = agents_path.read_bytes()
+
+    with pytest.raises(te.TasksAgentsMdManagedBlockModifiedError):
+        te.render_upgraded_agents_md(user_edited_text, tasks_dir=tasks_dir)
+
+    prev_2 = te.upgrade_tasks_tree(tasks_dir, dry_run=True, skip_git_config=True)
+    assert prev_2["ok"] is True
+    assert str(agents_path) not in prev_2["updated"]
+    assert str(agents_path) not in prev_2["upgraded_files"]
+    assert not any(op["path"] == "AGENTS.md" for op in prev_2["plan"])
+    assert prev_2["manual_review_sections"] == ["tasks/AGENTS.md <!-- ai-orch:managed begin --> block"]
+    assert any("manual review" in w.lower() for w in prev_2["warnings"])
+    assert agents_path.read_bytes() == before_bytes
+
+    # Even if another file in tasks/ needs upgrading (e.g. .gitignore), tasks/AGENTS.md is untouched
+    (tasks_dir / ".gitignore").unlink()
+    prev_3 = te.upgrade_tasks_tree(tasks_dir, dry_run=True, skip_git_config=True)
+    assert prev_3["ok"] is True
+    assert [op["path"] for op in prev_3["plan"]] == [".gitignore"]
+    assert prev_3["manual_review_sections"] == ["tasks/AGENTS.md <!-- ai-orch:managed begin --> block"]
+
+    app_3 = te.upgrade_tasks_tree(
+        tasks_dir,
+        dry_run=False,
+        apply=True,
+        expect_plan_hash=prev_3["plan_hash"],
+        skip_git_config=True,
+    )
+    assert app_3["ok"] is True
+    assert app_3["applied"] is True
+    assert app_3["manual_review_sections"] == ["tasks/AGENTS.md <!-- ai-orch:managed begin --> block"]
+    assert any("manual review" in w.lower() for w in app_3["warnings"])
+    assert (tasks_dir / ".gitignore").is_file()
+    assert agents_path.read_bytes() == before_bytes
+
 
 
 

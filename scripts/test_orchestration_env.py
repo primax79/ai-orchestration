@@ -6790,6 +6790,80 @@ def test_19_3_bounce2_b5_manifest_write_failure_in_trash_path_leaves_no_orphan_a
     assert after_fail_2_snapshot == before_proj_snapshot
 
 
+def test_t090_upgrade_project_and_doctor_protect_user_edited_tasks_agents_md_block(
+    tmp_path: pathlib.Path,
+) -> None:
+    """T090:
+    1. When `tasks/AGENTS.md` has an unmodified historical managed block, `ai-orch upgrade` updates
+       it normally to the current rendering.
+    2. When `tasks/AGENTS.md` has a user edit inside `<!-- ai-orch:managed begin --> ... <!-- ai-orch:managed end -->`,
+       `ai-orch doctor` and `ai-orch upgrade` report `tasks/AGENTS.md <!-- ai-orch:managed begin --> block`
+       in `manual_review_sections` and `warnings`, keep `tasks/AGENTS.md` byte-for-byte untouched, and
+       still apply other project upgrade steps.
+    """
+    import orchestration_env as oe
+
+    te = oe._load_tasks_engine()
+    assert te is not None
+
+    # 1. Unmodified historical managed block in tasks/AGENTS.md is updated normally
+    fake_home_1 = tmp_path / "home1"
+    fake_home_1.mkdir()
+    proj_1 = tmp_path / "proj_unmodified_tasks_agents"
+    create_2026_10_17_fixture(proj_1)
+
+    user_prefix = "# tasks/ — Project Custom Convention\n\nKeep this header.\n\n"
+    hist_managed = (
+        f"{te.MANAGED_AGENTS_BEGIN}\n## task-pipeline managed convention\n\n"
+        f"{te.HISTORICAL_MANAGED_TASKS_AGENTS_BODIES[9]}\n{te.MANAGED_AGENTS_END}\n"
+    )
+    (proj_1 / "tasks" / "AGENTS.md").write_text(user_prefix + hist_managed, encoding="utf-8")
+
+    prev_1 = oe.upgrade_project(proj_1, home=fake_home_1)
+    assert prev_1["ok"] is True
+    assert prev_1["manual_review_sections"] == []
+    assert any(op["step"] == "tasks-agents-md" for op in prev_1["plan"])
+
+    app_1 = oe.upgrade_project(proj_1, home=fake_home_1, apply=True, expect_hash=prev_1["plan_hash"])
+    assert app_1["ok"] is True
+    assert app_1["applied"] is True
+    expected_managed_1 = te.build_managed_tasks_agents_block(tasks_dir=proj_1 / "tasks", existing_agents=user_prefix)
+    assert (proj_1 / "tasks" / "AGENTS.md").read_text(encoding="utf-8") == user_prefix + expected_managed_1
+
+    # 2. User-edited managed block in tasks/AGENTS.md is kept byte-for-byte and reported for manual review
+    fake_home_2 = tmp_path / "home2"
+    fake_home_2.mkdir()
+    proj_2 = tmp_path / "proj_edited_tasks_agents"
+    create_2026_10_17_fixture(proj_2)
+
+    edited_managed = hist_managed.replace(
+        "## task-pipeline managed convention\n",
+        "## task-pipeline managed convention\n\n- **User Custom Addition Inside Managed Block:** Custom project note.\n",
+    )
+    edited_tasks_agents_full = user_prefix + edited_managed
+    tasks_agents_2 = proj_2 / "tasks" / "AGENTS.md"
+    tasks_agents_2.write_text(edited_tasks_agents_full, encoding="utf-8")
+    before_tasks_agents_bytes = tasks_agents_2.read_bytes()
+
+    doc_2 = oe.inspect_project_doctor(proj_2, home=fake_home_2)
+    assert "tasks/AGENTS.md <!-- ai-orch:managed begin --> block" in doc_2["checks"]["agents_md"]["manual_review_sections"]
+
+    prev_2 = oe.upgrade_project(proj_2, home=fake_home_2)
+    assert prev_2["ok"] is True
+    assert not any(op["step"] == "tasks-agents-md" for op in prev_2["plan"])
+    assert "tasks/AGENTS.md <!-- ai-orch:managed begin --> block" in prev_2["manual_review_sections"]
+    assert any("tasks/AGENTS.md" in w and "manual review" in w.lower() for w in prev_2["warnings"])
+    assert tasks_agents_2.read_bytes() == before_tasks_agents_bytes
+
+    app_2 = oe.upgrade_project(proj_2, home=fake_home_2, apply=True, expect_hash=prev_2["plan_hash"])
+    assert app_2["ok"] is True
+    assert app_2["applied"] is True
+    assert "tasks/AGENTS.md <!-- ai-orch:managed begin --> block" in app_2["manual_review_sections"]
+    assert any("tasks/AGENTS.md" in w and "manual review" in w.lower() for w in app_2["warnings"])
+    assert tasks_agents_2.read_bytes() == before_tasks_agents_bytes
+
+
+
 
 
 

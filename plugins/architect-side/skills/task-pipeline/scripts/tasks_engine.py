@@ -688,6 +688,295 @@ def resolve_project_languages(
     }
 
 
+class TasksAgentsMdManagedBlockModifiedError(ValueError):
+    """Raised when the <!-- ai-orch:managed begin --> block in tasks/AGENTS.md
+    contains user edits (does not match current or historical renderings) and cannot be replaced."""
+
+
+# Historical renderings of CANONICAL_TASKS_AGENTS_MD body (without the top `# tasks/ convention ...` line)
+# across git history from 2026-10-16 (commit 2e5a6c2) through 2026-10-28 (commit 5101a75).
+HISTORICAL_MANAGED_TASKS_AGENTS_BODIES: tuple[str, ...] = (
+    # 1. 2026-10-16 commit 2e5a6c2
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`).
+
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `NN.T` sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids:** `T###`, unique across `done/` too; reserve the id by creating the file immediately.
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`.
+- **States:** `open`, `in progress`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.""",
+    # 2. 2026-10-17 commit 949d63a
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`).
+
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `NN.T` sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids:** `T###`, unique across `done/` too; reserve the id by creating the file immediately.
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`, `branch`, `worktree`, `run-id`.
+- **States:** `open`, `in progress`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.""",
+    # 3. 2026-10-17 commit 5eaa436
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`).
+
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `NN.T` sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids:** `T###`, unique across `done/` too; reserve the id by creating the file immediately.
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`, `branch`, `worktree`, `run-id`.
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.""",
+    # 4. 2026-10-18 commit 92d9875
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`).
+
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `NN.T` sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids:** `T###`, unique across `done/` too; reserve the id by creating the file immediately.
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`, `size`, `branch`, `worktree`, `run-id`.
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.""",
+    # 5. 2026-10-18 commit 3124728
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`).
+
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `NN.T` sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids:** `T###`, unique across `done/` too; reserve the id by creating the file immediately.
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`.
+- **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`); size defaults to `XS`; body section `## What` only.
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.""",
+    # 6. 2026-10-21 commit 92230c6
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`).
+
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `NN.T` sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids:** `T###`, unique across `done/` too; reserve the id by creating the file immediately.
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up`, `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions: `profile`, `verification-mode`, `verifier`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`.
+- **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`); size defaults to `XS`; body section `## What` only.
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+- **Tooling feedback:** report friction, defects, or improvements in `ai-orch` and its tooling at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."`. Do not work around tooling issues silently; maintainers triage notes into tasks.""",
+    # 7. 2026-10-21 commit 64fd6cb
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`). Self-contained so this repository's `tasks/` tree works with or without the VS Code extension, the broker MCP server, or the `ai-orch` CLI installed.
+
+- **Three progressive ways to use `tasks/` (no hard dependency on extension or MCP):**
+  1. **Plain Markdown + Git (zero install — no extension, no MCP, no CLI required):** Every file under `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `AGENTS.md`, `NN-<slug>/plan.md`, `<category>/T###-<slug>.md`, `questions/Q###-<slug>.md`, `_inbox/`) is plain Markdown. Create, edit, transition, and close (`git mv` to `tasks/done/<category>/`) files directly following the format rules below, and update the corresponding row inside the `<!-- ai-orch:generated ... -->` markers in `00-INDEX.md`.
+  2. **Standalone CLI (no extension or MCP required):** Run `~/.local/bin/ai-orch tasks …` (or the stdlib-only `python3 <path-to>/tasks_engine.py …`) to create, transition, validate (`tasks validate`), and sync (`tasks sync-index --apply`).
+  3. **Broker MCP / Web UI / VS Code Extension (when installed):** Use the `ai-orchestration` MCP tools (`tasks.*`, `questions.*`, `inbox.add_note`) or the UI dashboard.
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `### NN.T - <title>` followed by `- **Status:** \\`<state>\\` · ...`, sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
+- **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+- **Tooling feedback:** when `ai-orch` is installed, report friction, defects, or improvements at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."` (without `ai-orch`, drop a Markdown note in `tasks/_inbox/to-analyze/`). Do not work around tooling issues silently; maintainers triage notes into tasks.""",
+    # 8. 2026-10-21 commit 6656e56
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`). Self-contained so this repository's `tasks/` tree works with or without the VS Code extension, the broker MCP server, or the `ai-orch` CLI installed.
+
+- **Three progressive ways to use `tasks/` (no hard dependency on extension or MCP):**
+  1. **Plain Markdown + Git (zero install — no extension, no MCP, no CLI required):** Every file under `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `AGENTS.md`, `NN-<slug>/plan.md`, `<category>/T###-<slug>.md`, `questions/Q###-<slug>.md`, `_inbox/`) is plain Markdown. Create, edit, transition, and close (`git mv` to `tasks/done/<category>/`) files directly following the format rules below, and update the corresponding row inside the `<!-- ai-orch:generated ... -->` markers in `00-INDEX.md`.
+  2. **Standalone CLI (no extension or MCP required):** Run `~/.local/bin/ai-orch tasks …` (or the stdlib-only `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py …` / `python3 <path-to>/tasks_engine.py …`) to create, transition, validate (`tasks validate`), and sync (`tasks sync-index --apply`).
+  3. **Broker MCP / Web UI / VS Code Extension (when installed):** Use the `ai-orchestration` MCP tools (`tasks.*`, `questions.*`, `inbox.add_note`) or the UI dashboard.
+- **Cross-framework skill loading (any AI assistant / framework):** Claude Code loads `.claude/skills/` and Kilo Code loads `.kilo/skills/`. Any other AI coding framework or assistant (Codex, Gemini CLI, Copilot, Cursor, etc.) that reads `AGENTS.md` without native `.claude/skills/` discovery MUST read the project-versioned orchestration skills directly from `.claude/skills/<skill>/SKILL.md` (specifically `.claude/skills/task-pipeline/SKILL.md`, `.claude/skills/orchestration-workflow/SKILL.md`, `.claude/skills/task-spec-authoring/SKILL.md`, `.claude/skills/executor-contract/SKILL.md`) and use `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py` when `ai-orch` is not on `PATH`.
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `### NN.T - <title>` followed by `- **Status:** \\`<state>\\` · ...`, sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
+- **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+- **Tooling feedback:** when `ai-orch` is installed, report friction, defects, or improvements at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."` (without `ai-orch`, drop a Markdown note in `tasks/_inbox/to-analyze/`). Do not work around tooling issues silently; maintainers triage notes into tasks.""",
+    # 9. 2026-10-21 commit 34c76a7
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`). Self-contained so this repository's `tasks/` tree works with or without the VS Code extension, the broker MCP server, or the `ai-orch` CLI installed.
+
+- **Three progressive ways to use `tasks/` (no hard dependency on extension or MCP):**
+  1. **Plain Markdown + Git (zero install — no extension, no MCP, no CLI required):** Every file under `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `AGENTS.md`, `NN-<slug>/plan.md`, `<category>/T###-<slug>.md`, `questions/Q###-<slug>.md`, `_inbox/`) is plain Markdown. Create, edit, transition, and close (`git mv` to `tasks/done/<category>/`) files directly following the format rules below, and update the corresponding row inside the `<!-- ai-orch:generated ... -->` markers in `00-INDEX.md`.
+  2. **Standalone CLI (no extension or MCP required):** Run `~/.local/bin/ai-orch tasks …` (or the stdlib-only `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py …` / `python3 <path-to>/tasks_engine.py …`) to create, transition, validate (`tasks validate`), and sync (`tasks sync-index --apply`).
+  3. **Broker MCP / Web UI / VS Code Extension (when installed):** Use the `ai-orchestration` MCP tools (`tasks.*`, `questions.*`, `inbox.add_note`) or the UI dashboard.
+- **Cross-framework skill loading (any AI assistant / framework):** Claude Code loads `.claude/skills/` and Kilo Code loads `.kilo/skills/`. Any other AI coding framework or assistant (Codex, Gemini CLI, Copilot, Cursor, etc.) that reads `AGENTS.md` without native `.claude/skills/` discovery MUST read the project-versioned orchestration skills directly from `.claude/skills/<skill>/SKILL.md` (specifically `.claude/skills/task-pipeline/SKILL.md`, `.claude/skills/orchestration-workflow/SKILL.md`, `.claude/skills/task-spec-authoring/SKILL.md`, `.claude/skills/executor-contract/SKILL.md`) and use `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py` when `ai-orch` is not on `PATH`.
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `### NN.T - <title>` followed by `- **Status:** \\`<state>\\` · ...`, sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
+- **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+- **Tooling feedback:** when `ai-orch` is installed, report friction, defects, or improvements at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."` (without `ai-orch`, drop a Markdown note in `tasks/_inbox/to-analyze/`). Do not work around tooling issues silently; maintainers triage notes into tasks.""",
+    # 10. 2026-10-25 commit 1a78516 (T050 initial)
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`). Self-contained so this repository's `tasks/` tree works with or without the VS Code extension, the broker MCP server, or the `ai-orch` CLI installed.
+
+- **Three progressive ways to use `tasks/` (no hard dependency on extension or MCP):**
+  1. **Plain Markdown + Git (zero install — no extension, no MCP, no CLI required):** Every file under `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `AGENTS.md`, `NN-<slug>/plan.md`, `<category>/T###-<slug>.md`, `questions/Q###-<slug>.md`, `_inbox/`) is plain Markdown. Create, edit, transition, and close (`git mv` to `tasks/done/<category>/`) files directly following the format rules below, and update the corresponding row inside the `<!-- ai-orch:generated ... -->` markers in `00-INDEX.md`.
+  2. **Standalone CLI (no extension or MCP required):** Run `~/.local/bin/ai-orch tasks …` (or the stdlib-only `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py …` / `python3 <path-to>/tasks_engine.py …`) to create, transition, validate (`tasks validate`), and sync (`tasks sync-index --apply`).
+  3. **Broker MCP / Web UI / VS Code Extension (when installed):** Use the `ai-orchestration` MCP tools (`tasks.*`, `questions.*`, `inbox.add_note`) or the UI dashboard.
+- **Cross-framework skill loading (any AI assistant / framework):** Claude Code loads `.claude/skills/` and Kilo Code loads `.kilo/skills/`. Any other AI coding framework or assistant (Codex, Gemini CLI, Copilot, Cursor, etc.) that reads `AGENTS.md` without native `.claude/skills/` discovery MUST read the project-versioned orchestration skills directly from `.claude/skills/<skill>/SKILL.md` (specifically `.claude/skills/task-pipeline/SKILL.md`, `.claude/skills/orchestration-workflow/SKILL.md`, `.claude/skills/task-spec-authoring/SKILL.md`, `.claude/skills/executor-contract/SKILL.md`) and use `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py` when `ai-orch` is not on `PATH`.
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `### NN.T - <title>` followed by `- **Status:** \\`<state>\\` · ...`, sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Per-project extra fields after `handoff` can be declared via `[tasks] extension_fields = ["area"]` in `orchestration.toml` (or `.ai-orchestration.local.toml`) or a fenced `toml` block in `tasks/AGENTS.md`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
+- **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+- **Tooling feedback:** when `ai-orch` is installed, report friction, defects, or improvements at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."` (without `ai-orch`, drop a Markdown note in `tasks/_inbox/to-analyze/`). Do not work around tooling issues silently; maintainers triage notes into tasks.""",
+    # 11. 2026-10-25 commit 92700d8 (T050 bounce fix)
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`). Self-contained so this repository's `tasks/` tree works with or without the VS Code extension, the broker MCP server, or the `ai-orch` CLI installed.
+
+- **Three progressive ways to use `tasks/` (no hard dependency on extension or MCP):**
+  1. **Plain Markdown + Git (zero install — no extension, no MCP, no CLI required):** Every file under `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `AGENTS.md`, `NN-<slug>/plan.md`, `<category>/T###-<slug>.md`, `questions/Q###-<slug>.md`, `_inbox/`) is plain Markdown. Create, edit, transition, and close (`git mv` to `tasks/done/<category>/`) files directly following the format rules below, and update the corresponding row inside the `<!-- ai-orch:generated ... -->` markers in `00-INDEX.md`.
+  2. **Standalone CLI (no extension or MCP required):** Run `~/.local/bin/ai-orch tasks …` (or the stdlib-only `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py …` / `python3 <path-to>/tasks_engine.py …`) to create, transition, validate (`tasks validate`), and sync (`tasks sync-index --apply`).
+  3. **Broker MCP / Web UI / VS Code Extension (when installed):** Use the `ai-orchestration` MCP tools (`tasks.*`, `questions.*`, `inbox.add_note`) or the UI dashboard.
+- **Cross-framework skill loading (any AI assistant / framework):** Claude Code loads `.claude/skills/` and Kilo Code loads `.kilo/skills/`. Any other AI coding framework or assistant (Codex, Gemini CLI, Copilot, Cursor, etc.) that reads `AGENTS.md` without native `.claude/skills/` discovery MUST read the project-versioned orchestration skills directly from `.claude/skills/<skill>/SKILL.md` (specifically `.claude/skills/task-pipeline/SKILL.md`, `.claude/skills/orchestration-workflow/SKILL.md`, `.claude/skills/task-spec-authoring/SKILL.md`, `.claude/skills/executor-contract/SKILL.md`) and use `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py` when `ai-orch` is not on `PATH`.
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `### NN.T - <title>` followed by `- **Status:** \\`<state>\\` · ...`, sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Per-project extra fields after `handoff` can be declared via `[tasks] extension_fields = ["area"]` in `orchestration.toml` (or `.ai-orchestration.local.toml`), a fenced `toml` block in `tasks/AGENTS.md`, or a prose/bullet line ``Extra header fields: `area` `` (with or without bold, comma or `and` separated) in `tasks/AGENTS.md`. Required body sections: `## Goal`, `## Steps`, `## Verification`.
+- **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+- **Tooling feedback:** when `ai-orch` is installed, report friction, defects, or improvements at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."` (without `ai-orch`, drop a Markdown note in `tasks/_inbox/to-analyze/`). Do not work around tooling issues silently; maintainers triage notes into tasks.""",
+    # 12. 2026-10-27 commit 3c15315 (T066 content languages)
+    """Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pipeline/`). Self-contained so this repository's `tasks/` tree works with or without the VS Code extension, the broker MCP server, or the `ai-orch` CLI installed.
+
+- **Three progressive ways to use `tasks/` (no hard dependency on extension or MCP):**
+  1. **Plain Markdown + Git (zero install — no extension, no MCP, no CLI required):** Every file under `tasks/` (`00-INDEX.md`, `CONTEXT.md`, `AGENTS.md`, `NN-<slug>/plan.md`, `<category>/T###-<slug>.md`, `questions/Q###-<slug>.md`, `_inbox/`) is plain Markdown. Create, edit, transition, and close (`git mv` to `tasks/done/<category>/`) files directly following the format rules below, and update the corresponding row inside the `<!-- ai-orch:generated ... -->` markers in `00-INDEX.md`.
+  2. **Standalone CLI (no extension or MCP required):** Run `~/.local/bin/ai-orch tasks …` (or the stdlib-only `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py …` / `python3 <path-to>/tasks_engine.py …`) to create, transition, validate (`tasks validate`), and sync (`tasks sync-index --apply`).
+  3. **Broker MCP / Web UI / VS Code Extension (when installed):** Use the `ai-orchestration` MCP tools (`tasks.*`, `questions.*`, `inbox.add_note`) or the UI dashboard.
+- **Cross-framework skill loading (any AI assistant / framework):** Claude Code loads `.claude/skills/` and Kilo Code loads `.kilo/skills/`. Any other AI coding framework or assistant (Codex, Gemini CLI, Copilot, Cursor, etc.) that reads `AGENTS.md` without native `.claude/skills/` discovery MUST read the project-versioned orchestration skills directly from `.claude/skills/<skill>/SKILL.md` (specifically `.claude/skills/task-pipeline/SKILL.md`, `.claude/skills/orchestration-workflow/SKILL.md`, `.claude/skills/task-spec-authoring/SKILL.md`, `.claude/skills/executor-contract/SKILL.md`) and use `python3 .claude/skills/task-pipeline/scripts/tasks_engine.py` when `ai-orch` is not on `PATH`.
+- **Pipeline for large multi-task initiatives:** `_inbox/to-analyze/` → `specs/<slug>.md` → `NN-<slug>/plan.md` (tasks `### NN.T - <title>` followed by `- **Status:** \\`<state>\\` · ...`, sized one-per-commit, inline or expanded) → `done/NN-<slug>/` (with `summary.md`) → `merged/NN-<slug>/`.
+- **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
+- **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
+- **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
+- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Per-project extra fields after `handoff` can be declared via `[tasks] extension_fields = ["area"]` in `orchestration.toml` (or `.ai-orchestration.local.toml`), a fenced `toml` block in `tasks/AGENTS.md`, or a prose/bullet line ``Extra header fields: `area` `` (with or without bold, comma or `and` separated) in `tasks/AGENTS.md`. Required body sections: `## Goal`, `## Steps`, `## Verification`. Section headings (`## Goal`, `## Steps`, `## Verification`, `## Log`; question `## Context`, `## Options`, `## Answer`, `## Notes`; use-case `## Description & Business Value`, `## Preconditions`, `## Scenario / Interaction Steps`, `## Automated Verification Command`, `## Acceptance Criteria`, `## AI Validation Log`) and header field names are fixed English keywords: never translate them.
+- **Content languages (per-project, versioned in `tasks/AGENTS.md`):** Declare the prose language for tasks, questions to the owner, and use cases in a fenced `toml` block in `tasks/AGENTS.md`: `[tasks] language = "en"`, `[questions] language = "it"`, `[use_cases] language = "en"` (use cases follow `[tasks] language` unless `[use_cases] language` is set; default `en`). Language settings govern only the prose content written by sessions; section headings and header field names are fixed English keywords and are never translated.
+- **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
+- **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
+- **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
+- **Tooling feedback:** when `ai-orch` is installed, report friction, defects, or improvements at once with `ai-orch feedback --kind bug|feature|idea|request --title "..." --body "..."` (without `ai-orch`, drop a Markdown note in `tasks/_inbox/to-analyze/`). Do not work around tooling issues silently; maintainers triage notes into tasks.""",
+    # 13. 2026-10-28 commit 5101a75 (current)
+    _MANAGED_AGENTS_BODY,
+)
+
+
+def _collect_known_tasks_agents_managed_blocks(
+    tasks_dir: pathlib.Path | None = None,
+    existing_agents: str | None = None,
+    candidate_block: str | None = None,
+) -> list[str]:
+    """Collect current and historical managed block renderings for tasks/AGENTS.md."""
+    lang_suffixes: list[str] = [""]
+    info = resolve_project_languages(tasks_dir=tasks_dir, agents_md_text=existing_agents)
+    for t_lang, q_lang, uc_lang in (
+        (info["tasks"], info["questions"], info["use_cases"]),
+        ("en", "en", "en"),
+        ("it", "it", "it"),
+        ("it", "it", "en"),
+        ("en", "it", "en"),
+    ):
+        sfx = (
+            f"\n- **Effective project content languages:** Content language: "
+            f"tasks `{t_lang}`, questions `{q_lang}`, use cases `{uc_lang}`. "
+            f"Section headings and header field names are fixed English keywords: never translate them."
+        )
+        if sfx not in lang_suffixes:
+            lang_suffixes.append(sfx)
+    if candidate_block:
+        m_lang = re.search(
+            r"\n(-\s+\*\*Effective project content languages:\*\*\s+Content language:\s+"
+            r"tasks\s+`([a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*)`,\s+"
+            r"questions\s+`([a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*)`,\s+"
+            r"use cases\s+`([a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*)`\.\s+"
+            r"Section headings and header field names are fixed English keywords: never translate them\.)",
+            candidate_block,
+        )
+        if m_lang:
+            cand_sfx = "\n" + m_lang.group(1)
+            if cand_sfx not in lang_suffixes:
+                lang_suffixes.append(cand_sfx)
+
+    blocks: list[str] = []
+    for body in HISTORICAL_MANAGED_TASKS_AGENTS_BODIES:
+        for sfx in lang_suffixes:
+            blocks.append(
+                f"{MANAGED_AGENTS_BEGIN}\n## task-pipeline managed convention\n\n{body}{sfx}\n{MANAGED_AGENTS_END}\n"
+            )
+    return blocks
+
+
+def _tasks_agents_managed_block_matches_known_rendering(
+    block_text: str,
+    current_block: str,
+    tasks_dir: pathlib.Path | None = None,
+    existing_agents: str | None = None,
+) -> bool:
+    """Reuse orchestration_config._managed_block_matches_known_rendering to verify that
+    a tasks/AGENTS.md managed block matches the current rendering or a historical one."""
+    known_blocks = _collect_known_tasks_agents_managed_blocks(
+        tasks_dir=tasks_dir,
+        existing_agents=existing_agents,
+        candidate_block=block_text,
+    )
+    if orchestration_config is not None and hasattr(orchestration_config, "_managed_block_matches_known_rendering"):
+        return bool(
+            orchestration_config._managed_block_matches_known_rendering(
+                block_text,
+                current_block=current_block,
+                historical_blocks=known_blocks,
+            )
+        )
+    # Fallback when running tasks_engine.py standalone without orchestration_config available
+    def _norm(txt: str) -> str:
+        s = txt.strip()
+        m_b = re.match(
+            r"^<!--\s*ai-orch:managed\s+begin\s*-->(.*)<!--\s*ai-orch:managed\s+end\s*-->\Z",
+            s,
+            flags=re.DOTALL,
+        )
+        if m_b:
+            s = m_b.group(1)
+        s = s.replace("\r\n", "\n").replace("\r", "\n")
+        return "\n".join(re.sub(r"[ \t]+", " ", line).rstrip(" \t") for line in s.split("\n")).strip()
+
+    norm_cand = _norm(block_text)
+    if not norm_cand:
+        return False
+    if norm_cand == _norm(current_block):
+        return True
+    return any(norm_cand == _norm(kb) for kb in known_blocks)
+
+
 def build_managed_tasks_agents_block(
     tasks_dir: pathlib.Path | None = None,
     existing_agents: str | None = None,
@@ -708,7 +997,9 @@ def build_managed_tasks_agents_block(
 def render_upgraded_agents_md(existing_agents: str, tasks_dir: pathlib.Path | None = None) -> str:
     """Render tasks/AGENTS.md preserving all project-specific content outside managed markers.
     If existing_agents is empty, returns CANONICAL_TASKS_AGENTS_MD with the managed block wrapped.
-    If existing_agents already has markers, refreshes only the block between markers.
+    If existing_agents already has markers, refreshes only the block between markers provided
+    its content matches the current or a known historical rendering; otherwise raises
+    TasksAgentsMdManagedBlockModifiedError so user edits inside markers are never overwritten.
     Otherwise, appends the managed block at the end while keeping existing content byte-for-byte.
     """
     managed_block = build_managed_tasks_agents_block(tasks_dir=tasks_dir, existing_agents=existing_agents)
@@ -720,6 +1011,17 @@ def render_upgraded_agents_md(existing_agents: str, tasks_dir: pathlib.Path | No
     )
     m = pat.search(existing_agents)
     if m:
+        if not _tasks_agents_managed_block_matches_known_rendering(
+            m.group(0),
+            current_block=managed_block,
+            tasks_dir=tasks_dir,
+            existing_agents=existing_agents,
+        ):
+            raise TasksAgentsMdManagedBlockModifiedError(
+                "Refusing to replace canonical <!-- ai-orch:managed begin --> block in tasks/AGENTS.md: "
+                "block content does not match the current or any known historical rendering "
+                "(user edits detected; manual review required)."
+            )
         replacement = managed_block
         if not existing_agents[m.start():m.end()].endswith("\n"):
             replacement = replacement.rstrip("\n")
@@ -21363,7 +21665,15 @@ def upgrade_tasks_tree(
             # 1. Update tasks/AGENTS.md (managed block, never overwrite project rules)
             agents_md = tasks_dir / "AGENTS.md"
             existing_agents = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
-            new_agents = render_upgraded_agents_md(existing_agents, tasks_dir=tasks_dir)
+            manual_review_sections: list[str] = []
+            extra_warnings: list[str] = []
+            try:
+                new_agents = render_upgraded_agents_md(existing_agents, tasks_dir=tasks_dir)
+            except TasksAgentsMdManagedBlockModifiedError as exc:
+                new_agents = existing_agents
+                canon_label = "tasks/AGENTS.md <!-- ai-orch:managed begin --> block"
+                manual_review_sections.append(canon_label)
+                extra_warnings.append(f"tasks/AGENTS.md: {exc} ({canon_label})")
             if existing_agents != new_agents:
                 agents_after_hash = hashlib.sha256(new_agents.encode("utf-8")).hexdigest()
                 if not agents_md.is_file():
@@ -21803,7 +22113,7 @@ def upgrade_tasks_tree(
 
             # 5. Inspect tree for validation summary (pre-existing task errors become warnings so upgrade exits 0)
             val_errors, val_warnings, emergent, initiatives = validate_tasks_tree(tasks_dir)
-            combined_warnings = list(val_warnings) + list(val_errors)
+            combined_warnings = list(extra_warnings) + list(val_warnings) + list(val_errors)
 
             return {
                 "ok": True,
@@ -21819,6 +22129,7 @@ def upgrade_tasks_tree(
                 "emergent_count": len(emergent),
                 "initiative_count": len(initiatives),
                 "legacy_plans": legacy_plans,
+                "manual_review_sections": manual_review_sections,
                 "errors": [],
                 "validation_errors": val_errors,
                 "warnings": combined_warnings,
