@@ -95,6 +95,7 @@ OPTIONAL_EXTENSION_FIELDS: tuple[str, ...] = (
     "conditions",
     "waiting-on",
     "waiting_on",
+    "tracker",
     "short",
 )
 OPTIONAL_HEADER_FIELDS: tuple[str, ...] = OPTIONAL_EXTENSION_FIELDS
@@ -118,6 +119,7 @@ MICRO_HEADER_FIELDS: tuple[str, ...] = (
     "conditions",
     "waiting-on",
     "waiting_on",
+    "tracker",
     "short",
 )
 
@@ -309,7 +311,7 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Emergent tasks (`<category>/T###-<slug>`): Capture first, then continue.** Work that appears mid-session becomes a task file at once; it does not stay in the session context.
 - **Ids & citations:** `T###`, unique across `done/` too; reserve the id by creating the file immediately. Always cite tasks and questions as `ID (short title)` (or `project/ID (short title)` across projects).
 - **Layout:** `tasks/<category>/T###-<slug>.md` for small tasks; `T###-<slug>/{README,CONTEXT,PROGRESS}.md` when there is context. Each category has a `README.md` and `notes/`.
-- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Per-project extra fields after `handoff` can be declared via `[tasks] extension_fields = ["area"]` in `orchestration.toml` (or `.ai-orchestration.local.toml`), a fenced `toml` block in `tasks/AGENTS.md`, or a prose/bullet line ``Extra header fields: `area` `` (with or without bold, comma or `and` separated) in `tasks/AGENTS.md`. Required body sections: `## Goal`, `## Steps`, `## Verification`. Section headings (`## Goal`, `## Steps`, `## Verification`, `## Log`; question `## Context`, `## Options`, `## Answer`, `## Notes`; use-case `## Description & Business Value`, `## Preconditions`, `## Scenario / Interaction Steps`, `## Automated Verification Command`, `## Acceptance Criteria`, `## AI Validation Log`) and header field names are fixed English keywords: never translate them.
+- **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `tracker` (ticket URLs), `short`, `conditions`. Per-project extra fields after `handoff` can be declared via `[tasks] extension_fields = ["area"]` in `orchestration.toml` (or `.ai-orchestration.local.toml`), a fenced `toml` block in `tasks/AGENTS.md`, or a prose/bullet line ``Extra header fields: `area` `` (with or without bold, comma or `and` separated) in `tasks/AGENTS.md`. Required body sections: `## Goal`, `## Steps`, `## Verification`. Section headings (`## Goal`, `## Steps`, `## Verification`, `## Log`; question `## Context`, `## Options`, `## Answer`, `## Notes`; use-case `## Description & Business Value`, `## Preconditions`, `## Scenario / Interaction Steps`, `## Automated Verification Command`, `## Acceptance Criteria`, `## AI Validation Log`) and header field names are fixed English keywords: never translate them.
 - **Content languages (per-project, versioned in `tasks/AGENTS.md`):** Declare the prose language for tasks, questions to the owner, and use cases in a fenced `toml` block in `tasks/AGENTS.md`: `[tasks] language = "en"`, `[questions] language = "it"`, `[use_cases] language = "en"` (use cases follow `[tasks] language` unless `[use_cases] language` is set; default `en`). Language settings govern only the prose content written by sessions; section headings and header field names are fixed English keywords and are never translated.
 - **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
 - **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `tracked` (`tracked (<ref>, <owner>)`: work followed on an external tracker and owned by someone else, closed when the ticket closes), `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
@@ -865,6 +867,51 @@ def parse_tracked_state(raw_state: str | None) -> dict[str, str | None] | None:
     inner = m.group(1).strip()
     ref, _, owner = inner.partition(",")
     return {"ref": ref.strip() or None, "owner": owner.strip() or None}
+
+
+TRACKER_URL_RE = re.compile(r"^https?://\S+$")
+TRACKER_MD_LINK_RE = re.compile(r"^\[([^\]]+)\]\((\S+)\)$")
+
+
+def parse_tracker_field(raw_val: Any) -> tuple[list[dict[str, str | None]], list[str]]:
+    """Parse the `tracker` header: comma-separated full ticket URLs, each optionally a Markdown link.
+
+    `https://host/issues/34152, [#34153](https://host/issues/34153)` ->
+    ([{'url': 'https://host/issues/34152', 'label': None}, {'url': 'https://host/issues/34153', 'label': '#34153'}], []).
+    The second element lists the items that are not a full http(s) URL (e.g. a bare `#34152`).
+    """
+    if raw_val is None:
+        return [], []
+    text = str(raw_val).strip()
+    if not text or text == "-":
+        return [], []
+    links: list[dict[str, str | None]] = []
+    invalid: list[str] = []
+    # Split on commas outside Markdown link labels
+    items: list[str] = []
+    buf = ""
+    depth = 0
+    for ch in text:
+        if ch == "[":
+            depth += 1
+        elif ch == "]" and depth:
+            depth -= 1
+        if ch == "," and depth == 0:
+            items.append(buf)
+            buf = ""
+        else:
+            buf += ch
+    items.append(buf)
+    for item in (i.strip() for i in items):
+        if not item:
+            continue
+        m_md = TRACKER_MD_LINK_RE.match(item)
+        label, url = (m_md.group(1).strip(), m_md.group(2).strip()) if m_md else (None, item)
+        if TRACKER_URL_RE.match(url):
+            links.append({"url": url, "label": label})
+        else:
+            invalid.append(item)
+    return links, invalid
 
 
 # ---------------------------------------------------------------------------
@@ -9236,6 +9283,8 @@ def parse_emergent_task_file(
         "coordinates_refs": coords_refs,
         "coordinates_raw": raw_coords,
         "moved_to": headers.get("moved-to"),
+        "tracker": parse_tracker_field(headers.get("tracker"))[0],
+        "tracked": parse_tracked_state(raw_state),
         "sections_present": sections_present,
         "found_headings": list(found_headings),
         "step_placeholders": step_placeholders,
@@ -12565,6 +12614,18 @@ def validate_tasks_tree(tasks_dir: pathlib.Path) -> tuple[list[str], list[str], 
                         msg = f"{rel}: task {tid} in waiting state lists question {qid} that is already {q_st} (stale entry)."
                         if msg not in warnings:
                             warnings.append(msg)
+
+            tracker_links, tracker_invalid = parse_tracker_field(task.get("headers", {}).get("tracker"))
+            for bad in tracker_invalid:
+                errors.append(
+                    f"{rel}: task {tid} tracker item {bad!r} is not a full http(s) URL "
+                    f"(write the complete ticket URL, optionally as [label](URL))."
+                )
+            if cstate == "tracked" and not tracker_links and not tracker_invalid:
+                warnings.append(
+                    f"{rel}: task {tid} in tracked state has no tracker links; "
+                    f"add '- tracker: <ticket URL>[, <ticket URL>...]' after handoff."
+                )
 
             # Required sections
             if not is_pointer:
@@ -18942,6 +19003,12 @@ def cmd_show(args: argparse.Namespace) -> int:
     task_data["use_cases"] = list(raw_task_ucs)
     task_data["use_cases_details"] = uc_details
     task_data["linked_use_cases"] = uc_details
+    raw_tracker = (task_data.get("headers") or {}).get("tracker")
+    if raw_tracker is None and task_id in tree:
+        t_node = tree[task_id]
+        raw_tracker = t_node.own_fields.get("tracker") or (t_node.fields.get("tracker") or {}).get("value")
+    task_data["tracker"] = parse_tracker_field(raw_tracker)[0]
+    task_data["tracked"] = parse_tracked_state(task_data.get("state"))
 
     args._last_result = {"ok": True, "task": task_data, "languages": resolve_project_languages(tasks_dir)}
     if getattr(args, "json", False):
@@ -18961,6 +19028,13 @@ def cmd_show(args: argparse.Namespace) -> int:
             print("Use cases: -")
         if task_data.get("waiting_on"):
             print(f"Waiting on: {task_data.get('waiting_on')}")
+        if task_data.get("tracked"):
+            tr = task_data["tracked"]
+            print(f"Tracked: {tr.get('ref') or '-'} (owner: {tr.get('owner') or '-'})")
+        if task_data.get("tracker"):
+            print("Tracker:")
+            for link in task_data["tracker"]:
+                print(f"  - {link['label'] + ': ' if link.get('label') else ''}{link['url']}")
         if task_data.get("external_executor"):
             print(f"External executor: {task_data['external_executor']}")
         if task_data.get("external_dependencies"):

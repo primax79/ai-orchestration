@@ -147,7 +147,7 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T081 (Branch e sblocco dipendenti) | P2 | [tasks_engine: list --branches, sblocco dei dipendenti e validate --branch](engine/T081-tasks-engine-list-branches-sblocco-dei-dipendenti.md) | open | kilo | - |
 | T083 (Rinomina sessione per provider) | P3 | [L'id del provider identifica la sessione: un nome nuovo rinomina il record invece di crearne un altro](engine/T083-l-id-del-provider-identifica-la-sessione-un-nome-n.md) | open | kilo | - |
 | T088 (Test rossi su main) | P1 | [Quattro test rossi su main: duplicati skill non fixable, kill dei discendenti su Linux, runaway stub lento](engine/T088-quattro-test-rossi-su-main-duplicati-skill-non-fix.md) | verified | kilo | - |
-| T091 (Stato tracked) | P0 | [Nuovo stato canonico tracked: lavoro seguito su un tracker esterno](engine/T091-nuovo-stato-canonico-tracked-lavoro-seguito-su-un.md) | open | claude | - |
+| T091 (Stato tracked) | P0 | [Nuovo stato canonico tracked: lavoro seguito su un tracker esterno](engine/T091-nuovo-stato-canonico-tracked-lavoro-seguito-su-un.md) | in progress | claude | - |
 | T092 (Stati per workspace) | P2 | [Stati dei task personalizzati per workspace (configurazione di progetto)](engine/T092-stati-dei-task-personalizzati-per-workspace-config.md) | open | - | - |
 
 ### methodology

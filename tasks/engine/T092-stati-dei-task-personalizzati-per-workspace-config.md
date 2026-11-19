@@ -30,3 +30,7 @@ Permettere a un progetto di dichiarare stati aggiuntivi senza modificare tasks_e
 
 - Test: stato di progetto accettato, stato sconosciuto rifiutato, ridefinizione di uno canonico rifiutata, derivazione tramite maps-to
 - Suite di test del progetto verde
+
+## Log (newest first)
+
+- 2026-11-19, claude: nota dall'implementazione di T091 (Stato tracked). `tracked` è stato aggiunto come stato canonico nel codice, senza punto di estensione. I punti che uno stato di progetto deve toccare sono gli stessi: `CANONICAL_STATES`, `ALLOWED_TRANSITIONS`, la lista base di `normalize_state`, `derive_container_state` (`tracked` deriva come `waiting`: è il caso concreto di `maps-to`), `UC_STAGE_NOT_STARTED_STATES`, `valid_start` e i passi di `tasks close`, la riga di conteggio del registro (`_tracked_summary_line`), `ALLOWED_MODES_PER_STATE` in `scripts/orchestration_runs.py` e gli stati dell'UI.

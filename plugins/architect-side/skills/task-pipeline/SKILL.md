@@ -259,6 +259,10 @@ For any new `feature` or `fix` request, capture follows the **use-case-first** s
   - `kind`: `feature` | `bug` | `fix` | `chore` | `docs` | `investigation` (classification kind; required for microtasks, optional for full tasks);
   - `labels`: free tags matching `[a-z0-9][a-z0-9-]*` (max 24 chars each, comma-separated, e.g. `ui, security`);
   - `branch`, `worktree`, `run-id`, `use-cases`;
+  - `tracker`: the external tickets of the task, comma-separated full URLs, each optionally a
+    Markdown link (`https://support.d4science.org/issues/34152, [#34153](https://support.d4science.org/issues/34153)`);
+    never a bare `#N` (`validate` errors on an item that is not an http(s) URL, and warns when a `tracked`
+    task has none); `tasks show` lists them as links (placed before `short`);
   - `short`: `1–5 words, ≤40 chars, no trailing punctuation` (a concise 3-4 word label stored with the item and used whenever cited; see [Citing tasks and questions: id plus a short title](#citing-tasks-and-questions-id-plus-a-short-title)).
 
   **Microtask Form (`tasks/micro/T###-<slug>.md`):**

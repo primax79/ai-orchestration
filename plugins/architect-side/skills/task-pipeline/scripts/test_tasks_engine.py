@@ -18339,3 +18339,62 @@ def test_t091_tracked_to_dropped_when_ticket_rejected(tmp_path: pathlib.Path) ->
     _write_sample_task(t1, task_id="T001", title="Mirror", state="tracked (Redmine #7, IAM team)", next_up="no")
     res = run_cli("transition", "T001", "dropped: ticket rejected", "--tasks-dir", str(tasks_dir))
     assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
+
+
+def test_t091_tracker_field_parsing() -> None:
+    links, invalid = te.parse_tracker_field(
+        "https://support.d4science.org/issues/34152, [#34153, sub](https://support.d4science.org/issues/34153)"
+    )
+    assert links == [
+        {"url": "https://support.d4science.org/issues/34152", "label": None},
+        {"url": "https://support.d4science.org/issues/34153", "label": "#34153, sub"},
+    ]
+    assert invalid == []
+    assert te.parse_tracker_field("-") == ([], [])
+    assert te.parse_tracker_field(None) == ([], [])
+    links, invalid = te.parse_tracker_field("#34152, https://x.org/issues/1")
+    assert invalid == ["#34152"]
+    assert links == [{"url": "https://x.org/issues/1", "label": None}]
+    assert "tracker" in te.OPTIONAL_EXTENSION_FIELDS
+    assert te.OPTIONAL_EXTENSION_FIELDS.index("tracker") < te.OPTIONAL_EXTENSION_FIELDS.index("short")
+
+
+def _add_tracker_header(path: pathlib.Path, value: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(r"(- handoff: [^\n]*\n(?:- [a-z-]+: [^\n]*\n)*?)(- short: |\n## Goal)", lambda m: m.group(1) + f"- tracker: {value}\n" + m.group(2), text, count=1)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_t091_tracker_field_validate_and_show(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_tracked_index(tasks_dir)
+    t1 = tasks_dir / "features" / "T001-mirror.md"
+    t2 = tasks_dir / "features" / "T002-bare.md"
+    t3 = tasks_dir / "features" / "T003-bad.md"
+    _write_sample_task(t1, task_id="T001", title="Mirror", state="tracked (Redmine #34152, NetFarm)", next_up="no")
+    _add_tracker_header(t1, "https://support.d4science.org/issues/34152, [#34153](https://support.d4science.org/issues/34153)")
+    _write_sample_task(t2, task_id="T002", title="Bare", state="tracked (Redmine #9, ops)", next_up="no")
+    _write_sample_task(t3, task_id="T003", title="Bad", state="open", next_up="no")
+    _add_tracker_header(t3, "#34152")
+    assert "- tracker: https://support.d4science.org/issues/34152" in t1.read_text(encoding="utf-8")
+
+    res = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    payload = json.loads(res.stdout)
+    errors = payload.get("errors", [])
+    warnings = payload.get("warnings", [])
+    assert not any("T001" in e for e in errors), errors
+    assert any("T003" in e and "'#34152'" in e for e in errors), errors
+    assert any("T002" in w and "no tracker links" in w for w in warnings), warnings
+    assert not any("T001" in w and "tracker" in w for w in warnings), warnings
+
+    res = run_cli("show", "T001", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
+    task = json.loads(res.stdout)["task"]
+    assert task["tracker"] == [
+        {"url": "https://support.d4science.org/issues/34152", "label": None},
+        {"url": "https://support.d4science.org/issues/34153", "label": "#34153"},
+    ]
+    assert task["tracked"] == {"ref": "Redmine #34152", "owner": "NetFarm"}
+    res = run_cli("show", "T001", "--tasks-dir", str(tasks_dir))
+    assert "Tracked: Redmine #34152 (owner: NetFarm)" in res.stdout
+    assert "#34153: https://support.d4science.org/issues/34153" in res.stdout
