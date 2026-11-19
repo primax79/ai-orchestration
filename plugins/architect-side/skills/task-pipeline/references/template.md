@@ -188,8 +188,9 @@ The 13 core header fields are closed and in this exact order; empty values are `
 Optional orchestration extension fields (`profile`, `verification-mode`,
 `verifier`) may follow immediately after `handoff`. While `delivered`, add a
 body line right after the header: `verification pending: <what is left, by
-whom>`. States: `open | in progress | waiting | blocked | delivered | bounced |
-verified | done | done with a caveat | dropped`. `verified` is set by someone
+whom>`. States: `open | in progress | waiting | blocked | tracked | delivered |
+bounced | verified | done | done with a caveat | dropped`; `tracked (<ref>,
+<owner>)` is work followed on an external tracker and owned by someone else. `verified` is set by someone
 other than the executor (`verifier != executor`), or by the executor after the
 user's explicit approval (recorded in `PROGRESS.md`). Manage transitions and
 `00-INDEX.md` synchronization deterministically with `scripts/tasks_engine.py`.

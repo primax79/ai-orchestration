@@ -300,10 +300,24 @@ For any new `feature` or `fix` request, capture follows the **use-case-first** s
 ### States
 
 `open`, `in progress`, `waiting` (on a blocking question `decider: Q###` or external party),
-`blocked` (on an unresolved upstream task or dependency), `delivered`,
+`blocked` (on an unresolved upstream task or dependency), `tracked` (work
+followed on an external tracker and owned by someone else), `delivered`,
 `bounced` (verification failed; returns to the same executor session with
 findings `B1..Bn` recorded in `PROGRESS.md`), `verified`, `done` (or `done with
 a caveat`: name the caveat), `dropped` (say why).
+
+- **`tracked` vs `waiting`:** `waiting` is our work, paused until we get
+  something from someone. `tracked` is work that is not ours any more: it lives
+  on an external tracker ticket assigned to someone else, and the local task
+  stays only as a link. Write it as `tracked (<ref>, <owner>)`, e.g.
+  `tracked (Redmine #34152, NetFarm)`. Enter it from `open`, `in progress`,
+  `waiting`, `blocked` or `paused`; leave it to `done` / `done with a caveat` /
+  `dropped` when the ticket is closed or rejected (no `delivered` step: the
+  ticket closing is the check, `tasks close` goes there directly), or to
+  `open` / `in progress` when the ticket comes back to us. Not terminal;
+  containers derive it like `waiting`; it never enters the ready queue; the
+  registry counts tracked tasks apart from ours (a `Tracked on an external
+  tracker:` line at the top of Tasks by category).
 
 - **No direct `open → done` or `in progress → done`:** every implementation
   task must pass through `delivered`.
@@ -694,7 +708,7 @@ A use case separates persisted author/owner intent (`approval`) from live execut
 | :--- | :--- | :--- | :--- |
 | `approval` | Persisted header | `proposed` \| `approved` \| `deprecated` | Author/owner intent. Set to `proposed` on creation; owner/decider approves (`approved`) or retires (`deprecated`). Replaces legacy `status`. |
 | `stage` | Engine-derived | `draft` | No linked tasks (or all linked tasks are `dropped`). |
-| | (never hand-set) | `planned` | Linked tasks exist, but none started (all `open`, `waiting`, `blocked`, `paused`). |
+| | (never hand-set) | `planned` | Linked tasks exist, but none started (all `open`, `waiting`, `tracked`, `blocked`, `paused`). |
 | | | `in development` | Work started: at least one linked task in progress, delivered, or later, but not all delivered. |
 | | | `ready` | All linked non-dropped tasks delivered, verified, or done (at least one non-dropped task). |
 | | | `verified` | Stage is `ready` + `last-verdict: pass` + no pending revalidation. |

@@ -520,6 +520,7 @@ orchestrator/verifier advance a task past `delivered` — an Executor may only
 | `in progress` | the Executor is actively working |
 | `waiting` | waiting on a blocking question (`decider: Q###`) or external party |
 | `blocked` | an unresolved upstream question or dependency makes it unspecifiable or unrunnable |
+| `tracked` | `tracked (<ref>, <owner>)`: the work lives on an external tracker ticket owned by someone else; nothing to delegate until the ticket closes (`done`/`dropped`) or comes back (`open`/`in progress`) |
 | **`delivered`** | the Executor committed, ran its self-checks, and emitted its `Final Report` (`verification pending: <what, by whom>`) |
 | `bounced` | an acceptance criterion failed during verification; findings (`B1..Bn`) are logged in `PROGRESS.md` and sent back into the *same* Executor session |
 | **`verified`** | an independent verifier (`verifier != executor`, such as a fresh blind subagent in `independent-session` mode or a second engine in `cross-agent` / `panel` mode) re-ran the `Verification` checks and they passed, OR the owner explicitly approved the result in `PROGRESS.md` |

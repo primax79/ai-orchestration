@@ -18219,3 +18219,123 @@ def test_n075_plan_task_multiple_questions_and_stale_warning(tmp_path: pathlib.P
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# T091: canonical `tracked` state (work followed on an external tracker)
+# ---------------------------------------------------------------------------
+
+
+def _write_tracked_index(tasks_dir: pathlib.Path) -> None:
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "00-INDEX.md").write_text(
+        "# Task Index\n\n"
+        "## Next up\n\n<!-- ai-orch:generated next-up -->\n<!-- /ai-orch:generated next-up -->\n\n"
+        "## Tasks by category\n\n<!-- ai-orch:generated tasks-by-category -->\n<!-- /ai-orch:generated tasks-by-category -->\n\n"
+        "## Decisions waiting\n\n<!-- ai-orch:generated decisions -->\n<!-- /ai-orch:generated decisions -->\n\n"
+        "## Done\n\n<!-- ai-orch:generated done -->\n<!-- /ai-orch:generated done -->\n",
+        encoding="utf-8",
+    )
+
+
+def test_t091_tracked_state_is_canonical_and_parameterized() -> None:
+    assert "tracked" in te.CANONICAL_STATES
+    assert "tracked" not in te.TERMINAL_STATES
+    for raw in ("tracked", "tracked (Redmine #34152, NetFarm)", "`tracked` (Redmine #1)", "Tracked: ticket moved"):
+        assert te.normalize_state(raw) == "tracked", raw
+        assert te.is_valid_state(raw), raw
+    assert te.is_canonical_state_spelling("tracked (Redmine #34152, NetFarm)")
+    assert te.parse_tracked_state("tracked (Redmine #34152, NetFarm)") == {"ref": "Redmine #34152", "owner": "NetFarm"}
+    assert te.parse_tracked_state("tracked (Redmine #34152)") == {"ref": "Redmine #34152", "owner": None}
+    assert te.parse_tracked_state("tracked") == {"ref": None, "owner": None}
+    assert te.parse_tracked_state("waiting (external:x)") is None
+
+
+def test_t091_tracked_transitions() -> None:
+    for src in ("open", "in progress", "waiting", "blocked", "paused"):
+        assert "tracked" in te.ALLOWED_TRANSITIONS[src], src
+    assert te.ALLOWED_TRANSITIONS["tracked"] == {"done", "done with a caveat", "dropped", "open", "in progress"}
+    for src in ("delivered", "bounced", "verified"):
+        assert "tracked" not in te.ALLOWED_TRANSITIONS[src], src
+
+
+def test_t091_container_derivation_treats_tracked_like_waiting() -> None:
+    assert te.derive_container_state(["tracked"]) == "waiting"
+    assert te.derive_container_state(["tracked", "open"]) == "waiting"
+    assert te.derive_container_state(["tracked", "blocked"]) == "blocked"
+    assert te.derive_container_state(["tracked", "in progress"]) == "in progress"
+    assert te.derive_container_state(["tracked", "done"]) == "in progress"
+    assert te.derive_container_state(["done", "dropped"]) == "done"
+
+
+def test_t091_tracked_summary_line_only_when_tracked_tasks_exist() -> None:
+    assert te._tracked_summary_line(["open", "waiting", "in progress"]) is None
+    line = te._tracked_summary_line(["open", "tracked (Redmine #1, NetFarm)", "tracked", "waiting"])
+    assert line is not None
+    assert line.startswith(te.TRACKED_SUMMARY_PREFIX)
+    assert "2 of 4 active tasks" in line
+    assert "2 are ours" in line
+
+
+def test_t091_tracked_cli_lifecycle(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_tracked_index(tasks_dir)
+    t1 = tasks_dir / "features" / "T001-mirror.md"
+    t2 = tasks_dir / "features" / "T002-ours.md"
+    _write_sample_task(t1, task_id="T001", title="Mirror of a vendor ticket", state="open", next_up="no")
+    _write_sample_task(t2, task_id="T002", title="Our work", state="open", next_up="no")
+
+    res = run_cli("transition", "T001", "tracked (Redmine #34152, NetFarm)", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
+    assert "- state: tracked (Redmine #34152, NetFarm)" in t1.read_text(encoding="utf-8")
+
+    res = run_cli("validate", "--tasks-dir", str(tasks_dir), "--json")
+    payload = json.loads(res.stdout)
+    assert not any("T001" in e for e in payload.get("errors", [])), payload
+
+    # Registry: tracked state shown in its category row and counted apart from ours
+    res = run_cli("sync-index", "--apply", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
+    idx = (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+    assert "tracked (Redmine #34152, NetFarm)" in idx
+    assert f"{te.TRACKED_SUMMARY_PREFIX} 1 of 2 active tasks" in idx
+    assert "1 are ours" in idx
+    res = run_cli("sync-index", "--check", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
+
+    # Not actionable here: only T002 is in the ready queue
+    res = run_cli("next", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
+    assert "T001" not in json.dumps(json.loads(res.stdout).get("ready", []))
+    assert "T002" in res.stdout
+
+    # Illegal: tracked -> delivered
+    res = run_cli("transition", "T001", "delivered", "--tasks-dir", str(tasks_dir))
+    assert res.returncode != 0
+
+    # Ticket comes back to us, then is handed over again
+    res = run_cli("transition", "T001", "in progress", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
+    res = run_cli("transition", "T001", "tracked (Redmine #34152, NetFarm)", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
+
+    # Ticket closed: one-shot close goes straight to done, no delivered/verified steps
+    res = run_cli("close", "T001", "--verifier", "redmine", "--reason", "Redmine #34152 closed", "--tasks-dir", str(tasks_dir), "--json")
+    assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
+    data = json.loads(res.stdout)
+    assert [t["to"] for t in data["transitions"]] == ["done"]
+    assert (tasks_dir / "done" / "features" / "T001-mirror.md").is_file()
+
+    # No tracked task left: the summary line disappears
+    res = run_cli("sync-index", "--apply", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
+    assert te.TRACKED_SUMMARY_PREFIX not in (tasks_dir / "00-INDEX.md").read_text(encoding="utf-8")
+
+
+def test_t091_tracked_to_dropped_when_ticket_rejected(tmp_path: pathlib.Path) -> None:
+    tasks_dir = tmp_path / "tasks"
+    _write_tracked_index(tasks_dir)
+    t1 = tasks_dir / "features" / "T001-mirror.md"
+    _write_sample_task(t1, task_id="T001", title="Mirror", state="tracked (Redmine #7, IAM team)", next_up="no")
+    res = run_cli("transition", "T001", "dropped: ticket rejected", "--tasks-dir", str(tasks_dir))
+    assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"

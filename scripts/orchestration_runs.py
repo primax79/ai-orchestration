@@ -172,6 +172,7 @@ ALLOWED_MODES_PER_STATE: dict[str, list[str]] = {
     "delivered": ["verify", "orchestrate"],
     "waiting": ["orchestrate"],
     "blocked": ["orchestrate"],
+    "tracked": [],  # someone else's work on an external tracker: nothing to run here
     "verified": [],
     "done": [],
     "done with a caveat": [],
@@ -185,6 +186,7 @@ DEFAULT_MODE_PER_STATE: dict[str, str | None] = {
     "delivered": "verify",
     "waiting": "orchestrate",
     "blocked": "orchestrate",
+    "tracked": None,
     "verified": None,
     "done": None,
     "done with a caveat": None,

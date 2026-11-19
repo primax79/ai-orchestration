@@ -198,6 +198,7 @@ CANONICAL_STATES: set[str] = {
     "paused",
     "waiting",
     "blocked",
+    "tracked",
     "delivered",
     "bounced",
     "verified",
@@ -211,11 +212,14 @@ TERMINAL_STATES: set[str] = {"done", "done with a caveat", "dropped", "moved"}
 
 # Legal state transitions (canonical base state -> allowed target canonical base states)
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-    "open": {"in progress", "waiting", "blocked", "paused", "dropped"},
-    "in progress": {"waiting", "blocked", "paused", "delivered", "open", "dropped"},
-    "paused": {"in progress", "open", "waiting", "blocked", "dropped"},
-    "waiting": {"in progress", "blocked", "paused", "open", "dropped"},
-    "blocked": {"in progress", "waiting", "paused", "open", "dropped"},
+    "open": {"in progress", "waiting", "blocked", "paused", "tracked", "dropped"},
+    "in progress": {"waiting", "blocked", "paused", "tracked", "delivered", "open", "dropped"},
+    "paused": {"in progress", "open", "waiting", "blocked", "tracked", "dropped"},
+    "waiting": {"in progress", "blocked", "paused", "tracked", "open", "dropped"},
+    "blocked": {"in progress", "waiting", "paused", "tracked", "open", "dropped"},
+    # Work followed on an external tracker and owned by someone else: closed when the ticket
+    # closes (or is rejected), back to us when the ticket returns.
+    "tracked": {"done", "done with a caveat", "dropped", "open", "in progress"},
     "delivered": {"verified", "bounced", "paused", "in progress", "delivered", "open", "done with a caveat", "dropped"},
     "bounced": {"in progress", "waiting", "blocked", "paused", "open", "delivered", "dropped"},
     "verified": {"done", "done with a caveat", "bounced", "delivered", "in progress", "open", "dropped"},
@@ -308,7 +312,7 @@ Short copy of the `task-pipeline` skill (`plugins/architect-side/skills/task-pip
 - **Header (closed set, exact order, `- key: value` lines under `# T### <title>`, empty value is `-`):** `id`, `title`, `category`, `priority` (P0-P3), `priority-reason`, `next-up` (`yes`|`no`), `state`, `executor`, `depends-on`, `decider`, `sources`, `paths`, `handoff`. Optional extensions (after `handoff`): `profile`, `verification-mode`, `verifier`, `verify-by`, `size`, `kind`, `labels`, `branch`, `worktree`, `run-id`, `use-cases`, `short`, `conditions`. Per-project extra fields after `handoff` can be declared via `[tasks] extension_fields = ["area"]` in `orchestration.toml` (or `.ai-orchestration.local.toml`), a fenced `toml` block in `tasks/AGENTS.md`, or a prose/bullet line ``Extra header fields: `area` `` (with or without bold, comma or `and` separated) in `tasks/AGENTS.md`. Required body sections: `## Goal`, `## Steps`, `## Verification`. Section headings (`## Goal`, `## Steps`, `## Verification`, `## Log`; question `## Context`, `## Options`, `## Answer`, `## Notes`; use-case `## Description & Business Value`, `## Preconditions`, `## Scenario / Interaction Steps`, `## Automated Verification Command`, `## Acceptance Criteria`, `## AI Validation Log`) and header field names are fixed English keywords: never translate them.
 - **Content languages (per-project, versioned in `tasks/AGENTS.md`):** Declare the prose language for tasks, questions to the owner, and use cases in a fenced `toml` block in `tasks/AGENTS.md`: `[tasks] language = "en"`, `[questions] language = "it"`, `[use_cases] language = "en"` (use cases follow `[tasks] language` unless `[use_cases] language` is set; default `en`). Language settings govern only the prose content written by sessions; section headings and header field names are fixed English keywords and are never translated.
 - **Microtasks (`tasks/micro/T###-<slug>.md`):** reduced header in exact order (`id`, `title`, `kind`, `priority`, `state`, `executor`, `paths`, `depends-on`, `size`, `labels`, optional `short`); size defaults to `XS`; body section `## What` only.
-- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
+- **States:** `open`, `in progress`, `paused`, `waiting`, `blocked`, `tracked` (`tracked (<ref>, <owner>)`: work followed on an external tracker and owned by someone else, closed when the ticket closes), `delivered`, `bounced`, `verified`, `done` (or `done with a caveat`), `dropped`. No direct `open`/`in progress` → `done` (always pass through `delivered`). `verified` is set by someone other than the executor, or by the executor after the owner's explicit approval (recorded in `PROGRESS.md`).
 - **Registry:** `00-INDEX.md` (Initiatives, Specs, Next up <= 5, Tasks by category, Decisions waiting, Done) is the state; keep it current with every change.
 - **Done:** `git mv` the finished emergent task to `tasks/done/<category>/`.
 - **Several sessions:** only a category's `owner-session` edits its tasks; others add notes or new tasks.
@@ -805,6 +809,7 @@ def normalize_state(raw_state: str) -> str:
         "done with a caveat",
         "waiting",
         "blocked",
+        "tracked",
         "dropped",
         "in progress",
         "paused",
@@ -842,6 +847,24 @@ def is_canonical_state_spelling(raw_state: str) -> bool:
 
 def is_valid_state(raw_state: str) -> bool:
     return normalize_state(raw_state) in CANONICAL_STATES
+
+
+def parse_tracked_state(raw_state: str | None) -> dict[str, str | None] | None:
+    """Split 'tracked (<ref>, <owner>)' into its tracker reference and owner.
+
+    'tracked (Redmine #34152, NetFarm)' -> {'ref': 'Redmine #34152', 'owner': 'NetFarm'};
+    'tracked (Redmine #34152)' -> owner None; bare 'tracked' -> both None.
+    Returns None when the state is not `tracked`.
+    """
+    if not raw_state or not isinstance(raw_state, str) or normalize_state(raw_state) != "tracked":
+        return None
+    s = raw_state.strip().strip("`").strip()
+    m = re.match(r"^tracked\s*\((.*)\)\s*$", s, re.IGNORECASE)
+    if not m:
+        return {"ref": None, "owner": None}
+    inner = m.group(1).strip()
+    ref, _, owner = inner.partition(",")
+    return {"ref": ref.strip() or None, "owner": owner.strip() or None}
 
 
 # ---------------------------------------------------------------------------
@@ -2253,7 +2276,7 @@ def derive_container_state(child_states: list[str]) -> str:
     3. every child is done, done with a caveat or dropped -> done, or done with a caveat when at least one child is
     4. any child is past open (in progress, delivered, bounced, verified, done, done with a caveat) -> in progress
     5. any child is blocked -> blocked
-    6. any child is waiting -> waiting
+    6. any child is waiting or tracked -> waiting
     7. otherwise -> open
     """
     if not child_states:
@@ -2269,7 +2292,7 @@ def derive_container_state(child_states: list[str]) -> str:
         return "in progress"
     if any(st == "blocked" for st in canon_states):
         return "blocked"
-    if any(st == "waiting" for st in canon_states):
+    if any(st in ("waiting", "tracked") for st in canon_states):
         return "waiting"
     if all(st == "paused" for st in canon_states):
         return "paused"
@@ -9821,7 +9844,7 @@ class UseCaseLinkProjection(dict):
         return default
 
 
-UC_STAGE_NOT_STARTED_STATES: set[str] = {"open", "waiting", "blocked", "paused"}
+UC_STAGE_NOT_STARTED_STATES: set[str] = {"open", "waiting", "tracked", "blocked", "paused"}
 UC_STAGE_DELIVERED_OR_LATER_STATES: set[str] = {"delivered", "verified", "done", "done with a caveat"}
 UC_STAGE_STARTED_STATES: set[str] = {"in progress", "bounced"} | UC_STAGE_DELIVERED_OR_LATER_STATES
 
@@ -14482,7 +14505,7 @@ def close_task(
                     "error": f"Task {task_id!r} is already closed in state '{curr_state}'.",
                 }
 
-            valid_start = ("open", "in progress", "delivered", "verified", "bounced", "paused", "waiting", "blocked")
+            valid_start = ("open", "in progress", "delivered", "verified", "bounced", "paused", "waiting", "blocked", "tracked")
             if curr_canon not in valid_start:
                 return False, {
                     "ok": False,
@@ -14606,7 +14629,9 @@ def close_task(
             elif curr_canon == "in progress":
                 steps.append("delivered")
 
-            if is_self_vmode and not _is_independent_verifier(executor, eff_actor_for_check, eff_verifier_for_check):
+            if curr_canon == "tracked":
+                pass  # the ticket closing is the check: tracked -> done directly
+            elif is_self_vmode and not _is_independent_verifier(executor, eff_actor_for_check, eff_verifier_for_check):
                 pass
             elif curr_canon == "verified":
                 pass
@@ -15398,6 +15423,26 @@ def adopt_markers(existing_index: str) -> str:
     return updated
 
 
+TRACKED_SUMMARY_PREFIX = "Tracked on an external tracker:"
+
+
+def _tracked_summary_line(states: list[str]) -> str | None:
+    """Registry line counting `tracked` tasks apart from the ones that are ours.
+
+    Emitted at the top of the tasks-by-category region only when at least one active task is tracked,
+    so registries without tracked tasks render unchanged.
+    """
+    canon = [normalize_state(st) for st in states if st]
+    n_tracked = sum(1 for st in canon if st == "tracked")
+    if not n_tracked:
+        return None
+    n_ours = len(canon) - n_tracked
+    return (
+        f"{TRACKED_SUMMARY_PREFIX} {n_tracked} of {len(canon)} active tasks (state `tracked`: someone else's work, "
+        f"closed when the ticket closes); {n_ours} are ours."
+    )
+
+
 def _read_category_blurb(tasks_dir: pathlib.Path, category: str, existing_index: str) -> str:
     # Preserve existing category blurb from 00-INDEX.md if present
     pattern = re.compile(
@@ -15494,6 +15539,7 @@ def _format_initiative_status_cell(
         open_leaves = [l for l in leaf_nodes if l.canonical_state == "open"]
         blocked_leaves = [l for l in leaf_nodes if l.canonical_state == "blocked"]
         waiting_leaves = [l for l in leaf_nodes if l.canonical_state == "waiting"]
+        tracked_leaves = [l for l in leaf_nodes if l.canonical_state == "tracked"]
 
         summary_parts: list[str] = []
         if done_leaves:
@@ -15513,6 +15559,8 @@ def _format_initiative_status_cell(
             summary_parts.append(
                 f"waiting: {', '.join(w_parts) if any(l.waiting_on for l in waiting_leaves) else format_id_ranges([l.id for l in waiting_leaves])}"
             )
+        if tracked_leaves and not (running_leaves or to_check_leaves or open_leaves):
+            summary_parts.append(f"tracked: {format_id_ranges([l.id for l in tracked_leaves])}")
 
         if summary_parts:
             return f"{derived_st} ({'; '.join(summary_parts)})"
@@ -16195,6 +16243,9 @@ def render_synced_index(
             cat_rows.sort(key=lambda r: _natural_sort_key(r[0]))
         cat_lines.extend([r[1] for r in cat_rows])
 
+    tracked_line = _tracked_summary_line([t["state"] for t in active_tasks])
+    if tracked_line and cat_lines:
+        cat_lines[:0] = [tracked_line, ""]
     cat_content = "\n".join(cat_lines)
 
     # 3. Decisions waiting section
@@ -20118,6 +20169,7 @@ def merge_index_three_way(
 
     combined_cat_source = "\n\n".join(x for x in (o_cat_txt, t_cat_txt, d_cat_txt) if x)
     cat_lines: list[str] = []
+    merged_states: list[str] = []
     out_cat_idx = 0
     for cat in all_cats:
         cb_o, cb_m = _parse_index_table_rows(b_cblocks.get(cat, ""), "category")
@@ -20149,7 +20201,13 @@ def merge_index_three_way(
         )
         cat_lines.extend([f"### {cat}", "", blurb, "", hdr_cat, sep_cat])
         cat_lines.extend([mc_map[k] for k in mc_order])
+        merged_states.extend(
+            [c[3] for c in ([x.strip() for x in mc_map[k].strip().strip("|").split("|")] for k in mc_order) if len(c) > 3]
+        )
 
+    tracked_line = _tracked_summary_line(merged_states)
+    if tracked_line and cat_lines:
+        cat_lines[:0] = [tracked_line, ""]
     cat_content = "\n".join(cat_lines)
 
     # 6. Decisions waiting section
