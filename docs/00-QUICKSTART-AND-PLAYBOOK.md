@@ -114,16 +114,16 @@ You can also run the underlying script directly:
 
 ### Interactive (via `orchestration-setup` Skill — Recommended)
 Open your project workspace and ask:
-> *"Configure `ai-orchestration` for this project, set up `tasks/orchestration.toml`, and generate `AGENTS.md`."*
+> *"Configure `ai-orchestration` for this project, set up the project `orchestration.toml` (`~/.config/ai-orchestration/projects/<repo>/orchestration.toml` or `.ai-orchestration.local.toml`), and generate `AGENTS.md`."*
 
-The skill interviews you on the project's execution topology (Single-Framework Native vs. Multi-Framework MCP) and verification policy (`independent-session`, `cross-agent`, `panel`, `owner`), inspects the repo for shared DBs, ports, conflict-prone files, and test commands, and runs `orchestration_config.py` to write `tasks/orchestration.toml` and update `AGENTS.md`.
+The skill interviews you on the project's execution topology (Single-Framework Native vs. Multi-Framework MCP) and verification policy (`independent-session`, `cross-agent`, `panel`, `owner`), inspects the repo for shared DBs, ports, conflict-prone files, and test commands, and runs `orchestration_config.py` to write the project configuration (`~/.config/ai-orchestration/projects/<repo>/orchestration.toml`, or `<repo>/.ai-orchestration.local.toml` if already present) and update `AGENTS.md`.
 
 ### Non-Interactive (via CLI Script)
 When automating or scripting project setup (`/path/to/repo`):
 
 ### Option A — Single-Framework Project (e.g., Kilo-only or Claude-only, no MCP)
 ```bash
-# Initialize tasks/orchestration.toml for Kilo-only native mode
+# Initialize project config (~/.config/ai-orchestration/projects/repo/orchestration.toml or .ai-orchestration.local.toml) for Kilo-only native mode
 python3 plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py \
   init-project --workspace /path/to/repo --name my-repo \
   --orchestrator kilo --executor kilo --verification-mode independent-session
@@ -135,7 +135,7 @@ python3 plugins/shared/skills/orchestration-setup/scripts/orchestration_config.p
 
 ### Option B — Multi-Framework Project (e.g., Claude orchestrating Kilo via `kilo-mcp`)
 ```bash
-# Initialize tasks/orchestration.toml for Claude Architect + Kilo Executor + Cross-Agent Verification
+# Initialize project config (~/.config/ai-orchestration/projects/repo/orchestration.toml or .ai-orchestration.local.toml) for Claude Architect + Kilo Executor + Cross-Agent Verification
 python3 plugins/shared/skills/orchestration-setup/scripts/orchestration_config.py \
   init-project --workspace /path/to/repo --name my-repo \
   --orchestrator claude --executor kilo --verification-mode cross-agent
@@ -146,7 +146,7 @@ python3 plugins/shared/skills/orchestration-setup/scripts/orchestration_config.p
 ```
 
 ### Adding Project-Specific Isolation & Verification Rules
-Edit `/path/to/repo/tasks/orchestration.toml` to declare shared resources that Git worktrees do **not** isolate (databases, ports, conflict-prone files, zero-conflict plugin registries, and subsystem check commands), then re-run `render-agents-md --apply`:
+Edit `~/.config/ai-orchestration/projects/<repo-name>/orchestration.toml` (or `/path/to/repo/.ai-orchestration.local.toml`) to declare shared resources that Git worktrees do **not** isolate (databases, ports, conflict-prone files, zero-conflict plugin registries, and subsystem check commands), then re-run `render-agents-md --apply`:
 
 ```toml
 [project.isolation]

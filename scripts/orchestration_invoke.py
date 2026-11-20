@@ -25,6 +25,7 @@ from typing import Any, Callable
 logger = logging.getLogger("orchestration_invoke")
 
 DEFAULT_LOG_CHUNK_SIZE = 10 * 1024 * 1024  # 10 MB chunks (Spec §5.1, R9)
+_USE_PROCFS = True
 
 
 # ---------------------------------------------------------------------------
@@ -47,13 +48,85 @@ def get_process_start_time(pid: int) -> str | None:
     return None
 
 
+def _is_pid_zombie(pid: int) -> bool:
+    """Return True if pid has already terminated (zombie 'Z' or dead 'X'), or no longer exists."""
+    if _USE_PROCFS:
+        stat_path = pathlib.Path(f"/proc/{pid}/stat")
+        if stat_path.exists():
+            try:
+                data = stat_path.read_text(encoding="utf-8", errors="replace")
+                idx = data.rfind(")")
+                if idx != -1:
+                    state = data[idx + 1 :].strip()[:1]
+                    return state in ("Z", "X", "x")
+            except FileNotFoundError:
+                return True
+            except OSError:
+                pass
+
+    try:
+        res = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode != 0:
+            return True
+        stat_str = res.stdout.strip()
+        if not stat_str or stat_str[0] in ("Z", "X", "x"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_process_group_alive(pgid: int) -> bool:
+    """Return True if at least one non-zombie process exists in process group pgid."""
+    if pgid <= 0:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except PermissionError:
+        pass
+    except OSError:
+        return False
+
+    for ps_cmd in (
+        ["ps", "-A", "-o", "pid=", "-o", "pgid=", "-o", "stat="],
+        ["ps", "-ax", "-o", "pid=", "-o", "pgid=", "-o", "stat="],
+    ):
+        try:
+            res = subprocess.run(ps_cmd, capture_output=True, text=True, check=False)
+            if res.returncode == 0 and res.stdout.strip():
+                parsed_any = False
+                for line in res.stdout.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 3:
+                        try:
+                            p_pgid = int(parts[1])
+                            p_stat = parts[2]
+                            parsed_any = True
+                            if p_pgid == pgid and not p_stat.startswith(("Z", "X", "x")):
+                                return True
+                        except ValueError:
+                            continue
+                if parsed_any:
+                    return False
+        except Exception:
+            pass
+    return True
+
+
 def is_process_alive(pid: int, expected_start_time: str | None = None) -> bool:
-    """Check if a process is alive, guarding against PID reuse if expected_start_time is given."""
+    """Check if a process is alive, guarding against zombies and PID reuse if expected_start_time is given."""
     if pid <= 0:
         return False
     try:
         os.kill(pid, 0)
     except OSError:
+        return False
+    if _is_pid_zombie(pid):
         return False
     if expected_start_time is not None:
         cur_start = get_process_start_time(pid)
@@ -66,24 +139,28 @@ def get_process_descendants(root_pid: int) -> list[int]:
     if root_pid <= 0:
         return []
 
-    # First attempt: ps -A -o pid=,ppid= (or ps -ax -o pid=,ppid= or ps -o pid=,ppid=)
+    # First attempt: ps with separate -o flags (portable across Linux procps and macOS BSD ps)
     for ps_cmd in (
-        ["ps", "-A", "-o", "pid=,ppid="],
-        ["ps", "-ax", "-o", "pid=,ppid="],
-        ["ps", "-o", "pid=,ppid="],
+        ["ps", "-A", "-o", "pid=", "-o", "ppid="],
+        ["ps", "-ax", "-o", "pid=", "-o", "ppid="],
+        ["ps", "-o", "pid=", "-o", "ppid="],
     ):
         try:
             res = subprocess.run(ps_cmd, capture_output=True, text=True, check=False)
             if res.returncode == 0 and res.stdout.strip():
                 parent_to_children: dict[int, list[int]] = collections.defaultdict(list)
+                parsed_any = False
                 for line in res.stdout.splitlines():
                     parts = line.strip().split()
                     if len(parts) >= 2:
                         try:
                             pid, ppid = int(parts[0]), int(parts[1])
                             parent_to_children[ppid].append(pid)
+                            parsed_any = True
                         except ValueError:
                             continue
+                if not parsed_any:
+                    continue
                 descendants: list[int] = []
                 queue = collections.deque(parent_to_children.get(root_pid, []))
                 visited = {root_pid}
@@ -128,6 +205,7 @@ def kill_process_group(
     leader_pid: int | None = None,
     expected_leader_start_time: str | None = None,
     timeout: float = 10.0,
+    reap_fn: Callable[[], Any] | None = None,
 ) -> bool:
     """Send SIGTERM to process group and agent descendants, then SIGKILL if needed."""
     if pgid <= 0:
@@ -159,21 +237,14 @@ def kill_process_group(
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        group_alive = False
-        try:
-            os.killpg(pgid, 0)
-            group_alive = True
-        except OSError:
-            pass
-
-        desc_alive = False
-        for dpid in descendants:
+        if reap_fn is not None:
             try:
-                os.kill(dpid, 0)
-                desc_alive = True
-                break
-            except OSError:
+                reap_fn()
+            except Exception:
                 pass
+
+        group_alive = _is_process_group_alive(pgid)
+        desc_alive = any(is_process_alive(dpid) for dpid in descendants)
 
         if not group_alive and not desc_alive:
             return True
@@ -198,21 +269,14 @@ def kill_process_group(
         pass
 
     time.sleep(0.1)
-    group_alive = False
-    try:
-        os.killpg(pgid, 0)
-        group_alive = True
-    except OSError:
-        pass
-
-    desc_alive = False
-    for dpid in all_descendants:
+    if reap_fn is not None:
         try:
-            os.kill(dpid, 0)
-            desc_alive = True
-            break
-        except OSError:
+            reap_fn()
+        except Exception:
             pass
+
+    group_alive = _is_process_group_alive(pgid)
+    desc_alive = any(is_process_alive(dpid) for dpid in all_descendants)
 
     return not group_alive and not desc_alive
 
@@ -429,6 +493,7 @@ class SupervisedInvocation:
                 leader_pid=self.pid,
                 expected_leader_start_time=self.start_time,
                 timeout=timeout,
+                reap_fn=self.proc.poll if self.proc is not None else None,
             )
         elif self.proc and self.proc.poll() is None:
             try:

@@ -2192,7 +2192,7 @@ def reassign_orchestrator(
     gpath = pathlib.Path(global_config).resolve() if global_config else None
     if find_project_config_path is not None and default_global_config_path is not None:
         if scope == "project":
-            target_path = find_project_config_path(ws, gpath)
+            target_path = find_project_config_path(ws, gpath, for_write=True)
         else:
             target_path = gpath or default_global_config_path()
     else:

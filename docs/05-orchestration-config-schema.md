@@ -19,6 +19,10 @@
    - Defines your default **Workflow Routing & Verification Policy** (e.g., default executor for `bulk-execution`, default cross-agent verifier when `verification-mode = "cross-agent"` or `"panel"`).
 
 2. **Project Config (`<workspace>/.ai-orchestration.local.toml` if present, gitignored, or `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml`)**:
+   - Resolved by the single unified lookup (`orchestration_config.find_project_config_path` / `inspect_project_config`), shared by `orchestration_config`, `tasks_engine`, `orchestration_triggers`, and `orchestration_env`:
+     1. `<workspace>/.ai-orchestration.local.toml` *(canonical, local unversioned override, read-write)*
+     2. `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` *(canonical default write location outside the repo, read-write)*
+     3. Legacy in-repo paths *(read-only fallback with deprecation warning; never written to)*: `<workspace>/orchestration.toml`, `<workspace>/.ai-orchestration/orchestration.toml`, `<workspace>/.ai-orchestration.toml`, and legacy `tasks/` config files.
    - Optional; inherits everything from Global and overrides only what differs for this project:
      - Which tools/MCPs are active in this project;
      - Optional model overrides per activity;

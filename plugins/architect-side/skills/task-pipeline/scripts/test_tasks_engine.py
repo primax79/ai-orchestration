@@ -11546,9 +11546,13 @@ def test_t050_agents_md_project_rules_survive_upgrade_and_idempotent(tmp_path: p
     assert upg2_payload["upgraded_files"] == []
     assert agents_path.read_text(encoding="utf-8") == upgraded_text
 
-    # 4. Modifying inside markers and re-running refreshes only the managed block
-    tampered = upgraded_text.replace("task-pipeline", "stale-skill-name")
-    agents_path.write_text(tampered, encoding="utf-8")
+    # 4. Outdated historical rendering inside markers is refreshed normally on upgrade
+    stale_hist_block = (
+        f"{te.MANAGED_AGENTS_BEGIN}\n## task-pipeline managed convention\n\n"
+        f"{te.HISTORICAL_MANAGED_TASKS_AGENTS_BODIES[0]}\n{te.MANAGED_AGENTS_END}\n"
+    )
+    stale_text = f"{custom_rules}\n{stale_hist_block}"
+    agents_path.write_text(stale_text, encoding="utf-8")
     res_prev3 = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
     assert res_prev3.returncode == 0
     prev3_data = json.loads(res_prev3.stdout)
@@ -11565,6 +11569,18 @@ def test_t050_agents_md_project_rules_survive_upgrade_and_idempotent(tmp_path: p
     )
     assert res_upg3.returncode == 0
     assert agents_path.read_text(encoding="utf-8") == upgraded_text
+
+    # 5. User edit inside markers is preserved (not replaced), reported for manual review, and not upgraded
+    user_edited = upgraded_text.replace("task-pipeline", "user-customized-convention")
+    agents_path.write_text(user_edited, encoding="utf-8")
+    res_prev4 = run_cli("upgrade", "--tasks-dir", str(tasks_dir), "--json")
+    assert res_prev4.returncode == 0
+    prev4_data = json.loads(res_prev4.stdout)
+    assert prev4_data["ok"] is True
+    assert prev4_data["upgraded_files"] == []
+    assert "tasks/AGENTS.md <!-- ai-orch:managed begin --> block" in prev4_data["manual_review_sections"]
+    assert any("manual review" in w.lower() for w in prev4_data["warnings"])
+    assert agents_path.read_text(encoding="utf-8") == user_edited
 
 
 def test_t050_sync_index_preserves_owner_column_next_up_order_and_id_format(tmp_path: pathlib.Path) -> None:
@@ -18209,6 +18225,290 @@ def test_n075_plan_task_multiple_questions_and_stale_warning(tmp_path: pathlib.P
     tree_final = te.discover_task_tree(tasks_dir)
     assert tree_final["01.1"].state == "in progress"
     assert tree_final["01.1"].waiting_on is None
+
+
+def test_19_4_task_and_microtask_host_validation_and_backward_compat(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 19.4: optional validated 'host' field on tasks, microtasks, and plan nodes; no 'run-ref'; existing tasks without 'host' stay valid."""
+    monkeypatch.delenv("AI_ORCH_HOST_ID", raising=False)
+    monkeypatch.delenv("AI_ORCH_DECLARED_HOSTS", raising=False)
+    cfg_file = tmp_path / "global_orchestration.toml"
+    cfg_file.write_text(
+        '[host]\nid = "alf_ubuntu"\n\n[hosts.alf_ubuntu]\nssh_target = "alf_ubuntu"\nagent_user = "kilo"\nrole = "hub"\n\n[hosts.mac]\nssh_target = "mac"\nagent_user = "alfredo"\nrole = "client"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "backend").mkdir(parents=True)
+    (tasks_dir / "micro").mkdir(parents=True)
+    (tasks_dir / "01-core").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # 1. Existing task and plan node without 'host' remain valid even when no hosts are declared
+    empty_cfg = tmp_path / "empty.toml"
+    empty_cfg.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(empty_cfg))
+
+    (tasks_dir / "01-core" / "plan.md").write_text(
+        "# 01 — Core\n\n- **Status:** `in progress`\n\n## Tasks\n\n### 01.1 - Base task\n\n- **Status:** `open`\n- **Goal:** Do base work.\n- **Verification:** pytest\n",
+        encoding="utf-8",
+    )
+    t1_path = tasks_dir / "backend" / "T001-no-host.md"
+    t1_path.write_text(
+        "# T001 No host\n\n"
+        "- id: T001\n- title: No host\n- category: backend\n- priority: P2\n"
+        "- priority-reason: test\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: do T001\n"
+        "- short: No host\n\n## Goal\nG\n\n## Steps\n- [ ] S\n\n## Verification\n- V\n",
+        encoding="utf-8",
+    )
+    errs0, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errs0 == []
+
+    # Restore config with declared hosts: alf_ubuntu, mac
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_file))
+    assert te.resolve_host_id(tasks_dir) == "alf_ubuntu"
+    assert te.get_declared_hosts(tasks_dir) == {"alf_ubuntu", "mac"}
+
+    # 2. Emergent task with declared host & run-id is valid
+    t2_path = tasks_dir / "backend" / "T002-with-host.md"
+    t2_path.write_text(
+        "# T002 With host\n\n"
+        "- id: T002\n- title: With host\n- category: backend\n- priority: P2\n"
+        "- priority-reason: test\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: do T002\n"
+        "- run-id: 20261029-120000-T002-kilo-1234\n- host: alf_ubuntu\n- short: With host\n\n"
+        "## Goal\nG\n\n## Steps\n- [ ] S\n\n## Verification\n- V\n",
+        encoding="utf-8",
+    )
+    # 3. Microtask created with declared host is valid and promotes preserving host
+    ok_m, res_m = te.tasks_micro(tasks_dir, title="Quick fix on mac", kind="fix", host="mac")
+    assert ok_m is True, res_m
+    assert res_m["host"] == "mac"
+
+    errs1, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errs1 == []
+    tree1 = te.discover_task_tree(tasks_dir)
+    assert tree1["T002"].host == "alf_ubuntu"
+    assert tree1[res_m["id"]].host == "mac"
+
+    ok_p, res_p = te.tasks_promote(tasks_dir, res_m["id"], category="backend")
+    assert ok_p is True, res_p
+    errs_p, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errs_p == []
+    tree_p = te.discover_task_tree(tasks_dir)
+    assert tree_p[res_m["id"]].host == "mac"
+
+    # 4. Undeclared host on emergent task, microtask, and plan node is rejected by tasks validate
+    t2_path.write_text(
+        t2_path.read_text(encoding="utf-8").replace("- host: alf_ubuntu", "- host: undeclared_box"),
+        encoding="utf-8",
+    )
+    m_bad = tasks_dir / "micro" / "T004-bad-micro-host.md"
+    m_bad.write_text(
+        "# T004 Bad micro host\n\n"
+        "- id: T004\n- title: Bad micro host\n- kind: fix\n- priority: P2\n"
+        "- state: open\n- executor: kilo\n- paths: -\n- depends-on: -\n"
+        "- host: ghost_host\n- short: Bad micro host\n\n## What\nFix.\n",
+        encoding="utf-8",
+    )
+    (tasks_dir / "01-core" / "plan.md").write_text(
+        "# 01 — Core\n\n- **Status:** `in progress`\n\n## Tasks\n\n### 01.1 - Base task\n\n- **Status:** `open` · **Host:**mars_host\n- **Goal:** Do base work.\n- **Verification:** pytest\n",
+        encoding="utf-8",
+    )
+    errs_bad, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("undeclared host 'undeclared_box'" in e for e in errs_bad)
+    assert any("undeclared host 'ghost_host'" in e for e in errs_bad)
+    assert any("undeclared host 'mars_host'" in e for e in errs_bad)
+
+    # 5. 'run-ref' is rejected (must use 'run-id')
+    assert "run-ref" not in te.OPTIONAL_EXTENSION_FIELDS
+    assert "run-ref" not in te.MICRO_HEADER_FIELDS
+    t2_path.write_text(
+        t2_path.read_text(encoding="utf-8")
+        .replace("- host: undeclared_box", "- host: alf_ubuntu")
+        .replace("- run-id:", "- run-ref:"),
+        encoding="utf-8",
+    )
+    errs_ref, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("run-ref" in e for e in errs_ref)
+
+
+def test_19_4_b1_shadowed_legacy_config_hosts_do_not_leak(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 19.4 (B1): When an active canonical config and a shadowed legacy config declare
+    different hosts, neither resolve_host_id() nor get_declared_hosts() nor tasks validate
+    leaks hosts from the shadowed legacy config."""
+    monkeypatch.delenv("AI_ORCH_HOST_ID", raising=False)
+    monkeypatch.delenv("AI_ORCH_DECLARED_HOSTS", raising=False)
+
+    empty_global = tmp_path / "global_empty.toml"
+    empty_global.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(empty_global))
+
+    ws = tmp_path / "proj_shadow"
+    tasks_dir = ws / "tasks"
+    (tasks_dir / "backend").mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    # Shadowed legacy config in tasks/orchestration.toml declares legacy_hub and legacy_client
+    legacy_cfg = tasks_dir / "orchestration.toml"
+    legacy_cfg.write_text(
+        '[host]\nid = "legacy_hub"\n\n'
+        '[hosts.legacy_client]\nssh_target = "legacy.lan"\nrole = "client"\n\n'
+        '[tasks]\nhosts = ["legacy_extra"]\n',
+        encoding="utf-8",
+    )
+
+    # Active canonical config in .ai-orchestration.local.toml declares only active_box (no [host] id)
+    active_cfg = ws / ".ai-orchestration.local.toml"
+    active_cfg.write_text(
+        '[hosts.active_box]\nssh_target = "active.lan"\nrole = "client"\n',
+        encoding="utf-8",
+    )
+
+    # 1. With orchestration_config integration: legacy hosts do not leak, and resolve_host_id does not read legacy [host] id
+    assert te.get_declared_hosts(tasks_dir, global_config=empty_global) == {"active_box"}
+    assert te.resolve_host_id(tasks_dir, global_config=empty_global, hostname="my-workstation.local") == "my-workstation"
+
+    # 2. Fallback path when orchestration_config is unavailable: identical behavior (no legacy leak)
+    with monkeypatch.context() as mp:
+        mp.setattr(te, "orchestration_config", None)
+        assert te.get_declared_hosts(tasks_dir, global_config=empty_global) == {"active_box"}
+        assert te.resolve_host_id(tasks_dir, global_config=empty_global, hostname="my-workstation.local") == "my-workstation"
+
+    # 3. tasks validate accepts active_box and rejects legacy_client / legacy_hub from the shadowed legacy config
+    t_active = tasks_dir / "backend" / "T001-active-host.md"
+    t_active.write_text(
+        "# T001 Active host\n\n"
+        "- id: T001\n- title: Active host\n- category: backend\n- priority: P2\n"
+        "- priority-reason: test\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: do T001\n"
+        "- host: active_box\n- short: Active host\n\n"
+        "## Goal\nG\n\n## Steps\n- [ ] S\n\n## Verification\n- V\n",
+        encoding="utf-8",
+    )
+    errs_ok, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert errs_ok == []
+
+    t_legacy = tasks_dir / "backend" / "T002-legacy-host.md"
+    t_legacy.write_text(
+        "# T002 Legacy host\n\n"
+        "- id: T002\n- title: Legacy host\n- category: backend\n- priority: P2\n"
+        "- priority-reason: test\n- next-up: no\n- state: open\n- executor: kilo\n"
+        "- depends-on: -\n- decider: -\n- sources: -\n- paths: -\n- handoff: do T002\n"
+        "- host: legacy_client\n- short: Legacy host\n\n"
+        "## Goal\nG\n\n## Steps\n- [ ] S\n\n## Verification\n- V\n",
+        encoding="utf-8",
+    )
+    errs_leak, _, _, _ = te.validate_tasks_tree(tasks_dir)
+    assert any("T002" in e and "undeclared host 'legacy_client'" in e for e in errs_leak)
+
+
+def test_t090_tasks_agents_md_managed_block_protects_user_edits_and_updates_unmodified_historical(
+    tmp_path: pathlib.Path,
+) -> None:
+    """T090:
+    1. An unmodified historical managed block in tasks/AGENTS.md (including whitespace variation)
+       is replaced and updated normally on `tasks upgrade` (reusing `_managed_block_matches_known_rendering`).
+    2. A managed block in tasks/AGENTS.md containing user edits does not match any known rendering:
+       `render_upgraded_agents_md` raises `TasksAgentsMdManagedBlockModifiedError`, and `tasks upgrade`
+       keeps the block byte-for-byte, reports it in `manual_review_sections` and `warnings`, and does
+       not apply the upgrade to that block.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True)
+    (tasks_dir / "00-INDEX.md").write_text("# Task Index\n", encoding="utf-8")
+
+    custom_header = (
+        "# tasks/ - Project Rules\n\n"
+        "- Custom project rule outside markers.\n\n"
+        "```toml\n"
+        "[tasks]\n"
+        'language = "it"\n'
+        "```\n\n"
+    )
+    custom_footer = "\n## Custom Footer\n\nKeep this footer intact.\n"
+
+    # 1. Historical managed block (from 2026-10-25 T050, with extra spaces/tabs) is updated normally
+    hist_body_t050 = te.HISTORICAL_MANAGED_TASKS_AGENTS_BODIES[9]
+    hist_block_ws = (
+        f"{te.MANAGED_AGENTS_BEGIN}\n"
+        "## task-pipeline   managed convention  \n\n"
+        + "\r\n".join(line + "   " for line in hist_body_t050.splitlines())
+        + f"\r\n{te.MANAGED_AGENTS_END}\n"
+    )
+    agents_path = tasks_dir / "AGENTS.md"
+    agents_path.write_text(custom_header + hist_block_ws + custom_footer, encoding="utf-8")
+
+    prev_1 = te.upgrade_tasks_tree(tasks_dir, dry_run=True, skip_git_config=True)
+    assert prev_1["ok"] is True
+    assert prev_1["manual_review_sections"] == []
+    assert str(agents_path) in prev_1["updated"]
+
+    app_1 = te.upgrade_tasks_tree(
+        tasks_dir,
+        dry_run=False,
+        apply=True,
+        expect_plan_hash=prev_1["plan_hash"],
+        skip_git_config=True,
+    )
+    assert app_1["ok"] is True
+    assert app_1["applied"] is True
+    assert app_1["manual_review_sections"] == []
+    assert str(agents_path) in app_1["updated"]
+
+    expected_managed = te.build_managed_tasks_agents_block(tasks_dir=tasks_dir, existing_agents=custom_header)
+    upgraded_text = agents_path.read_text(encoding="utf-8")
+    assert upgraded_text == custom_header + expected_managed + custom_footer
+    assert "Effective project content languages:" in upgraded_text
+
+    # 2. User edit inside the managed block -> kept byte-for-byte, reported for manual review, not upgraded
+    user_edited_text = upgraded_text.replace(
+        "## task-pipeline managed convention\n",
+        "## task-pipeline managed convention\n\n- **Team Custom Rule Inside Managed Block:** Never close tasks on Fridays.\n",
+    )
+    agents_path.write_text(user_edited_text, encoding="utf-8")
+    before_bytes = agents_path.read_bytes()
+
+    with pytest.raises(te.TasksAgentsMdManagedBlockModifiedError):
+        te.render_upgraded_agents_md(user_edited_text, tasks_dir=tasks_dir)
+
+    prev_2 = te.upgrade_tasks_tree(tasks_dir, dry_run=True, skip_git_config=True)
+    assert prev_2["ok"] is True
+    assert str(agents_path) not in prev_2["updated"]
+    assert str(agents_path) not in prev_2["upgraded_files"]
+    assert not any(op["path"] == "AGENTS.md" for op in prev_2["plan"])
+    assert prev_2["manual_review_sections"] == ["tasks/AGENTS.md <!-- ai-orch:managed begin --> block"]
+    assert any("manual review" in w.lower() for w in prev_2["warnings"])
+    assert agents_path.read_bytes() == before_bytes
+
+    # Even if another file in tasks/ needs upgrading (e.g. .gitignore), tasks/AGENTS.md is untouched
+    (tasks_dir / ".gitignore").unlink()
+    prev_3 = te.upgrade_tasks_tree(tasks_dir, dry_run=True, skip_git_config=True)
+    assert prev_3["ok"] is True
+    assert [op["path"] for op in prev_3["plan"]] == [".gitignore"]
+    assert prev_3["manual_review_sections"] == ["tasks/AGENTS.md <!-- ai-orch:managed begin --> block"]
+
+    app_3 = te.upgrade_tasks_tree(
+        tasks_dir,
+        dry_run=False,
+        apply=True,
+        expect_plan_hash=prev_3["plan_hash"],
+        skip_git_config=True,
+    )
+    assert app_3["ok"] is True
+    assert app_3["applied"] is True
+    assert app_3["manual_review_sections"] == ["tasks/AGENTS.md <!-- ai-orch:managed begin --> block"]
+    assert any("manual review" in w.lower() for w in app_3["warnings"])
+    assert (tasks_dir / ".gitignore").is_file()
+    assert agents_path.read_bytes() == before_bytes
+
+
+
 
 
 

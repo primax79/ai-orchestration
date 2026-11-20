@@ -151,3 +151,46 @@ def test_supervised_invocation_timeout(tmp_path: pathlib.Path):
 
     assert res.timed_out is True
     assert res.cancelled is True
+    assert res.duration_seconds < 3.0
+
+
+@pytest.mark.parametrize("use_procfs", [True, False])
+def test_kill_process_group_unreaped_zombie_leader_procfs_and_ps_fallback(
+    monkeypatch: pytest.MonkeyPatch, use_procfs: bool
+):
+    """T088: kill_process_group and is_process_alive treat unreaped zombie leaders as dead
+    on both Linux (/proc/<pid>/stat) and macOS (ps -o stat= / ps -A -o pid= -o pgid= -o stat=).
+    """
+    import orchestration_invoke as oi
+    import subprocess
+
+    monkeypatch.setattr(oi, "_USE_PROCFS", use_procfs)
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    try:
+        pgid = os.getpgid(proc.pid)
+        st = get_process_start_time(proc.pid)
+        assert st is not None
+        assert is_process_alive(proc.pid, st) is True
+
+        t0 = time.time()
+        # Call kill_process_group WITHOUT reap_fn so proc stays an unreaped zombie of this test process
+        ok = kill_process_group(
+            pgid=pgid,
+            leader_pid=proc.pid,
+            expected_leader_start_time=st,
+            timeout=2.0,
+        )
+        elapsed = time.time() - t0
+        assert ok is True
+        assert elapsed < 1.8
+        assert is_process_alive(proc.pid, st) is False
+    finally:
+        try:
+            proc.wait(timeout=1.0)
+        except Exception:
+            pass
+

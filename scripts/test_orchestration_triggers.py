@@ -1293,3 +1293,45 @@ def test_confirm_start_run_hash_mismatch_if_plan_changed(tmp_path: pathlib.Path)
     # Proposal remains pending
     updated = json.loads((prop_dir / f"{action_id}.json").read_text(encoding="utf-8"))
     assert updated["status"] == "pending_confirmation"
+
+
+def test_19_1_triggers_shadowed_legacy_config_does_not_leak_rules(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+    """19.1 (B3): Lower-precedence project config files are shadowed when a higher-precedence
+    project config file exists; stale legacy trigger rules and kill switches are not loaded."""
+    cfg_dir = tmp_path / "global_cfg"
+    cfg_dir.mkdir()
+    monkeypatch.setenv("AI_ORCHESTRATION_CONFIG", str(cfg_dir / "orchestration.toml"))
+
+    ws = tmp_path / "trig_shadow_ws"
+    (ws / "tasks").mkdir(parents=True)
+
+    # Stale legacy file at tasks/orchestration.toml
+    (ws / "tasks" / "orchestration.toml").write_text(
+        '[triggers]\n'
+        'enabled = false\n\n'
+        '[[triggers.rules]]\n'
+        'name = "stale-shadowed-rule"\n'
+        'on = "task.transitioned"\n'
+        'when = { to = "delivered" }\n'
+        'action = "notify"\n',
+        encoding="utf-8",
+    )
+
+    # Active canonical external config
+    ext_cfg = cfg_dir / "projects" / ws.name / "orchestration.toml"
+    ext_cfg.parent.mkdir(parents=True, exist_ok=True)
+    ext_cfg.write_text(
+        '[[triggers]]\n'
+        'name = "active-external-rule"\n'
+        'on = "task.transitioned"\n'
+        'when = { to = "delivered" }\n'
+        'action = "notify"\n',
+        encoding="utf-8",
+    )
+
+    meta, rules, errors = load_triggers_config(ws)
+    assert not errors
+    assert meta["kill_switch_enabled"] is True
+    assert [r["name"] for r in rules] == ["active-external-rule"]
+    assert any("shadowed by" in w for w in meta["warnings"])
+

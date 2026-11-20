@@ -32,7 +32,14 @@ To support both seamlessly, `orchestration.toml` (Global + Project override), ma
 
 1. **Global Machine Config**: `~/.config/ai-orchestration/orchestration.toml` (override via `$AI_ORCHESTRATION_CONFIG`).
    - Backward compatibility: if `~/.config/ai-architect-executor/roles.toml` exists and `orchestration.toml` does not, the loader can import its `[roles.<profile>]` entries.
-2. **Per-Project Local Config (Unversioned)**: `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` (or `<workspace>/.ai-orchestration.local.toml`, which is always gitignored / in `.git/info/exclude`).
+2. **Per-Project Local Config (Unversioned)**: `<workspace>/.ai-orchestration.local.toml` (if already present locally, gitignored / in `.git/info/exclude`) or `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` (default write location outside the repo).
+   - Unified lookup precedence order (`orchestration_config.find_project_config_path` / `inspect_project_config`, used across `orchestration_config`, `tasks_engine`, `orchestration_triggers`, and `orchestration_env`):
+     1. `<workspace>/.ai-orchestration.local.toml` *(canonical, read-write)*
+     2. `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` *(canonical, read-write, default when no file exists)*
+     3. `<workspace>/orchestration.toml` *(legacy, read-only with warning)*
+     4. `<workspace>/.ai-orchestration/orchestration.toml` *(legacy, read-only with warning)*
+     5. `<workspace>/tasks/orchestration.toml` *(legacy, read-only with warning)*
+     6. `<workspace>/.ai-orchestration.toml` *(legacy, read-only with warning)*
    - Deep-merged on top of the Global Config (`project` keys, `[routing]` overrides, `[verification]` overrides, `[tools.<id>.profiles.<profile>]` overrides).
 
 ---
@@ -47,5 +54,5 @@ All commands support `--json` (structured JSON on stdout, logs on stderr) so the
 | `validate [--workspace <dir>] [--plugin-dir <dir>...] [--json]` | Run kit-internal checks (`skill-requirements.json`, no `model:` in `SKILL.md`) plus operator/project config validation (profiles, `xhigh` effort compatibility, verification rules, port ranges). |
 | `set-profile <tool> <profile> --model <id> [--variant <v>] [--effort <e>] [--basis <b>] [--scope global\|project]` | Atomically set or update one `(tool, profile)` model assignment in `orchestration.toml`. |
 | `init-global [--force]` | Create `~/.config/ai-orchestration/orchestration.toml` with the documented schema skeleton. |
-| `init-project [--workspace <dir>] [--name <name>] [--orchestrator <tool>] [--executor <tool>]` | Create `<workspace>/tasks/orchestration.toml` and optionally scaffold `tasks/{00-INDEX.md,CONTEXT.md,AGENTS.md}`. |
+| `init-project [--workspace <dir>] [--name <name>] [--orchestrator <tool>] [--executor <tool>]` | Create `~/.config/ai-orchestration/projects/<workspace-name>/orchestration.toml` (or `<workspace>/.ai-orchestration.local.toml` if already present). |
 | `render-agents-md [--workspace <dir>] [--apply] [--check]` | Render the project-bound orchestration charter (Rules 1–4 + Verification Gate) from the merged config; with `--apply`, create or update the `<!-- BEGIN ai-orchestration --> ... <!-- END ai-orchestration -->` block in `<workspace>/AGENTS.md`. |

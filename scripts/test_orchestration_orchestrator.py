@@ -840,8 +840,10 @@ def test_reassign_dry_run_diff_header_home_relative(tmp_path: pathlib.Path, monk
     """T072: Reassign diff header formats paths under home as a/~/.config/..."""
     fake_home = tmp_path / "fake_home"
     fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: fake_home))
     monkeypatch.delenv("AI_ORCHESTRATION_CONFIG", raising=False)
+    monkeypatch.delenv("AI_ORCH_CONFIG_DIR", raising=False)
 
     ws = fake_home / "works" / "d4science_kb"
     ws.mkdir(parents=True)
