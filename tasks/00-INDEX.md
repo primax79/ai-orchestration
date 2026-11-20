@@ -146,7 +146,6 @@ Tasks in `engine`. Owner session: unassigned ([README](engine/README.md)).
 | T079 (Workspace da sottocartella) | P2 | [I comandi lanciati da una sottocartella risolvono il workspace che la contiene](engine/T079-i-comandi-lanciati-da-una-sottocartella-risolvono.md) | open | kilo | - |
 | T081 (Branch e sblocco dipendenti) | P2 | [tasks_engine: list --branches, sblocco dei dipendenti e validate --branch](engine/T081-tasks-engine-list-branches-sblocco-dei-dipendenti.md) | open | kilo | - |
 | T083 (Rinomina sessione per provider) | P3 | [L'id del provider identifica la sessione: un nome nuovo rinomina il record invece di crearne un altro](engine/T083-l-id-del-provider-identifica-la-sessione-un-nome-n.md) | open | kilo | - |
-| T088 (Test rossi su main) | P1 | [Quattro test rossi su main: duplicati skill non fixable, kill dei discendenti su Linux, runaway stub lento](engine/T088-quattro-test-rossi-su-main-duplicati-skill-non-fix.md) | verified | kilo | - |
 | T091 (Stato tracked) | P0 | [Nuovo stato canonico tracked: lavoro seguito su un tracker esterno](engine/T091-nuovo-stato-canonico-tracked-lavoro-seguito-su-un.md) | in progress | claude | - |
 | T092 (Stati per workspace) | P2 | [Stati dei task personalizzati per workspace (configurazione di progetto)](engine/T092-stati-dei-task-personalizzati-per-workspace-config.md) | open | - | - |
 
@@ -169,16 +168,6 @@ Tasks in `ui`. Owner session: unassigned ([README](ui/README.md)).
 | Id | Priority | Task | State | Executor | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | T084 (Test backend UI rossi) | P1 | [Test del backend della UI rossi su main](ui/T084-test-del-backend-della-ui-rossi-su-main.md) | open | kilo | - |
-
-### micro
-
-Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
-
-| Id | Priority | Task | State | Executor | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| T087 (describe run incompleto) | P3 | [ai-orch describe elenca solo una parte dei sottocomandi di run](micro/T087-describe-run-incompleto.md) | verified | kilo | - |
-| T089 (Test non isolati) | P1 | [I test scrivono nella config globale reale: serve isolamento automatico in conftest](micro/T089-test-non-isolati.md) | verified | kilo | - |
-| T090 (Protezione blocco tasks/AGENTS) | P2 | [tasks upgrade: proteggere le modifiche dell'utente nel blocco gestito di tasks/AGENTS.md](micro/T090-protezione-blocco-tasks-agents.md) | in progress | kilo | - |
 <!-- /ai-orch:generated tasks-by-category -->
 
 ## Decisions waiting
@@ -270,6 +259,10 @@ Tasks in `micro`. Owner session: unassigned ([README](micro/README.md)).
 | T085 (Espansione iniziative) | [adopt-links espande i collegamenti a iniziative nei loro task](done/engine/T085-adopt-links-espande-i-collegamenti-a-iniziative-ne.md) | done | 2026-10-28 |
 | T086 (Approvare use case) | [Approvazione degli use case da CLI e UI](done/engine/T086-approvazione-degli-use-case-da-cli-e-ui.md) | done | 2026-10-29 |
 | T075 (Valida e chiudi da UI) | [Pulsante Valida e chiudi sulla colonna Delivered e sul singolo task](done/ui/T075-pulsante-richiedi-validazione-sulla-colonna-done-e.md) | done | 2026-10-29 |
+| T087 (describe run incompleto) | [ai-orch describe elenca solo una parte dei sottocomandi di run](done/micro/T087-describe-run-incompleto.md) | done | 2026-11-20 |
+| T088 (Test rossi su main) | [Quattro test rossi su main: duplicati skill non fixable, kill dei discendenti su Linux, runaway stub lento](done/engine/T088-quattro-test-rossi-su-main-duplicati-skill-non-fix.md) | done | 2026-11-20 |
+| T089 (Test non isolati) | [I test scrivono nella config globale reale: serve isolamento automatico in conftest](done/micro/T089-test-non-isolati.md) | done | 2026-11-20 |
+| T090 (Protezione blocco tasks/AGENTS) | [tasks upgrade: proteggere le modifiche dell'utente nel blocco gestito di tasks/AGENTS.md](done/micro/T090-protezione-blocco-tasks-agents.md) | done | 2026-11-20 |
 <!-- /ai-orch:generated done -->
 
 ## Dependency graph

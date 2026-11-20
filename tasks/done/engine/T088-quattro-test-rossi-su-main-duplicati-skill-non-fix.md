@@ -6,14 +6,14 @@
 - priority: P1
 - priority-reason: Suite rossa su main: maschera le regressioni degli executor dell'iniziativa 19
 - next-up: no
-- state: verified
+- state: done
 - executor: kilo
 - depends-on: -
 - decider: -
 - sources: -
 - paths: scripts/orchestration_env.py, scripts/orchestration_invoke.py, scripts/orchestration_orchestrator.py, scripts/test_orchestration_*.py
 - handoff: Read tasks/engine/T088-quattro-test-rossi-su-main-duplicati-skill-non-fix.md, do the open steps, run the Verification, update the task and the registry.
-- verifier: codex
+- verifier: owner
 - kind: fix
 - short: Test rossi su main
 
@@ -35,6 +35,7 @@ Riportare verde la suite completa. Baseline 2026-10-29 su alf_ubuntu (uvx pytest
 
 ## Log (newest first)
 
+- 2026-11-20, owner: state `verified` -> `done` — Integrato su main (9252ce8), 770 passed su alf_ubuntu (owner-approved)
 - 2026-10-30, codex: state `delivered` -> `verified` — OK: quarta verifica Codex PASS; su integration/19, non ancora su main
 - 2026-10-30, kilo: state `in progress` -> `delivered` — fix 1396135, unito in integration/19
 - 2026-10-30, orchestrator: state `bounced` -> `in progress` — terzo rinvio su alf_ubuntu

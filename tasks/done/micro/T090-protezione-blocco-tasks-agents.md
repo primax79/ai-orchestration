@@ -4,7 +4,7 @@
 - title: tasks upgrade: proteggere le modifiche dell'utente nel blocco gestito di tasks/AGENTS.md
 - kind: fix
 - priority: P2
-- state: in progress
+- state: done
 - executor: kilo
 - paths: plugins/architect-side/skills/task-pipeline/scripts/tasks_engine.py, scripts/orchestration_env.py
 - depends-on: -
@@ -27,6 +27,9 @@ Add a test with a user edit inside the block, and a test showing that an unmodif
 
 ## Log (newest first)
 
+- 2026-11-20, owner: state `verified` -> `done` — Fix 4c4293b integrato su main (913b20a), 11/11 test upgrade verdi + 770 suite verde (owner-approved)
+- 2026-11-20, owner: state `delivered` -> `verified` — Fix 4c4293b integrato su main (913b20a), 11/11 test upgrade verdi + 770 suite verde (owner-approved)
+- 2026-11-20, kilo: state `in progress` -> `delivered`
 - 2026-10-31, orchestrator: state `bounced` -> `in progress` — rinviato come kilo su alf_ubuntu
 - 2026-10-31, codex: state `delivered` -> `bounced` — Verifica Codex NON OK (nota in notes/)
 - 2026-10-31, kilo: state `in progress` -> `delivered` — commit unito in integration/19 (6e26b9b / 7fe887f)
