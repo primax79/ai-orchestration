@@ -69,4 +69,26 @@ In Kilo: `kilo run --model google/gemini-4-hydrogen --variant medium "..."`
 
 ⚠️ **Avvertenza:** Hydrogen e Neon hanno pochi giorni di vita e quasi tutti i benchmark sono dichiarati da Google. Verificate l'output come fareste con qualunque esecutore, e segnalate i difetti che trovate, così correggiamo la scelta.
 
+📊 **Riepilogo: Gemini, Claude e ChatGPT a confronto** (USD per milione di token, input / output; velocità di output indicativa in token al secondo)
+
+| Fascia | Modello | Costo in / out | Velocità |
+| --- | --- | --- | --- |
+| Problemi più difficili | Gemini 4 Carbon | 2 / 10, dal 1/12 4 / 20 | ~56 |
+| | Claude Fable 5.2 | 8 / 40 | ~92 |
+| | GPT-6.2 Astra | 8 / 40 | ~63⁴ |
+| Task complessi | Gemini 4 Neon | 3 / 15 | ~100 |
+| | Claude Opus 5.5 | 4 / 20 | ~95-105 |
+| | GPT-6.2 Astra oppure Sol con effort alto | 8 / 40 oppure 2 / 10 | ~63⁴ / ~65⁴ |
+| Routine, coding quotidiano | Gemini 4 Hydrogen | 1.50 / 7.50 | ~165 |
+| | Claude Sonnet 5.5 | 2 / 10 | ~130-155 |
+| | GPT-6.2 Sol oppure GPT-6.1 Terra | 2 / 10 oppure 1 / 5 | ~65⁴ / n.d. |
+| Testo in volume | Gemini 3.5 Flash-Lite | 0.30 / 2.50 | n.d. |
+| | Claude Haiku 5.5 | 0.10 / 0.50 (fino a 100K token) | ~220-260 |
+| | GPT-6 Luna | 0.10 / 0.50 | ~130 |
+| Legacy | Gemini 4 Argon | 2 / 10, dal 1/12 4 / 20 | ~66 |
+| | Gemini 3.8 Flash | 0.75 / 3.75, dal 1/1/2027 1.50 / 7.50 | n.d. |
+
+Le velocità di Gemini vengono da Artificial Analysis. Quelle di Claude e OpenAI vengono da articoli che citano Artificial Analysis, con livelli di effort diversi: prendetele come ordine di grandezza.
+⁴ Misurate su GPT-6 Astra e GPT-6.1 Sol. Per GPT-6.2 e Terra non ho trovato misure.
+
 Fonti: [prezzi OpenAI](https://developers.openai.com/api/docs/pricing); [prezzi Claude](https://www.anthropic.com/pricing); [modelli](https://aistudio.google.com/docs/models), [scelta del modello](https://aistudio.google.com/docs/choosing-a-model) e [prezzi](https://aistudio.google.com/docs/pricing) di Google AI Studio; [Artificial Analysis](https://artificialanalysis.ai/models/gemini-4-neon); [model card di Hydrogen](https://deepmind.google/models/model-cards/gemini-4-hydrogen/).
