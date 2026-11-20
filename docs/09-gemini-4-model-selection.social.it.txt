@@ -1,21 +1,21 @@
-Gemini 4: quale modello usare e quando 🧭
+Gemini 4: quale modello usare e quando
 
 Dopo aver dormito un anno, Google ha cambiato la denominazione dei modelli Gemini, tira fuori un modello a settimana e si è inventata le varianti, ognuna con la sua fascia di costo. Per ora siamo a 4 modelli e una quindicina di varianti in totale, con funzionalità in parte sovrapposte. Ho fatto fare a Claude un mini studio, sia sulla documentazione ufficiale sia sui benchmark di terze parti, per capire cosa usare e quando.
 
 In breve:
 
-🟢 Lavoro di routine (codice, test, refactor, esplorazione): Gemini 4 Hydrogen, ragionamento medium. È il default consigliato da Google, prende il posto di 3.8 Flash ed è nettamente più capace.
+- Lavoro di routine (codice, test, refactor, esplorazione): Gemini 4 Hydrogen, ragionamento medium. È il default consigliato da Google, prende il posto di 3.8 Flash ed è nettamente più capace.
 
-🟠 Task complessi o rischiosi (bug sottili, sicurezza, spec, review indipendenti): Gemini 4 Neon, ragionamento high.
+- Task complessi o rischiosi (bug sottili, sicurezza, spec, review indipendenti): Gemini 4 Neon, ragionamento high.
 
-🔴 Solo i problemi più difficili (architettura, audit, bug su cui Neon si blocca): Gemini 4 Carbon, ragionamento high. È il più forte, ma anche il più lento e il più caro.
+- Solo i problemi più difficili (architettura, audit, bug su cui Neon si blocca): Gemini 4 Carbon, ragionamento high. È il più forte, ma anche il più lento e il più caro.
 
-⚪ Argon non è deprecato, ma di fatto è superato: dal 1° dicembre costa quanto Carbon e rende meno di Neon.
+- Argon non è deprecato, ma di fatto è superato: dal 1° dicembre costa quanto Carbon e rende meno di Neon.
 
-⚙️ Il livello di ragionamento pesa sul costo più del listino: Hydrogen e Neon partono da high di default, quindi conviene impostarlo sempre a mano.
+- Il livello di ragionamento pesa sul costo più del listino: Hydrogen e Neon partono da high di default, quindi conviene impostarlo sempre a mano.
 
-🔁 Per chi usa altri assistenti, le fasce corrispondenti sono, più o meno: Hydrogen ≈ Claude Sonnet 5.5 / GPT-6.2 Sol, Neon ≈ Claude Opus 5.5, Carbon ≈ Claude Fable 5.2 / GPT-6.2 Astra.
+- Per chi usa altri assistenti, le fasce corrispondenti sono, più o meno: Hydrogen ≈ Claude Sonnet 5.5 / GPT-6.2 Sol, Neon ≈ Claude Opus 5.5, Carbon ≈ Claude Fable 5.2 / GPT-6.2 Astra.
 
-⚠️ Hydrogen e Neon hanno pochi giorni di vita e quasi tutti i benchmark sono di Google: da verificare sul campo.
+- Hydrogen e Neon hanno pochi giorni di vita e quasi tutti i benchmark sono di Google: da verificare sul campo.
 
 Nel PDF allegato trovate prezzi, livelli di ragionamento, equivalenti Claude e OpenAI e fonti.
