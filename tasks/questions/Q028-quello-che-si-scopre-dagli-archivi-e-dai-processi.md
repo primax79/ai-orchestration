@@ -2,7 +2,7 @@
 
 - id: Q028
 - question: Quello che si scopre dagli archivi e dai processi può decidere presenza o subentri?
-- status: open
+- status: answered
 - blocks: T073 (waiting)
 - decider: owner
 - asked-by: ai-coding-tools-87
@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: yes
 - recommended: A
+- applied: no
 - short: Valore di queste scoperte
 
 ## Context
@@ -23,6 +24,10 @@ Studio tasks/specs/orchestrator-control-plane-study.md (T073), rivisto da Codex;
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: open
+- answered-by: owner
+- answered: 2026-10-29
+
+```text
+mi servono più info
+```

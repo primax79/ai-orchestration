@@ -6,14 +6,13 @@
 - priority: P1
 - priority-reason: Richiesta del proprietario 2026-10-27: oggi i registri non concordano e il ruolo di orchestratore non è visibile né gestibile
 - next-up: no
-- state: waiting
+- state: in progress
 - executor: kilo
 - depends-on: -
-- decider: Q026, Q028
+- decider: -
 - sources: _inbox/analyzed/20261027-144545-in-depth-study-orchestrator-feedback-han/note.md
 - paths: N068; N069; specs ui-multi-project.md, orchestration-broker-mcp.md, orchestration-extension-spec.md, events-and-triggers.md; UC028, UC030, UC033, UC037
 - handoff: Read tasks/methodology/T073-studio-pannello-di-controllo-degli-orchestratori-d.md, do the open steps, run the Verification, update the task and the registry.
-- waiting-on: question:Q026, question:Q028
 - short: Studio pannello orchestratori
 
 ## Goal
@@ -32,6 +31,7 @@ Owner request (2026-10-27, verbatim intent): we need a mechanism that gives feed
 
 ## Log
 
+- 2026-10-29, owner: state `waiting` -> `in progress` — Unblocked: question Q028 answered
 - 2026-10-28, ai-coding-tools-87: state `waiting` -> `waiting` — Blocked by question Q031
 - 2026-10-28, ai-coding-tools-87: state `waiting` -> `waiting` — Blocked by question Q030
 - 2026-10-28, ai-coding-tools-87: state `waiting` -> `waiting` — Blocked by question Q029

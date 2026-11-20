@@ -2,7 +2,7 @@
 
 - id: Q032
 - question: L'interlocutore di un progetto può modificare il codice di prodotto, o solo conversare e smistare il lavoro?
-- status: open
+- status: answered
 - blocks: -
 - decider: owner
 - asked-by: owner
@@ -10,6 +10,7 @@
 - origin-run: -
 - open-answer: no
 - recommended: B
+- applied: no
 - short: Interlocutore e codice
 
 ## Context
@@ -24,6 +25,6 @@ Spec multi-macchina §7: l'interlocutore è la sessione con cui l'owner parla pe
 
 ## Answer
 
-- choice: -
-- answered-by: -
-- answered: -
+- choice: B
+- answered-by: owner
+- answered: 2026-10-31
