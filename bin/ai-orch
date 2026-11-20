@@ -85,7 +85,7 @@ CLI_DESCRIPTION: dict[str, Any] = {
                 "[--plan] [--apply] [--expect-hash <hash>] [--start-orchestrator] [--json]"
             ),
             "description": (
-                "First-run setup engine: probe tools, propose defaults (Claude orch, Kilo exec with gemini-3.8-flash), "
+                "First-run setup engine: probe tools, propose defaults (Claude orch, Kilo exec with gemini-4-hydrogen), "
                 "show Q001 permissions, preview diff with hash, and apply with --expect-hash."
             ),
         },

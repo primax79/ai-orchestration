@@ -332,7 +332,7 @@ def _parse_iso_dt(dt_str: str | None) -> datetime.datetime | None:
 
 # Last-resort defaults when the config has no `orchestration` profile for the tool.
 # Aliases, not dated ids: the CLIs resolve them to the current model.
-FALLBACK_MODELS = {"claude": "sonnet", "kilo": "google/gemini-3.8-flash", "codex": "gpt-5.6-luna"}
+FALLBACK_MODELS = {"claude": "sonnet", "kilo": "google/gemini-4-hydrogen", "codex": "gpt-5.6-luna"}
 
 
 def load_orchestrator_tool_config(workspace: pathlib.Path, tool: str) -> tuple[dict[str, Any], str]:
