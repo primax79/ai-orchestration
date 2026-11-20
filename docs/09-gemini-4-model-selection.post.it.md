@@ -1,6 +1,8 @@
 **Gemini 4: quale modello usare per gli agenti di coding (aggiornamento 20/11/2026)**
 
-Google ha completato la famiglia Gemini 4: **Hydrogen** (12/11), **Carbon** (10/11), **Neon** (18/11), oltre ad **Argon** di ottobre. Ho letto la documentazione ufficiale di AI Studio e le analisi indipendenti (Artificial Analysis e altre). Ecco cosa usiamo da oggi nei task delegati a Kilo e in generale:
+Dopo aver dormito un anno, Google ha cambiato la denominazione dei modelli Gemini. Adesso tira fuori un modello a settimana e si è inventata le varianti, ognuna con la sua fascia di costo. Per ora siamo a 4 modelli e una quindicina di varianti in totale, con funzionalità in parte sovrapposte. Ho fatto fare a Claude un mini studio, sia sulla documentazione ufficiale sia sui benchmark di terze parti, per capire cosa usare e quando.
+
+I modelli sono **Argon** (13/10), **Carbon** (10/11), **Hydrogen** (12/11) e **Neon** (18/11). Ecco cosa usiamo da oggi nei task delegati a Kilo, e in generale:
 
 🟢 **Lavoro di routine → `gemini-4-hydrogen`**
 Implementazione, test, refactor meccanici, review di diff piccoli, esplorazione del codice.
