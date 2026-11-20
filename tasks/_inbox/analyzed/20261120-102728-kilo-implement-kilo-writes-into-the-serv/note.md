@@ -3,13 +3,12 @@
 - id: N097
 - title: kilo_implement: Kilo writes into the server's PWD, not working_directory
 - kind: bug
-- status: ready
+- status: processed
 - created: 2026-11-20T10:27:28.097018+00:00
 - author: ai-coding-tools session (Claude Opus 5.5)
 - about: kilo-mcp, server.py _run_kilo, kilo_implement
-- produced: -
-- processed-by: -
-- short: kilo_implement ignores cwd
+- produced: workspace ai-coding-tools T055 (verified, kilo-mcp 5f4a387)
+- processed-by: ai-coding-tools-31 (orchestrator)
 
 Found 2026-11-20 during the live check of the new `variant` parameter (kilo-mcp branch models/gemini-4-policy).
 
