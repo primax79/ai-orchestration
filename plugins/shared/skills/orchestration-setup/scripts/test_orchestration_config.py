@@ -45,7 +45,7 @@ def _stub_agent_clis(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pyte
             "#!/bin/sh\n"
             'case "$1" in\n'
             f'  --version) echo "{name} 0.0.0-test-fake"; exit 0 ;;\n'
-            '  models) echo "google/gemini-3.8-flash"; echo "google/gemini-4-argon"; exit 0 ;;\n'
+            '  models) echo "google/gemini-3.8-flash"; echo "google/gemini-4-argon"; echo "google/gemini-4-hydrogen"; echo "google/gemini-4-neon"; exit 0 ;;\n'
             "esac\n"
             f"echo 'REAL {name} CLI CALLED: configure a stub' >&2\n"
             "exit 97\n",
@@ -903,7 +903,7 @@ def test_set_routing_and_set_profile_diff_preview(tmp_path: pathlib.Path) -> Non
         if (l.startswith("+") or l.startswith("-")) and not (l.startswith("+++") or l.startswith("---"))
     ]
     assert len(diff_lines_sp) == 2
-    assert diff_lines_sp[0] == '-model = "google/gemini-4-argon"'
+    assert diff_lines_sp[0] == '-model = "google/gemini-4-neon"'
     assert diff_lines_sp[1] == '+model = "custom/reasoner-v99"'
 
 
@@ -2129,7 +2129,7 @@ def _create_fake_clis(tmp_bin: pathlib.Path) -> None:
         "#!/bin/sh\n"
         'case "$1" in\n'
         '  --version) echo "kilo 2.0.0-test" ; exit 0 ;;\n'
-        '  models) echo "google/gemini-3.8-flash\ngoogle/gemini-4-argon" ; exit 0 ;;\n'
+        '  models) echo "google/gemini-3.8-flash\ngoogle/gemini-4-argon\ngoogle/gemini-4-hydrogen\ngoogle/gemini-4-neon" ; exit 0 ;;\n'
         "esac\n"
         "exit 0\n"
     )
@@ -2194,7 +2194,7 @@ def test_setup_plan_mode_defaults(tmp_path: pathlib.Path, monkeypatch: pytest.Mo
     assert payload["routing"]["default_executor"] == "kilo"
     assert payload["routing"]["default_profile"] == "bulk-execution"
     assert payload["verification"]["default_mode"] == "cross-agent"
-    assert payload["profiles"]["executor"]["model"] == "google/gemini-3.8-flash"
+    assert payload["profiles"]["executor"]["model"] == "google/gemini-4-hydrogen"
     assert payload["profiles"]["orchestrator"]["model"] == "sonnet"
     assert len(payload["plan_hash"]) == 64
     assert payload["existing_exists"] is False
@@ -2282,7 +2282,7 @@ def test_setup_writes_only_with_hash(tmp_path: pathlib.Path, monkeypatch: pytest
     saved_cfg = oc.load_toml_file(target_path)
     assert saved_cfg["routing"]["default_orchestrator"] == "claude"
     assert saved_cfg["routing"]["default_executor"] == "kilo"
-    assert saved_cfg["tools"]["kilo"]["profiles"]["bulk-execution"]["model"] == "google/gemini-3.8-flash"
+    assert saved_cfg["tools"]["kilo"]["profiles"]["bulk-execution"]["model"] == "google/gemini-4-hydrogen"
 
 
 def test_setup_emits_config_changed_event(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:

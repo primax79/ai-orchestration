@@ -2,6 +2,7 @@
 
 > **Author:** Kilo Code (AI Orchestrator)  
 > **Date:** 2026-10-15  
+> **Superseded for Gemini model choice** by [`09-gemini-4-model-selection.md`](09-gemini-4-model-selection.md) (2026-11-20: Hydrogen / Neon / Carbon replace 3.8 Flash / Argon).  
 > **Target Systems:** `ai-orchestration`, `kilo-mcp`, `claude-mcp`, Kilo Code (`~/.config/kilo/kilo.jsonc`), Claude Code (`valutazione modelli claude.md`), Codex CLI  
 > **Source Documents Analyzed & Cross-Referenced:**
 > - [Google AI Studio — Gemini API Official Pricing (`ai.google.dev/gemini-api/docs/pricing`)](https://ai.google.dev/gemini-api/docs/pricing)

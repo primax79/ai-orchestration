@@ -37,6 +37,7 @@ flowchart TB
 | **Configure tools (`kilo`, `claude`, `codex`), models & verification modes** | **[`05-orchestration-config-schema.md`](05-orchestration-config-schema.md)** |
 | **Analyze model costs, Gemini 4 Argon vs 3.8 Flash, and Kilo model assignment** | **[`07-gemini-pricing-and-role-cost-analysis.md`](07-gemini-pricing-and-role-cost-analysis.md)** |
 | **Set up a development hub (agents user, executors in screen, chain, integration)** | **[`08-development-hub-setup.md`](08-development-hub-setup.md)** |
+| **Choose the Gemini 4 model and thinking variant per task (Hydrogen / Neon / Carbon)** | **[`09-gemini-4-model-selection.md`](09-gemini-4-model-selection.md)** |
 | **Understand how project `AGENTS.md` is generated and kept in sync** | **[`04-project-bootstrap-and-agents-md-pattern.md`](04-project-bootstrap-and-agents-md-pattern.md)** |
 | **Check the formal task format (`T###`, `NN.T`), state machine & guards** | **[`../tasks/specs/task-and-state-model.md`](../tasks/specs/task-and-state-model.md)** |
 | **See the spec for the Backlog Manager & Environment Extension/UI** | **[`../tasks/specs/orchestration-extension-spec.md`](../tasks/specs/orchestration-extension-spec.md)** |

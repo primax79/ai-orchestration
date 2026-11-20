@@ -116,7 +116,7 @@ Manages Global and Project `orchestration.toml`, validates configuration and ski
 
 ```bash
 # 1. First-Run Setup Engine (shared across CLI, Web UI 12.10, and this skill)
-#    Inspects available tools, versions, auth, proposes defaults (Claude orch, Kilo exec with gemini-3.8-flash),
+#    Inspects available tools, versions, auth, proposes defaults (Claude orch, Kilo exec with gemini-4-hydrogen),
 #    shows Q001 permissions, previews diff, and outputs plan_hash:
 ai-orch setup [--json] [--workspace <dir>] [--scope project|global|project-local]
 
@@ -179,7 +179,7 @@ Call `ai-orch setup --json [--workspace <dir>] [--scope project|global]` to run 
 - **Model Discovery:** Enumerates reachable models (e.g. `kilo models`).
 - **Proposed Routing Defaults:**
   - `default_orchestrator`: `claude` (Owner default per 2026-10-17 spec; falls back to `kilo` if Claude unavailable)
-  - `default_executor`: `kilo` (with `google/gemini-3.8-flash` for `bulk-execution`)
+  - `default_executor`: `kilo` (with `google/gemini-4-hydrogen` for `bulk-execution`/`exploration`, `google/gemini-4-neon` for `deep-reasoning`/`orchestration`)
   - `default_profile`: `bulk-execution`
   - `verification.default_mode`: `cross-agent` (or `independent-session` if orchestrator == executor)
 - **Q001 Permission Defaults:** Displays Option A per-mode allow-lists for unattended and headless runs.
@@ -394,9 +394,9 @@ When guiding the operator to select models across the 4 cognitive profiles, foll
 
 1. **Cognitive Profile Cost Split:**
    - Reserve high-tier models (`deep-reasoning`, `orchestration`) for architectural design, spec drafting, blind verification, and semantic conflict resolution.
-   - Map `bulk-execution` and `exploration` to fast agent-optimized models (e.g. `Gemini 3.8 Flash`, `Claude Sonnet`, `GPT-5-Codex-Mini`). In production runs, fast agent models cost **~1.7× less per component** while eliminating 60%–80% of secondary token expenditure.
+   - Map `bulk-execution` and `exploration` to fast agent-optimized models (e.g. `Gemini 4 Hydrogen`, `Claude Sonnet`, `GPT-5-Codex-Mini`). In production runs, fast agent models cost **~1.7× less per component** while eliminating 60%–80% of secondary token expenditure.
 2. **Preventing the "Silent Subagent Leak":**
-   - In tools like Kilo Code, leaving `subagent_model` or `compaction` unset causes background workers and history compaction to inherit the expensive default chat model (`Gemini 4 Argon`, `Claude Opus`). Always explicitly map subagents and compaction to the `bulk-execution` / `exploration` model.
+   - In tools like Kilo Code, leaving `subagent_model` or `compaction` unset causes background workers and history compaction to inherit the expensive default chat model (`Gemini 4 Neon`, `Claude Opus`). Always explicitly map subagents and compaction to the `bulk-execution` / `exploration` model.
 3. **Free Tier vs. Paid Tier Privacy:**
    - Free tiers (such as Google AI Studio's Free Tier) explicitly specify `Used to improve our products: Yes`, exposing proprietary codebase context, internal APIs, and prompts to model training and human review.
    - The Paid Tier (Pay-As-You-Go / Tier 1+) guarantees `Used to improve our products: No`. For institutional, enterprise, or private codebases, always configure Paid Tier API keys and enable `"Hide Prompt-Training Models"`.

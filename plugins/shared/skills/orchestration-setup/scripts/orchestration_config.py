@@ -223,22 +223,22 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
             "cli_command": "kilo",
             "profiles": {
                 "deep-reasoning": {
-                    "model": "google/gemini-4-argon",
+                    "model": "google/gemini-4-neon",
                     "variant": "high",
                     "basis": "template-default",
                 },
                 "orchestration": {
-                    "model": "google/gemini-4-argon",
+                    "model": "google/gemini-4-neon",
                     "variant": "medium",
                     "basis": "template-default",
                 },
                 "bulk-execution": {
-                    "model": "google/gemini-3.8-flash",
+                    "model": "google/gemini-4-hydrogen",
                     "variant": "medium",
                     "basis": "template-default",
                 },
                 "exploration": {
-                    "model": "google/gemini-3.8-flash",
+                    "model": "google/gemini-4-hydrogen",
                     "variant": "low",
                     "basis": "template-default",
                 },
@@ -2320,11 +2320,11 @@ def build_setup_plan(
             order.append(cand)
 
     # Step 4: Choose models per profile
-    # Default executor model: google/gemini-3.8-flash for kilo
+    # Default executor model: google/gemini-4-hydrogen for kilo
     if executor_model:
         exec_m = executor_model
     elif exec_tool == "kilo":
-        exec_m = "google/gemini-3.8-flash"
+        exec_m = "google/gemini-4-hydrogen"
     elif exec_tool == "claude":
         exec_m = "sonnet"
     else:
@@ -2336,7 +2336,7 @@ def build_setup_plan(
     elif orch_tool == "claude":
         orch_m = "sonnet"
     elif orch_tool == "kilo":
-        orch_m = "google/gemini-4-argon"
+        orch_m = "google/gemini-4-neon"
     else:
         orch_m = "gpt-5-codex"
 
@@ -2719,7 +2719,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_setup = sub.add_parser(
         "setup",
-        help="First-run setup engine: probe tools, propose defaults (Claude orch, Kilo exec with gemini-3.8-flash), preview diff with hash, and apply",
+        help="First-run setup engine: probe tools, propose defaults (Claude orch, Kilo exec with gemini-4-hydrogen), preview diff with hash, and apply",
     )
     p_setup.add_argument("--workspace", default=".", help="Project workspace root")
     p_setup.add_argument("--global-config", type=pathlib.Path, default=argparse.SUPPRESS, help="Override path to global config")
@@ -2727,7 +2727,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup.add_argument("--orchestrator", default=None, help="Orchestrator tool ID")
     p_setup.add_argument("--executor", default=None, help="Default executor tool ID")
     p_setup.add_argument("--verification-mode", choices=sorted(VERIFICATION_MODES), default=None, help="Verification mode")
-    p_setup.add_argument("--executor-model", default=None, help="Executor model (default: google/gemini-3.8-flash for kilo)")
+    p_setup.add_argument("--executor-model", default=None, help="Executor model (default: google/gemini-4-hydrogen for kilo)")
     p_setup.add_argument("--orchestrator-model", default=None, help="Orchestrator model")
     p_setup.add_argument("--plan", action="store_true", default=False, help="Show setup plan without applying (default if --apply not passed)")
     p_setup.add_argument("--apply", action="store_true", default=False, help="Apply setup plan to target configuration")
