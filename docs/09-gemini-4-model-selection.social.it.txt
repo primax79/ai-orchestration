@@ -4,17 +4,17 @@ Dopo aver dormito un anno, Google ha cambiato la denominazione dei modelli Gemin
 
 In breve:
 
-- Lavoro di routine (codice, test, refactor, esplorazione): Gemini 4 Hydrogen, ragionamento medium. È il default consigliato da Google, prende il posto di 3.8 Flash ed è nettamente più capace.
+- Lavoro di routine (codice, test, refactor, esplorazione): Gemini 4 Hydrogen, ragionamento medium. È il default consigliato da Google, prende il posto di 3.8 Flash ed è nettamente più capace. Equivalenti: Claude Sonnet 5.5, GPT-6.2 Sol (o GPT-6.1 Terra se conta il costo).
 
-- Task complessi o rischiosi (bug sottili, sicurezza, spec, review indipendenti): Gemini 4 Neon, ragionamento high.
+- Task complessi o rischiosi (bug sottili, sicurezza, spec, review indipendenti): Gemini 4 Neon, ragionamento high. Equivalenti: Claude Opus 5.5; OpenAI non ha un modello in questa fascia, quindi GPT-6.2 Astra o GPT-6.2 Sol con effort alto.
 
-- Solo i problemi più difficili (architettura, audit, bug su cui Neon si blocca): Gemini 4 Carbon, ragionamento high. È il più forte, ma anche il più lento e il più caro.
+- Solo i problemi più difficili (architettura, audit, bug su cui Neon si blocca): Gemini 4 Carbon, ragionamento high. È il più forte, ma anche il più lento e il più caro. Equivalenti: Claude Fable 5.2, GPT-6.2 Astra.
 
 - Argon non è deprecato, ma di fatto è superato: dal 1° dicembre costa quanto Carbon e rende meno di Neon.
 
 - Il livello di ragionamento pesa sul costo più del listino: Hydrogen e Neon partono da high di default, quindi conviene impostarlo sempre a mano.
 
-- Per chi usa altri assistenti, le fasce corrispondenti sono, più o meno: Hydrogen ≈ Claude Sonnet 5.5 / GPT-6.2 Sol, Neon ≈ Claude Opus 5.5, Carbon ≈ Claude Fable 5.2 / GPT-6.2 Astra.
+- Gli equivalenti Claude e ChatGPT sono per fascia di prezzo e di posizionamento, non li abbiamo messi a confronto sugli stessi task.
 
 - Hydrogen e Neon hanno pochi giorni di vita e quasi tutti i benchmark sono di Google: da verificare sul campo.
 
