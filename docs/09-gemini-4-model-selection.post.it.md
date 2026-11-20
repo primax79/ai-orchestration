@@ -35,6 +35,22 @@ Ha il ragionamento più forte, ma è il più lento e il più caro per task.
 
 Velocità indicativa (Artificial Analysis): Hydrogen ~165 tok/s, Neon ~100, Argon ~66, Carbon ~56.
 
+🔁 **Gli equivalenti Claude e OpenAI**, per chi usa Claude Code o Codex (USD per milione di token, input / output, listini ufficiali)
+
+| Uso | Gemini | Claude | OpenAI |
+| --- | --- | --- | --- |
+| Problemi più difficili | `gemini-4-carbon`: 2 / 10, poi 4 / 20 dal 1/12 | `claude-fable-5-2`: 8 / 40 | `gpt-6.2-astra`: 8 / 40 |
+| Task complessi | `gemini-4-neon`: 3 / 15 | `claude-opus-5-5`: 4 / 20 | `gpt-6.2-astra` (8 / 40) oppure `gpt-6.2-sol` con effort alto (2 / 10)² |
+| Routine, coding quotidiano, agenti in parallelo | `gemini-4-hydrogen`: 1.50 / 7.50 | `claude-sonnet-5-5`: 2 / 10 | `gpt-6.2-sol`: 2 / 10 oppure `gpt-6.1-terra`: 1 / 5 |
+| Testo in volume: riassunti, estrazione, classificazione | `gemini-3.5-flash-lite`: 0.30 / 2.50 | `claude-haiku-5-5`: 0.10 / 0.50³ | `gpt-6-luna`: 0.10 / 0.50 |
+
+Cache in lettura: Claude ha 0.20 su Fable e Opus e 0.10 su Sonnet; OpenAI ha 0.40 su Astra, 0.10 su Sol, 0.05 su Terra e 0.01 su Luna. Il Batch costa il 50% in tutti e tre i casi.
+
+² OpenAI non ha un modello GPT-6.x a metà tra Sol e Astra (il vecchio `gpt-5.6-sol` costa 4 / 20). Anche Claude e OpenAI regolano la profondità di ragionamento con un "effort" (`low` … `max`), che pesa sul costo quanto il modello.
+³ Haiku 5.5 costa così fino a 100K token di prompt; oltre, 0.50 / 2.50.
+
+Attenzione: le corrispondenze sono **per fascia di prezzo e di posizionamento**, non misurate da noi sugli stessi task. A parità di riga i modelli non si equivalgono.
+
 🚫 **Da non usare:** `gemini-3.1-pro*` e qualunque alias `-latest` (Google cambia il modello sottostante a ogni rilascio).
 
 ⚙️ **Il livello di thinking pesa più del listino.** Hydrogen e Neon partono di default da `high`, che produce molti token di ragionamento (fatturati come output). Impostatelo sempre in modo esplicito:
@@ -47,4 +63,4 @@ In Kilo: `kilo run --model google/gemini-4-hydrogen --variant medium "..."`
 
 ⚠️ **Avvertenza:** Hydrogen e Neon hanno pochi giorni di vita e quasi tutti i benchmark sono dichiarati da Google. Verificate l'output come fareste con qualunque esecutore, e segnalate i difetti che trovate, così correggiamo la scelta.
 
-Fonti: [modelli](https://aistudio.google.com/docs/models), [scelta del modello](https://aistudio.google.com/docs/choosing-a-model) e [prezzi](https://aistudio.google.com/docs/pricing) di Google AI Studio; [Artificial Analysis](https://artificialanalysis.ai/models/gemini-4-neon); [model card di Hydrogen](https://deepmind.google/models/model-cards/gemini-4-hydrogen/).
+Fonti: [prezzi OpenAI](https://developers.openai.com/api/docs/pricing); [prezzi Claude](https://www.anthropic.com/pricing); [modelli](https://aistudio.google.com/docs/models), [scelta del modello](https://aistudio.google.com/docs/choosing-a-model) e [prezzi](https://aistudio.google.com/docs/pricing) di Google AI Studio; [Artificial Analysis](https://artificialanalysis.ai/models/gemini-4-neon); [model card di Hydrogen](https://deepmind.google/models/model-cards/gemini-4-hydrogen/).
