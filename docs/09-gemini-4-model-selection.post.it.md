@@ -16,7 +16,24 @@ Bug sottili, concorrenza, modifiche security-sensitive, spec, verifica indipende
 Architettura di sistema, audit di sicurezza, un bug su cui Neon si è bloccato.
 Ha il ragionamento più forte, ma è il più lento e il più caro per task.
 
-⚪ **Argon e 3.8 Flash: non più come default.** Dal **1° dicembre** Argon raddoppia ($4 / $20, come Carbon), mentre Neon costa meno e rende di più. Hydrogen in modalità `high` vale già quanto Argon, a circa il 40% del costo per task. 3.8 Flash resta più economico per token fino al 31/12, ma è nettamente meno capace.
+⚪ **Argon: di fatto superato, ma non ufficialmente.** Google non l'ha deprecato: è ancora "stable" e non c'è nessuna data di dismissione. Però l'ha già tolto dalla pagina "choosing a model", che consiglia solo Hydrogen, Neon e Carbon. In più, dal **1° dicembre** Argon raddoppia di prezzo ($4 / $20, come Carbon). A quel punto rende meno di Neon e costa di più, e Hydrogen in modalità `high` vale già quanto lui, a circa il 40% del costo per task. Non ha più senso sceglierlo.
+
+⚪ **3.8 Flash:** il sostituto ufficiale è Hydrogen. Per token resta più economico fino al 31/12, poi costa uguale, ed è nettamente meno capace.
+
+💰 **Costi** (USD per milione di token, listino standard Google AI Studio)
+
+| Modello | Input | Output (thinking incluso) | Cache | Batch in / out | Free tier | Costo medio per task di coding agent¹ |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gemini-4-hydrogen` | 1.50 | 7.50 | 0.075 | 0.75 / 3.75 | sì | ~$4.5 |
+| `gemini-4-neon` | 3.00 | 15.00 | 0.15 | 1.50 / 7.50 | no | ~$6.9 |
+| `gemini-4-carbon` | 2.00 → **4.00** dal 1/12 | 10.00 → **20.00** dal 1/12 | 0.10 → 0.20 | 1.00 / 5.00 → 2.00 / 10.00 | no | ~$9.8 |
+| `gemini-4-argon` | 2.00 → **4.00** dal 1/12 | 10.00 → **20.00** dal 1/12 | 0.10 → 0.20 | come Carbon | no | ~$6.8 |
+| `gemini-3.8-flash` | 0.75 → 1.50 dal 1/1/2027 | 3.75 → 7.50 dal 1/1/2027 | 0.075 → 0.15 | | sì | |
+| `gemini-3.5-flash-lite` | 0.30 | 2.50 | 0.03 | 0.15 / 1.25 | sì | (solo testo: riassunti, estrazione) |
+
+¹ Stima di Artificial Analysis (Coding Agent Index), quindi indipendente da Google, ripresa da Valyu. Conta più del listino, perché misura anche quanti token il modello spende davvero.
+
+Velocità indicativa (Artificial Analysis): Hydrogen ~165 tok/s, Neon ~100, Argon ~66, Carbon ~56.
 
 🚫 **Da non usare:** `gemini-3.1-pro*` e qualunque alias `-latest` (Google cambia il modello sottostante a ogni rilascio).
 
